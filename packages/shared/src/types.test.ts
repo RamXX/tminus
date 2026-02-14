@@ -12,6 +12,7 @@ import type {
   EventDateTime,
   CanonicalEvent,
   ProjectedEvent,
+  PolicyEdge,
   ProviderDelta,
   SyncIncrementalMessage,
   SyncFullMessage,
@@ -136,28 +137,51 @@ describe("types.ts -- domain object shapes", () => {
     expect(sampleEvent.version).toBe(1);
   });
 
-  it("EventDateTime supports optional timeZone", () => {
-    const withTz: EventDateTime = {
+  it("EventDateTime supports timed events with dateTime", () => {
+    const timed: EventDateTime = {
       dateTime: "2025-06-15T09:00:00",
       timeZone: "America/Chicago",
     };
-    const withoutTz: EventDateTime = { dateTime: "2025-06-15" };
-    expect(withTz.timeZone).toBe("America/Chicago");
-    expect(withoutTz.timeZone).toBeUndefined();
+    expect(timed.dateTime).toBe("2025-06-15T09:00:00");
+    expect(timed.timeZone).toBe("America/Chicago");
+    expect(timed.date).toBeUndefined();
   });
 
-  it("ProjectedEvent is a subset of CanonicalEvent", () => {
+  it("EventDateTime supports all-day events with date", () => {
+    const allDay: EventDateTime = { date: "2025-06-15" };
+    expect(allDay.date).toBe("2025-06-15");
+    expect(allDay.dateTime).toBeUndefined();
+    expect(allDay.timeZone).toBeUndefined();
+  });
+
+  it("ProjectedEvent has Google Calendar API shape", () => {
     const projected: ProjectedEvent = {
-      canonical_event_id: sampleEvent.canonical_event_id,
-      title: sampleEvent.title,
+      summary: "Team standup",
       start: sampleEvent.start,
       end: sampleEvent.end,
-      all_day: sampleEvent.all_day,
-      status: sampleEvent.status,
-      transparency: sampleEvent.transparency,
+      transparency: "opaque",
+      visibility: "default",
+      extendedProperties: {
+        private: {
+          tminus: "true",
+          managed: "true",
+          canonical_event_id: "evt_01",
+          origin_account_id: "acc_01",
+        },
+      },
     };
-    expect(projected.canonical_event_id).toBe("evt_01");
-    expect(projected.title).toBe("Team standup");
+    expect(projected.summary).toBe("Team standup");
+    expect(projected.extendedProperties.private.tminus).toBe("true");
+    expect(projected.extendedProperties.private.canonical_event_id).toBe("evt_01");
+  });
+
+  it("PolicyEdge defines projection direction", () => {
+    const edge: PolicyEdge = {
+      detail_level: "BUSY",
+      calendar_kind: "BUSY_OVERLAY",
+    };
+    expect(edge.detail_level).toBe("BUSY");
+    expect(edge.calendar_kind).toBe("BUSY_OVERLAY");
   });
 
   it("ProviderDelta represents create/update/delete", () => {
@@ -226,17 +250,25 @@ describe("types.ts -- queue message types", () => {
       target_account_id: "acc_02" as AccountId,
       target_calendar_id: "cal_busy" as CalendarId,
       projected_payload: {
-        canonical_event_id: "evt_01" as EventId,
+        summary: "Busy",
         start: { dateTime: "2025-06-15T09:00:00Z" },
         end: { dateTime: "2025-06-15T09:30:00Z" },
-        all_day: false,
-        status: "confirmed",
         transparency: "opaque",
+        visibility: "private",
+        extendedProperties: {
+          private: {
+            tminus: "true",
+            managed: "true",
+            canonical_event_id: "evt_01",
+            origin_account_id: "acc_01",
+          },
+        },
       },
       idempotency_key: "idem_abc",
     };
     expect(msg.type).toBe("UPSERT_MIRROR");
-    expect(msg.projected_payload.canonical_event_id).toBe("evt_01");
+    expect(msg.projected_payload.summary).toBe("Busy");
+    expect(msg.projected_payload.extendedProperties.private.canonical_event_id).toBe("evt_01");
   });
 
   it("DeleteMirrorMessage has provider_event_id", () => {

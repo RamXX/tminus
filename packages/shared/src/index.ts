@@ -23,6 +23,7 @@ export type {
   EventDateTime,
   CanonicalEvent,
   ProjectedEvent,
+  PolicyEdge,
   ProviderDelta,
   SyncIncrementalMessage,
   SyncFullMessage,
@@ -49,6 +50,12 @@ export {
 // Re-export ID utilities
 export { generateId, parseId, isValidId } from "./id";
 export type { EntityType } from "./id";
+
+// Re-export policy compiler
+export { compileProjection } from "./policy";
+
+// Re-export stable hashing utilities
+export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 
 // Re-export DO SQLite schema definitions and migration runner
 export {

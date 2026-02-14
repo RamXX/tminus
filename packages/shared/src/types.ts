@@ -52,10 +52,16 @@ export type MirrorState =
 // Core domain objects
 // ---------------------------------------------------------------------------
 
-/** ISO 8601 datetime string or date string for all-day events. */
+/**
+ * ISO 8601 datetime or date for Google Calendar API.
+ * Timed events use dateTime + optional timeZone.
+ * All-day events use date only.
+ */
 export interface EventDateTime {
-  /** ISO 8601 datetime (e.g. "2025-06-15T09:00:00Z") or date ("2025-06-15"). */
-  readonly dateTime: string;
+  /** ISO 8601 datetime (e.g. "2025-06-15T09:00:00Z"). Present for timed events. */
+  readonly dateTime?: string;
+  /** YYYY-MM-DD date string. Present for all-day events. */
+  readonly date?: string;
   /** IANA timezone (e.g. "America/Chicago"). Undefined for UTC or all-day. */
   readonly timeZone?: string;
 }
@@ -88,18 +94,34 @@ export interface CanonicalEvent {
 
 /**
  * A projected event payload, created by applying a policy's detail_level
- * to a CanonicalEvent. This is what gets written to mirror calendars.
+ * to a CanonicalEvent. This is the Google Calendar API shape written to
+ * mirror calendars.
  */
 export interface ProjectedEvent {
-  readonly canonical_event_id: EventId;
-  readonly title?: string;
+  readonly summary: string;
   readonly description?: string;
   readonly location?: string;
   readonly start: EventDateTime;
   readonly end: EventDateTime;
-  readonly all_day: boolean;
-  readonly status: "confirmed" | "tentative" | "cancelled";
   readonly transparency: "opaque" | "transparent";
+  readonly visibility: "default" | "private";
+  readonly extendedProperties: {
+    readonly private: {
+      readonly tminus: "true";
+      readonly managed: "true";
+      readonly canonical_event_id: string;
+      readonly origin_account_id: string;
+    };
+  };
+}
+
+/**
+ * A directional policy edge controlling how events project
+ * from one account to another.
+ */
+export interface PolicyEdge {
+  readonly detail_level: DetailLevel;
+  readonly calendar_kind: CalendarKind;
 }
 
 /**
