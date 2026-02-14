@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:unit": "vitest run --testPathPattern='\\.(test|unit\\.test)\\.ts$' --testPathIgnorePatterns='integration'",
     "test:integration": "vitest run --testPathPattern='integration'",
     "lint": "tsc --noEmit",

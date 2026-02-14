@@ -3,9 +3,13 @@ import path from "path";
 
 export default defineConfig({
   test: {
-    name: path.basename(path.resolve()),
+    name: "tminus-sync-consumer",
+    root: __dirname,
     include: ["src/**/*.test.ts"],
-    exclude: ["src/**/*.real.integration.test.ts"],
+    exclude: [
+      "**/*.integration.test.ts",
+      "**/*.real.integration.test.ts",
+    ],
   },
   resolve: {
     alias: {

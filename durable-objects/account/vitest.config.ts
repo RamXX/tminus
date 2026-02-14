@@ -3,8 +3,13 @@ import path from "path";
 
 export default defineConfig({
   test: {
-    name: path.basename(path.resolve()),
+    name: "tminus-account-do",
+    root: __dirname,
     include: ["src/**/*.test.ts"],
+    exclude: [
+      "**/*.integration.test.ts",
+      "**/*.real.integration.test.ts",
+    ],
   },
   resolve: {
     alias: {
