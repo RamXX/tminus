@@ -4,7 +4,8 @@
  * Converts raw Google Calendar API event responses into the ProviderDelta
  * format consumed by UserGraphDO.applyProviderDelta().
  *
- * Pure function -- no side effects, no mutations, deterministic.
+ * Deterministic, no mutations. The only side effect is console.warn()
+ * when an unexpected enum-like value is received from the Google API.
  *
  * Key design decisions:
  * - Google API uses "updated" for both create and update; the sync-consumer
@@ -75,8 +76,36 @@ export function normalizeGoogleEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers -- all pure, no side effects
+// Internal helpers
 // ---------------------------------------------------------------------------
+
+/** Known valid values for each validated field. */
+const VALID_STATUS = new Set(["confirmed", "tentative", "cancelled"]);
+const VALID_VISIBILITY = new Set(["default", "public", "private", "confidential"]);
+const VALID_TRANSPARENCY = new Set(["opaque", "transparent"]);
+
+/**
+ * Validate a string field against a set of known values.
+ * If the value is undefined (missing), returns silently -- the caller
+ * handles the default. If the value is present but not in the known set,
+ * emits a console.warn with the field name, received value, and the
+ * default that will be used.
+ */
+function warnIfUnknown(
+  fieldName: string,
+  value: string | undefined,
+  validValues: ReadonlySet<string>,
+  defaultValue: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!validValues.has(value)) {
+    console.warn(
+      `normalizeGoogleEvent: unknown ${fieldName} "${value}", defaulting to "${defaultValue}"`,
+    );
+  }
+}
 
 /**
  * Determine the change type from the Google event status.
@@ -137,10 +166,13 @@ function isAllDay(start: EventDateTime | undefined): boolean {
  * Google Calendar API status values: 'confirmed', 'tentative', 'cancelled'.
  * Note: 'cancelled' events are handled by determineChangeType and never
  * reach the event payload, so only 'confirmed' and 'tentative' appear here.
+ *
+ * Warns via console.warn if an unexpected value is received.
  */
 function normalizeStatus(
   status: string | undefined,
 ): "confirmed" | "tentative" | "cancelled" {
+  warnIfUnknown("status", status, VALID_STATUS, "confirmed");
   if (status === "tentative" || status === "cancelled") {
     return status;
   }
@@ -149,10 +181,13 @@ function normalizeStatus(
 
 /**
  * Normalize event visibility, defaulting to 'default' if absent.
+ *
+ * Warns via console.warn if an unexpected value is received.
  */
 function normalizeVisibility(
   visibility: string | undefined,
 ): "default" | "public" | "private" | "confidential" {
+  warnIfUnknown("visibility", visibility, VALID_VISIBILITY, "default");
   if (
     visibility === "public" ||
     visibility === "private" ||
@@ -165,10 +200,13 @@ function normalizeVisibility(
 
 /**
  * Normalize event transparency, defaulting to 'opaque' if absent.
+ *
+ * Warns via console.warn if an unexpected value is received.
  */
 function normalizeTransparency(
   transparency: string | undefined,
 ): "opaque" | "transparent" {
+  warnIfUnknown("transparency", transparency, VALID_TRANSPARENCY, "opaque");
   if (transparency === "transparent") {
     return transparency;
   }

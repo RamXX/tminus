@@ -13,7 +13,7 @@
  * - Recurring events preserve RRULE
  * - Attendees/creator/organizer are NOT included in output (Phase 1 scope)
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type {
   GoogleCalendarEvent,
   EventClassification,
@@ -411,5 +411,231 @@ describe("normalizeGoogleEvent -- return type conformance", () => {
     const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
 
     expect(delta.type).toBe("updated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime validation -- TM-jrv: warns on unknown values, defaults silently
+// ---------------------------------------------------------------------------
+
+describe("normalizeGoogleEvent -- runtime validation (TM-jrv)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // -----------------------------------------------------------------------
+  // Status field validation
+  // -----------------------------------------------------------------------
+
+  describe("status validation", () => {
+    it("accepts 'confirmed' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ status: "confirmed" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.status).toBe("confirmed");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'tentative' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ status: "tentative" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.status).toBe("tentative");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'cancelled' without warning (handled as deleted)", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ status: "cancelled" });
+      normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      // 'cancelled' produces deleted delta, no payload -- but no warning either
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("warns and defaults to 'confirmed' for unknown status value", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ status: "BOGUS_STATUS" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.status).toBe("confirmed");
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("status"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("BOGUS_STATUS"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("confirmed"),
+      );
+    });
+
+    it("does not warn when status is undefined (missing)", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event: GoogleCalendarEvent = {
+        id: "google_evt_no_status",
+        start: { dateTime: "2025-06-15T09:00:00Z" },
+        end: { dateTime: "2025-06-15T09:30:00Z" },
+      };
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.status).toBe("confirmed");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Visibility field validation
+  // -----------------------------------------------------------------------
+
+  describe("visibility validation", () => {
+    it("accepts 'default' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ visibility: "default" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("default");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'public' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ visibility: "public" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("public");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'private' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ visibility: "private" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("private");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'confidential' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ visibility: "confidential" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("confidential");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("warns and defaults to 'default' for unknown visibility value", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ visibility: "BOGUS_VIS" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("default");
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("visibility"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("BOGUS_VIS"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("default"),
+      );
+    });
+
+    it("does not warn when visibility is undefined (missing)", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event: GoogleCalendarEvent = {
+        id: "google_evt_no_vis",
+        start: { dateTime: "2025-06-15T09:00:00Z" },
+        end: { dateTime: "2025-06-15T09:30:00Z" },
+      };
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.visibility).toBe("default");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Transparency field validation
+  // -----------------------------------------------------------------------
+
+  describe("transparency validation", () => {
+    it("accepts 'opaque' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ transparency: "opaque" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.transparency).toBe("opaque");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts 'transparent' without warning", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ transparency: "transparent" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.transparency).toBe("transparent");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it("warns and defaults to 'opaque' for unknown transparency value", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({ transparency: "BOGUS_TRANS" });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.transparency).toBe("opaque");
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("transparency"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("BOGUS_TRANS"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("opaque"),
+      );
+    });
+
+    it("does not warn when transparency is undefined (missing)", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event: GoogleCalendarEvent = {
+        id: "google_evt_no_trans",
+        start: { dateTime: "2025-06-15T09:00:00Z" },
+        end: { dateTime: "2025-06-15T09:30:00Z" },
+      };
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      expect(delta.event!.transparency).toBe("opaque");
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Multiple unknown fields in same event
+  // -----------------------------------------------------------------------
+
+  describe("multiple unknown fields", () => {
+    it("warns separately for each unknown field", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const event = makeGoogleEvent({
+        status: "UNKNOWN_STATUS",
+        visibility: "UNKNOWN_VIS",
+        transparency: "UNKNOWN_TRANS",
+      });
+      const delta = normalizeGoogleEvent(event, TEST_ACCOUNT_ID, "origin");
+
+      // All three fields should get defaults
+      expect(delta.event!.status).toBe("confirmed");
+      expect(delta.event!.visibility).toBe("default");
+      expect(delta.event!.transparency).toBe("opaque");
+
+      // Three separate warnings
+      expect(warnSpy).toHaveBeenCalledTimes(3);
+    });
   });
 });
