@@ -49,3 +49,14 @@ export {
 // Re-export ID utilities
 export { generateId, parseId, isValidId } from "./id";
 export type { EntityType } from "./id";
+
+// Re-export DO SQLite schema definitions and migration runner
+export {
+  USER_GRAPH_DO_MIGRATION_V1,
+  ACCOUNT_DO_MIGRATION_V1,
+  USER_GRAPH_DO_MIGRATIONS,
+  ACCOUNT_DO_MIGRATIONS,
+  applyMigrations,
+  getSchemaVersion,
+} from "./schema";
+export type { Migration, SqlStorageLike, SqlStorageCursorLike } from "./schema";

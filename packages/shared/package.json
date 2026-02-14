@@ -14,8 +14,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:unit": "vitest run",
-    "test:integration": "echo 'No integration tests yet'",
+    "test:unit": "vitest run --testPathPattern='unit'",
+    "test:integration": "vitest run --testPathPattern='integration'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
@@ -23,6 +23,8 @@
     "ulid": "^2.3.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^11.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
