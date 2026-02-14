@@ -349,6 +349,7 @@ describe("wrangler.toml configuration validation", () => {
   });
 
   // ---- AC7 (DLQ): Dead Letter Queue configuration ----
+  // Extended by TM-9j7: explicit per-AC tests for DLQ setup
 
   describe("AC7: DLQ configuration for sync-queue and write-queue", () => {
     it("sync-consumer has DLQ configured for sync-queue", () => {
@@ -379,6 +380,91 @@ describe("wrangler.toml configuration validation", () => {
       expect(writeConsumer).toBeDefined();
       expect(writeConsumer?.dead_letter_queue).toBe("tminus-write-queue-dlq");
       expect(writeConsumer?.max_retries).toBe(5);
+    });
+
+    // TM-9j7: Explicit max_retries = 5 for both consumers
+    it("sync-consumer max_retries is exactly 5", () => {
+      const queues = configs["sync-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const consumers = queues["consumers"] as Array<Record<string, unknown>>;
+      const syncConsumer = consumers.find(
+        (c) => c.queue === "tminus-sync-queue"
+      );
+      expect(syncConsumer?.max_retries).toBe(5);
+    });
+
+    it("write-consumer max_retries is exactly 5", () => {
+      const queues = configs["write-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const consumers = queues["consumers"] as Array<Record<string, unknown>>;
+      const writeConsumer = consumers.find(
+        (c) => c.queue === "tminus-write-queue"
+      );
+      expect(writeConsumer?.max_retries).toBe(5);
+    });
+
+    // TM-9j7: DLQ queue names follow naming convention (tminus-*-dlq)
+    it("all DLQ queue names follow tminus-*-dlq naming convention", () => {
+      const dlqPattern = /^tminus-.+-dlq$/;
+
+      // sync-consumer DLQ
+      const syncQueues = configs["sync-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const syncConsumers = syncQueues["consumers"] as Array<
+        Record<string, unknown>
+      >;
+      for (const consumer of syncConsumers) {
+        if (consumer.dead_letter_queue) {
+          expect(consumer.dead_letter_queue).toMatch(dlqPattern);
+        }
+      }
+
+      // write-consumer DLQ
+      const writeQueues = configs["write-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const writeConsumers = writeQueues["consumers"] as Array<
+        Record<string, unknown>
+      >;
+      for (const consumer of writeConsumers) {
+        if (consumer.dead_letter_queue) {
+          expect(consumer.dead_letter_queue).toMatch(dlqPattern);
+        }
+      }
+    });
+
+    // TM-9j7: DLQ name derives from source queue name (source-queue + "-dlq")
+    it("DLQ names are derived from source queue name with -dlq suffix", () => {
+      const syncQueues = configs["sync-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const syncConsumers = syncQueues["consumers"] as Array<
+        Record<string, unknown>
+      >;
+      const syncEntry = syncConsumers.find(
+        (c) => c.queue === "tminus-sync-queue"
+      );
+      expect(syncEntry?.dead_letter_queue).toBe(syncEntry?.queue + "-dlq");
+
+      const writeQueues = configs["write-consumer"]["queues"] as Record<
+        string,
+        unknown
+      >;
+      const writeConsumers = writeQueues["consumers"] as Array<
+        Record<string, unknown>
+      >;
+      const writeEntry = writeConsumers.find(
+        (c) => c.queue === "tminus-write-queue"
+      );
+      expect(writeEntry?.dead_letter_queue).toBe(writeEntry?.queue + "-dlq");
     });
   });
 
