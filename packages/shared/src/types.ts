@@ -1,0 +1,199 @@
+/**
+ * @tminus/shared -- Domain types for the T-Minus calendar federation engine.
+ *
+ * Branded ID types use intersection with a phantom brand field to prevent
+ * accidental mixing of different ID kinds at the type level.
+ */
+
+// ---------------------------------------------------------------------------
+// Branded ID types
+// ---------------------------------------------------------------------------
+
+/** Branded string type helper. Prevents mixing different ID kinds. */
+type Brand<T extends string> = string & { readonly __brand: T };
+
+/** Unique identifier for a user (prefix: usr_) */
+export type UserId = Brand<"UserId">;
+
+/** Unique identifier for a linked calendar account (prefix: acc_) */
+export type AccountId = Brand<"AccountId">;
+
+/** Unique identifier for a canonical event (prefix: evt_) */
+export type EventId = Brand<"EventId">;
+
+/** Unique identifier for a policy (prefix: pol_) */
+export type PolicyId = Brand<"PolicyId">;
+
+/** Unique identifier for a calendar (prefix: cal_) */
+export type CalendarId = Brand<"CalendarId">;
+
+/** Unique identifier for a journal entry (prefix: jrn_) */
+export type JournalId = Brand<"JournalId">;
+
+// ---------------------------------------------------------------------------
+// Union / enum-like types
+// ---------------------------------------------------------------------------
+
+/** How much detail a policy edge projects. */
+export type DetailLevel = "BUSY" | "TITLE" | "FULL";
+
+/** The kind of calendar created for mirroring. */
+export type CalendarKind = "BUSY_OVERLAY" | "TRUE_MIRROR";
+
+/** State of a mirror entry in event_mirrors. */
+export type MirrorState =
+  | "PENDING"
+  | "ACTIVE"
+  | "DELETED"
+  | "TOMBSTONED"
+  | "ERROR";
+
+// ---------------------------------------------------------------------------
+// Core domain objects
+// ---------------------------------------------------------------------------
+
+/** ISO 8601 datetime string or date string for all-day events. */
+export interface EventDateTime {
+  /** ISO 8601 datetime (e.g. "2025-06-15T09:00:00Z") or date ("2025-06-15"). */
+  readonly dateTime: string;
+  /** IANA timezone (e.g. "America/Chicago"). Undefined for UTC or all-day. */
+  readonly timeZone?: string;
+}
+
+/**
+ * The canonical event -- single source of truth for a calendar event.
+ * Derived from the canonical_events SQL schema in PLAN.md.
+ */
+export interface CanonicalEvent {
+  readonly canonical_event_id: EventId;
+  readonly origin_account_id: AccountId;
+  /** Provider-specific event ID from the origin account. */
+  readonly origin_event_id: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly location?: string;
+  readonly start: EventDateTime;
+  readonly end: EventDateTime;
+  readonly all_day: boolean;
+  readonly status: "confirmed" | "tentative" | "cancelled";
+  readonly visibility: "default" | "public" | "private" | "confidential";
+  readonly transparency: "opaque" | "transparent";
+  readonly recurrence_rule?: string;
+  /** How the event entered the system. */
+  readonly source: "provider" | "ui" | "mcp" | "system";
+  readonly version: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+/**
+ * A projected event payload, created by applying a policy's detail_level
+ * to a CanonicalEvent. This is what gets written to mirror calendars.
+ */
+export interface ProjectedEvent {
+  readonly canonical_event_id: EventId;
+  readonly title?: string;
+  readonly description?: string;
+  readonly location?: string;
+  readonly start: EventDateTime;
+  readonly end: EventDateTime;
+  readonly all_day: boolean;
+  readonly status: "confirmed" | "tentative" | "cancelled";
+  readonly transparency: "opaque" | "transparent";
+}
+
+/**
+ * A normalized delta from a provider (Google Calendar, etc.).
+ * Represents one create, update, or delete that sync-consumer produces.
+ */
+export interface ProviderDelta {
+  readonly type: "created" | "updated" | "deleted";
+  readonly origin_event_id: string;
+  readonly origin_account_id: AccountId;
+  /** Full event payload. Present for created/updated, absent for deleted. */
+  readonly event?: Omit<
+    CanonicalEvent,
+    "canonical_event_id" | "version" | "created_at" | "updated_at" | "source"
+  >;
+}
+
+// ---------------------------------------------------------------------------
+// Queue message types
+// ---------------------------------------------------------------------------
+
+/** Webhook-triggered incremental sync (sync-queue). */
+export interface SyncIncrementalMessage {
+  readonly type: "SYNC_INCREMENTAL";
+  readonly account_id: AccountId;
+  readonly channel_id: string;
+  readonly resource_id: string;
+  readonly ping_ts: string;
+}
+
+/** Full sync request -- onboarding, reconcile, or 410 recovery (sync-queue). */
+export interface SyncFullMessage {
+  readonly type: "SYNC_FULL";
+  readonly account_id: AccountId;
+  readonly reason: "onboarding" | "reconcile" | "token_410";
+}
+
+/** Request to create or update a mirror event (write-queue). */
+export interface UpsertMirrorMessage {
+  readonly type: "UPSERT_MIRROR";
+  readonly canonical_event_id: EventId;
+  readonly target_account_id: AccountId;
+  readonly target_calendar_id: CalendarId;
+  readonly projected_payload: ProjectedEvent;
+  readonly idempotency_key: string;
+}
+
+/** Request to delete a mirror event (write-queue). */
+export interface DeleteMirrorMessage {
+  readonly type: "DELETE_MIRROR";
+  readonly canonical_event_id: EventId;
+  readonly target_account_id: AccountId;
+  readonly provider_event_id: string;
+  readonly idempotency_key: string;
+}
+
+/** Request to reconcile a specific account (reconcile-queue). */
+export interface ReconcileAccountMessage {
+  readonly type: "RECONCILE_ACCOUNT";
+  readonly account_id: AccountId;
+  readonly reason: "scheduled" | "manual" | "drift_detected";
+}
+
+// ---------------------------------------------------------------------------
+// Result / response types
+// ---------------------------------------------------------------------------
+
+/** Result of applying provider deltas to the canonical store. */
+export interface ApplyResult {
+  readonly created: number;
+  readonly updated: number;
+  readonly deleted: number;
+  readonly mirrors_enqueued: number;
+  readonly errors: ReadonlyArray<{
+    readonly origin_event_id: string;
+    readonly error: string;
+  }>;
+}
+
+/** Health status for a linked account. */
+export interface AccountHealth {
+  readonly account_id: AccountId;
+  readonly status: "healthy" | "degraded" | "error" | "disconnected";
+  readonly last_sync_ts: string | null;
+  readonly last_success_ts: string | null;
+  readonly error_message: string | null;
+  readonly watch_channel_active: boolean;
+  readonly token_valid: boolean;
+}
+
+/**
+ * Discriminated union for API responses.
+ * Consumers narrow via `if (resp.ok)` or `if (!resp.ok)`.
+ */
+export type ApiResponse<T> =
+  | { readonly ok: true; readonly data: T }
+  | { readonly ok: false; readonly error: string; readonly code?: number };
