@@ -22,3 +22,23 @@ Current gaps identified:
 - JWT_SECRET has no rotation mechanism (Phase 2)
 - No rate limiting on API endpoints (Phase 2)
 - No distributed tracing (Phase 2)
+
+---
+
+## [Added from Epic TM-852 retro - 2026-02-14]
+
+### All workers must implement /health endpoint
+
+**Priority:** Important
+
+**Context:** TM-3i0 discovered OAuth worker had no /health endpoint, unlike webhook/cron/api workers. This creates inconsistency and breaks test harness health polling.
+
+**Recommendation:** Every worker MUST implement /health endpoint that:
+1. Returns 200 status with JSON: `{ status: "healthy" }`
+2. Is used by startWranglerDev() health polling
+3. Is used by production monitoring/load balancers
+4. Add this as embedded context in Sr. PM's worker story templates
+
+**Applies to:** All workers, all future worker stories
+
+**Source stories:** TM-3i0
