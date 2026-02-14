@@ -1518,4 +1518,302 @@ describe("UserGraphDO integration", () => {
       expect(policy!.edges).toHaveLength(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // unlinkAccount -- cascade deletion
+  // -------------------------------------------------------------------------
+
+  describe("unlinkAccount", () => {
+    const THIRD_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000003" as AccountId;
+
+    it("executes full unlink cascade: events, mirrors, policies, calendars, journal", async () => {
+      // Setup: default policy with bidirectional edges between TEST and OTHER
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      // Create events from TEST_ACCOUNT
+      const delta1 = makeCreatedDelta({ origin_event_id: "evt_unlink_1" });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_unlink_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_unlink_2",
+          title: "Second Event",
+          start: { dateTime: "2026-02-16T09:00:00Z" },
+          end: { dateTime: "2026-02-16T09:30:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      // Create events from OTHER_ACCOUNT (should NOT be deleted)
+      const otherDelta = makeCreatedDelta({
+        origin_event_id: "evt_other_1",
+        origin_account_id: OTHER_ACCOUNT_ID,
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: "evt_other_1",
+          title: "Other Account Event",
+          start: { dateTime: "2026-02-17T09:00:00Z" },
+          end: { dateTime: "2026-02-17T09:30:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [otherDelta]);
+
+      // Insert a calendar entry for TEST_ACCOUNT
+      db.prepare(
+        `INSERT INTO calendars (calendar_id, account_id, provider_calendar_id, display_name)
+         VALUES (?, ?, ?, ?)`,
+      ).run(
+        "cal_01TESTCALENDAR000000000001",
+        TEST_ACCOUNT_ID,
+        "primary",
+        "Test Calendar",
+      );
+
+      // Clear queue so we only see unlink messages
+      queue.clear();
+
+      // Pre-assertions
+      const preEvents = db
+        .prepare("SELECT * FROM canonical_events")
+        .all() as Array<Record<string, unknown>>;
+      expect(preEvents).toHaveLength(3); // 2 from TEST + 1 from OTHER
+
+      const preMirrors = db
+        .prepare("SELECT * FROM event_mirrors")
+        .all() as Array<Record<string, unknown>>;
+      expect(preMirrors.length).toBeGreaterThan(0);
+
+      // ACT: Unlink TEST_ACCOUNT
+      const result = await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      expect(result.events_deleted).toBe(2);
+      expect(result.mirrors_deleted).toBeGreaterThan(0);
+      expect(result.policy_edges_removed).toBeGreaterThan(0);
+
+      // Canonical events from TEST_ACCOUNT are gone (hard delete BR-7)
+      const postEvents = db
+        .prepare("SELECT * FROM canonical_events WHERE origin_account_id = ?")
+        .all(TEST_ACCOUNT_ID);
+      expect(postEvents).toHaveLength(0);
+
+      // Other account's events remain
+      const otherEvents = db
+        .prepare("SELECT * FROM canonical_events WHERE origin_account_id = ?")
+        .all(OTHER_ACCOUNT_ID);
+      expect(otherEvents).toHaveLength(1);
+
+      // All mirrors referencing TEST_ACCOUNT (as target) are gone
+      const targetMirrors = db
+        .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
+        .all(TEST_ACCOUNT_ID);
+      expect(targetMirrors).toHaveLength(0);
+
+      // All mirrors from events belonging to TEST_ACCOUNT are gone
+      // (because those canonical events were deleted)
+      const sourceMirrors = db
+        .prepare(
+          `SELECT em.* FROM event_mirrors em
+           WHERE em.canonical_event_id NOT IN (SELECT canonical_event_id FROM canonical_events)`,
+        )
+        .all();
+      expect(sourceMirrors).toHaveLength(0);
+
+      // Policy edges referencing TEST_ACCOUNT are gone
+      const edges = db
+        .prepare(
+          "SELECT * FROM policy_edges WHERE from_account_id = ? OR to_account_id = ?",
+        )
+        .all(TEST_ACCOUNT_ID, TEST_ACCOUNT_ID);
+      expect(edges).toHaveLength(0);
+
+      // Calendar entries for TEST_ACCOUNT are gone
+      const calendars = db
+        .prepare("SELECT * FROM calendars WHERE account_id = ?")
+        .all(TEST_ACCOUNT_ID);
+      expect(calendars).toHaveLength(0);
+
+      // Journal records the unlinking
+      const journal = ug.queryJournal({ limit: 100 });
+      const unlinkEntries = journal.items.filter(
+        (j) => j.change_type === "account_unlinked",
+      );
+      expect(unlinkEntries.length).toBeGreaterThanOrEqual(1);
+      expect(unlinkEntries[0].actor).toBe("system");
+    });
+
+    it("deletes canonical events from unlinked account (BR-7 hard delete)", async () => {
+      // Create 3 events from TEST_ACCOUNT
+      const deltas: ProviderDelta[] = [];
+      for (let i = 0; i < 3; i++) {
+        deltas.push(
+          makeCreatedDelta({
+            origin_event_id: `evt_harddel_${i}`,
+            event: {
+              ...makeCreatedDelta().event!,
+              origin_event_id: `evt_harddel_${i}`,
+              title: `Hard Delete Event ${i}`,
+              start: { dateTime: `2026-02-15T${(8 + i).toString().padStart(2, "0")}:00:00Z` },
+              end: { dateTime: `2026-02-15T${(8 + i).toString().padStart(2, "0")}:30:00Z` },
+            },
+          }),
+        );
+      }
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, deltas);
+
+      const preCnt = db
+        .prepare("SELECT COUNT(*) as cnt FROM canonical_events WHERE origin_account_id = ?")
+        .get(TEST_ACCOUNT_ID) as { cnt: number };
+      expect(preCnt.cnt).toBe(3);
+
+      await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      const postCnt = db
+        .prepare("SELECT COUNT(*) as cnt FROM canonical_events WHERE origin_account_id = ?")
+        .get(TEST_ACCOUNT_ID) as { cnt: number };
+      expect(postCnt.cnt).toBe(0);
+    });
+
+    it("enqueues DELETE_MIRROR for mirrors FROM the unlinked account", async () => {
+      // Setup policy edge so mirrors are created
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+      queue.clear();
+
+      await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      // Should have enqueued DELETE_MIRROR messages
+      const deleteMsgs = queue.messages.filter(
+        (m) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+      );
+      expect(deleteMsgs.length).toBeGreaterThanOrEqual(1);
+
+      // All should target OTHER_ACCOUNT (the mirror target)
+      for (const msg of deleteMsgs) {
+        const m = msg as Record<string, unknown>;
+        expect(m.target_account_id).toBe(OTHER_ACCOUNT_ID);
+      }
+    });
+
+    it("deletes mirrors TO the unlinked account (tombstoned on failure)", async () => {
+      // Setup: OTHER_ACCOUNT events mirrored TO TEST_ACCOUNT
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_event_id: "evt_other_mirror",
+          origin_account_id: OTHER_ACCOUNT_ID,
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_account_id: OTHER_ACCOUNT_ID,
+            origin_event_id: "evt_other_mirror",
+            title: "Other's Event",
+          },
+        }),
+      ]);
+
+      // Verify mirrors to TEST_ACCOUNT exist
+      const preMirrors = db
+        .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
+        .all(TEST_ACCOUNT_ID);
+      expect(preMirrors.length).toBeGreaterThan(0);
+
+      queue.clear();
+      await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      // Mirrors TO TEST_ACCOUNT should be deleted from DB
+      const postMirrors = db
+        .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
+        .all(TEST_ACCOUNT_ID);
+      expect(postMirrors).toHaveLength(0);
+
+      // Other account's canonical event should still exist
+      const otherEvents = db
+        .prepare("SELECT * FROM canonical_events WHERE origin_account_id = ?")
+        .all(OTHER_ACCOUNT_ID);
+      expect(otherEvents).toHaveLength(1);
+    });
+
+    it("removes policy edges and triggers recomputeProjections", async () => {
+      // Setup: 3 accounts with default policy (6 edges total)
+      await ug.ensureDefaultPolicy([
+        TEST_ACCOUNT_ID,
+        OTHER_ACCOUNT_ID,
+        THIRD_ACCOUNT_ID,
+      ]);
+
+      const preEdges = db
+        .prepare("SELECT * FROM policy_edges")
+        .all() as Array<Record<string, unknown>>;
+      expect(preEdges).toHaveLength(6);
+
+      // Create an event from THIRD_ACCOUNT that would mirror to TEST and OTHER
+      await ug.applyProviderDelta(THIRD_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_event_id: "evt_third_1",
+          origin_account_id: THIRD_ACCOUNT_ID,
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_account_id: THIRD_ACCOUNT_ID,
+            origin_event_id: "evt_third_1",
+            title: "Third Account Event",
+          },
+        }),
+      ]);
+
+      queue.clear();
+
+      // Unlink TEST_ACCOUNT
+      await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      // Edges referencing TEST_ACCOUNT should be gone
+      const postEdges = db
+        .prepare(
+          "SELECT * FROM policy_edges WHERE from_account_id = ? OR to_account_id = ?",
+        )
+        .all(TEST_ACCOUNT_ID, TEST_ACCOUNT_ID);
+      expect(postEdges).toHaveLength(0);
+
+      // Remaining edges should be only THIRD <-> OTHER (2 edges)
+      const remainingEdges = db
+        .prepare("SELECT * FROM policy_edges")
+        .all() as Array<Record<string, unknown>>;
+      expect(remainingEdges).toHaveLength(2);
+    });
+
+    it("creates journal entries recording the unlink", async () => {
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+      // Clear queue before unlink
+      queue.clear();
+
+      await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      // Check journal for the unlink entry
+      const journal = ug.queryJournal({ limit: 100 });
+      const unlinkEntries = journal.items.filter(
+        (j) => j.change_type === "account_unlinked",
+      );
+      expect(unlinkEntries).toHaveLength(1);
+      expect(unlinkEntries[0].actor).toBe("system");
+
+      // Also verify individual event deletion journal entries exist
+      const deleteEntries = journal.items.filter(
+        (j) => j.change_type === "deleted",
+      );
+      expect(deleteEntries).toHaveLength(1); // 1 event was deleted
+    });
+
+    it("returns zero counts when account has no data", async () => {
+      // Trigger migration
+      ug.getSyncHealth();
+
+      const result = await ug.unlinkAccount(TEST_ACCOUNT_ID);
+
+      expect(result.events_deleted).toBe(0);
+      expect(result.mirrors_deleted).toBe(0);
+      expect(result.policy_edges_removed).toBe(0);
+    });
+  });
 });

@@ -446,10 +446,28 @@ async function handleDeleteAccount(
       );
     }
 
-    // Defer cleanup to AccountDO (revoke tokens)
-    await callDO(env.ACCOUNT, accountId, "/revokeTokens", {});
+    // Step 1: Revoke OAuth tokens (AccountDO)
+    // Errors are non-fatal -- tokens may already be revoked
+    try {
+      await callDO(env.ACCOUNT, accountId, "/revokeTokens", {});
+    } catch {
+      // Proceed anyway -- tokens may already be revoked
+    }
 
-    // Update status in D1
+    // Step 2: Stop watch channels (AccountDO)
+    try {
+      await callDO(env.ACCOUNT, accountId, "/stopWatchChannels", {});
+    } catch {
+      // Proceed anyway -- channels may already be expired
+    }
+
+    // Steps 3-8: Cascade cleanup in UserGraphDO
+    // (mirrors, events, policies, calendars, journal)
+    await callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
+      account_id: accountId,
+    });
+
+    // Step 9: Update D1 registry status
     await env.DB
       .prepare("UPDATE accounts SET status = 'revoked' WHERE account_id = ?1")
       .bind(accountId)

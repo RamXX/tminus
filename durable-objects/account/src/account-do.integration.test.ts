@@ -719,6 +719,84 @@ describe("AccountDO integration", () => {
   });
 
   // -------------------------------------------------------------------------
+  // stopWatchChannels
+  // -------------------------------------------------------------------------
+
+  describe("stopWatchChannels()", () => {
+    it("stops all active channels and removes them from DB", async () => {
+      const fetchCalls: Array<{ url: string; body: string }> = [];
+      const mockFetch: FetchFn = async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        fetchCalls.push({ url, body: init?.body as string ?? "" });
+        return new Response(null, { status: 204 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Register channels with resource_id (simulating a real channel)
+      await acct.registerChannel("primary");
+      await acct.registerChannel("work@example.com");
+
+      // Manually set resource_id since registerChannel doesn't set it
+      db.prepare("UPDATE watch_channels SET resource_id = 'res_1' WHERE calendar_id = 'primary'").run();
+      db.prepare("UPDATE watch_channels SET resource_id = 'res_2' WHERE calendar_id = 'work@example.com'").run();
+
+      const result = await acct.stopWatchChannels();
+
+      expect(result.stopped).toBe(2);
+      expect(result.errors).toBe(0);
+
+      // Verify channels.stop was called for each
+      const stopCalls = fetchCalls.filter((c) =>
+        c.url.includes("channels/stop"),
+      );
+      expect(stopCalls).toHaveLength(2);
+
+      // All channel rows should be deleted
+      const channels = await acct.getChannelStatus();
+      expect(channels.channels).toHaveLength(0);
+    });
+
+    it("continues when Google channels.stop fails", async () => {
+      const mockFetch: FetchFn = async () => {
+        throw new Error("Network error");
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(
+        { ...TEST_TOKENS, access_token: "token" },
+        TEST_SCOPES,
+      );
+
+      await acct.registerChannel("primary");
+      db.prepare("UPDATE watch_channels SET resource_id = 'res_1'").run();
+
+      const result = await acct.stopWatchChannels();
+
+      expect(result.stopped).toBe(0);
+      expect(result.errors).toBe(1);
+
+      // Channel rows should STILL be deleted even on failure
+      const channels = await acct.getChannelStatus();
+      expect(channels.channels).toHaveLength(0);
+    });
+
+    it("returns zero counts when no channels exist", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const result = await acct.stopWatchChannels();
+      expect(result.stopped).toBe(0);
+      expect(result.errors).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Edge cases
   // -------------------------------------------------------------------------
 

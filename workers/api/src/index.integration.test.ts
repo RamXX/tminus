@@ -533,12 +533,13 @@ describe("Integration: Account endpoints", () => {
   // DELETE /v1/accounts/:id
   // -----------------------------------------------------------------------
 
-  it("DELETE /v1/accounts/:id revokes tokens and updates D1 status", async () => {
+  it("DELETE /v1/accounts/:id executes cascade: revoke, stop channels, unlink, D1 update", async () => {
     insertAccount(db, ACCOUNT_A);
 
     const accountDO = createMockDONamespace();
+    const userGraphDO = createMockDONamespace();
     const handler = createHandler();
-    const env = buildEnv(d1, undefined, accountDO);
+    const env = buildEnv(d1, userGraphDO, accountDO);
     const authHeader = await makeAuthHeader();
 
     const response = await handler.fetch(
@@ -558,11 +559,19 @@ describe("Integration: Account endpoints", () => {
     expect(body.ok).toBe(true);
     expect(body.data.deleted).toBe(true);
 
-    // Verify AccountDO.revokeTokens was called
-    expect(accountDO.calls).toHaveLength(1);
+    // Verify AccountDO calls: revokeTokens + stopWatchChannels
+    expect(accountDO.calls).toHaveLength(2);
     expect(accountDO.calls[0].path).toBe("/revokeTokens");
+    expect(accountDO.calls[1].path).toBe("/stopWatchChannels");
 
-    // Verify D1 status was updated
+    // Verify UserGraphDO.unlinkAccount was called
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/unlinkAccount");
+    expect(userGraphDO.calls[0].body).toEqual({
+      account_id: ACCOUNT_A.account_id,
+    });
+
+    // Verify D1 status was updated to 'revoked'
     const row = db
       .prepare("SELECT status FROM accounts WHERE account_id = ?")
       .get(ACCOUNT_A.account_id) as { status: string };

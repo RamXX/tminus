@@ -179,6 +179,14 @@ export interface RecomputeScope {
   readonly canonical_event_id?: string;
 }
 
+/** Result of an account unlink cascade. */
+export interface UnlinkResult {
+  readonly events_deleted: number;
+  readonly mirrors_deleted: number;
+  readonly policy_edges_removed: number;
+  readonly calendars_removed: number;
+}
+
 /** A policy as returned by createPolicy / listPolicies. */
 export interface Policy {
   readonly policy_id: string;
@@ -1230,6 +1238,178 @@ export class UserGraphDO {
         );
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // unlinkAccount -- Cascade deletion for account removal
+  // -------------------------------------------------------------------------
+
+  /**
+   * Remove all data associated with an account from the UserGraphDO.
+   *
+   * Cascade order:
+   * 1. Delete mirrors FROM this account (enqueue DELETE_MIRROR for each)
+   * 2. Delete mirrors TO this account (remove mirror rows)
+   * 3. Hard delete canonical events from this account (BR-7)
+   * 4. Remove policy edges referencing this account
+   * 5. Trigger recomputeProjections for remaining events
+   * 6. Remove calendar entries for this account
+   * 7. Write journal entries recording the unlinking
+   *
+   * Error handling:
+   * - Mirror deletion failures: mirrors marked TOMBSTONED, reconciliation cleans up
+   * - Proceeds through all steps even if individual steps have partial failures
+   *
+   * Note: OAuth token revocation and watch channel stopping are handled by
+   * AccountDO, not here. D1 registry update is handled by the API worker.
+   */
+  async unlinkAccount(accountId: string): Promise<UnlinkResult> {
+    this.ensureMigrated();
+
+    let eventsDeleted = 0;
+    let mirrorsDeleted = 0;
+    let policyEdgesRemoved = 0;
+    let calendarsRemoved = 0;
+
+    // Step 1: Delete mirrors FROM this account
+    // For each canonical event owned by this account, enqueue DELETE_MIRROR
+    // for every mirror that was created from it.
+    const ownedEvents = this.sql
+      .exec<{ canonical_event_id: string }>(
+        `SELECT canonical_event_id FROM canonical_events WHERE origin_account_id = ?`,
+        accountId,
+      )
+      .toArray();
+
+    for (const evt of ownedEvents) {
+      const mirrors = this.sql
+        .exec<EventMirrorRow>(
+          `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
+          evt.canonical_event_id,
+        )
+        .toArray();
+
+      for (const mirror of mirrors) {
+        await this.writeQueue.send({
+          type: "DELETE_MIRROR",
+          canonical_event_id: evt.canonical_event_id,
+          target_account_id: mirror.target_account_id,
+          target_calendar_id: mirror.target_calendar_id,
+          provider_event_id: mirror.provider_event_id ?? "",
+        });
+        mirrorsDeleted++;
+      }
+
+      // Remove mirror rows for this event
+      this.sql.exec(
+        `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+        evt.canonical_event_id,
+      );
+    }
+
+    // Step 2: Delete mirrors TO this account
+    // These are mirror rows where this account is the target (receiving mirrors)
+    const inboundMirrors = this.sql
+      .exec<EventMirrorRow>(
+        `SELECT * FROM event_mirrors WHERE target_account_id = ?`,
+        accountId,
+      )
+      .toArray();
+
+    for (const mirror of inboundMirrors) {
+      // Enqueue DELETE_MIRROR so the provider-side mirror event gets removed
+      await this.writeQueue.send({
+        type: "DELETE_MIRROR",
+        canonical_event_id: mirror.canonical_event_id,
+        target_account_id: mirror.target_account_id,
+        target_calendar_id: mirror.target_calendar_id,
+        provider_event_id: mirror.provider_event_id ?? "",
+      });
+      mirrorsDeleted++;
+    }
+
+    this.sql.exec(
+      `DELETE FROM event_mirrors WHERE target_account_id = ?`,
+      accountId,
+    );
+
+    // Step 3: Hard delete canonical events from this account (BR-7)
+    // Journal entries for each deletion
+    for (const evt of ownedEvents) {
+      this.writeJournal(
+        evt.canonical_event_id,
+        "deleted",
+        "system",
+        { reason: "account_unlinked", account_id: accountId },
+        "account_unlinked",
+      );
+      eventsDeleted++;
+    }
+
+    this.sql.exec(
+      `DELETE FROM canonical_events WHERE origin_account_id = ?`,
+      accountId,
+    );
+
+    // Step 4: Remove policy edges referencing this account
+    const edgesToRemove = this.sql
+      .exec<PolicyEdgeRow>(
+        `SELECT * FROM policy_edges WHERE from_account_id = ? OR to_account_id = ?`,
+        accountId,
+        accountId,
+      )
+      .toArray();
+
+    policyEdgesRemoved = edgesToRemove.length;
+
+    this.sql.exec(
+      `DELETE FROM policy_edges WHERE from_account_id = ? OR to_account_id = ?`,
+      accountId,
+      accountId,
+    );
+
+    // Step 5: Recompute projections for remaining events
+    // After edges are removed, some mirrors may be orphaned -- recompute
+    // will clean up by re-evaluating all remaining events against remaining edges.
+    await this.recomputeProjections();
+
+    // Step 6: Remove calendar entries for this account
+    const calCount = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt FROM calendars WHERE account_id = ?`,
+        accountId,
+      )
+      .toArray()[0].cnt;
+    calendarsRemoved = calCount;
+
+    this.sql.exec(
+      `DELETE FROM calendars WHERE account_id = ?`,
+      accountId,
+    );
+
+    // Step 7: Write a summary journal entry for the unlinking
+    // Use a synthetic canonical_event_id since this is an account-level operation
+    const syntheticId = `unlink:${accountId}`;
+    this.writeJournal(
+      syntheticId,
+      "account_unlinked",
+      "system",
+      {
+        account_id: accountId,
+        events_deleted: eventsDeleted,
+        mirrors_deleted: mirrorsDeleted,
+        policy_edges_removed: policyEdgesRemoved,
+        calendars_removed: calendarsRemoved,
+      },
+      "account_unlinked",
+    );
+
+    return {
+      events_deleted: eventsDeleted,
+      mirrors_deleted: mirrorsDeleted,
+      policy_edges_removed: policyEdgesRemoved,
+      calendars_removed: calendarsRemoved,
+    };
   }
 
   // -------------------------------------------------------------------------

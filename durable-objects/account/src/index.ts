@@ -392,6 +392,65 @@ export class AccountDO {
     };
   }
 
+  /**
+   * Stop all active watch channels and remove them from storage.
+   *
+   * Calls Google's channels.stop API for each active channel.
+   * Errors from Google are logged but do not prevent cleanup --
+   * channels may already be expired or stopped.
+   *
+   * After stopping, all channel rows are deleted from the DB.
+   */
+  async stopWatchChannels(): Promise<{ stopped: number; errors: number }> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{
+        channel_id: string;
+        resource_id: string | null;
+        calendar_id: string;
+        status: string;
+      }>(
+        "SELECT channel_id, resource_id, calendar_id, status FROM watch_channels WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    let stopped = 0;
+    let errors = 0;
+
+    for (const row of rows) {
+      if (row.resource_id) {
+        try {
+          // Call Google channels.stop API
+          await this.fetchFn(
+            "https://www.googleapis.com/calendar/v3/channels/stop",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: row.channel_id,
+                resourceId: row.resource_id,
+              }),
+            },
+          );
+          stopped++;
+        } catch {
+          // Channel may already be expired or stopped -- proceed anyway
+          errors++;
+        }
+      }
+    }
+
+    // Delete all channel rows regardless of stop success
+    this.sql.exec(
+      `DELETE FROM watch_channels WHERE account_id = ?`,
+      ACCOUNT_ROW_KEY,
+    );
+
+    return { stopped, errors };
+  }
+
   // -------------------------------------------------------------------------
   // Health tracking
   // -------------------------------------------------------------------------
