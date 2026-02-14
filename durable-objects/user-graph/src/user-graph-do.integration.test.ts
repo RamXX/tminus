@@ -1224,4 +1224,298 @@ describe("UserGraphDO integration", () => {
       expect(result.errors[0].origin_event_id).toBe("bad_evt");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Policy CRUD
+  // -------------------------------------------------------------------------
+
+  describe("createPolicy + getPolicy round-trip", () => {
+    it("creates a policy and retrieves it with edges", async () => {
+      const policy = await ug.createPolicy("My Custom Policy");
+
+      expect(policy.policy_id).toMatch(/^pol_[0-9A-HJKMNP-TV-Z]{26}$/);
+      expect(policy.name).toBe("My Custom Policy");
+      expect(policy.is_default).toBe(false);
+      expect(policy.created_at).toBeDefined();
+
+      // getPolicy should return policy with empty edges
+      const fetched = await ug.getPolicy(policy.policy_id);
+      expect(fetched).not.toBeNull();
+      expect(fetched!.policy_id).toBe(policy.policy_id);
+      expect(fetched!.name).toBe("My Custom Policy");
+      expect(fetched!.edges).toHaveLength(0);
+    });
+
+    it("returns null for non-existent policy", async () => {
+      // Trigger migration first
+      ug.getSyncHealth();
+
+      const fetched = await ug.getPolicy("pol_01NONEXISTENT0000000000000");
+      expect(fetched).toBeNull();
+    });
+  });
+
+  describe("listPolicies", () => {
+    it("lists all policies", async () => {
+      const p1 = await ug.createPolicy("Policy A");
+      const p2 = await ug.createPolicy("Policy B");
+
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(2);
+
+      const names = policies.map((p) => p.name);
+      expect(names).toContain("Policy A");
+      expect(names).toContain("Policy B");
+    });
+
+    it("returns empty array when no policies", async () => {
+      // Trigger migration
+      ug.getSyncHealth();
+
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // setPolicyEdges -- replace all edges
+  // -------------------------------------------------------------------------
+
+  describe("setPolicyEdges", () => {
+    it("replaces all edges for a policy", async () => {
+      const policy = await ug.createPolicy("Test Policy");
+
+      // Set initial edges
+      await ug.setPolicyEdges(policy.policy_id, [
+        {
+          from_account_id: TEST_ACCOUNT_ID,
+          to_account_id: OTHER_ACCOUNT_ID,
+          detail_level: "BUSY",
+          calendar_kind: "BUSY_OVERLAY",
+        },
+      ]);
+
+      let fetched = await ug.getPolicy(policy.policy_id);
+      expect(fetched!.edges).toHaveLength(1);
+      expect(fetched!.edges[0].from_account_id).toBe(TEST_ACCOUNT_ID);
+      expect(fetched!.edges[0].to_account_id).toBe(OTHER_ACCOUNT_ID);
+
+      // Replace with different edges
+      const THIRD_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000003" as AccountId;
+      await ug.setPolicyEdges(policy.policy_id, [
+        {
+          from_account_id: TEST_ACCOUNT_ID,
+          to_account_id: THIRD_ACCOUNT_ID,
+          detail_level: "TITLE",
+          calendar_kind: "BUSY_OVERLAY",
+        },
+        {
+          from_account_id: THIRD_ACCOUNT_ID,
+          to_account_id: TEST_ACCOUNT_ID,
+          detail_level: "FULL",
+          calendar_kind: "TRUE_MIRROR",
+        },
+      ]);
+
+      fetched = await ug.getPolicy(policy.policy_id);
+      expect(fetched!.edges).toHaveLength(2);
+
+      // Verify old edge is gone
+      const oldEdge = fetched!.edges.find(
+        (e) => e.to_account_id === OTHER_ACCOUNT_ID,
+      );
+      expect(oldEdge).toBeUndefined();
+
+      // Verify new edges
+      const edge1 = fetched!.edges.find(
+        (e) =>
+          e.from_account_id === TEST_ACCOUNT_ID &&
+          e.to_account_id === THIRD_ACCOUNT_ID,
+      );
+      expect(edge1).toBeDefined();
+      expect(edge1!.detail_level).toBe("TITLE");
+
+      const edge2 = fetched!.edges.find(
+        (e) =>
+          e.from_account_id === THIRD_ACCOUNT_ID &&
+          e.to_account_id === TEST_ACCOUNT_ID,
+      );
+      expect(edge2).toBeDefined();
+      expect(edge2!.detail_level).toBe("FULL");
+      expect(edge2!.calendar_kind).toBe("TRUE_MIRROR");
+    });
+
+    it("triggers recomputeProjections after setting edges", async () => {
+      const policy = await ug.createPolicy("Projection Policy");
+
+      // Create an event first (so there is something to project)
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+      // No edges yet, so no mirrors
+      expect(queue.messages).toHaveLength(0);
+
+      // Set edges -- should trigger recompute and enqueue mirrors
+      await ug.setPolicyEdges(policy.policy_id, [
+        {
+          from_account_id: TEST_ACCOUNT_ID,
+          to_account_id: OTHER_ACCOUNT_ID,
+          detail_level: "BUSY",
+          calendar_kind: "BUSY_OVERLAY",
+        },
+      ]);
+
+      // recomputeProjections should have enqueued an UPSERT_MIRROR
+      expect(queue.messages.length).toBeGreaterThanOrEqual(1);
+      const upsertMsg = queue.messages.find(
+        (m) => (m as Record<string, unknown>).type === "UPSERT_MIRROR",
+      );
+      expect(upsertMsg).toBeDefined();
+      expect((upsertMsg as Record<string, unknown>).target_account_id).toBe(
+        OTHER_ACCOUNT_ID,
+      );
+    });
+
+    it("rejects self-loop edges (from === to)", async () => {
+      const policy = await ug.createPolicy("Self Loop Policy");
+
+      await expect(
+        ug.setPolicyEdges(policy.policy_id, [
+          {
+            from_account_id: TEST_ACCOUNT_ID,
+            to_account_id: TEST_ACCOUNT_ID,
+            detail_level: "BUSY",
+            calendar_kind: "BUSY_OVERLAY",
+          },
+        ]),
+      ).rejects.toThrow(/self-loop/i);
+    });
+
+    it("rejects invalid detail_level", async () => {
+      const policy = await ug.createPolicy("Invalid Detail Policy");
+
+      await expect(
+        ug.setPolicyEdges(policy.policy_id, [
+          {
+            from_account_id: TEST_ACCOUNT_ID,
+            to_account_id: OTHER_ACCOUNT_ID,
+            detail_level: "INVALID" as any,
+            calendar_kind: "BUSY_OVERLAY",
+          },
+        ]),
+      ).rejects.toThrow(/detail_level/i);
+    });
+
+    it("throws when policy does not exist", async () => {
+      // Trigger migration
+      ug.getSyncHealth();
+
+      await expect(
+        ug.setPolicyEdges("pol_01NONEXISTENT0000000000000", [
+          {
+            from_account_id: TEST_ACCOUNT_ID,
+            to_account_id: OTHER_ACCOUNT_ID,
+            detail_level: "BUSY",
+            calendar_kind: "BUSY_OVERLAY",
+          },
+        ]),
+      ).rejects.toThrow(/not found/i);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // ensureDefaultPolicy
+  // -------------------------------------------------------------------------
+
+  describe("ensureDefaultPolicy", () => {
+    it("creates bidirectional BUSY overlay edges between all accounts", async () => {
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      // Should have 1 default policy
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(1);
+      expect(policies[0].is_default).toBe(true);
+      expect(policies[0].name).toBe("Default Policy");
+
+      // Should have 2 edges (bidirectional)
+      const policy = await ug.getPolicy(policies[0].policy_id);
+      expect(policy!.edges).toHaveLength(2);
+
+      // Edge: TEST_ACCOUNT -> OTHER_ACCOUNT
+      const edge1 = policy!.edges.find(
+        (e) =>
+          e.from_account_id === TEST_ACCOUNT_ID &&
+          e.to_account_id === OTHER_ACCOUNT_ID,
+      );
+      expect(edge1).toBeDefined();
+      expect(edge1!.detail_level).toBe("BUSY");
+      expect(edge1!.calendar_kind).toBe("BUSY_OVERLAY");
+
+      // Edge: OTHER_ACCOUNT -> TEST_ACCOUNT
+      const edge2 = policy!.edges.find(
+        (e) =>
+          e.from_account_id === OTHER_ACCOUNT_ID &&
+          e.to_account_id === TEST_ACCOUNT_ID,
+      );
+      expect(edge2).toBeDefined();
+      expect(edge2!.detail_level).toBe("BUSY");
+      expect(edge2!.calendar_kind).toBe("BUSY_OVERLAY");
+    });
+
+    it("adding a third account extends default policy with new edges", async () => {
+      const THIRD_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000003" as AccountId;
+
+      // Initial: 2 accounts
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      // Add third account
+      await ug.ensureDefaultPolicy([
+        TEST_ACCOUNT_ID,
+        OTHER_ACCOUNT_ID,
+        THIRD_ACCOUNT_ID,
+      ]);
+
+      // Should still be 1 policy
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(1);
+
+      // Should have 6 edges (3 accounts * 2 directions each pair = 3 pairs * 2 = 6)
+      const policy = await ug.getPolicy(policies[0].policy_id);
+      expect(policy!.edges).toHaveLength(6);
+
+      // Check new edges involving THIRD_ACCOUNT
+      const thirdEdges = policy!.edges.filter(
+        (e) =>
+          e.from_account_id === THIRD_ACCOUNT_ID ||
+          e.to_account_id === THIRD_ACCOUNT_ID,
+      );
+      expect(thirdEdges).toHaveLength(4); // 2 to/from TEST, 2 to/from OTHER
+
+      // All edges should be BUSY / BUSY_OVERLAY
+      for (const edge of policy!.edges) {
+        expect(edge.detail_level).toBe("BUSY");
+        expect(edge.calendar_kind).toBe("BUSY_OVERLAY");
+      }
+    });
+
+    it("is idempotent -- calling twice with same accounts does not duplicate edges", async () => {
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(1);
+
+      const policy = await ug.getPolicy(policies[0].policy_id);
+      expect(policy!.edges).toHaveLength(2);
+    });
+
+    it("does not create edges for a single account", async () => {
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID]);
+
+      const policies = await ug.listPolicies();
+      expect(policies).toHaveLength(1);
+
+      const policy = await ug.getPolicy(policies[0].policy_id);
+      expect(policy!.edges).toHaveLength(0);
+    });
+  });
 });

@@ -90,6 +90,14 @@ interface EventMirrorRow {
   error_message: string | null;
 }
 
+interface PolicyRow {
+  [key: string]: unknown;
+  policy_id: string;
+  name: string;
+  is_default: number;
+  created_at: string;
+}
+
 interface PolicyEdgeRow {
   [key: string]: unknown;
   policy_id: string;
@@ -169,6 +177,36 @@ export interface SyncHealth {
 /** Scope for recomputeProjections. */
 export interface RecomputeScope {
   readonly canonical_event_id?: string;
+}
+
+/** A policy as returned by createPolicy / listPolicies. */
+export interface Policy {
+  readonly policy_id: string;
+  readonly name: string;
+  readonly is_default: boolean;
+  readonly created_at: string;
+}
+
+/** A policy with its edges, as returned by getPolicy. */
+export interface PolicyWithEdges extends Policy {
+  readonly edges: PolicyEdgeRecord[];
+}
+
+/** A stored policy edge record (full DB row shape). */
+export interface PolicyEdgeRecord {
+  readonly policy_id: string;
+  readonly from_account_id: string;
+  readonly to_account_id: string;
+  readonly detail_level: string;
+  readonly calendar_kind: string;
+}
+
+/** Input for creating/replacing policy edges. */
+export interface PolicyEdgeInput {
+  readonly from_account_id: string;
+  readonly to_account_id: string;
+  readonly detail_level: string;
+  readonly calendar_kind: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -981,8 +1019,232 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Policy CRUD
+  // -------------------------------------------------------------------------
+
+  /** Valid detail levels for edge validation. */
+  private static readonly VALID_DETAIL_LEVELS: ReadonlySet<string> = new Set([
+    "BUSY",
+    "TITLE",
+    "FULL",
+  ]);
+
+  /** Valid calendar kinds for edge validation. */
+  private static readonly VALID_CALENDAR_KINDS: ReadonlySet<string> = new Set([
+    "BUSY_OVERLAY",
+    "TRUE_MIRROR",
+  ]);
+
+  /**
+   * Create a new (non-default) policy.
+   * Returns the created policy record.
+   */
+  async createPolicy(name: string): Promise<Policy> {
+    this.ensureMigrated();
+
+    const policyId = generateId("policy");
+    this.sql.exec(
+      `INSERT INTO policies (policy_id, name, is_default, created_at)
+       VALUES (?, ?, 0, datetime('now'))`,
+      policyId,
+      name,
+    );
+
+    const rows = this.sql
+      .exec<PolicyRow>(
+        `SELECT * FROM policies WHERE policy_id = ?`,
+        policyId,
+      )
+      .toArray();
+
+    return this.rowToPolicy(rows[0]);
+  }
+
+  /**
+   * Get a policy by ID, including its edges.
+   * Returns null if not found.
+   */
+  async getPolicy(policyId: string): Promise<PolicyWithEdges | null> {
+    this.ensureMigrated();
+
+    const policyRows = this.sql
+      .exec<PolicyRow>(
+        `SELECT * FROM policies WHERE policy_id = ?`,
+        policyId,
+      )
+      .toArray();
+
+    if (policyRows.length === 0) return null;
+
+    const edgeRows = this.sql
+      .exec<PolicyEdgeRow>(
+        `SELECT * FROM policy_edges WHERE policy_id = ?`,
+        policyId,
+      )
+      .toArray();
+
+    const policy = this.rowToPolicy(policyRows[0]);
+
+    return {
+      ...policy,
+      edges: edgeRows.map((e) => ({
+        policy_id: e.policy_id,
+        from_account_id: e.from_account_id,
+        to_account_id: e.to_account_id,
+        detail_level: e.detail_level,
+        calendar_kind: e.calendar_kind,
+      })),
+    };
+  }
+
+  /**
+   * List all policies (without edges).
+   */
+  async listPolicies(): Promise<Policy[]> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<PolicyRow>(`SELECT * FROM policies ORDER BY created_at ASC`)
+      .toArray();
+
+    return rows.map((r) => this.rowToPolicy(r));
+  }
+
+  /**
+   * Replace ALL edges for a policy, then recompute projections.
+   *
+   * Validates:
+   * - Policy must exist
+   * - No self-loops (from_account_id === to_account_id)
+   * - Valid detail_level and calendar_kind values
+   */
+  async setPolicyEdges(
+    policyId: string,
+    edges: PolicyEdgeInput[],
+  ): Promise<void> {
+    this.ensureMigrated();
+
+    // Verify policy exists
+    const policyRows = this.sql
+      .exec<PolicyRow>(
+        `SELECT * FROM policies WHERE policy_id = ?`,
+        policyId,
+      )
+      .toArray();
+
+    if (policyRows.length === 0) {
+      throw new Error(`Policy not found: ${policyId}`);
+    }
+
+    // Validate edges before mutating
+    for (const edge of edges) {
+      if (edge.from_account_id === edge.to_account_id) {
+        throw new Error(
+          `Self-loop not allowed: from_account_id and to_account_id are both "${edge.from_account_id}"`,
+        );
+      }
+      if (!UserGraphDO.VALID_DETAIL_LEVELS.has(edge.detail_level)) {
+        throw new Error(
+          `Invalid detail_level "${edge.detail_level}". Must be one of: BUSY, TITLE, FULL`,
+        );
+      }
+      if (!UserGraphDO.VALID_CALENDAR_KINDS.has(edge.calendar_kind)) {
+        throw new Error(
+          `Invalid calendar_kind "${edge.calendar_kind}". Must be one of: BUSY_OVERLAY, TRUE_MIRROR`,
+        );
+      }
+    }
+
+    // Delete all existing edges for this policy
+    this.sql.exec(
+      `DELETE FROM policy_edges WHERE policy_id = ?`,
+      policyId,
+    );
+
+    // Insert new edges
+    for (const edge of edges) {
+      this.sql.exec(
+        `INSERT INTO policy_edges (policy_id, from_account_id, to_account_id, detail_level, calendar_kind)
+         VALUES (?, ?, ?, ?, ?)`,
+        policyId,
+        edge.from_account_id,
+        edge.to_account_id,
+        edge.detail_level,
+        edge.calendar_kind,
+      );
+    }
+
+    // Recompute all projections: re-evaluate all canonical events against
+    // the updated policy edges and enqueue UPSERT_MIRROR for changes.
+    await this.recomputeProjections();
+  }
+
+  /**
+   * Ensure a default policy exists with bidirectional BUSY overlay edges
+   * between all provided accounts.
+   *
+   * - Creates the default policy if it does not yet exist.
+   * - Replaces all edges with the full mesh of bidirectional BUSY edges
+   *   for the given accounts. This makes it idempotent and additive:
+   *   calling with [A, B] then [A, B, C] extends to include C.
+   */
+  async ensureDefaultPolicy(accounts: string[]): Promise<void> {
+    this.ensureMigrated();
+
+    // Find or create the default policy
+    const existing = this.sql
+      .exec<PolicyRow>(
+        `SELECT * FROM policies WHERE is_default = 1 LIMIT 1`,
+      )
+      .toArray();
+
+    let policyId: string;
+    if (existing.length > 0) {
+      policyId = existing[0].policy_id;
+    } else {
+      policyId = generateId("policy");
+      this.sql.exec(
+        `INSERT INTO policies (policy_id, name, is_default, created_at)
+         VALUES (?, 'Default Policy', 1, datetime('now'))`,
+        policyId,
+      );
+    }
+
+    // Build bidirectional edges between all distinct pairs
+    // Delete existing edges and replace with the full mesh
+    this.sql.exec(
+      `DELETE FROM policy_edges WHERE policy_id = ?`,
+      policyId,
+    );
+
+    for (let i = 0; i < accounts.length; i++) {
+      for (let j = 0; j < accounts.length; j++) {
+        if (i === j) continue;
+        this.sql.exec(
+          `INSERT OR IGNORE INTO policy_edges
+             (policy_id, from_account_id, to_account_id, detail_level, calendar_kind)
+           VALUES (?, ?, ?, 'BUSY', 'BUSY_OVERLAY')`,
+          policyId,
+          accounts[i],
+          accounts[j],
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /** Convert a DB row to a Policy domain object. */
+  private rowToPolicy(row: PolicyRow): Policy {
+    return {
+      policy_id: row.policy_id,
+      name: row.name,
+      is_default: row.is_default === 1,
+      created_at: row.created_at,
+    };
+  }
 
   /** Write a journal entry (ADR-5: every mutation produces a journal entry). */
   private writeJournal(
