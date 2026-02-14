@@ -43,7 +43,7 @@ describe("constants.ts -- calendar defaults", () => {
 });
 
 describe("constants.ts -- ID_PREFIXES", () => {
-  it("contains all six entity prefixes", () => {
+  it("contains all seven entity prefixes", () => {
     const expectedKeys = [
       "user",
       "account",
@@ -51,6 +51,7 @@ describe("constants.ts -- ID_PREFIXES", () => {
       "policy",
       "calendar",
       "journal",
+      "constraint",
     ];
     expect(Object.keys(ID_PREFIXES).sort()).toEqual(expectedKeys.sort());
   });
@@ -77,6 +78,10 @@ describe("constants.ts -- ID_PREFIXES", () => {
 
   it("journal prefix is 'jrn_'", () => {
     expect(ID_PREFIXES.journal).toBe("jrn_");
+  });
+
+  it("constraint prefix is 'cst_'", () => {
+    expect(ID_PREFIXES.constraint).toBe("cst_");
   });
 
   it("all prefixes end with underscore", () => {

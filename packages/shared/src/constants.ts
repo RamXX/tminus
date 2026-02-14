@@ -52,4 +52,5 @@ export const ID_PREFIXES = {
   policy: "pol_",
   calendar: "cal_",
   journal: "jrn_",
+  constraint: "cst_",
 } as const;

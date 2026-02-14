@@ -45,3 +45,7 @@ export {
   DEFAULT_CALENDAR_KIND,
   ID_PREFIXES,
 } from "./constants";
+
+// Re-export ID utilities
+export { generateId, parseId, isValidId } from "./id";
+export type { EntityType } from "./id";
