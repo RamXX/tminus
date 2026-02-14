@@ -18,8 +18,9 @@ import {
   applyMigrations,
   generateId,
 } from "@tminus/shared";
-import type { SqlStorageLike, FetchFn } from "@tminus/shared";
+import type { SqlStorageLike, FetchFn, ProviderType } from "@tminus/shared";
 export type { FetchFn } from "@tminus/shared";
+export type { ProviderType } from "@tminus/shared";
 import {
   importMasterKey,
   encryptTokens,
@@ -84,20 +85,30 @@ export class AccountDO {
   private migrated = false;
 
   /**
+   * The provider type for this account.
+   * Defaults to 'google'. Stored in the auth table's provider column.
+   * Used to route to the correct CalendarProvider, normalizer, and classifier.
+   */
+  readonly provider: ProviderType;
+
+  /**
    * Construct an AccountDO.
    *
    * @param sql - SqlStorage (real DO) or SqlStorageLike adapter (tests)
    * @param masterKeyHex - Hex-encoded 256-bit master key
-   * @param fetchFn - Fetch function for Google API calls (defaults to globalThis.fetch)
+   * @param fetchFn - Fetch function for API calls (defaults to globalThis.fetch)
+   * @param provider - Calendar provider type (defaults to 'google')
    */
   constructor(
     sql: SqlStorageLike,
     masterKeyHex: string,
     fetchFn?: FetchFn,
+    provider?: ProviderType,
   ) {
     this.sql = sql;
     this.masterKeyHex = masterKeyHex;
     this.fetchFn = fetchFn ?? globalThis.fetch.bind(globalThis);
+    this.provider = provider ?? "google";
   }
 
   // -------------------------------------------------------------------------
@@ -130,13 +141,14 @@ export class AccountDO {
     const masterKey = await importMasterKey(this.masterKeyHex);
     const envelope = await encryptTokens(masterKey, tokens);
 
-    // Store encrypted tokens
+    // Store encrypted tokens with provider type
     this.sql.exec(
-      `INSERT OR REPLACE INTO auth (account_id, encrypted_tokens, scopes, updated_at)
-       VALUES (?, ?, ?, datetime('now'))`,
+      `INSERT OR REPLACE INTO auth (account_id, encrypted_tokens, scopes, provider, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))`,
       ACCOUNT_ROW_KEY,
       JSON.stringify(envelope),
       scopes,
+      this.provider,
     );
 
     // Initialize sync state
@@ -678,6 +690,10 @@ export class AccountDO {
         case "/getHealth": {
           const result = await this.getHealth();
           return Response.json(result);
+        }
+
+        case "/getProvider": {
+          return Response.json({ provider: this.provider });
         }
 
         default:

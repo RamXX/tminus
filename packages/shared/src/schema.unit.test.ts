@@ -17,6 +17,7 @@ import type { Database as DatabaseType } from "better-sqlite3";
 import {
   USER_GRAPH_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V1,
+  ACCOUNT_DO_MIGRATION_V2,
   USER_GRAPH_DO_MIGRATIONS,
   ACCOUNT_DO_MIGRATIONS,
 } from "./schema";
@@ -356,13 +357,19 @@ describe("migration lists", () => {
   });
 
   it("ACCOUNT_DO_MIGRATIONS has correct structure", () => {
-    expect(ACCOUNT_DO_MIGRATIONS).toHaveLength(1);
+    expect(ACCOUNT_DO_MIGRATIONS).toHaveLength(2);
 
-    const m = ACCOUNT_DO_MIGRATIONS[0];
-    expect(m.version).toBe(1);
-    expect(m.sql).toBe(ACCOUNT_DO_MIGRATION_V1);
-    expect(typeof m.description).toBe("string");
-    expect(m.description.length).toBeGreaterThan(0);
+    const m1 = ACCOUNT_DO_MIGRATIONS[0];
+    expect(m1.version).toBe(1);
+    expect(m1.sql).toBe(ACCOUNT_DO_MIGRATION_V1);
+    expect(typeof m1.description).toBe("string");
+    expect(m1.description.length).toBeGreaterThan(0);
+
+    const m2 = ACCOUNT_DO_MIGRATIONS[1];
+    expect(m2.version).toBe(2);
+    expect(m2.sql).toBe(ACCOUNT_DO_MIGRATION_V2);
+    expect(typeof m2.description).toBe("string");
+    expect(m2.description.length).toBeGreaterThan(0);
   });
 
   it("migration versions are monotonically increasing", () => {

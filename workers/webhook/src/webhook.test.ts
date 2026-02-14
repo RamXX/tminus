@@ -302,3 +302,47 @@ describe("Worker routing", () => {
     expect(response.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Provider-based routing (AC 6: Webhook worker routes by provider path)
+// ---------------------------------------------------------------------------
+
+describe("POST /webhook/microsoft (Phase 5 placeholder)", () => {
+  it("returns 501 Not Implemented", async () => {
+    const { env } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+    });
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(501);
+    const body = await response.text();
+    expect(body).toBe("Not Implemented");
+  });
+
+  it("does not enqueue any messages", async () => {
+    const { env, queue } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+    });
+    await handler.fetch(request, env, mockCtx);
+
+    expect(queue.messages.length).toBe(0);
+  });
+
+  it("GET /webhook/microsoft returns 404 (only POST accepted)", async () => {
+    const { env } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "GET",
+    });
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(404);
+  });
+});

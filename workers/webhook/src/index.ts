@@ -1,9 +1,13 @@
 /**
- * tminus-webhook -- Google Calendar push notification receiver.
+ * tminus-webhook -- Provider-agnostic push notification receiver.
  *
- * Receives POST /webhook/google from Google Calendar push notifications,
- * validates the channel_token against D1, and enqueues SYNC_INCREMENTAL
- * messages to sync-queue for actual sync processing.
+ * Routes webhook requests to provider-specific handlers based on URL path:
+ * - POST /webhook/google  -> Google Calendar push notification handler
+ * - POST /webhook/microsoft -> Microsoft Graph notification handler (placeholder)
+ *
+ * Google handler: Receives POST /webhook/google from Google Calendar push
+ * notifications, validates the channel_token against D1, and enqueues
+ * SYNC_INCREMENTAL messages to sync-queue for actual sync processing.
  *
  * Key invariant: ALWAYS return 200 to Google. Non-200 responses trigger
  * exponential backoff and eventual channel expiry.
@@ -102,12 +106,37 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// Microsoft webhook handler (placeholder for Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle a Microsoft Graph change notification.
+ *
+ * Phase 5 placeholder: logs and returns 202 Accepted.
+ * Microsoft Graph expects 202 for successful receipt of notifications.
+ * Returns 501 Not Implemented until Microsoft support is built.
+ */
+async function handleMicrosoftWebhook(
+  _request: Request,
+  _env: Env,
+): Promise<Response> {
+  console.warn(
+    "Microsoft webhook received but not yet implemented (Phase 5)",
+  );
+  return new Response("Not Implemented", { status: 501 });
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 /**
  * Creates the worker handler. Factory pattern allows tests to inject
  * dependencies if needed in the future.
+ *
+ * Routes webhook requests by provider path:
+ * - POST /webhook/google    -> Google Calendar handler
+ * - POST /webhook/microsoft -> Microsoft Graph handler (placeholder)
  */
 export function createHandler() {
   return {
@@ -116,9 +145,14 @@ export function createHandler() {
       const { pathname } = url;
       const method = request.method;
 
-      // POST /webhook/google -- main webhook endpoint
+      // POST /webhook/google -- Google Calendar push notifications
       if (method === "POST" && pathname === "/webhook/google") {
         return handleWebhook(request, env);
+      }
+
+      // POST /webhook/microsoft -- Microsoft Graph notifications (Phase 5 placeholder)
+      if (method === "POST" && pathname === "/webhook/microsoft") {
+        return handleMicrosoftWebhook(request, env);
       }
 
       // GET /health -- health check

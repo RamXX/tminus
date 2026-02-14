@@ -356,9 +356,9 @@ describe("AccountDO schema via migration runner", () => {
     ]);
   });
 
-  it("sets schema version to 1 after initial migration", () => {
+  it("sets schema version to latest after all migrations", () => {
     applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
-    expect(getSchemaVersion(sql, "account")).toBe(1);
+    expect(getSchemaVersion(sql, "account")).toBe(2);
   });
 
   it("auth table INSERT and SELECT works", () => {
@@ -376,6 +376,34 @@ describe("AccountDO schema via migration runner", () => {
     expect(row.encrypted_tokens).toBe("encrypted_blob_abc");
     expect(row.scopes).toBe("calendar.readonly");
     expect(typeof row.updated_at).toBe("string");
+  });
+
+  it("auth table has provider column with default 'google' after migration v2", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+
+    db.prepare(
+      "INSERT INTO auth (account_id, encrypted_tokens, scopes) VALUES (?, ?, ?)",
+    ).run("acc_01TEST_PROV", "encrypted_blob", "calendar");
+
+    const row = db
+      .prepare("SELECT provider FROM auth WHERE account_id = ?")
+      .get("acc_01TEST_PROV") as { provider: string };
+
+    expect(row.provider).toBe("google");
+  });
+
+  it("auth table allows explicit provider value", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+
+    db.prepare(
+      "INSERT INTO auth (account_id, encrypted_tokens, scopes, provider) VALUES (?, ?, ?, ?)",
+    ).run("acc_01TEST_MS", "encrypted_blob", "calendar", "microsoft");
+
+    const row = db
+      .prepare("SELECT provider FROM auth WHERE account_id = ?")
+      .get("acc_01TEST_MS") as { provider: string };
+
+    expect(row.provider).toBe("microsoft");
   });
 
   it("auth table rejects null encrypted_tokens", () => {
@@ -562,7 +590,7 @@ describe("migration runner", () => {
     applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
 
     expect(getSchemaVersion(sql, "user_graph")).toBe(1);
-    expect(getSchemaVersion(sql, "account")).toBe(1);
+    expect(getSchemaVersion(sql, "account")).toBe(2); // v1 + v2 (provider column)
 
     // Both schemas share the same _schema_meta table
     const meta = db

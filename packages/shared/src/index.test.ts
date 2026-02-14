@@ -8,6 +8,12 @@ import {
   ResourceNotFoundError,
   SyncTokenExpiredError,
   RateLimitError,
+  SUPPORTED_PROVIDERS,
+  isSupportedProvider,
+  googleClassificationStrategy,
+  getClassificationStrategy,
+  normalizeProviderEvent,
+  createCalendarProvider,
 } from "./index";
 
 describe("@tminus/shared", () => {
@@ -27,5 +33,14 @@ describe("@tminus/shared", () => {
     expect(ResourceNotFoundError).toBeDefined();
     expect(SyncTokenExpiredError).toBeDefined();
     expect(RateLimitError).toBeDefined();
+  });
+
+  it("exports provider-agnostic abstraction functions", () => {
+    expect(SUPPORTED_PROVIDERS).toBeDefined();
+    expect(isSupportedProvider).toBeDefined();
+    expect(googleClassificationStrategy).toBeDefined();
+    expect(getClassificationStrategy).toBeDefined();
+    expect(normalizeProviderEvent).toBeDefined();
+    expect(createCalendarProvider).toBeDefined();
   });
 });

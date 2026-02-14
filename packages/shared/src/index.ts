@@ -62,6 +62,20 @@ export { classifyEvent } from "./classify";
 // Re-export Google event normalization (provider -> ProviderDelta)
 export { normalizeGoogleEvent } from "./normalize";
 
+// Re-export provider-agnostic abstraction layer
+export {
+  SUPPORTED_PROVIDERS,
+  isSupportedProvider,
+  googleClassificationStrategy,
+  getClassificationStrategy,
+  normalizeProviderEvent,
+  createCalendarProvider,
+} from "./provider";
+export type {
+  ProviderType,
+  ClassificationStrategy,
+} from "./provider";
+
 // Re-export stable hashing utilities
 export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 
@@ -69,6 +83,7 @@ export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 export {
   USER_GRAPH_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V1,
+  ACCOUNT_DO_MIGRATION_V2,
   USER_GRAPH_DO_MIGRATIONS,
   ACCOUNT_DO_MIGRATIONS,
   applyMigrations,

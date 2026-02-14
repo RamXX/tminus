@@ -324,12 +324,27 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   },
 ] as const;
 
+/**
+ * AccountDO migration v2: Add provider column to auth table.
+ *
+ * Supports multi-provider accounts (Google, Microsoft, CalDAV).
+ * Defaults to 'google' for existing rows.
+ */
+export const ACCOUNT_DO_MIGRATION_V2 = `
+ALTER TABLE auth ADD COLUMN provider TEXT NOT NULL DEFAULT 'google';
+` as const;
+
 /** Ordered migrations for AccountDO. Apply sequentially. */
 export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     sql: ACCOUNT_DO_MIGRATION_V1,
     description: "Initial AccountDO schema: auth, sync_state, watch_channels",
+  },
+  {
+    version: 2,
+    sql: ACCOUNT_DO_MIGRATION_V2,
+    description: "Add provider column to auth table for multi-provider support",
   },
 ] as const;
 
