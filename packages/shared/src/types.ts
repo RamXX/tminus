@@ -49,6 +49,42 @@ export type MirrorState =
   | "ERROR";
 
 // ---------------------------------------------------------------------------
+// Google Calendar API types (provider-level, pre-classification)
+// ---------------------------------------------------------------------------
+
+/**
+ * Represents a raw event from the Google Calendar API.
+ * This is the shape we receive from the provider before classification
+ * or canonicalization. Used by classifyEvent() (Invariant A).
+ */
+export interface GoogleCalendarEvent {
+  /** Provider-assigned event ID. */
+  readonly id?: string;
+  /** Event title / summary. */
+  readonly summary?: string;
+  /** Start time of the event. */
+  readonly start?: EventDateTime;
+  /** End time of the event. */
+  readonly end?: EventDateTime;
+  /** Extended properties set by applications (including T-Minus). */
+  readonly extendedProperties?: {
+    readonly private?: Record<string, string>;
+    readonly shared?: Record<string, string>;
+  };
+}
+
+/**
+ * Classification of a provider event (Invariant A).
+ *
+ * - 'origin': A real user-created event that T-Minus should track.
+ * - 'managed_mirror': A mirror event created by T-Minus (tminus='true' AND managed='true').
+ *    Must NEVER be treated as a new origin (Invariant E / Risk R1 loop prevention).
+ * - 'foreign_managed': Created by another system. Currently treated as origin,
+ *    but the type exists for future differentiation.
+ */
+export type EventClassification = "origin" | "managed_mirror" | "foreign_managed";
+
+// ---------------------------------------------------------------------------
 // Core domain objects
 // ---------------------------------------------------------------------------
 

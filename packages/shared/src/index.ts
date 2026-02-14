@@ -21,6 +21,8 @@ export type {
   CalendarKind,
   MirrorState,
   EventDateTime,
+  GoogleCalendarEvent,
+  EventClassification,
   CanonicalEvent,
   ProjectedEvent,
   PolicyEdge,
@@ -53,6 +55,9 @@ export type { EntityType } from "./id";
 
 // Re-export policy compiler
 export { compileProjection } from "./policy";
+
+// Re-export event classification (Invariants A & E, loop prevention)
+export { classifyEvent } from "./classify";
 
 // Re-export stable hashing utilities
 export { computeProjectionHash, computeIdempotencyKey } from "./hash";
