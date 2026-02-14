@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-scripts lint deploy deploy-secrets deploy-d1-migrate install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate install clean typecheck
 
 # ---- Core targets ----
 
@@ -22,6 +22,9 @@ test-scripts: install
 
 test-integration-real: install
 	@test -f .env && . ./.env; npx vitest run --config vitest.integration.real.config.ts
+
+test-e2e: install
+	@test -f .env && . ./.env; npx vitest run --config vitest.e2e.config.ts
 
 lint: install
 	pnpm run lint
