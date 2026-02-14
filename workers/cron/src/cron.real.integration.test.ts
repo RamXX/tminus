@@ -138,13 +138,18 @@ describe("Cron real integration tests", () => {
     expect(toml).toContain('binding = "RECONCILE_QUEUE"');
   });
 
-  it("cron worker exports createHandler and cron constants", async () => {
+  it("cron worker exports createHandler; constants live in constants module", async () => {
     const mod = await import("./index.js");
     expect(typeof mod.createHandler).toBe("function");
-    expect(mod.CRON_CHANNEL_RENEWAL).toBe("0 */6 * * *");
-    expect(mod.CRON_TOKEN_HEALTH).toBe("0 */12 * * *");
-    expect(mod.CRON_RECONCILIATION).toBe("0 3 * * *");
-    expect(mod.CHANNEL_RENEWAL_THRESHOLD_MS).toBe(24 * 60 * 60 * 1000);
+
+    // Constants are no longer exported from the worker entry point
+    // (wrangler dev rejects non-handler constant exports). Verify they
+    // live in the dedicated constants module instead.
+    const constants = await import("./constants.js");
+    expect(constants.CRON_CHANNEL_RENEWAL).toBe("0 */6 * * *");
+    expect(constants.CRON_TOKEN_HEALTH).toBe("0 */12 * * *");
+    expect(constants.CRON_RECONCILIATION).toBe("0 3 * * *");
+    expect(constants.CHANNEL_RENEWAL_THRESHOLD_MS).toBe(24 * 60 * 60 * 1000);
   });
 
   // -------------------------------------------------------------------------

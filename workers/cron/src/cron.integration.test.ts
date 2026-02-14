@@ -19,14 +19,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import { createHandler } from "./index";
 import {
-  createHandler,
   CRON_CHANNEL_RENEWAL,
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
-} from "./index";
+} from "./constants";
 
 // ---------------------------------------------------------------------------
 // Test constants
