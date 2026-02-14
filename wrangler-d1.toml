@@ -1,0 +1,12 @@
+# wrangler-d1.toml -- Configuration for D1 migration management.
+# Used by: make deploy-d1-migrate, scripts/deploy.mjs
+# This is NOT a worker config; it only defines the D1 database binding
+# so that `wrangler d1 migrations apply` can find the migration files.
+
+name = "tminus-d1-migrations"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
+migrations_dir = "migrations/d1-registry"

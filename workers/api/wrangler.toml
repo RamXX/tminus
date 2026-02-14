@@ -10,11 +10,13 @@ compatibility_date = "2025-02-14"
 
 # --- Durable Object class definitions (hosted here) -----------------------
 
-[durable_objects]
-classes = [
-  { binding = "USER_GRAPH", class_name = "UserGraphDO" },
-  { binding = "ACCOUNT", class_name = "AccountDO" },
-]
+[[durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
 
 # DO migrations -- SQLite storage for both DOs
 [[migrations]]
@@ -26,7 +28,7 @@ new_sqlite_classes = ["UserGraphDO", "AccountDO"]
 [[d1_databases]]
 binding = "DB"
 database_name = "tminus-registry"
-database_id = "placeholder-d1-id"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 # --- Queue producers -------------------------------------------------------
 

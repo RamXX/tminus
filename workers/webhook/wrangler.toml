@@ -12,7 +12,7 @@ compatibility_date = "2025-02-14"
 [[d1_databases]]
 binding = "DB"
 database_name = "tminus-registry"
-database_id = "placeholder-d1-id"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 # --- Queue producers -------------------------------------------------------
 

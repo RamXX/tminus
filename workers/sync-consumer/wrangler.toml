@@ -15,18 +15,22 @@ cpu_ms = 300000
 
 # --- Durable Object references (hosted on tminus-api) ----------------------
 
-[durable_objects]
-classes = [
-  { binding = "USER_GRAPH", class_name = "UserGraphDO", script_name = "tminus-api" },
-  { binding = "ACCOUNT", class_name = "AccountDO", script_name = "tminus-api" },
-]
+[[durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api"
 
 # --- D1 registry database --------------------------------------------------
 
 [[d1_databases]]
 binding = "DB"
 database_name = "tminus-registry"
-database_id = "placeholder-d1-id"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 # --- Queue producers -------------------------------------------------------
 
