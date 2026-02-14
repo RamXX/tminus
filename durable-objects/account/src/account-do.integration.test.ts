@@ -356,6 +356,111 @@ describe("AccountDO integration", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Provider-aware token refresh (Microsoft support)
+  // -------------------------------------------------------------------------
+
+  describe("provider-aware token refresh", () => {
+    it("sends refresh request to Microsoft token endpoint when provider is microsoft", async () => {
+      let capturedUrl: string | undefined;
+      let capturedBody: string | undefined;
+      const spyFetch: FetchFn = async (input, init) => {
+        capturedUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({
+            access_token: "EwB0A8l6_refreshed_ms_token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft");
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      const token = await acct.getAccessToken();
+
+      expect(token).toBe("EwB0A8l6_refreshed_ms_token");
+      expect(capturedUrl).toContain("login.microsoftonline.com");
+      expect(capturedUrl).toContain("oauth2/v2.0/token");
+      expect(capturedBody).toBeDefined();
+      const params = new URLSearchParams(capturedBody!);
+      expect(params.get("grant_type")).toBe("refresh_token");
+      expect(params.get("refresh_token")).toBe(EXPIRED_TOKENS.refresh_token);
+    });
+
+    it("sends refresh request to Google token endpoint when provider is google", async () => {
+      let capturedUrl: string | undefined;
+      const spyFetch: FetchFn = async (input, _init) => {
+        capturedUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        return new Response(
+          JSON.stringify({
+            access_token: "ya29.google-refreshed",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "google");
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      expect(capturedUrl).toContain("oauth2.googleapis.com");
+    });
+
+    it("stores provider column in auth table", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const authRow = db
+        .prepare("SELECT provider FROM auth WHERE account_id = 'self'")
+        .get() as { provider: string };
+      expect(authRow.provider).toBe("microsoft");
+    });
+
+    it("handles non-JSON error response from Microsoft token endpoint gracefully", async () => {
+      const spyFetch: FetchFn = async () => {
+        return new Response("<html>Service Unavailable</html>", {
+          status: 503,
+          headers: { "Content-Type": "text/html" },
+        });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft");
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+
+      await expect(acct.getAccessToken()).rejects.toThrow(
+        /Token refresh failed \(503\)/,
+      );
+    });
+
+    it("revokeTokens does not call Google revoke when provider is microsoft", async () => {
+      const fetchCalls: string[] = [];
+      const spyFetch: FetchFn = async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        fetchCalls.push(url);
+        return new Response(null, { status: 200 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.revokeTokens();
+
+      // Microsoft doesn't have a token revoke endpoint -- local deletion only
+      expect(fetchCalls).toHaveLength(0);
+      expect(result).toEqual({ revoked: true });
+
+      // Auth data should be deleted
+      const row = db
+        .prepare("SELECT COUNT(*) as cnt FROM auth")
+        .get() as { cnt: number };
+      expect(row.cnt).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // BR-8: Refresh token never leaves AccountDO boundary
   // -------------------------------------------------------------------------
 

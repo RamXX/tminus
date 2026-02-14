@@ -37,5 +37,7 @@ class_name = "OnboardingWorkflow"
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
+# MS_CLIENT_ID        -- Microsoft Entra ID (Azure AD) client ID
+# MS_CLIENT_SECRET    -- Microsoft Entra ID (Azure AD) client secret
 # MASTER_KEY          -- envelope encryption master key
 # JWT_SECRET          -- API auth JWT signing secret

@@ -18,8 +18,12 @@ import type {
 } from "./types";
 import type { CalendarProvider, FetchFn } from "./google-api";
 import { GoogleCalendarClient } from "./google-api";
+import { MicrosoftCalendarClient } from "./microsoft-api";
 import { normalizeGoogleEvent } from "./normalize";
+import { normalizeMicrosoftEvent } from "./normalize-microsoft";
+import type { MicrosoftGraphEvent } from "./normalize-microsoft";
 import { classifyEvent as classifyGoogleEvent } from "./classify";
+import { classifyMicrosoftEvent } from "./classify";
 
 // ---------------------------------------------------------------------------
 // Provider type
@@ -36,7 +40,7 @@ export type ProviderType = "google" | "microsoft" | "caldav";
  * All currently supported provider types.
  * Useful for validation and iteration.
  */
-export const SUPPORTED_PROVIDERS: readonly ProviderType[] = ["google"] as const;
+export const SUPPORTED_PROVIDERS: readonly ProviderType[] = ["google", "microsoft"] as const;
 
 /**
  * Check if a string is a valid ProviderType.
@@ -78,6 +82,16 @@ export const googleClassificationStrategy: ClassificationStrategy = {
 };
 
 /**
+ * Microsoft Calendar classification strategy.
+ * Uses open extensions (com.tminus.metadata) to detect managed mirrors.
+ */
+export const microsoftClassificationStrategy: ClassificationStrategy = {
+  classify(rawEvent: unknown): EventClassification {
+    return classifyMicrosoftEvent(rawEvent as MicrosoftGraphEvent);
+  },
+};
+
+/**
  * Get the ClassificationStrategy for a given provider type.
  * Throws if the provider is not supported.
  */
@@ -87,9 +101,11 @@ export function getClassificationStrategy(
   switch (provider) {
     case "google":
       return googleClassificationStrategy;
+    case "microsoft":
+      return microsoftClassificationStrategy;
     default:
       throw new Error(
-        `No classification strategy for provider: ${provider}. Only Google is supported in Phase 1.`,
+        `No classification strategy for provider: ${provider}. Only Google and Microsoft are supported.`,
       );
   }
 }
@@ -124,9 +140,15 @@ export function normalizeProviderEvent(
         accountId,
         classification,
       );
+    case "microsoft":
+      return normalizeMicrosoftEvent(
+        rawEvent as MicrosoftGraphEvent,
+        accountId,
+        classification,
+      );
     default:
       throw new Error(
-        `No normalizer for provider: ${provider}. Only Google is supported in Phase 1.`,
+        `No normalizer for provider: ${provider}. Only Google and Microsoft are supported.`,
       );
   }
 }
@@ -151,9 +173,11 @@ export function createCalendarProvider(
   switch (provider) {
     case "google":
       return new GoogleCalendarClient(accessToken, fetchFn);
+    case "microsoft":
+      return new MicrosoftCalendarClient(accessToken, fetchFn);
     default:
       throw new Error(
-        `Cannot create provider: ${provider}. Only Google is supported in Phase 1.`,
+        `Cannot create provider: ${provider}. Only Google and Microsoft are supported.`,
       );
   }
 }

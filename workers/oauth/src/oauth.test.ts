@@ -16,6 +16,7 @@ import { generateCodeVerifier, generateCodeChallenge } from "./pkce";
 import { encryptState, decryptState, type StatePayload } from "./state";
 import { createHandler, type FetchFn } from "./index";
 import { GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL, GOOGLE_USERINFO_URL, GOOGLE_SCOPES } from "./google";
+import { MS_AUTH_URL, MS_TOKEN_URL, MS_USERINFO_URL, MS_SCOPES, MS_CALLBACK_PATH } from "./microsoft";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -25,10 +26,15 @@ import { GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL, GOOGLE_USERINFO_URL, GOOGLE_SCOPES }
 const TEST_JWT_SECRET = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
 const TEST_CLIENT_ID = "test-client-id.apps.googleusercontent.com";
 const TEST_CLIENT_SECRET = "test-client-secret";
+const TEST_MS_CLIENT_ID = "test-ms-client-id-00000000-0000-0000-0000-000000000000";
+const TEST_MS_CLIENT_SECRET = "test-ms-client-secret";
 const TEST_USER_ID = "usr_01HXY0000000000000000000AA";
 const TEST_GOOGLE_SUB = "google-sub-12345";
 const TEST_GOOGLE_EMAIL = "user@gmail.com";
+const TEST_MS_SUB = "microsoft-oid-67890";
+const TEST_MS_EMAIL = "user@outlook.com";
 const TEST_AUTH_CODE = "4/0AbCdEfGhIjKlMnOpQrStUvWxYz";
+const TEST_MS_AUTH_CODE = "M.C107_BAY.2.xxxxxxxx";
 
 // ---------------------------------------------------------------------------
 // PKCE unit tests (real crypto)
@@ -204,14 +210,27 @@ function createMockD1() {
             if (!rows["accounts"]) rows["accounts"] = [];
             // Parse bindings into an account row
             if (sql.includes("accounts")) {
+              // Detect provider from SQL literal or bindings
+              let provider = "google";
+              if (sql.includes("'microsoft'")) {
+                provider = "microsoft";
+              } else if (statement.bindings.length >= 5) {
+                // Provider is a binding parameter (parameterized INSERT)
+                provider = statement.bindings[2] as string;
+              }
               const newRow = {
                 account_id: statement.bindings[0],
                 user_id: statement.bindings[1],
-                provider: "google",
-                provider_subject: statement.bindings[2],
+                provider,
+                provider_subject: sql.includes("'microsoft'") ? statement.bindings[2] : statement.bindings[2],
                 email: statement.bindings[3],
                 status: "active",
               };
+              // For parameterized INSERT with provider as binding
+              if (statement.bindings.length >= 5) {
+                newRow.provider_subject = statement.bindings[3] as string;
+                newRow.email = statement.bindings[4] as string;
+              }
               (rows["accounts"] as unknown[]).push(newRow);
             }
           }
@@ -326,6 +345,63 @@ function createMockGoogleFetch(overrides?: {
   };
 }
 
+/** Create a mock fetch that handles Microsoft token and userinfo endpoints. */
+function createMockMicrosoftFetch(overrides?: {
+  tokenResponse?: Partial<{
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    token_type: string;
+    scope: string;
+  }>;
+  tokenStatus?: number;
+  tokenBody?: string; // Raw body string, for non-JSON error tests
+  userInfoResponse?: Partial<{ id: string; mail: string; displayName: string; userPrincipalName: string }>;
+  userInfoStatus?: number;
+}): FetchFn {
+  return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (url.includes("login.microsoftonline.com") && url.includes("token")) {
+      const status = overrides?.tokenStatus ?? 200;
+      if (status !== 200) {
+        const body = overrides?.tokenBody ?? JSON.stringify({ error: "invalid_grant" });
+        return new Response(body, { status });
+      }
+      return new Response(
+        JSON.stringify({
+          access_token: "EwB0A8l6BAAURSN_mock_ms_access_token",
+          refresh_token: "M.C107_BAY.2.mock_ms_refresh_token",
+          expires_in: 3600,
+          token_type: "Bearer",
+          scope: MS_SCOPES,
+          ...overrides?.tokenResponse,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    if (url.includes("graph.microsoft.com") && url.includes("/me")) {
+      const status = overrides?.userInfoStatus ?? 200;
+      if (status !== 200) {
+        return new Response(JSON.stringify({ error: { code: "Unauthorized" } }), { status });
+      }
+      return new Response(
+        JSON.stringify({
+          id: TEST_MS_SUB,
+          mail: TEST_MS_EMAIL,
+          displayName: "Test MS User",
+          userPrincipalName: TEST_MS_EMAIL,
+          ...overrides?.userInfoResponse,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+}
+
 /** Build the mock Env. */
 function createMockEnv(overrides?: {
   d1?: ReturnType<typeof createMockD1>;
@@ -339,6 +415,8 @@ function createMockEnv(overrides?: {
     ONBOARDING_WORKFLOW: overrides?.workflow ?? createMockWorkflow(),
     GOOGLE_CLIENT_ID: TEST_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: TEST_CLIENT_SECRET,
+    MS_CLIENT_ID: TEST_MS_CLIENT_ID,
+    MS_CLIENT_SECRET: TEST_MS_CLIENT_SECRET,
     JWT_SECRET: TEST_JWT_SECRET,
   } as unknown as Env;
 }
@@ -725,6 +803,387 @@ describe("Worker routing", () => {
     });
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(405);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /oauth/microsoft/start tests
+// ---------------------------------------------------------------------------
+
+describe("GET /oauth/microsoft/start", () => {
+  it("redirects to Microsoft with correct params and scopes", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request(
+      `https://oauth.tminus.dev/oauth/microsoft/start?user_id=${TEST_USER_ID}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(302);
+    const location = response.headers.get("Location")!;
+    expect(location).toBeTruthy();
+
+    const redirectUrl = new URL(location);
+    expect(redirectUrl.origin + redirectUrl.pathname).toBe(MS_AUTH_URL);
+    expect(redirectUrl.searchParams.get("client_id")).toBe(TEST_MS_CLIENT_ID);
+    expect(redirectUrl.searchParams.get("redirect_uri")).toBe(
+      "https://oauth.tminus.dev/oauth/microsoft/callback",
+    );
+    expect(redirectUrl.searchParams.get("response_type")).toBe("code");
+    expect(redirectUrl.searchParams.get("scope")).toBe(MS_SCOPES);
+    expect(redirectUrl.searchParams.get("response_mode")).toBe("query");
+    expect(redirectUrl.searchParams.get("prompt")).toBe("consent");
+
+    // Verify state is present and decryptable
+    const state = redirectUrl.searchParams.get("state")!;
+    expect(state.length).toBeGreaterThan(0);
+    const payload = await decryptState(TEST_JWT_SECRET, state);
+    expect(payload).not.toBeNull();
+    expect(payload!.user_id).toBe(TEST_USER_ID);
+  });
+
+  it("uses custom redirect_uri when provided", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+    const customRedirect = "https://myapp.com/ms-oauth/complete";
+
+    const request = new Request(
+      `https://oauth.tminus.dev/oauth/microsoft/start?user_id=${TEST_USER_ID}&redirect_uri=${encodeURIComponent(customRedirect)}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    const location = response.headers.get("Location")!;
+    const state = new URL(location).searchParams.get("state")!;
+    const payload = await decryptState(TEST_JWT_SECRET, state);
+    expect(payload!.redirect_uri).toBe(customRedirect);
+  });
+
+  it("returns 400 when user_id is missing", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://oauth.tminus.dev/oauth/microsoft/start");
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: string };
+    expect(body.error).toContain("user_id");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /oauth/microsoft/callback tests
+// ---------------------------------------------------------------------------
+
+describe("GET /oauth/microsoft/callback", () => {
+  /** Helper: create a valid state for Microsoft callback tests. */
+  async function createValidMsState(userId?: string, redirectUri?: string) {
+    const state = await encryptState(
+      TEST_JWT_SECRET,
+      "not-used-for-ms", // Microsoft flow doesn't use PKCE code_verifier
+      userId || TEST_USER_ID,
+      redirectUri || "https://app.tminus.dev/done",
+    );
+    return { state };
+  }
+
+  describe("new account (happy path)", () => {
+    it("exchanges code, creates D1 row with provider=microsoft, initializes AccountDO, starts workflow, redirects", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+      const mockFetch = createMockMicrosoftFetch();
+      const handler = createHandler(mockFetch);
+
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      // Should redirect to success URL
+      expect(response.status).toBe(302);
+      const location = new URL(response.headers.get("Location")!);
+      expect(location.origin + location.pathname).toBe("https://app.tminus.dev/done");
+      const accountId = location.searchParams.get("account_id")!;
+      expect(accountId).toMatch(/^acc_/); // Prefixed ULID
+
+      // D1: account row was inserted with provider=microsoft
+      const insertedAccounts = (d1._rows["accounts"] || []) as any[];
+      expect(insertedAccounts.length).toBe(1);
+      expect(insertedAccounts[0].user_id).toBe(TEST_USER_ID);
+      expect(insertedAccounts[0].provider).toBe("microsoft");
+      expect(insertedAccounts[0].provider_subject).toBe(TEST_MS_SUB);
+      expect(insertedAccounts[0].email).toBe(TEST_MS_EMAIL);
+
+      // AccountDO: initialize was called with tokens
+      expect(accountDO._calls.length).toBe(1);
+      expect(accountDO._calls[0].url).toContain("initialize");
+      const doBody = accountDO._calls[0].body as any;
+      expect(doBody.tokens.access_token).toBe("EwB0A8l6BAAURSN_mock_ms_access_token");
+      expect(doBody.tokens.refresh_token).toBe("M.C107_BAY.2.mock_ms_refresh_token");
+      expect(doBody.tokens.expiry).toBeTruthy();
+      expect(doBody.scopes).toBe(MS_SCOPES);
+
+      // OnboardingWorkflow: was started
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe(accountId);
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
+    });
+  });
+
+  describe("re-activation (same user)", () => {
+    it("reuses existing Microsoft account, refreshes tokens, skips workflow", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      // Pre-populate: same user already linked this Microsoft account
+      d1._rows["accounts"] = [{
+        account_id: "acc_MSEXISTING01",
+        user_id: TEST_USER_ID,
+        provider: "microsoft",
+        provider_subject: TEST_MS_SUB,
+        email: "old@outlook.com",
+        status: "revoked",
+      }];
+
+      const mockFetch = createMockMicrosoftFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      // Should redirect with the existing account_id and reactivated flag
+      expect(response.status).toBe(302);
+      const location = new URL(response.headers.get("Location")!);
+      expect(location.searchParams.get("account_id")).toBe("acc_MSEXISTING01");
+      expect(location.searchParams.get("reactivated")).toBe("true");
+
+      // AccountDO: initialize was called (to refresh tokens)
+      expect(accountDO._calls.length).toBe(1);
+      expect(accountDO._calls[0].id).toBe("acc_MSEXISTING01");
+
+      // OnboardingWorkflow: was NOT started (existing account)
+      expect(workflow._calls.length).toBe(0);
+    });
+  });
+
+  describe("cross-user linking rejection", () => {
+    it("returns 409 when Microsoft account is linked to a different user", async () => {
+      const d1 = createMockD1();
+      const env = createMockEnv({ d1 });
+
+      // Pre-populate: different user owns this Microsoft account
+      d1._rows["accounts"] = [{
+        account_id: "acc_MS_OTHER_USER",
+        user_id: "usr_DIFFERENT_USER_0000000000AA",
+        provider: "microsoft",
+        provider_subject: TEST_MS_SUB,
+        email: "other@outlook.com",
+        status: "active",
+      }];
+
+      const mockFetch = createMockMicrosoftFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(409);
+      const body = await response.text();
+      expect(body).toContain("already linked to another user");
+    });
+  });
+
+  describe("error handling", () => {
+    it("returns user-friendly message when Microsoft consent is denied", async () => {
+      const env = createMockEnv();
+      const handler = createHandler();
+
+      const request = new Request(
+        "https://oauth.tminus.dev/oauth/microsoft/callback?error=access_denied",
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("declined access");
+    });
+
+    it("returns error when state parameter is invalid/tampered", async () => {
+      const env = createMockEnv();
+      const handler = createHandler(createMockMicrosoftFetch());
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=tampered-state`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(400);
+      const body = await response.text();
+      expect(body).toContain("Please try again");
+    });
+
+    it("returns 502 when Microsoft token exchange fails", async () => {
+      const env = createMockEnv();
+      const mockFetch = createMockMicrosoftFetch({ tokenStatus: 400 });
+      const handler = createHandler(mockFetch);
+
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=bad-code&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(502);
+      const body = await response.text();
+      expect(body).toContain("Something went wrong");
+    });
+
+    it("returns 502 when Microsoft token endpoint returns non-JSON (HTML error page)", async () => {
+      const env = createMockEnv();
+      const htmlError = "<html><body>Service Unavailable</body></html>";
+      const mockFetch = createMockMicrosoftFetch({
+        tokenStatus: 503,
+        tokenBody: htmlError,
+      });
+      const handler = createHandler(mockFetch);
+
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=some-code&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(502);
+      const body = await response.text();
+      expect(body).toContain("Something went wrong");
+    });
+
+    it("returns 502 when no refresh_token in response", async () => {
+      const env = createMockEnv();
+      const mockFetch = createMockMicrosoftFetch({
+        tokenResponse: { refresh_token: undefined } as any,
+      });
+      const handler = createHandler(mockFetch);
+
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(502);
+    });
+
+    it("returns 502 when Microsoft userinfo fetch fails", async () => {
+      const env = createMockEnv();
+      const mockFetch = createMockMicrosoftFetch({ userInfoStatus: 401 });
+      const handler = createHandler(mockFetch);
+
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(502);
+    });
+
+    it("returns 400 when code is missing", async () => {
+      const env = createMockEnv();
+      const handler = createHandler();
+
+      const request = new Request(
+        "https://oauth.tminus.dev/oauth/microsoft/callback?state=something",
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("returns 400 when state is missing", async () => {
+      const env = createMockEnv();
+      const handler = createHandler();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("handles Microsoft userinfo with userPrincipalName fallback for email", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      const mockFetch = createMockMicrosoftFetch({
+        userInfoResponse: {
+          id: TEST_MS_SUB,
+          mail: null as any, // Some accounts have null mail
+          userPrincipalName: "user@contoso.onmicrosoft.com",
+        },
+      });
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(302);
+      const insertedAccounts = (d1._rows["accounts"] || []) as any[];
+      expect(insertedAccounts[0].email).toBe("user@contoso.onmicrosoft.com");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Microsoft constants tests
+// ---------------------------------------------------------------------------
+
+describe("Microsoft OAuth constants", () => {
+  it("MS_AUTH_URL points to Microsoft login endpoint", () => {
+    expect(MS_AUTH_URL).toContain("login.microsoftonline.com");
+    expect(MS_AUTH_URL).toContain("oauth2/v2.0/authorize");
+  });
+
+  it("MS_TOKEN_URL points to Microsoft token endpoint", () => {
+    expect(MS_TOKEN_URL).toContain("login.microsoftonline.com");
+    expect(MS_TOKEN_URL).toContain("oauth2/v2.0/token");
+  });
+
+  it("MS_SCOPES includes calendar, user, and offline access scopes", () => {
+    expect(MS_SCOPES).toContain("Calendars.ReadWrite");
+    expect(MS_SCOPES).toContain("User.Read");
+    expect(MS_SCOPES).toContain("offline_access");
+  });
+
+  it("MS_CALLBACK_PATH is correct", () => {
+    expect(MS_CALLBACK_PATH).toBe("/oauth/microsoft/callback");
+  });
+
+  it("MS_USERINFO_URL points to Microsoft Graph", () => {
+    expect(MS_USERINFO_URL).toContain("graph.microsoft.com");
   });
 });
 

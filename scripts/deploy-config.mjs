@@ -45,6 +45,8 @@ export const D1_MIGRATIONS_PATH = "migrations/d1-registry";
 export const SECRET_MAP = {
   GOOGLE_CLIENT_ID: ["oauth"],
   GOOGLE_CLIENT_SECRET: ["oauth"],
+  MS_CLIENT_ID: ["oauth"],
+  MS_CLIENT_SECRET: ["oauth"],
   MASTER_KEY: ["api", "oauth"],
   JWT_SECRET: ["api", "oauth"],
 };

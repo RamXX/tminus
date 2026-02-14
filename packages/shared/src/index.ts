@@ -57,16 +57,21 @@ export type { EntityType } from "./id";
 export { compileProjection } from "./policy";
 
 // Re-export event classification (Invariants A & E, loop prevention)
-export { classifyEvent } from "./classify";
+export { classifyEvent, classifyMicrosoftEvent } from "./classify";
 
 // Re-export Google event normalization (provider -> ProviderDelta)
 export { normalizeGoogleEvent } from "./normalize";
+
+// Re-export Microsoft event normalization (provider -> ProviderDelta)
+export { normalizeMicrosoftEvent } from "./normalize-microsoft";
+export type { MicrosoftGraphEvent } from "./normalize-microsoft";
 
 // Re-export provider-agnostic abstraction layer
 export {
   SUPPORTED_PROVIDERS,
   isSupportedProvider,
   googleClassificationStrategy,
+  microsoftClassificationStrategy,
   getClassificationStrategy,
   normalizeProviderEvent,
   createCalendarProvider,
@@ -107,3 +112,15 @@ export type {
   CalendarListEntry,
   WatchResponse,
 } from "./google-api";
+
+// Re-export Microsoft Calendar API abstraction layer
+export {
+  MicrosoftCalendarClient,
+  MicrosoftApiError,
+  MicrosoftTokenExpiredError,
+  MicrosoftResourceNotFoundError,
+  MicrosoftRateLimitError,
+  MicrosoftSubscriptionValidationError,
+  TokenBucket,
+} from "./microsoft-api";
+export type { MicrosoftClientOptions } from "./microsoft-api";

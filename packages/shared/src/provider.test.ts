@@ -52,8 +52,8 @@ describe("isSupportedProvider", () => {
     expect(isSupportedProvider("google")).toBe(true);
   });
 
-  it("returns false for 'microsoft' (not yet implemented)", () => {
-    expect(isSupportedProvider("microsoft")).toBe(false);
+  it("returns true for 'microsoft'", () => {
+    expect(isSupportedProvider("microsoft")).toBe(true);
   });
 
   it("returns false for 'caldav' (not yet implemented)", () => {
@@ -68,14 +68,14 @@ describe("isSupportedProvider", () => {
 });
 
 describe("SUPPORTED_PROVIDERS", () => {
-  it("contains only 'google' in Phase 1", () => {
-    expect(SUPPORTED_PROVIDERS).toEqual(["google"]);
+  it("contains 'google' and 'microsoft'", () => {
+    expect(SUPPORTED_PROVIDERS).toEqual(["google", "microsoft"]);
   });
 
   it("is readonly (frozen at the type level)", () => {
     // TypeScript enforces readonly, but we can verify it's an array
     expect(Array.isArray(SUPPORTED_PROVIDERS)).toBe(true);
-    expect(SUPPORTED_PROVIDERS.length).toBe(1);
+    expect(SUPPORTED_PROVIDERS.length).toBe(2);
   });
 });
 
@@ -114,10 +114,10 @@ describe("getClassificationStrategy", () => {
     expect(strategy).toBe(googleClassificationStrategy);
   });
 
-  it("throws for 'microsoft' (unsupported in Phase 1)", () => {
-    expect(() => getClassificationStrategy("microsoft" as ProviderType)).toThrow(
-      /no classification strategy/i,
-    );
+  it("returns microsoftClassificationStrategy for 'microsoft'", () => {
+    const strategy = getClassificationStrategy("microsoft");
+    expect(strategy).toBeDefined();
+    expect(typeof strategy.classify).toBe("function");
   });
 
   it("throws for 'caldav' (unsupported in Phase 1)", () => {
@@ -174,11 +174,18 @@ describe("normalizeProviderEvent", () => {
     expect(dispatchResult).toEqual(directResult);
   });
 
-  it("throws for unsupported provider 'microsoft'", () => {
-    const event = makeGoogleEvent();
-    expect(() =>
-      normalizeProviderEvent("microsoft" as ProviderType, event, TEST_ACCOUNT_ID, "origin"),
-    ).toThrow(/no normalizer/i);
+  it("dispatches to Microsoft normalizer for provider='microsoft'", () => {
+    // Use a minimal Microsoft Graph event shape
+    const msEvent = {
+      id: "ms_evt_123",
+      subject: "MS Meeting",
+      start: { dateTime: "2025-06-15T09:00:00", timeZone: "UTC" },
+      end: { dateTime: "2025-06-15T09:30:00", timeZone: "UTC" },
+      isCancelled: false,
+    };
+    const delta = normalizeProviderEvent("microsoft", msEvent, TEST_ACCOUNT_ID, "origin");
+    expect(delta.type).toBeDefined();
+    expect(delta.origin_account_id).toBe(TEST_ACCOUNT_ID);
   });
 
   it("throws for unsupported provider 'caldav'", () => {
@@ -226,10 +233,10 @@ describe("createCalendarProvider", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("throws for unsupported provider 'microsoft'", () => {
-    expect(() =>
-      createCalendarProvider("microsoft" as ProviderType, "test-token"),
-    ).toThrow(/cannot create provider/i);
+  it("returns a MicrosoftCalendarClient for provider='microsoft'", () => {
+    const provider = createCalendarProvider("microsoft", "test-token");
+    expect(provider).toBeDefined();
+    expect(typeof provider.listEvents).toBe("function");
   });
 
   it("throws for unsupported provider 'caldav'", () => {

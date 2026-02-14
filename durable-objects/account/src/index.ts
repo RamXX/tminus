@@ -38,6 +38,9 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 /** Google OAuth2 token revocation endpoint. */
 const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
+/** Microsoft OAuth2 token refresh endpoint (common tenant). */
+const MS_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
 /** Buffer before expiry to trigger a refresh (5 minutes). */
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
@@ -216,28 +219,34 @@ export class AccountDO {
       .toArray();
 
     if (rows.length > 0) {
-      try {
-        // Decrypt to get the refresh token
-        const masterKey = await importMasterKey(this.masterKeyHex);
-        const envelope: EncryptedEnvelope = JSON.parse(
-          rows[0].encrypted_tokens,
-        );
-        const tokens = await decryptTokens(masterKey, envelope);
+      if (this.provider === "google") {
+        // Google has a standard token revocation endpoint
+        try {
+          const masterKey = await importMasterKey(this.masterKeyHex);
+          const envelope: EncryptedEnvelope = JSON.parse(
+            rows[0].encrypted_tokens,
+          );
+          const tokens = await decryptTokens(masterKey, envelope);
 
-        // Call Google's revoke endpoint
-        const response = await this.fetchFn(GOOGLE_REVOKE_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            token: tokens.refresh_token,
-          }).toString(),
-        });
+          const response = await this.fetchFn(GOOGLE_REVOKE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              token: tokens.refresh_token,
+            }).toString(),
+          });
 
-        revoked = response.ok;
-      } catch {
-        // Token may already be revoked, expired, or network may be down.
-        // Proceed with local deletion regardless.
-        revoked = false;
+          revoked = response.ok;
+        } catch {
+          // Token may already be revoked, expired, or network may be down.
+          // Proceed with local deletion regardless.
+          revoked = false;
+        }
+      } else {
+        // Microsoft (and future providers) don't have a standard token
+        // revocation endpoint accessible via simple HTTP. We just delete
+        // the tokens locally. Mark as "revoked" since local cleanup succeeded.
+        revoked = true;
       }
     }
 
@@ -272,14 +281,31 @@ export class AccountDO {
   }
 
   /**
+   * Get the token refresh URL for the current provider.
+   * Google and Microsoft use different token endpoints.
+   */
+  private getTokenRefreshUrl(): string {
+    switch (this.provider) {
+      case "microsoft":
+        return MS_TOKEN_URL;
+      case "google":
+      default:
+        return GOOGLE_TOKEN_URL;
+    }
+  }
+
+  /**
    * Refresh the access token using the refresh token.
+   * Provider-aware: routes to the correct token endpoint based on this.provider.
    * Re-encrypts updated tokens and stores them.
    */
   private async refreshAccessToken(
     masterKey: CryptoKey,
     refreshToken: string,
   ): Promise<TokenPayload> {
-    const response = await this.fetchFn(GOOGLE_TOKEN_URL, {
+    const tokenUrl = this.getTokenRefreshUrl();
+
+    const response = await this.fetchFn(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -307,7 +333,7 @@ export class AccountDO {
 
     const newTokens: TokenPayload = {
       access_token: data.access_token,
-      refresh_token: refreshToken, // Google doesn't always return a new refresh token
+      refresh_token: refreshToken, // Neither Google nor Microsoft always return a new refresh token
       expiry,
     };
 

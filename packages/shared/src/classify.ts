@@ -12,10 +12,14 @@
  */
 
 import type { GoogleCalendarEvent, EventClassification } from "./types";
+import type { MicrosoftGraphEvent } from "./normalize-microsoft";
 import {
   EXTENDED_PROP_TMINUS,
   EXTENDED_PROP_MANAGED,
 } from "./constants";
+
+/** Open extension name used by T-Minus for Microsoft events. */
+const MS_EXTENSION_NAME = "com.tminus.metadata";
 
 /**
  * Classify a Google Calendar provider event.
@@ -52,5 +56,44 @@ export function classifyEvent(
   // Has extended properties but not our managed markers.
   // Could be another system's event or partial T-Minus props.
   // Treat as origin (safe default -- better to re-sync than to miss).
+  return "origin";
+}
+
+/**
+ * Classify a Microsoft Graph provider event.
+ *
+ * Pure function -- no side effects, no mutations, deterministic.
+ *
+ * Uses open extensions (com.tminus.metadata) to detect managed mirrors.
+ *
+ * @param providerEvent - Raw event from the Microsoft Graph API
+ * @returns Classification: 'origin' | 'managed_mirror' | 'foreign_managed'
+ *
+ * Decision logic:
+ * 1. No extensions array => origin (user-created event)
+ * 2. Has com.tminus.metadata with tminus='true' AND managed='true' => managed_mirror
+ * 3. Has other extensions => origin (safe default)
+ */
+export function classifyMicrosoftEvent(
+  providerEvent: MicrosoftGraphEvent,
+): EventClassification {
+  const extensions = providerEvent.extensions;
+
+  if (!extensions || extensions.length === 0) {
+    return "origin";
+  }
+
+  const tminusExt = extensions.find(
+    (ext) => ext.extensionName === MS_EXTENSION_NAME,
+  );
+
+  if (!tminusExt) {
+    return "origin";
+  }
+
+  if (tminusExt.tminus === "true" && tminusExt.managed === "true") {
+    return "managed_mirror";
+  }
+
   return "origin";
 }

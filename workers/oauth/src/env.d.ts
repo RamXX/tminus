@@ -24,6 +24,12 @@ interface Env {
   /** Google OAuth2 client secret. */
   GOOGLE_CLIENT_SECRET: string;
 
+  /** Microsoft Entra ID (Azure AD) client ID. */
+  MS_CLIENT_ID: string;
+
+  /** Microsoft Entra ID (Azure AD) client secret. */
+  MS_CLIENT_SECRET: string;
+
   /** Symmetric key for encrypting state parameter (hex-encoded 32 bytes). */
   JWT_SECRET: string;
 }

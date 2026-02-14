@@ -2,12 +2,14 @@
  * tminus-oauth -- OAuth callback and token exchange worker.
  *
  * Endpoints:
- *   GET /oauth/google/start    -- Initiate Google PKCE flow
- *   GET /oauth/google/callback -- Handle Google redirect, exchange tokens
+ *   GET /oauth/google/start        -- Initiate Google PKCE flow
+ *   GET /oauth/google/callback     -- Handle Google redirect, exchange tokens
+ *   GET /oauth/microsoft/start     -- Initiate Microsoft OAuth flow
+ *   GET /oauth/microsoft/callback  -- Handle Microsoft redirect, exchange tokens
+ *   GET /health                    -- Health check
  *
- * This worker is stateless: PKCE verifier and user context are encrypted
- * into the state parameter using AES-256-GCM, eliminating the need for
- * KV or cookie storage.
+ * This worker is stateless: user context is encrypted into the state
+ * parameter using AES-256-GCM, eliminating the need for KV or cookie storage.
  */
 
 import { generateId } from "@tminus/shared";
@@ -29,6 +31,13 @@ import {
   GOOGLE_SCOPES,
   CALLBACK_PATH,
 } from "./google";
+import {
+  MS_AUTH_URL,
+  MS_TOKEN_URL,
+  MS_USERINFO_URL,
+  MS_SCOPES,
+  MS_CALLBACK_PATH,
+} from "./microsoft";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,6 +58,23 @@ interface GoogleUserInfo {
   email: string;
   name?: string;
   picture?: string;
+}
+
+/** Response from Microsoft token exchange. */
+interface MicrosoftTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+  token_type: string;
+  scope: string;
+}
+
+/** Response from Microsoft Graph /me endpoint. */
+interface MicrosoftUserInfo {
+  id: string;
+  mail: string | null;
+  displayName?: string;
+  userPrincipalName: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +314,228 @@ async function handleCallback(
 }
 
 // ---------------------------------------------------------------------------
+// Route: GET /oauth/microsoft/start
+// ---------------------------------------------------------------------------
+
+async function handleMicrosoftStart(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const userId = url.searchParams.get("user_id");
+
+  if (!userId) {
+    return errorResponse("Missing required parameter: user_id", 400);
+  }
+
+  const redirectUri = url.searchParams.get("redirect_uri") || `${url.origin}/oauth/microsoft/done`;
+
+  // Encrypt context into state parameter (code_verifier slot unused for Microsoft)
+  const state = await encryptState(env.JWT_SECRET, "not-used-for-ms", userId, redirectUri);
+
+  // Build the callback URL for this worker
+  const callbackUrl = `${url.origin}${MS_CALLBACK_PATH}`;
+
+  // Build Microsoft authorization URL
+  const authUrl = new URL(MS_AUTH_URL);
+  authUrl.searchParams.set("client_id", env.MS_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", callbackUrl);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", MS_SCOPES);
+  authUrl.searchParams.set("response_mode", "query");
+  authUrl.searchParams.set("prompt", "consent");
+  authUrl.searchParams.set("state", state);
+
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+// ---------------------------------------------------------------------------
+// Route: GET /oauth/microsoft/callback
+// ---------------------------------------------------------------------------
+
+async function handleMicrosoftCallback(
+  request: Request,
+  env: Env,
+  fetchFn: FetchFn = globalThis.fetch.bind(globalThis),
+): Promise<Response> {
+  const url = new URL(request.url);
+
+  // Check if user denied consent
+  const errorParam = url.searchParams.get("error");
+  if (errorParam) {
+    return htmlError("Access Denied", "You declined access. No account was linked.", 200);
+  }
+
+  const code = url.searchParams.get("code");
+  const stateParam = url.searchParams.get("state");
+
+  if (!code || !stateParam) {
+    return htmlError("Link Failed", "Missing required parameters from Microsoft.", 400);
+  }
+
+  // Decrypt and validate state
+  const statePayload = await decryptState(env.JWT_SECRET, stateParam);
+  if (!statePayload) {
+    return htmlError("Link Failed", "Link failed. Please try again.", 400);
+  }
+
+  const { user_id, redirect_uri } = statePayload;
+  const callbackUrl = `${url.origin}${MS_CALLBACK_PATH}`;
+
+  // Step 1: Exchange authorization code for tokens
+  let tokenData: MicrosoftTokenResponse;
+  try {
+    const tokenResponse = await fetchFn(MS_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: env.MS_CLIENT_ID,
+        client_secret: env.MS_CLIENT_SECRET,
+        redirect_uri: callbackUrl,
+        grant_type: "authorization_code",
+        scope: MS_SCOPES,
+      }).toString(),
+    });
+
+    if (!tokenResponse.ok) {
+      // Handle non-JSON responses gracefully (Microsoft can return HTML on 5xx)
+      const body = await tokenResponse.text();
+      console.error(`Microsoft token exchange failed (${tokenResponse.status}): ${body}`);
+      return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+    }
+
+    // Parse token response, guarding against non-JSON bodies
+    const responseText = await tokenResponse.text();
+    try {
+      tokenData = JSON.parse(responseText) as MicrosoftTokenResponse;
+    } catch {
+      console.error("Microsoft token endpoint returned non-JSON response:", responseText.slice(0, 200));
+      return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+    }
+  } catch (err) {
+    console.error("Microsoft token exchange error:", err);
+    return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+  }
+
+  if (!tokenData.refresh_token) {
+    console.error("No refresh_token in Microsoft token response. Was offline_access scope requested?");
+    return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+  }
+
+  // Step 2: Fetch Microsoft Graph /me for provider_subject and email
+  let userInfo: MicrosoftUserInfo;
+  try {
+    const userInfoResponse = await fetchFn(MS_USERINFO_URL, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+
+    if (!userInfoResponse.ok) {
+      const body = await userInfoResponse.text();
+      console.error(`Microsoft userinfo fetch failed (${userInfoResponse.status}): ${body}`);
+      return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+    }
+
+    userInfo = await userInfoResponse.json() as MicrosoftUserInfo;
+  } catch (err) {
+    console.error("Microsoft userinfo fetch error:", err);
+    return htmlError("Something Went Wrong", "Something went wrong. Please try again.", 502);
+  }
+
+  // Microsoft Graph /me: `mail` can be null for some accounts, fall back to userPrincipalName
+  const email = userInfo.mail || userInfo.userPrincipalName;
+  const providerSubject = userInfo.id;
+
+  // Step 3: Check D1 for existing account with this (provider, provider_subject)
+  const existingRows = await env.DB
+    .prepare("SELECT account_id, user_id, status FROM accounts WHERE provider = ? AND provider_subject = ?")
+    .bind("microsoft", providerSubject)
+    .all<Pick<AccountRow, "account_id" | "user_id" | "status">>();
+
+  const existing = existingRows.results.length > 0 ? existingRows.results[0] : null;
+
+  let accountId: string;
+  let isNewAccount = false;
+
+  if (existing) {
+    if (existing.user_id !== user_id) {
+      // Different user already linked this Microsoft account
+      return htmlError(
+        "Account Already Linked",
+        "This Microsoft account is already linked to another user.",
+        409,
+      );
+    }
+
+    // Same user -- re-activate and refresh tokens
+    accountId = existing.account_id;
+
+    // Update status to active if it was revoked/error
+    if (existing.status !== "active") {
+      await env.DB
+        .prepare("UPDATE accounts SET status = 'active', email = ? WHERE account_id = ?")
+        .bind(email, accountId)
+        .run();
+    }
+  } else {
+    // New account
+    accountId = generateId("account");
+    isNewAccount = true;
+
+    await env.DB
+      .prepare(
+        `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)
+         VALUES (?, ?, 'microsoft', ?, ?, 'active')`,
+      )
+      .bind(accountId, user_id, providerSubject, email)
+      .run();
+  }
+
+  // Step 4: Initialize AccountDO with encrypted tokens
+  const expiry = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+  const accountDOId = env.ACCOUNT.idFromName(accountId);
+  const accountDOStub = env.ACCOUNT.get(accountDOId);
+
+  await accountDOStub.fetch(new Request("https://do/initialize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tokens: {
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        expiry,
+      },
+      scopes: tokenData.scope || MS_SCOPES,
+    }),
+  }));
+
+  // Step 5: Start OnboardingWorkflow for new accounts
+  if (isNewAccount) {
+    try {
+      await env.ONBOARDING_WORKFLOW.create({
+        id: `onboard-${accountId}`,
+        params: {
+          account_id: accountId,
+          user_id: user_id,
+        },
+      });
+    } catch (err) {
+      // Log but don't fail the OAuth flow -- onboarding can be retried
+      console.error("Failed to start OnboardingWorkflow:", err);
+    }
+  }
+
+  // Step 6: Redirect to success URL
+  const successUrl = new URL(redirect_uri);
+  successUrl.searchParams.set("account_id", accountId);
+  if (!isNewAccount) {
+    successUrl.searchParams.set("reactivated", "true");
+  }
+
+  return Response.redirect(successUrl.toString(), 302);
+}
+
+// ---------------------------------------------------------------------------
 // Worker entry point
 // ---------------------------------------------------------------------------
 
@@ -314,6 +562,10 @@ export function createHandler(fetchFn?: FetchFn) {
           return handleStart(request, env);
         case "/oauth/google/callback":
           return handleCallback(request, env, fetchFn);
+        case "/oauth/microsoft/start":
+          return handleMicrosoftStart(request, env);
+        case "/oauth/microsoft/callback":
+          return handleMicrosoftCallback(request, env, fetchFn);
         default:
           return errorResponse("Not found", 404);
       }
