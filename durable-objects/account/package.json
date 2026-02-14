@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run --passWithNoTests",
-    "test:unit": "vitest run --passWithNoTests",
-    "test:integration": "echo 'No integration tests yet'",
+    "test": "vitest run",
+    "test:unit": "vitest run --testPathPattern='\\.(test|unit\\.test)\\.ts$' --testPathIgnorePatterns='integration'",
+    "test:integration": "vitest run --testPathPattern='integration'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
@@ -16,7 +16,9 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.8.0",
-    "@cloudflare/workers-types": "^4.20250214.0",
+    "@cloudflare/workers-types": "^4.20260214.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^11.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
