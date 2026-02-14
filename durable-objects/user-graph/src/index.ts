@@ -1797,6 +1797,12 @@ export class UserGraphDO {
           return Response.json({ enqueued });
         }
 
+        case "/computeAvailability": {
+          const body = (await request.json()) as AvailabilityQuery;
+          const result = this.computeAvailability(body);
+          return Response.json(result);
+        }
+
         default:
           return new Response(`Unknown action: ${pathname}`, { status: 404 });
       }
@@ -1842,6 +1848,68 @@ export class UserGraphDO {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // computeAvailability -- Unified free/busy computation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute unified free/busy intervals across all (or specified) accounts
+   * for a given time range. Queries canonical_events from DO SQLite,
+   * merges overlapping busy intervals, and computes free gaps.
+   *
+   * Performance target (NFR-16): under 500ms, served entirely from DO SQLite.
+   */
+  computeAvailability(query: AvailabilityQuery): AvailabilityResult {
+    this.ensureMigrated();
+
+    const conditions: string[] = [
+      // Events that overlap the query range:
+      // event starts before query ends AND event ends after query starts
+      "end_ts > ?",
+      "start_ts < ?",
+      // Only opaque events count as busy
+      "transparency = 'opaque'",
+      // Exclude cancelled events
+      "status != 'cancelled'",
+    ];
+    const params: unknown[] = [query.start, query.end];
+
+    // Optional account filtering
+    if (query.accounts && query.accounts.length > 0) {
+      const placeholders = query.accounts.map(() => "?").join(", ");
+      conditions.push(`origin_account_id IN (${placeholders})`);
+      params.push(...query.accounts);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const sql = `SELECT start_ts, end_ts, origin_account_id FROM canonical_events ${where} ORDER BY start_ts ASC`;
+
+    const rows = this.sql
+      .exec<{ start_ts: string; end_ts: string; origin_account_id: string }>(
+        sql,
+        ...params,
+      )
+      .toArray();
+
+    // Build raw busy intervals from query results
+    const rawIntervals: BusyInterval[] = rows.map((row) => ({
+      start: row.start_ts,
+      end: row.end_ts,
+      account_ids: [row.origin_account_id],
+    }));
+
+    // Merge overlapping intervals
+    const busyIntervals = mergeIntervals(rawIntervals);
+
+    // Compute free intervals as gaps between busy intervals
+    const freeIntervals = computeFreeIntervals(busyIntervals, query.start, query.end);
+
+    return {
+      busy_intervals: busyIntervals,
+      free_intervals: freeIntervals,
+    };
+  }
+
   /** Convert a DB row to a CanonicalEvent domain object. */
   private rowToCanonicalEvent(row: CanonicalEventRow): CanonicalEvent {
     const allDay = row.all_day === 1;
@@ -1870,4 +1938,160 @@ export class UserGraphDO {
       updated_at: row.updated_at,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Availability types
+// ---------------------------------------------------------------------------
+
+/** Query parameters for computing free/busy availability. */
+export interface AvailabilityQuery {
+  /** ISO 8601 start of the time range. */
+  readonly start: string;
+  /** ISO 8601 end of the time range. */
+  readonly end: string;
+  /** Optional account IDs to filter. When omitted, all accounts are included. */
+  readonly accounts?: string[];
+}
+
+/** A busy interval with the accounts that contribute to it. */
+export interface BusyInterval {
+  start: string;
+  end: string;
+  account_ids: string[];
+}
+
+/** A free interval (a gap between busy blocks). */
+export interface FreeInterval {
+  start: string;
+  end: string;
+}
+
+/** Result of computing availability across accounts. */
+export interface AvailabilityResult {
+  readonly busy_intervals: BusyInterval[];
+  readonly free_intervals: FreeInterval[];
+}
+
+// ---------------------------------------------------------------------------
+// Pure functions for interval merging and gap computation
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge overlapping or adjacent busy intervals, combining account_ids.
+ *
+ * Algorithm:
+ * 1. Sort intervals by start time
+ * 2. Walk through sorted intervals, extending the current merged interval
+ *    when the next interval overlaps or is adjacent (end >= next.start)
+ * 3. When a gap is found, push the current merged interval and start a new one
+ *
+ * Time complexity: O(n log n) due to sorting.
+ */
+export function mergeIntervals(intervals: BusyInterval[]): BusyInterval[] {
+  if (intervals.length === 0) return [];
+
+  // Sort by start time using normalized comparison for mixed date/datetime strings
+  const sorted = [...intervals].sort((a, b) =>
+    normalizeForComparison(a.start).localeCompare(normalizeForComparison(b.start)),
+  );
+
+  const merged: BusyInterval[] = [];
+  let current: BusyInterval = {
+    start: sorted[0].start,
+    end: sorted[0].end,
+    account_ids: [...sorted[0].account_ids],
+  };
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i];
+    const nextStartNorm = normalizeForComparison(next.start);
+    const currentEndNorm = normalizeForComparison(current.end);
+
+    if (nextStartNorm <= currentEndNorm) {
+      // Overlapping or adjacent: extend the current interval
+      const nextEndNorm = normalizeForComparison(next.end);
+      if (nextEndNorm > currentEndNorm) {
+        current.end = next.end;
+      }
+      // Merge account_ids (deduplicate)
+      for (const aid of next.account_ids) {
+        if (!current.account_ids.includes(aid)) {
+          current.account_ids.push(aid);
+        }
+      }
+    } else {
+      // Gap found: push current and start new
+      merged.push(current);
+      current = {
+        start: next.start,
+        end: next.end,
+        account_ids: [...next.account_ids],
+      };
+    }
+  }
+
+  // Push the last interval
+  merged.push(current);
+
+  return merged;
+}
+
+/**
+ * Normalize a date or datetime string for consistent comparison.
+ * All-day event dates ("2026-02-15") are expanded to "2026-02-15T00:00:00Z"
+ * so they compare correctly with ISO 8601 datetime strings.
+ *
+ * This is needed because "2026-02-16" < "2026-02-16T00:00:00Z" in lexicographic
+ * comparison, but they represent the same point in time.
+ */
+function normalizeForComparison(ts: string): string {
+  // Date-only format is exactly 10 characters: YYYY-MM-DD
+  if (ts.length === 10) {
+    return `${ts}T00:00:00Z`;
+  }
+  return ts;
+}
+
+/**
+ * Compute free intervals as gaps between merged busy intervals
+ * within the given [rangeStart, rangeEnd) window.
+ *
+ * Assumes busyIntervals are already sorted and non-overlapping
+ * (i.e., output of mergeIntervals).
+ *
+ * Uses normalizeForComparison to handle mixed date/datetime strings
+ * correctly (all-day events use YYYY-MM-DD, timed events use ISO 8601 datetime).
+ */
+export function computeFreeIntervals(
+  busyIntervals: BusyInterval[],
+  rangeStart: string,
+  rangeEnd: string,
+): FreeInterval[] {
+  const free: FreeInterval[] = [];
+  let cursor = rangeStart;
+
+  for (const busy of busyIntervals) {
+    const busyStartNorm = normalizeForComparison(busy.start);
+    const busyEndNorm = normalizeForComparison(busy.end);
+    const cursorNorm = normalizeForComparison(cursor);
+
+    // If there is a gap before this busy interval, add a free interval
+    if (busyStartNorm > cursorNorm) {
+      free.push({ start: cursor, end: busy.start });
+    }
+    // Advance cursor past this busy interval
+    if (busyEndNorm > cursorNorm) {
+      cursor = busy.end;
+    }
+  }
+
+  // If there is time left after the last busy interval, add a free interval
+  const cursorNorm = normalizeForComparison(cursor);
+  const rangeEndNorm = normalizeForComparison(rangeEnd);
+  if (cursorNorm < rangeEndNorm) {
+    free.push({ start: cursor, end: rangeEnd });
+  }
+
+  return free;
 }

@@ -22,8 +22,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } from "@tminus/shared";
-import { UserGraphDO } from "./index";
-import type { QueueLike } from "./index";
+import { UserGraphDO, mergeIntervals, computeFreeIntervals } from "./index";
+import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -2126,5 +2126,475 @@ describe("UserGraphDO integration", () => {
         expect(data.enqueued).toBe(1);
       });
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // computeAvailability -- unified free/busy computation
+  // -------------------------------------------------------------------------
+
+  describe("computeAvailability", () => {
+    it("returns busy and free intervals for a single account", async () => {
+      // Create two events with a gap between them
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_avail_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_avail_1",
+          title: "Morning Meeting",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T10:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_avail_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_avail_2",
+          title: "Afternoon Meeting",
+          start: { dateTime: "2026-02-15T14:00:00Z" },
+          end: { dateTime: "2026-02-15T15:00:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T16:00:00Z",
+      });
+
+      // Should have 2 busy intervals
+      expect(result.busy_intervals).toHaveLength(2);
+      expect(result.busy_intervals[0].start).toBe("2026-02-15T09:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-15T10:00:00Z");
+      expect(result.busy_intervals[0].account_ids).toContain(TEST_ACCOUNT_ID);
+      expect(result.busy_intervals[1].start).toBe("2026-02-15T14:00:00Z");
+      expect(result.busy_intervals[1].end).toBe("2026-02-15T15:00:00Z");
+
+      // Should have 3 free intervals: before first, between, after last
+      expect(result.free_intervals).toHaveLength(3);
+      expect(result.free_intervals[0].start).toBe("2026-02-15T08:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-15T09:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-15T10:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-15T14:00:00Z");
+      expect(result.free_intervals[2].start).toBe("2026-02-15T15:00:00Z");
+      expect(result.free_intervals[2].end).toBe("2026-02-15T16:00:00Z");
+    });
+
+    it("merges overlapping events across multiple accounts", async () => {
+      // Account 1: event from 9-11
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_overlap_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_overlap_1",
+          title: "Account 1 Meeting",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T11:00:00Z" },
+        },
+      });
+
+      // Account 2: event from 10-12 (overlaps with account 1)
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_overlap_2",
+        origin_account_id: OTHER_ACCOUNT_ID,
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: "evt_overlap_2",
+          title: "Account 2 Meeting",
+          start: { dateTime: "2026-02-15T10:00:00Z" },
+          end: { dateTime: "2026-02-15T12:00:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [delta2]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T13:00:00Z",
+      });
+
+      // Should merge into a single busy interval from 9-12
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-15T09:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-15T12:00:00Z");
+      // Both accounts should be listed
+      expect(result.busy_intervals[0].account_ids).toContain(TEST_ACCOUNT_ID);
+      expect(result.busy_intervals[0].account_ids).toContain(OTHER_ACCOUNT_ID);
+
+      // Free intervals: before (8-9) and after (12-13)
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-15T08:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-15T09:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-15T12:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-15T13:00:00Z");
+    });
+
+    it("handles all-day events correctly", async () => {
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_allday_avail",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_allday_avail",
+          title: "All Day Conference",
+          start: { date: "2026-02-15" },
+          end: { date: "2026-02-16" },
+          all_day: true,
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T00:00:00Z",
+        end: "2026-02-16T00:00:00Z",
+      });
+
+      // All-day event should occupy the full day
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-15");
+      expect(result.busy_intervals[0].end).toBe("2026-02-16");
+      expect(result.busy_intervals[0].account_ids).toContain(TEST_ACCOUNT_ID);
+
+      // No free intervals since the entire day is busy
+      expect(result.free_intervals).toHaveLength(0);
+    });
+
+    it("returns all-free when no events in time range", async () => {
+      // Trigger migration but add no events
+      ug.getSyncHealth();
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T17:00:00Z",
+      });
+
+      expect(result.busy_intervals).toHaveLength(0);
+      expect(result.free_intervals).toHaveLength(1);
+      expect(result.free_intervals[0].start).toBe("2026-02-15T08:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-15T17:00:00Z");
+    });
+
+    it("filters by account when accounts array is provided", async () => {
+      // Create events on both accounts
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_filter_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_filter_1",
+          title: "Account 1 Only",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T10:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_filter_2",
+        origin_account_id: OTHER_ACCOUNT_ID,
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: "evt_filter_2",
+          title: "Account 2 Only",
+          start: { dateTime: "2026-02-15T14:00:00Z" },
+          end: { dateTime: "2026-02-15T15:00:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [delta2]);
+
+      // Query only for TEST_ACCOUNT_ID
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T16:00:00Z",
+        accounts: [TEST_ACCOUNT_ID],
+      });
+
+      // Should only see account 1's event
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-15T09:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-15T10:00:00Z");
+      expect(result.busy_intervals[0].account_ids).toEqual([TEST_ACCOUNT_ID]);
+    });
+
+    it("returns all accounts when accounts array is omitted", async () => {
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_all_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_all_1",
+          title: "Account 1 Event",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T10:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_all_2",
+        origin_account_id: OTHER_ACCOUNT_ID,
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: "evt_all_2",
+          title: "Account 2 Event",
+          start: { dateTime: "2026-02-15T14:00:00Z" },
+          end: { dateTime: "2026-02-15T15:00:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [delta2]);
+
+      // Query without accounts filter
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T16:00:00Z",
+      });
+
+      // Should see both accounts' events
+      expect(result.busy_intervals).toHaveLength(2);
+    });
+
+    it("excludes transparent events from busy intervals", async () => {
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_opaque",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_opaque",
+          title: "Opaque (Blocks Time)",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T10:00:00Z" },
+          transparency: "opaque",
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_transparent",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_transparent",
+          title: "Transparent (Does Not Block)",
+          start: { dateTime: "2026-02-15T11:00:00Z" },
+          end: { dateTime: "2026-02-15T12:00:00Z" },
+          transparency: "transparent",
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T13:00:00Z",
+      });
+
+      // Only the opaque event should appear as busy
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-15T09:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-15T10:00:00Z");
+    });
+
+    it("excludes cancelled events from busy intervals", async () => {
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_cancelled",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_cancelled",
+          title: "Cancelled Event",
+          start: { dateTime: "2026-02-15T09:00:00Z" },
+          end: { dateTime: "2026-02-15T10:00:00Z" },
+          status: "cancelled",
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-15T08:00:00Z",
+        end: "2026-02-15T11:00:00Z",
+      });
+
+      expect(result.busy_intervals).toHaveLength(0);
+      expect(result.free_intervals).toHaveLength(1);
+    });
+
+    it("accessible via handleFetch at /computeAvailability", async () => {
+      // Create an event
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_event_id: "evt_fetch_avail",
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_event_id: "evt_fetch_avail",
+            title: "Fetch Test Event",
+            start: { dateTime: "2026-02-15T09:00:00Z" },
+            end: { dateTime: "2026-02-15T10:00:00Z" },
+          },
+        }),
+      ]);
+
+      const resp = await ug.handleFetch(
+        new Request("https://user-graph.internal/computeAvailability", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start: "2026-02-15T08:00:00Z",
+            end: "2026-02-15T11:00:00Z",
+          }),
+        }),
+      );
+
+      expect(resp.status).toBe(200);
+      const data = (await resp.json()) as AvailabilityResult;
+      expect(data.busy_intervals).toHaveLength(1);
+      expect(data.busy_intervals[0].start).toBe("2026-02-15T09:00:00Z");
+      expect(data.free_intervals).toHaveLength(2);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests for interval merging and gap computation (pure functions)
+// ---------------------------------------------------------------------------
+
+describe("mergeIntervals (pure function)", () => {
+  it("returns empty array for empty input", () => {
+    const result = mergeIntervals([]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns single interval unchanged", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-15T09:00:00Z");
+    expect(result[0].end).toBe("2026-02-15T10:00:00Z");
+  });
+
+  it("merges two overlapping intervals", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T11:00:00Z", account_ids: ["acc_1"] },
+      { start: "2026-02-15T10:00:00Z", end: "2026-02-15T12:00:00Z", account_ids: ["acc_2"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-15T09:00:00Z");
+    expect(result[0].end).toBe("2026-02-15T12:00:00Z");
+    expect(result[0].account_ids).toContain("acc_1");
+    expect(result[0].account_ids).toContain("acc_2");
+  });
+
+  it("merges adjacent intervals (end === start)", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+      { start: "2026-02-15T10:00:00Z", end: "2026-02-15T11:00:00Z", account_ids: ["acc_2"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-15T09:00:00Z");
+    expect(result[0].end).toBe("2026-02-15T11:00:00Z");
+  });
+
+  it("does not merge non-overlapping intervals", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+      { start: "2026-02-15T11:00:00Z", end: "2026-02-15T12:00:00Z", account_ids: ["acc_2"] },
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("handles unsorted input correctly", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T14:00:00Z", end: "2026-02-15T15:00:00Z", account_ids: ["acc_2"] },
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result[0].start).toBe("2026-02-15T09:00:00Z");
+    expect(result[1].start).toBe("2026-02-15T14:00:00Z");
+  });
+
+  it("merges multiple overlapping intervals into one", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+      { start: "2026-02-15T09:30:00Z", end: "2026-02-15T10:30:00Z", account_ids: ["acc_2"] },
+      { start: "2026-02-15T10:00:00Z", end: "2026-02-15T11:00:00Z", account_ids: ["acc_3"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-15T09:00:00Z");
+    expect(result[0].end).toBe("2026-02-15T11:00:00Z");
+    expect(result[0].account_ids).toContain("acc_1");
+    expect(result[0].account_ids).toContain("acc_2");
+    expect(result[0].account_ids).toContain("acc_3");
+  });
+
+  it("deduplicates account_ids when same account has multiple overlapping events", () => {
+    const result = mergeIntervals([
+      { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: ["acc_1"] },
+      { start: "2026-02-15T09:30:00Z", end: "2026-02-15T10:30:00Z", account_ids: ["acc_1"] },
+    ]);
+    expect(result).toHaveLength(1);
+    // account_ids should not contain duplicates
+    expect(result[0].account_ids).toEqual(["acc_1"]);
+  });
+});
+
+describe("computeFreeIntervals (pure function)", () => {
+  it("returns full range when no busy intervals", () => {
+    const result = computeFreeIntervals(
+      [],
+      "2026-02-15T08:00:00Z",
+      "2026-02-15T17:00:00Z",
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-15T08:00:00Z");
+    expect(result[0].end).toBe("2026-02-15T17:00:00Z");
+  });
+
+  it("returns gaps between busy intervals", () => {
+    const result = computeFreeIntervals(
+      [
+        { start: "2026-02-15T09:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: [] },
+        { start: "2026-02-15T14:00:00Z", end: "2026-02-15T15:00:00Z", account_ids: [] },
+      ],
+      "2026-02-15T08:00:00Z",
+      "2026-02-15T16:00:00Z",
+    );
+    expect(result).toHaveLength(3);
+    expect(result[0]).toEqual({ start: "2026-02-15T08:00:00Z", end: "2026-02-15T09:00:00Z" });
+    expect(result[1]).toEqual({ start: "2026-02-15T10:00:00Z", end: "2026-02-15T14:00:00Z" });
+    expect(result[2]).toEqual({ start: "2026-02-15T15:00:00Z", end: "2026-02-15T16:00:00Z" });
+  });
+
+  it("returns empty when busy covers entire range", () => {
+    const result = computeFreeIntervals(
+      [
+        { start: "2026-02-15T08:00:00Z", end: "2026-02-15T17:00:00Z", account_ids: [] },
+      ],
+      "2026-02-15T08:00:00Z",
+      "2026-02-15T17:00:00Z",
+    );
+    expect(result).toHaveLength(0);
+  });
+
+  it("handles busy starting at range start", () => {
+    const result = computeFreeIntervals(
+      [
+        { start: "2026-02-15T08:00:00Z", end: "2026-02-15T10:00:00Z", account_ids: [] },
+      ],
+      "2026-02-15T08:00:00Z",
+      "2026-02-15T12:00:00Z",
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ start: "2026-02-15T10:00:00Z", end: "2026-02-15T12:00:00Z" });
+  });
+
+  it("handles busy ending at range end", () => {
+    const result = computeFreeIntervals(
+      [
+        { start: "2026-02-15T15:00:00Z", end: "2026-02-15T17:00:00Z", account_ids: [] },
+      ],
+      "2026-02-15T08:00:00Z",
+      "2026-02-15T17:00:00Z",
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ start: "2026-02-15T08:00:00Z", end: "2026-02-15T15:00:00Z" });
   });
 });
