@@ -59,6 +59,9 @@ export { compileProjection } from "./policy";
 // Re-export event classification (Invariants A & E, loop prevention)
 export { classifyEvent } from "./classify";
 
+// Re-export Google event normalization (provider -> ProviderDelta)
+export { normalizeGoogleEvent } from "./normalize";
+
 // Re-export stable hashing utilities
 export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 

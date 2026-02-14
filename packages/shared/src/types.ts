@@ -62,10 +62,36 @@ export interface GoogleCalendarEvent {
   readonly id?: string;
   /** Event title / summary. */
   readonly summary?: string;
+  /** Event description / notes. */
+  readonly description?: string;
+  /** Event location (free-form text or address). */
+  readonly location?: string;
   /** Start time of the event. */
   readonly start?: EventDateTime;
   /** End time of the event. */
   readonly end?: EventDateTime;
+  /**
+   * Event status from Google Calendar API.
+   * 'confirmed' | 'tentative' | 'cancelled'.
+   * 'cancelled' indicates the event was deleted.
+   */
+  readonly status?: string;
+  /**
+   * Event visibility: 'default' | 'public' | 'private' | 'confidential'.
+   * Controls who can see event details.
+   */
+  readonly visibility?: string;
+  /**
+   * Event transparency: 'opaque' | 'transparent'.
+   * Controls whether the event blocks time on the calendar.
+   */
+  readonly transparency?: string;
+  /**
+   * Recurrence rules (RRULE, EXRULE, RDATE, EXDATE) as an array of strings.
+   * Only present on the recurring event definition (not individual instances).
+   * Example: ["RRULE:FREQ=WEEKLY;BYDAY=MO"]
+   */
+  readonly recurrence?: readonly string[];
   /** Extended properties set by applications (including T-Minus). */
   readonly extendedProperties?: {
     readonly private?: Record<string, string>;
