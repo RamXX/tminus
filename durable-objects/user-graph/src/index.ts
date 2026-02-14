@@ -22,6 +22,7 @@ import {
   compileProjection,
   computeProjectionHash,
   computeIdempotencyKey,
+  BUSY_OVERLAY_CALENDAR_NAME,
 } from "@tminus/shared";
 import type {
   SqlStorageLike,
@@ -34,6 +35,7 @@ import type {
   AccountId,
   DetailLevel,
   CalendarKind,
+  MirrorState,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -215,6 +217,16 @@ export interface PolicyEdgeInput {
   readonly to_account_id: string;
   readonly detail_level: string;
   readonly calendar_kind: string;
+}
+
+/** Fields that can be updated on a mirror row via RPC. */
+export interface MirrorStateUpdate {
+  provider_event_id?: string;
+  last_projected_hash?: string;
+  last_write_ts?: string;
+  state?: MirrorState;
+  error_message?: string | null;
+  target_calendar_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,6 +1422,248 @@ export class UserGraphDO {
       policy_edges_removed: policyEdgesRemoved,
       calendars_removed: calendarsRemoved,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Mirror state RPC methods (for write-consumer via DO fetch)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Get a mirror row by canonical_event_id + target_account_id.
+   * Returns null if not found.
+   */
+  getMirror(
+    canonicalEventId: string,
+    targetAccountId: string,
+  ): EventMirrorRow | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<EventMirrorRow>(
+        `SELECT * FROM event_mirrors
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+        canonicalEventId,
+        targetAccountId,
+      )
+      .toArray();
+
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  /**
+   * Update mirror state fields. Used by write-consumer after Google API calls.
+   */
+  updateMirrorState(
+    canonicalEventId: string,
+    targetAccountId: string,
+    update: MirrorStateUpdate,
+  ): void {
+    this.ensureMigrated();
+
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (update.provider_event_id !== undefined) {
+      setClauses.push("provider_event_id = ?");
+      params.push(update.provider_event_id);
+    }
+    if (update.last_projected_hash !== undefined) {
+      setClauses.push("last_projected_hash = ?");
+      params.push(update.last_projected_hash);
+    }
+    if (update.last_write_ts !== undefined) {
+      setClauses.push("last_write_ts = ?");
+      params.push(update.last_write_ts);
+    }
+    if (update.state !== undefined) {
+      setClauses.push("state = ?");
+      params.push(update.state);
+    }
+    if (update.error_message !== undefined) {
+      setClauses.push("error_message = ?");
+      params.push(update.error_message);
+    }
+    if (update.target_calendar_id !== undefined) {
+      setClauses.push("target_calendar_id = ?");
+      params.push(update.target_calendar_id);
+    }
+
+    if (setClauses.length === 0) return;
+
+    params.push(canonicalEventId, targetAccountId);
+    this.sql.exec(
+      `UPDATE event_mirrors SET ${setClauses.join(", ")}
+       WHERE canonical_event_id = ? AND target_account_id = ?`,
+      ...params,
+    );
+  }
+
+  /**
+   * Look up the busy overlay calendar's provider ID for a given account.
+   * Returns null if no busy overlay calendar has been created yet.
+   */
+  getBusyOverlayCalendar(accountId: string): string | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ provider_calendar_id: string }>(
+        `SELECT provider_calendar_id FROM calendars
+         WHERE account_id = ? AND kind = 'BUSY_OVERLAY'`,
+        accountId,
+      )
+      .toArray();
+
+    return rows.length > 0 ? rows[0].provider_calendar_id : null;
+  }
+
+  /**
+   * Store a busy overlay calendar's provider ID for a given account.
+   * Called after write-consumer auto-creates the calendar via Google API.
+   */
+  storeBusyOverlayCalendar(
+    accountId: string,
+    providerCalendarId: string,
+  ): void {
+    this.ensureMigrated();
+
+    const calendarId = generateId("calendar");
+    this.sql.exec(
+      `INSERT OR REPLACE INTO calendars
+       (calendar_id, account_id, provider_calendar_id, role, kind, display_name)
+       VALUES (?, ?, ?, 'writer', 'BUSY_OVERLAY', ?)`,
+      calendarId,
+      accountId,
+      providerCalendarId,
+      BUSY_OVERLAY_CALENDAR_NAME,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // fetch() handler -- RPC-style routing for DO stub communication
+  // -------------------------------------------------------------------------
+
+  /**
+   * Handle fetch requests from DO stubs. Routes requests by URL pathname
+   * to the appropriate method.
+   *
+   * This is the entry point for all inter-worker communication with
+   * UserGraphDO. Workers call `stub.fetch(new Request(url, { body }))`.
+   */
+  async handleFetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const { pathname } = url;
+
+    try {
+      switch (pathname) {
+        case "/applyProviderDelta": {
+          const body = (await request.json()) as {
+            account_id: string;
+            deltas: ProviderDelta[];
+          };
+          const result = await this.applyProviderDelta(
+            body.account_id,
+            body.deltas,
+          );
+          return Response.json(result);
+        }
+
+        case "/getMirror": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            target_account_id: string;
+          };
+          const mirror = this.getMirror(
+            body.canonical_event_id,
+            body.target_account_id,
+          );
+          return Response.json({ mirror });
+        }
+
+        case "/updateMirrorState": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            target_account_id: string;
+            update: MirrorStateUpdate;
+          };
+          this.updateMirrorState(
+            body.canonical_event_id,
+            body.target_account_id,
+            body.update,
+          );
+          return Response.json({ ok: true });
+        }
+
+        case "/getBusyOverlayCalendar": {
+          const body = (await request.json()) as { account_id: string };
+          const calId = this.getBusyOverlayCalendar(body.account_id);
+          return Response.json({ provider_calendar_id: calId });
+        }
+
+        case "/storeBusyOverlayCalendar": {
+          const body = (await request.json()) as {
+            account_id: string;
+            provider_calendar_id: string;
+          };
+          this.storeBusyOverlayCalendar(
+            body.account_id,
+            body.provider_calendar_id,
+          );
+          return Response.json({ ok: true });
+        }
+
+        case "/listCanonicalEvents": {
+          const body = (await request.json()) as ListEventsQuery;
+          const result = this.listCanonicalEvents(body);
+          return Response.json(result);
+        }
+
+        case "/getCanonicalEvent": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+          };
+          const result = this.getCanonicalEvent(body.canonical_event_id);
+          return Response.json(result);
+        }
+
+        case "/queryJournal": {
+          const body = (await request.json()) as JournalQuery;
+          const result = this.queryJournal(body);
+          return Response.json(result);
+        }
+
+        case "/getSyncHealth": {
+          const result = this.getSyncHealth();
+          return Response.json(result);
+        }
+
+        case "/createPolicy": {
+          const body = (await request.json()) as { name: string };
+          const result = await this.createPolicy(body.name);
+          return Response.json(result);
+        }
+
+        case "/setPolicyEdges": {
+          const body = (await request.json()) as {
+            policy_id: string;
+            edges: PolicyEdgeInput[];
+          };
+          await this.setPolicyEdges(body.policy_id, body.edges);
+          return Response.json({ ok: true });
+        }
+
+        case "/ensureDefaultPolicy": {
+          const body = (await request.json()) as { accounts: string[] };
+          await this.ensureDefaultPolicy(body.accounts);
+          return Response.json({ ok: true });
+        }
+
+        default:
+          return new Response(`Unknown action: ${pathname}`, { status: 404 });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return Response.json({ error: message }, { status: 500 });
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -555,4 +555,92 @@ export class AccountDO {
       );
     }
   }
+
+  // -------------------------------------------------------------------------
+  // fetch() handler -- RPC-style routing for DO stub communication
+  // -------------------------------------------------------------------------
+
+  /**
+   * Handle fetch requests from DO stubs. Routes requests by URL pathname
+   * to the appropriate method.
+   *
+   * Workers call AccountDO via: `stub.fetch(new Request(url, { body }))`.
+   * The pathname determines which method is invoked.
+   */
+  async handleFetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const { pathname } = url;
+
+    try {
+      switch (pathname) {
+        case "/getAccessToken": {
+          const accessToken = await this.getAccessToken();
+          return Response.json({ access_token: accessToken });
+        }
+
+        case "/getSyncToken": {
+          const syncToken = await this.getSyncToken();
+          return Response.json({ sync_token: syncToken });
+        }
+
+        case "/setSyncToken": {
+          const body = (await request.json()) as { sync_token: string };
+          await this.setSyncToken(body.sync_token);
+          return Response.json({ ok: true });
+        }
+
+        case "/markSyncSuccess": {
+          const body = (await request.json()) as { ts: string };
+          await this.markSyncSuccess(body.ts);
+          return Response.json({ ok: true });
+        }
+
+        case "/markSyncFailure": {
+          const body = (await request.json()) as { error: string };
+          await this.markSyncFailure(body.error);
+          return Response.json({ ok: true });
+        }
+
+        case "/initialize": {
+          const body = (await request.json()) as {
+            tokens: {
+              access_token: string;
+              refresh_token: string;
+              expiry: string;
+            };
+            scopes: string;
+          };
+          await this.initialize(body.tokens, body.scopes);
+          return Response.json({ ok: true });
+        }
+
+        case "/revokeTokens": {
+          await this.revokeTokens();
+          return Response.json({ ok: true });
+        }
+
+        case "/registerChannel": {
+          const body = (await request.json()) as { calendar_id: string };
+          const result = await this.registerChannel(body.calendar_id);
+          return Response.json(result);
+        }
+
+        case "/getChannelStatus": {
+          const result = await this.getChannelStatus();
+          return Response.json(result);
+        }
+
+        case "/getHealth": {
+          const result = await this.getHealth();
+          return Response.json(result);
+        }
+
+        default:
+          return new Response(`Unknown action: ${pathname}`, { status: 404 });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return Response.json({ error: message }, { status: 500 });
+    }
+  }
 }
