@@ -1803,6 +1803,12 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/unlinkAccount": {
+          const body = (await request.json()) as { account_id: string };
+          const result = await this.unlinkAccount(body.account_id);
+          return Response.json(result);
+        }
+
         default:
           return new Response(`Unknown action: ${pathname}`, { status: 404 });
       }

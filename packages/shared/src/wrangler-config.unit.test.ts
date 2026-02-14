@@ -53,30 +53,30 @@ function queueConsumerQueues(config: Record<string, unknown>): string[] {
   return consumers.map((c) => c.queue);
 }
 
-/** Get DO class names from durable_objects.classes array. */
+/** Get DO class names from durable_objects.bindings array. */
 function doClassNames(config: Record<string, unknown>): string[] {
   const doSection = config["durable_objects"] as
     | Record<string, unknown>
     | undefined;
   if (!doSection) return [];
-  const classes = doSection["classes"] as
+  const bindings = doSection["bindings"] as
     | Array<Record<string, string>>
     | undefined;
-  if (!Array.isArray(classes)) return [];
-  return classes.map((c) => c.class_name);
+  if (!Array.isArray(bindings)) return [];
+  return bindings.map((c) => c.class_name);
 }
 
-/** Get DO binding names from durable_objects.classes array. */
+/** Get DO binding names from durable_objects.bindings array. */
 function doBindingNames(config: Record<string, unknown>): string[] {
   const doSection = config["durable_objects"] as
     | Record<string, unknown>
     | undefined;
   if (!doSection) return [];
-  const classes = doSection["classes"] as
+  const bindings = doSection["bindings"] as
     | Array<Record<string, string>>
     | undefined;
-  if (!Array.isArray(classes)) return [];
-  return classes.map((c) => c.binding);
+  if (!Array.isArray(bindings)) return [];
+  return bindings.map((c) => c.name);
 }
 
 /** Get D1 binding names. */
@@ -236,7 +236,7 @@ describe("wrangler.toml configuration validation", () => {
         unknown
       >;
       expect(doSection).toBeDefined();
-      const classes = doSection["classes"] as Array<Record<string, string>>;
+      const classes = doSection["bindings"] as Array<Record<string, string>>;
       const userGraph = classes.find((c) => c.class_name === "UserGraphDO");
       const account = classes.find((c) => c.class_name === "AccountDO");
       expect(userGraph?.script_name).toBe("tminus-api");
@@ -249,7 +249,7 @@ describe("wrangler.toml configuration validation", () => {
         unknown
       >;
       expect(doSection).toBeDefined();
-      const classes = doSection["classes"] as Array<Record<string, string>>;
+      const classes = doSection["bindings"] as Array<Record<string, string>>;
       const userGraph = classes.find((c) => c.class_name === "UserGraphDO");
       const account = classes.find((c) => c.class_name === "AccountDO");
       expect(userGraph?.script_name).toBe("tminus-api");
@@ -262,7 +262,7 @@ describe("wrangler.toml configuration validation", () => {
         unknown
       >;
       expect(doSection).toBeDefined();
-      const classes = doSection["classes"] as Array<Record<string, string>>;
+      const classes = doSection["bindings"] as Array<Record<string, string>>;
       const account = classes.find((c) => c.class_name === "AccountDO");
       const userGraph = classes.find((c) => c.class_name === "UserGraphDO");
       expect(account?.script_name).toBe("tminus-api");
@@ -275,7 +275,7 @@ describe("wrangler.toml configuration validation", () => {
         unknown
       >;
       expect(doSection).toBeDefined();
-      const classes = doSection["classes"] as Array<Record<string, string>>;
+      const classes = doSection["bindings"] as Array<Record<string, string>>;
       const account = classes.find((c) => c.class_name === "AccountDO");
       expect(account?.script_name).toBe("tminus-api");
     });

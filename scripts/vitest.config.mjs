@@ -9,5 +9,6 @@ export default defineConfig({
     name: "scripts",
     root: resolve(__dirname),
     include: ["**/*.test.mjs", "**/*.test.ts"],
+    exclude: ["**/*.integration.test.ts"],
   },
 });

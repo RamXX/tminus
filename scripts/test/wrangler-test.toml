@@ -1,0 +1,37 @@
+# ============================================================================
+# Test-only worker for real DO integration tests.
+# This worker hosts UserGraphDO and AccountDO and exposes a simple RPC proxy
+# so integration tests can call any DO method via HTTP.
+#
+# NOT for production use. Only started by vitest via startWranglerDev().
+# ============================================================================
+
+name = "tminus-test-do"
+main = "do-test-worker.ts"
+compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Durable Object class definitions (same as tminus-api) -----------------
+
+[[durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+
+# DO migrations -- SQLite storage for both DOs
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserGraphDO", "AccountDO"]
+
+# --- Queue producers (captured locally by Miniflare) -----------------------
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+[[queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"

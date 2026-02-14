@@ -13,3 +13,4 @@ Accumulated insights from epic retrospectives. Organized by category.
 - [Testing](testing.md) - Integration test patterns, test setup, coverage strategies
 - [Architecture](architecture.md) - DO patterns, API design, crypto choices
 - [Process](process.md) - Delivery evidence, AC verification, ID format standards
+- [Beads Workflow](beads-workflow.md) - Git branching, worktrees, sync modes
