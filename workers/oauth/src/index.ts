@@ -300,6 +300,11 @@ export function createHandler(fetchFn?: FetchFn) {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
       const url = new URL(request.url);
 
+      // Health check -- no auth, no method restriction
+      if (url.pathname === "/health") {
+        return new Response("OK", { status: 200 });
+      }
+
       if (request.method !== "GET") {
         return errorResponse("Method not allowed", 405);
       }

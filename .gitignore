@@ -7,6 +7,10 @@ dist/
 # Wrangler
 .wrangler/
 .wrangler-test-shared/
+.wrangler-test-webhook/
+.wrangler-test-oauth/
+.wrangler-test-cron/
+.wrangler-test-sync-consumer/
 
 # Environment variables (secrets)
 .dev.vars
