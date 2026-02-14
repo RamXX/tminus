@@ -1,0 +1,1442 @@
+/**
+ * Integration tests for tminus-api worker.
+ *
+ * These tests use better-sqlite3 for real D1 database operations and mock
+ * DO stubs that capture calls and return configurable responses. This proves
+ * the full request flow: auth -> routing -> D1 query -> DO call -> envelope.
+ *
+ * Each test exercises the FULL handler flow: createHandler() -> fetch() -> response,
+ * with real SQL executing against real table structures and mock DOs that
+ * simulate the actual DO protocol.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import Database from "better-sqlite3";
+import type { Database as DatabaseType } from "better-sqlite3";
+import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import { createHandler, createJwt } from "./index";
+
+// ---------------------------------------------------------------------------
+// Test constants
+// ---------------------------------------------------------------------------
+
+const JWT_SECRET = "integration-test-jwt-secret-32chars-minimum";
+
+const TEST_ORG = {
+  org_id: "org_01HXY000000000000000000001",
+  name: "Integration Test Org",
+} as const;
+
+const TEST_USER = {
+  user_id: "usr_01HXY000000000000000000001",
+  org_id: TEST_ORG.org_id,
+  email: "integration@example.com",
+} as const;
+
+const ACCOUNT_A = {
+  account_id: "acc_01HXY0000000000000000000AA",
+  user_id: TEST_USER.user_id,
+  provider: "google",
+  provider_subject: "google-sub-aaaa",
+  email: "alice@gmail.com",
+  status: "active",
+} as const;
+
+const ACCOUNT_B = {
+  account_id: "acc_01HXY0000000000000000000BB",
+  user_id: TEST_USER.user_id,
+  provider: "google",
+  provider_subject: "google-sub-bbbb",
+  email: "bob@gmail.com",
+  status: "active",
+} as const;
+
+// Different user's account -- should not be accessible
+const OTHER_USER_ACCOUNT = {
+  account_id: "acc_01HXY0000000000000000000CC",
+  user_id: "usr_01HXY0000000000000000000ZZ",
+  provider: "google",
+  provider_subject: "google-sub-cccc",
+  email: "other@gmail.com",
+  status: "active",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Real D1 mock backed by better-sqlite3
+// ---------------------------------------------------------------------------
+
+function createRealD1(db: DatabaseType): D1Database {
+  const normalizeSQL = (sql: string): string => sql.replace(/\?(\d+)/g, "?");
+
+  return {
+    prepare(sql: string) {
+      const normalizedSql = normalizeSQL(sql);
+      return {
+        bind(...params: unknown[]) {
+          return {
+            first<T>(): Promise<T | null> {
+              const stmt = db.prepare(normalizedSql);
+              const row = stmt.get(...params) as T | null;
+              return Promise.resolve(row ?? null);
+            },
+            all<T>(): Promise<{ results: T[] }> {
+              const stmt = db.prepare(normalizedSql);
+              const rows = stmt.all(...params) as T[];
+              return Promise.resolve({ results: rows });
+            },
+            run(): Promise<D1Result<unknown>> {
+              const stmt = db.prepare(normalizedSql);
+              const info = stmt.run(...params);
+              return Promise.resolve({
+                success: true,
+                results: [],
+                meta: {
+                  duration: 0,
+                  rows_read: 0,
+                  rows_written: info.changes,
+                  last_row_id: info.lastInsertRowid as number,
+                  changed_db: info.changes > 0,
+                  size_after: 0,
+                  changes: info.changes,
+                },
+              } as unknown as D1Result<unknown>);
+            },
+          };
+        },
+      };
+    },
+    exec(sql: string): Promise<D1ExecResult> {
+      db.exec(sql);
+      return Promise.resolve({ count: 0, duration: 0 });
+    },
+    batch(_stmts: D1PreparedStatement[]): Promise<D1Result<unknown>[]> {
+      return Promise.resolve([]);
+    },
+    dump(): Promise<ArrayBuffer> {
+      return Promise.resolve(new ArrayBuffer(0));
+    },
+  } as unknown as D1Database;
+}
+
+// ---------------------------------------------------------------------------
+// Mock DO namespace: captures calls and returns configured responses
+// ---------------------------------------------------------------------------
+
+interface DOCallRecord {
+  name: string;
+  path: string;
+  method: string;
+  body?: unknown;
+}
+
+function createMockDONamespace(config?: {
+  /** Default JSON response for all DO calls. */
+  defaultResponse?: unknown;
+  /** Map of path -> response data. */
+  pathResponses?: Map<string, unknown>;
+}): DurableObjectNamespace & { calls: DOCallRecord[] } {
+  const calls: DOCallRecord[] = [];
+  const defaultResp = config?.defaultResponse ?? { ok: true };
+
+  return {
+    calls,
+    idFromName(name: string): DurableObjectId {
+      return {
+        toString: () => name,
+        name,
+        equals: () => false,
+      } as unknown as DurableObjectId;
+    },
+    get(_id: DurableObjectId): DurableObjectStub {
+      const doName = _id.toString();
+      return {
+        async fetch(
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ): Promise<Response> {
+          const url =
+            typeof input === "string"
+              ? new URL(input)
+              : input instanceof URL
+                ? input
+                : new URL(input.url);
+          const method =
+            init?.method ??
+            (typeof input === "object" && "method" in input
+              ? input.method
+              : "GET");
+
+          let parsedBody: unknown;
+          if (init?.body) {
+            try {
+              parsedBody = JSON.parse(init.body as string);
+            } catch {
+              parsedBody = init.body;
+            }
+          }
+
+          calls.push({ name: doName, path: url.pathname, method, body: parsedBody });
+
+          // Check path-specific responses
+          const pathData = config?.pathResponses?.get(url.pathname);
+          const responseData = pathData !== undefined ? pathData : defaultResp;
+
+          return new Response(JSON.stringify(responseData), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      } as unknown as DurableObjectStub;
+    },
+    idFromString(_hexId: string): DurableObjectId {
+      return {
+        toString: () => _hexId,
+        equals: () => false,
+      } as unknown as DurableObjectId;
+    },
+    newUniqueId(): DurableObjectId {
+      return {
+        toString: () => "unique",
+        equals: () => false,
+      } as unknown as DurableObjectId;
+    },
+    jurisdiction(_name: string): DurableObjectNamespace {
+      return this;
+    },
+  } as unknown as DurableObjectNamespace & { calls: DOCallRecord[] };
+}
+
+// ---------------------------------------------------------------------------
+// MockQueue
+// ---------------------------------------------------------------------------
+
+function createMockQueue(): Queue & { messages: unknown[] } {
+  const messages: unknown[] = [];
+  return {
+    messages,
+    async send(msg: unknown) {
+      messages.push(msg);
+    },
+    async sendBatch(_msgs: Iterable<MessageSendRequest>) {},
+  } as unknown as Queue & { messages: unknown[] };
+}
+
+// ---------------------------------------------------------------------------
+// JWT helper
+// ---------------------------------------------------------------------------
+
+async function makeAuthHeader(userId?: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const token = await createJwt(
+    { sub: userId ?? TEST_USER.user_id, iat: now, exp: now + 3600 },
+    JWT_SECRET,
+  );
+  return `Bearer ${token}`;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: insert account into D1
+// ---------------------------------------------------------------------------
+
+function insertAccount(
+  db: DatabaseType,
+  account: {
+    account_id: string;
+    user_id: string;
+    provider: string;
+    provider_subject: string;
+    email: string;
+    status?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO accounts
+     (account_id, user_id, provider, provider_subject, email, status)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    account.account_id,
+    account.user_id,
+    account.provider,
+    account.provider_subject,
+    account.email,
+    account.status ?? "active",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build mock env
+// ---------------------------------------------------------------------------
+
+function buildEnv(
+  d1: D1Database,
+  userGraphDO?: DurableObjectNamespace,
+  accountDO?: DurableObjectNamespace,
+): Env {
+  return {
+    DB: d1,
+    USER_GRAPH: userGraphDO ?? createMockDONamespace(),
+    ACCOUNT: accountDO ?? createMockDONamespace(),
+    SYNC_QUEUE: createMockQueue(),
+    WRITE_QUEUE: createMockQueue(),
+    JWT_SECRET,
+  };
+}
+
+const mockCtx = {
+  waitUntil: vi.fn(),
+  passThroughOnException: vi.fn(),
+} as unknown as ExecutionContext;
+
+// ---------------------------------------------------------------------------
+// Helper: ensure other user + org exists for cross-user tests
+// ---------------------------------------------------------------------------
+
+function seedOtherUser(db: DatabaseType): void {
+  const otherOrgId = "org_01HXYZ000000000000000099";
+  db.prepare("INSERT OR IGNORE INTO orgs (org_id, name) VALUES (?, ?)").run(
+    otherOrgId,
+    "Other Org",
+  );
+  db.prepare(
+    "INSERT OR IGNORE INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+  ).run(OTHER_USER_ACCOUNT.user_id, otherOrgId, "other@example.com");
+}
+
+// ===========================================================================
+// Integration test suites
+// ===========================================================================
+
+describe("Integration: Account endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/accounts/link
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/accounts/link returns redirect info with envelope", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/accounts/link", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { redirect_url: string };
+      meta: { request_id: string; timestamp: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.redirect_url).toContain("oauth");
+    expect(body.meta.request_id).toMatch(/^req_/);
+    expect(body.meta.timestamp).toBeTruthy();
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/accounts
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/accounts returns user's accounts from D1", async () => {
+    insertAccount(db, ACCOUNT_A);
+    insertAccount(db, ACCOUNT_B);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/accounts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ account_id: string; email: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(2);
+
+    const emails = body.data.map((a) => a.email).sort();
+    expect(emails).toEqual(["alice@gmail.com", "bob@gmail.com"]);
+  });
+
+  it("GET /v1/accounts does NOT return other users' accounts", async () => {
+    insertAccount(db, ACCOUNT_A);
+    seedOtherUser(db);
+    insertAccount(db, OTHER_USER_ACCOUNT);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/accounts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ account_id: string }>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].account_id).toBe(ACCOUNT_A.account_id);
+  });
+
+  it("GET /v1/accounts returns empty array for user with no accounts", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/accounts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; data: unknown[] };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(0);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/accounts/:id
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/accounts/:id returns account with health from AccountDO", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const accountDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getHealth", {
+          lastSyncTs: "2026-01-01T00:00:00Z",
+          lastSuccessTs: "2026-01-01T00:00:00Z",
+          fullSyncNeeded: false,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, undefined, accountDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        account_id: string;
+        email: string;
+        health: { lastSyncTs: string };
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.account_id).toBe(ACCOUNT_A.account_id);
+    expect(body.data.email).toBe(ACCOUNT_A.email);
+    expect(body.data.health).not.toBeNull();
+    expect(body.data.health.lastSyncTs).toBe("2026-01-01T00:00:00Z");
+
+    // Verify DO was called with correct account ID
+    expect(accountDO.calls).toHaveLength(1);
+    expect(accountDO.calls[0].name).toBe(ACCOUNT_A.account_id);
+    expect(accountDO.calls[0].path).toBe("/getHealth");
+  });
+
+  it("GET /v1/accounts/:id returns 404 for nonexistent account", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("Account not found");
+  });
+
+  it("GET /v1/accounts/:id returns 404 for another user's account", async () => {
+    seedOtherUser(db);
+    insertAccount(db, OTHER_USER_ACCOUNT);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader(); // auth as TEST_USER
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${OTHER_USER_ACCOUNT.account_id}`,
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  // -----------------------------------------------------------------------
+  // DELETE /v1/accounts/:id
+  // -----------------------------------------------------------------------
+
+  it("DELETE /v1/accounts/:id revokes tokens and updates D1 status", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const accountDO = createMockDONamespace();
+    const handler = createHandler();
+    const env = buildEnv(d1, undefined, accountDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { deleted: boolean };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.deleted).toBe(true);
+
+    // Verify AccountDO.revokeTokens was called
+    expect(accountDO.calls).toHaveLength(1);
+    expect(accountDO.calls[0].path).toBe("/revokeTokens");
+
+    // Verify D1 status was updated
+    const row = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_A.account_id) as { status: string };
+    expect(row.status).toBe("revoked");
+  });
+
+  it("DELETE /v1/accounts/:id returns 404 for nonexistent account", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+});
+
+// ===========================================================================
+// Integration: Event endpoints
+// ===========================================================================
+
+describe("Integration: Event endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/events
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/events delegates to UserGraphDO.listCanonicalEvents and returns data", async () => {
+    const mockEvents = [
+      { canonical_event_id: "evt_01HXYZ00000000000000000001", title: "Meeting" },
+      { canonical_event_id: "evt_01HXYZ00000000000000000002", title: "Lunch" },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", {
+          items: mockEvents,
+          cursor: "cursor123",
+          has_more: true,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/events?start=2026-01-01&end=2026-12-31&limit=10", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ canonical_event_id: string; title: string }>;
+      meta: { next_cursor?: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(2);
+    expect(body.data[0].title).toBe("Meeting");
+    expect(body.meta.next_cursor).toBe("cursor123");
+
+    // Verify DO was called with correct user ID and query
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].name).toBe(TEST_USER.user_id);
+    expect(userGraphDO.calls[0].path).toBe("/listCanonicalEvents");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.time_min).toBe("2026-01-01");
+    expect(doBody.time_max).toBe("2026-12-31");
+    expect(doBody.limit).toBe(10);
+  });
+
+  it("GET /v1/events passes cursor and account_id filter to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/events?cursor=abc123&account_id=${ACCOUNT_A.account_id}`,
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.cursor).toBe("abc123");
+    expect(doBody.origin_account_id).toBe(ACCOUNT_A.account_id);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/events/:id
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/events/:id returns event with mirrors", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getCanonicalEvent", {
+          event: { canonical_event_id: eventId, title: "Important Meeting" },
+          mirrors: [{ target_account_id: ACCOUNT_B.account_id, state: "ACTIVE" }],
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { event: { title: string }; mirrors: unknown[] };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.event.title).toBe("Important Meeting");
+    expect(body.data.mirrors).toHaveLength(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/events
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/events creates event and returns ID in envelope", async () => {
+    const newEventId = "evt_01HXYZ00000000000000000099";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/upsertCanonicalEvent", newEventId],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const eventPayload = {
+      title: "New Event",
+      origin_account_id: ACCOUNT_A.account_id,
+      origin_event_id: "google-event-123",
+      start: { dateTime: "2026-06-15T09:00:00Z" },
+      end: { dateTime: "2026-06-15T10:00:00Z" },
+      all_day: false,
+    };
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/events", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(eventPayload),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { canonical_event_id: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.canonical_event_id).toBe(newEventId);
+
+    // Verify DO was called with correct data
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/upsertCanonicalEvent");
+    const doBody = userGraphDO.calls[0].body as {
+      event: Record<string, unknown>;
+      source: string;
+    };
+    expect(doBody.source).toBe("api");
+    expect(doBody.event.title).toBe("New Event");
+  });
+
+  // -----------------------------------------------------------------------
+  // PATCH /v1/events/:id
+  // -----------------------------------------------------------------------
+
+  it("PATCH /v1/events/:id updates event with ID merged into body", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/upsertCanonicalEvent", eventId],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: "Updated Title" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { canonical_event_id: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.canonical_event_id).toBe(eventId);
+
+    // Verify the event ID was merged into the body
+    const doBody = userGraphDO.calls[0].body as {
+      event: Record<string, unknown>;
+    };
+    expect(doBody.event.canonical_event_id).toBe(eventId);
+    expect(doBody.event.title).toBe("Updated Title");
+  });
+
+  // -----------------------------------------------------------------------
+  // DELETE /v1/events/:id
+  // -----------------------------------------------------------------------
+
+  it("DELETE /v1/events/:id returns success when event exists", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/deleteCanonicalEvent", true],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { deleted: boolean };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.deleted).toBe(true);
+
+    // Verify DO call
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/deleteCanonicalEvent");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.canonical_event_id).toBe(eventId);
+    expect(doBody.source).toBe("api");
+  });
+
+  it("DELETE /v1/events/:id returns 404 when event does not exist", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/deleteCanonicalEvent", false],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+});
+
+// ===========================================================================
+// Integration: Policy endpoints
+// ===========================================================================
+
+describe("Integration: Policy endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/policies
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/policies returns policies from UserGraphDO", async () => {
+    const policies = [
+      { policy_id: "pol_01HXYZ00000000000000000001", name: "Default Policy" },
+    ];
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listPolicies", { items: policies, cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/policies", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ policy_id: string; name: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].name).toBe("Default Policy");
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/policies
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/policies creates a policy via UserGraphDO", async () => {
+    const createdPolicy = {
+      policy_id: "pol_01HXYZ00000000000000000001",
+      name: "My Policy",
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/createPolicy", createdPolicy],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/policies", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: "My Policy" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { policy_id: string; name: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.name).toBe("My Policy");
+
+    // Verify DO call
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/createPolicy");
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/policies/:id
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/policies/:id returns policy with edges", async () => {
+    const policyId = "pol_01HXYZ00000000000000000001";
+    const policyData = {
+      policy_id: policyId,
+      name: "Test Policy",
+      edges: [
+        {
+          from_account_id: ACCOUNT_A.account_id,
+          to_account_id: ACCOUNT_B.account_id,
+          detail_level: "BUSY",
+          calendar_kind: "BUSY_OVERLAY",
+        },
+      ],
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getPolicy", policyData],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/policies/${policyId}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { policy_id: string; edges: unknown[] };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.policy_id).toBe(policyId);
+    expect(body.data.edges).toHaveLength(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /v1/policies/:id/edges
+  // -----------------------------------------------------------------------
+
+  it("PUT /v1/policies/:id/edges sets edges and triggers recomputeProjections", async () => {
+    const policyId = "pol_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/setPolicyEdges", { edges_set: 2, projections_recomputed: 5 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const edges = [
+      {
+        from_account_id: ACCOUNT_A.account_id,
+        to_account_id: ACCOUNT_B.account_id,
+        detail_level: "BUSY",
+        calendar_kind: "BUSY_OVERLAY",
+      },
+      {
+        from_account_id: ACCOUNT_B.account_id,
+        to_account_id: ACCOUNT_A.account_id,
+        detail_level: "TITLE",
+        calendar_kind: "BUSY_OVERLAY",
+      },
+    ];
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/policies/${policyId}/edges`, {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ edges }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { edges_set: number; projections_recomputed: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.edges_set).toBe(2);
+    expect(body.data.projections_recomputed).toBe(5);
+
+    // Verify DO call payload includes edges and policy ID
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/setPolicyEdges");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.policy_id).toBe(policyId);
+    expect(doBody.edges).toHaveLength(2);
+  });
+});
+
+// ===========================================================================
+// Integration: Sync status endpoints
+// ===========================================================================
+
+describe("Integration: Sync status endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/sync/status
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/sync/status aggregates health across all accounts", async () => {
+    insertAccount(db, ACCOUNT_A);
+    insertAccount(db, ACCOUNT_B);
+
+    const accountDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getHealth", {
+          lastSyncTs: "2026-01-01T00:00:00Z",
+          lastSuccessTs: "2026-01-01T00:00:00Z",
+          fullSyncNeeded: false,
+        }],
+      ]),
+    });
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getSyncHealth", {
+          total_events: 42,
+          total_mirrors: 84,
+          total_journal_entries: 100,
+          pending_mirrors: 3,
+          error_mirrors: 0,
+          last_journal_ts: "2026-01-01T12:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO, accountDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/status", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        accounts: Array<{
+          account_id: string;
+          status: string;
+          health: unknown;
+        }>;
+        user_graph: {
+          total_events: number;
+          total_mirrors: number;
+        };
+      };
+    };
+    expect(body.ok).toBe(true);
+
+    // Two accounts with health
+    expect(body.data.accounts).toHaveLength(2);
+    expect(body.data.accounts[0].health).not.toBeNull();
+    expect(body.data.accounts[1].health).not.toBeNull();
+
+    // UserGraph health
+    expect(body.data.user_graph.total_events).toBe(42);
+    expect(body.data.user_graph.total_mirrors).toBe(84);
+
+    // Verify AccountDO was called for each account
+    expect(accountDO.calls).toHaveLength(2);
+    // Verify UserGraphDO was called
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/getSyncHealth");
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/sync/status/:accountId
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/sync/status/:accountId returns per-account health", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const accountDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getHealth", {
+          lastSyncTs: "2026-02-14T10:00:00Z",
+          lastSuccessTs: "2026-02-14T10:00:00Z",
+          fullSyncNeeded: false,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, undefined, accountDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/sync/status/${ACCOUNT_A.account_id}`,
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { lastSyncTs: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.lastSyncTs).toBe("2026-02-14T10:00:00Z");
+  });
+
+  it("GET /v1/sync/status/:accountId returns 404 for unowned account", async () => {
+    seedOtherUser(db);
+    insertAccount(db, OTHER_USER_ACCOUNT);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/sync/status/${OTHER_USER_ACCOUNT.account_id}`,
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/sync/journal
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/sync/journal returns journal entries from UserGraphDO", async () => {
+    const journalEntries = [
+      {
+        journal_id: "jrn_01HXYZ00000000000000000001",
+        canonical_event_id: "evt_01HXYZ00000000000000000001",
+        change_type: "created",
+        actor: "api",
+        ts: "2026-01-01T00:00:00Z",
+      },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/queryJournal", {
+          items: journalEntries,
+          cursor: null,
+          has_more: false,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/journal?limit=10", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ journal_id: string; change_type: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].change_type).toBe("created");
+
+    // Verify query params passed through
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.limit).toBe(10);
+  });
+
+  it("GET /v1/sync/journal passes event_id and cursor filters to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/queryJournal", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request(
+        "https://api.tminus.dev/v1/sync/journal?event_id=evt_01HXYZ00000000000000000001&cursor=jrn_cursor",
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.canonical_event_id).toBe("evt_01HXYZ00000000000000000001");
+    expect(doBody.cursor).toBe("jrn_cursor");
+  });
+});
+
+// ===========================================================================
+// Integration: Auth enforcement (full flow)
+// ===========================================================================
+
+describe("Integration: Auth enforcement full flow", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("all /v1 endpoints reject requests without auth", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    const endpoints = [
+      { method: "GET", path: "/v1/accounts" },
+      { method: "POST", path: "/v1/accounts/link" },
+      { method: "GET", path: "/v1/events" },
+      { method: "POST", path: "/v1/events" },
+      { method: "GET", path: "/v1/policies" },
+      { method: "POST", path: "/v1/policies" },
+      { method: "GET", path: "/v1/sync/status" },
+      { method: "GET", path: "/v1/sync/journal" },
+    ];
+
+    for (const ep of endpoints) {
+      const response = await handler.fetch(
+        new Request(`https://api.tminus.dev${ep.path}`, {
+          method: ep.method,
+        }),
+        env,
+        mockCtx,
+      );
+      expect(response.status).toBe(401);
+
+      const body = (await response.json()) as { ok: boolean; error: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toBe("Authentication required");
+    }
+  });
+
+  it("valid JWT grants access to endpoints", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    // GET /v1/events with valid auth should succeed (200, not 401)
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/events", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean };
+    expect(body.ok).toBe(true);
+  });
+});

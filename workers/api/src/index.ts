@@ -1,7 +1,1175 @@
-import { APP_NAME } from "@tminus/shared";
+/**
+ * tminus-api -- Main REST API worker.
+ *
+ * Provides programmatic access to accounts, events, policies, and sync status.
+ * Hosts UserGraphDO and AccountDO class definitions (per wrangler.toml).
+ *
+ * Key design:
+ * - Bearer token auth (JWT HS256) on all /v1/* routes
+ * - Consistent response envelope: {ok, data, error, meta}
+ * - Cursor-based pagination on list endpoints
+ * - Routes delegate to UserGraphDO and AccountDO via DO stubs
+ * - D1 for account lookups (cross-user registry)
+ */
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return new Response(`${APP_NAME} API worker`, { status: 200 });
-  },
-};
+import { isValidId } from "@tminus/shared";
+
+// ---------------------------------------------------------------------------
+// Error codes (from DESIGN.md Section 3)
+// ---------------------------------------------------------------------------
+
+export const ErrorCode = {
+  VALIDATION_ERROR: 400,
+  AUTH_REQUIRED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  ACCOUNT_REVOKED: 422,
+  ACCOUNT_SYNC_STALE: 422,
+  PROVIDER_ERROR: 502,
+  PROVIDER_QUOTA: 429,
+  INTERNAL_ERROR: 500,
+} as const;
+
+export type ErrorCodeName = keyof typeof ErrorCode;
+
+// ---------------------------------------------------------------------------
+// Response envelope
+// ---------------------------------------------------------------------------
+
+export interface ApiEnvelope<T = unknown> {
+  ok: boolean;
+  data?: T;
+  error?: string;
+  meta: {
+    request_id: string;
+    timestamp: string;
+    next_cursor?: string;
+  };
+}
+
+/** Generate a short request ID (not cryptographically secure, just for tracing). */
+function generateRequestId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `req_${ts}_${rand}`;
+}
+
+export function successEnvelope<T>(data: T, meta?: { next_cursor?: string }): ApiEnvelope<T> {
+  return {
+    ok: true,
+    data,
+    meta: {
+      request_id: generateRequestId(),
+      timestamp: new Date().toISOString(),
+      ...(meta?.next_cursor ? { next_cursor: meta.next_cursor } : {}),
+    },
+  };
+}
+
+export function errorEnvelope(error: string, code: ErrorCodeName): ApiEnvelope {
+  return {
+    ok: false,
+    error,
+    meta: {
+      request_id: generateRequestId(),
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
+function jsonResponse(envelope: ApiEnvelope, status: number): Response {
+  return new Response(JSON.stringify(envelope), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// JWT validation (HS256, Phase 1 simple)
+// ---------------------------------------------------------------------------
+
+/**
+ * Decode and validate a JWT signed with HS256.
+ *
+ * Returns the payload on success, or null on failure.
+ * Phase 1: simple validation -- no audience/issuer checks.
+ */
+export async function verifyJwt(
+  token: string,
+  secret: string,
+): Promise<{ sub: string; [key: string]: unknown } | null> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, signatureB64] = parts;
+
+    // Decode header and verify algorithm
+    const header = JSON.parse(b64UrlDecode(headerB64));
+    if (header.alg !== "HS256") return null;
+
+    // Verify signature
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+
+    const signatureData = b64UrlToBytes(signatureB64);
+    const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+
+    const valid = await crypto.subtle.verify("HMAC", key, signatureData, signingInput);
+    if (!valid) return null;
+
+    // Decode payload
+    const payload = JSON.parse(b64UrlDecode(payloadB64));
+
+    // Check expiration
+    if (payload.exp && typeof payload.exp === "number") {
+      const now = Math.floor(Date.now() / 1000);
+      if (now >= payload.exp) return null;
+    }
+
+    // Must have sub claim
+    if (!payload.sub || typeof payload.sub !== "string") return null;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/** Base64URL decode to string. */
+function b64UrlDecode(str: string): string {
+  const padded = str.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = padded.length % 4;
+  const fullPadded = pad ? padded + "=".repeat(4 - pad) : padded;
+  return atob(fullPadded);
+}
+
+/** Base64URL decode to Uint8Array. */
+function b64UrlToBytes(str: string): Uint8Array {
+  const decoded = b64UrlDecode(str);
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) {
+    bytes[i] = decoded.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Create a JWT signed with HS256. Used for testing.
+ * Exported so test code can create valid tokens.
+ */
+export async function createJwt(
+  payload: Record<string, unknown>,
+  secret: string,
+): Promise<string> {
+  const header = { alg: "HS256", typ: "JWT" };
+  const headerB64 = b64UrlEncode(JSON.stringify(header));
+  const payloadB64 = b64UrlEncode(JSON.stringify(payload));
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const signature = await crypto.subtle.sign("HMAC", key, signingInput);
+
+  const signatureB64 = bytesToB64Url(new Uint8Array(signature));
+  return `${headerB64}.${payloadB64}.${signatureB64}`;
+}
+
+/** Base64URL encode a string. */
+function b64UrlEncode(str: string): string {
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Uint8Array to Base64URL. */
+function bytesToB64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
+
+interface AuthContext {
+  userId: string;
+}
+
+async function extractAuth(
+  request: Request,
+  jwtSecret: string,
+): Promise<AuthContext | null> {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader) return null;
+
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") return null;
+
+  const payload = await verifyJwt(parts[1], jwtSecret);
+  if (!payload) return null;
+
+  return { userId: payload.sub };
+}
+
+// ---------------------------------------------------------------------------
+// Route parameter extraction
+// ---------------------------------------------------------------------------
+
+interface RouteMatch {
+  /** Matched parameter values in order. */
+  params: string[];
+}
+
+/**
+ * Match a URL path against a pattern like "/v1/events/:id".
+ * Returns matched params or null if no match.
+ */
+function matchRoute(pathname: string, pattern: string): RouteMatch | null {
+  const pathParts = pathname.split("/").filter(Boolean);
+  const patternParts = pattern.split("/").filter(Boolean);
+
+  if (pathParts.length !== patternParts.length) return null;
+
+  const params: string[] = [];
+  for (let i = 0; i < patternParts.length; i++) {
+    if (patternParts[i].startsWith(":")) {
+      params.push(pathParts[i]);
+    } else if (patternParts[i] !== pathParts[i]) {
+      return null;
+    }
+  }
+
+  return { params };
+}
+
+// ---------------------------------------------------------------------------
+// DO stub helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a JSON RPC-style request to a Durable Object.
+ *
+ * UserGraphDO and AccountDO in production will expose an HTTP API
+ * (fetch handler inside the DO class). We send JSON payloads and
+ * receive JSON responses.
+ *
+ * For this REST surface, the DO is addressed by user_id or account_id,
+ * and the path maps to a DO method (e.g. /listCanonicalEvents).
+ */
+async function callDO<T>(
+  namespace: DurableObjectNamespace,
+  name: string,
+  path: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: T }> {
+  const id = namespace.idFromName(name);
+  const stub = namespace.get(id);
+
+  const init: RequestInit = {
+    method: body !== undefined ? "POST" : "GET",
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await stub.fetch(`https://do.internal${path}`, init);
+  const data = (await response.json()) as T;
+  return { ok: response.ok, status: response.status, data };
+}
+
+// ---------------------------------------------------------------------------
+// Request body parsing
+// ---------------------------------------------------------------------------
+
+async function parseJsonBody<T>(request: Request): Promise<T | null> {
+  try {
+    const text = await request.text();
+    if (!text) return null;
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers
+// ---------------------------------------------------------------------------
+
+// -- Accounts ---------------------------------------------------------------
+
+async function handleAccountLink(
+  _request: Request,
+  _auth: AuthContext,
+  _env: Env,
+): Promise<Response> {
+  // Phase 1: redirect to oauth-worker URL
+  // In production, this would construct the OAuth URL. For now, return the
+  // redirect information in the envelope.
+  const envelope = successEnvelope({
+    redirect_url: "/oauth/google/authorize",
+    message: "Redirect to OAuth flow to link a new account",
+  });
+  return jsonResponse(envelope, 200);
+}
+
+async function handleListAccounts(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await env.DB
+      .prepare(
+        "SELECT account_id, user_id, provider, email, status, created_at FROM accounts WHERE user_id = ?1",
+      )
+      .bind(auth.userId)
+      .all<{
+        account_id: string;
+        user_id: string;
+        provider: string;
+        email: string;
+        status: string;
+        created_at: string;
+      }>();
+
+    const accounts = result.results ?? [];
+    return jsonResponse(successEnvelope(accounts), 200);
+  } catch (err) {
+    console.error("Failed to list accounts", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list accounts", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetAccount(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  if (!isValidId(accountId, "account")) {
+    return jsonResponse(
+      errorEnvelope("Invalid account ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Get account from D1
+    const row = await env.DB
+      .prepare(
+        "SELECT account_id, user_id, provider, email, status, created_at FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+      )
+      .bind(accountId, auth.userId)
+      .first<{
+        account_id: string;
+        user_id: string;
+        provider: string;
+        email: string;
+        status: string;
+        created_at: string;
+      }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Account not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    // Get health from AccountDO
+    const health = await callDO<{
+      lastSyncTs: string | null;
+      lastSuccessTs: string | null;
+      fullSyncNeeded: boolean;
+    }>(env.ACCOUNT, accountId, "/getHealth");
+
+    return jsonResponse(
+      successEnvelope({
+        ...row,
+        health: health.ok ? health.data : null,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to get account", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get account details", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleDeleteAccount(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  if (!isValidId(accountId, "account")) {
+    return jsonResponse(
+      errorEnvelope("Invalid account ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Verify ownership in D1
+    const row = await env.DB
+      .prepare(
+        "SELECT account_id FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+      )
+      .bind(accountId, auth.userId)
+      .first<{ account_id: string }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Account not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    // Defer cleanup to AccountDO (revoke tokens)
+    await callDO(env.ACCOUNT, accountId, "/revokeTokens", {});
+
+    // Update status in D1
+    await env.DB
+      .prepare("UPDATE accounts SET status = 'revoked' WHERE account_id = ?1")
+      .bind(accountId)
+      .run();
+
+    return jsonResponse(successEnvelope({ deleted: true }), 200);
+  } catch (err) {
+    console.error("Failed to delete account", err);
+    return jsonResponse(
+      errorEnvelope("Failed to delete account", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Events ---------------------------------------------------------------
+
+async function handleListEvents(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const query: Record<string, unknown> = {};
+
+  const start = url.searchParams.get("start");
+  const end = url.searchParams.get("end");
+  const accountIdFilter = url.searchParams.get("account_id");
+  const cursor = url.searchParams.get("cursor");
+  const limitStr = url.searchParams.get("limit");
+
+  if (start) query.time_min = start;
+  if (end) query.time_max = end;
+  if (accountIdFilter) query.origin_account_id = accountIdFilter;
+  if (cursor) query.cursor = cursor;
+  if (limitStr) {
+    const limit = parseInt(limitStr, 10);
+    if (!isNaN(limit) && limit > 0) query.limit = limit;
+  }
+
+  try {
+    const result = await callDO<{
+      items: unknown[];
+      cursor: string | null;
+      has_more: boolean;
+    }>(env.USER_GRAPH, auth.userId, "/listCanonicalEvents", query);
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to list events", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope(result.data.items, {
+        next_cursor: result.data.cursor ?? undefined,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to list events", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list events", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetEvent(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      event: unknown;
+      mirrors: unknown[];
+    } | null>(env.USER_GRAPH, auth.userId, "/getCanonicalEvent", {
+      canonical_event_id: eventId,
+    });
+
+    if (!result.ok || result.data === null) {
+      return jsonResponse(
+        errorEnvelope("Event not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get event", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get event", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleCreateEvent(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Basic validation: must have start and end
+  if (!body.start || !body.end) {
+    return jsonResponse(
+      errorEnvelope("Event must have start and end", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<string>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/upsertCanonicalEvent",
+      { event: body, source: "api" },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to create event", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({ canonical_event_id: result.data }),
+      201,
+    );
+  } catch (err) {
+    console.error("Failed to create event", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create event", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleUpdateEvent(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Merge the event ID into the body for the upsert
+    const event = { ...body, canonical_event_id: eventId };
+    const result = await callDO<string>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/upsertCanonicalEvent",
+      { event, source: "api" },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to update event", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({ canonical_event_id: result.data }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to update event", err);
+    return jsonResponse(
+      errorEnvelope("Failed to update event", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleDeleteEvent(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<boolean>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/deleteCanonicalEvent",
+      { canonical_event_id: eventId, source: "api" },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to delete event", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data) {
+      return jsonResponse(
+        errorEnvelope("Event not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope({ deleted: true }), 200);
+  } catch (err) {
+    console.error("Failed to delete event", err);
+    return jsonResponse(
+      errorEnvelope("Failed to delete event", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Policies -------------------------------------------------------------
+
+async function handleListPolicies(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await callDO<{
+      items: unknown[];
+      cursor: string | null;
+      has_more: boolean;
+    }>(env.USER_GRAPH, auth.userId, "/listPolicies");
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to list policies", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope(result.data.items ?? result.data, {
+        next_cursor: result.data.cursor ?? undefined,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to list policies", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list policies", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetPolicy(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  policyId: string,
+): Promise<Response> {
+  if (!isValidId(policyId, "policy")) {
+    return jsonResponse(
+      errorEnvelope("Invalid policy ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getPolicy",
+      { policy_id: policyId },
+    );
+
+    if (!result.ok || result.data === null) {
+      return jsonResponse(
+        errorEnvelope("Policy not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get policy", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get policy", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleCreatePolicy(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.name || typeof body.name !== "string") {
+    return jsonResponse(
+      errorEnvelope("Policy must have a name", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/createPolicy",
+      body,
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to create policy", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 201);
+  } catch (err) {
+    console.error("Failed to create policy", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create policy", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleSetPolicyEdges(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  policyId: string,
+): Promise<Response> {
+  if (!isValidId(policyId, "policy")) {
+    return jsonResponse(
+      errorEnvelope("Invalid policy ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const body = await parseJsonBody<{ edges: unknown[] }>(request);
+  if (!body || !Array.isArray(body.edges)) {
+    return jsonResponse(
+      errorEnvelope("Request body must include an edges array", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Set edges and trigger recomputeProjections
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/setPolicyEdges",
+      { policy_id: policyId, edges: body.edges },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to set policy edges", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to set policy edges", err);
+    return jsonResponse(
+      errorEnvelope("Failed to set policy edges", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Sync Status ----------------------------------------------------------
+
+async function handleAggregateStatus(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    // Get all accounts for this user
+    const accountsResult = await env.DB
+      .prepare("SELECT account_id, status FROM accounts WHERE user_id = ?1")
+      .bind(auth.userId)
+      .all<{ account_id: string; status: string }>();
+
+    const accounts = accountsResult.results ?? [];
+    const healthResults: Array<{
+      account_id: string;
+      status: string;
+      health: unknown;
+    }> = [];
+
+    // Get health from each account's DO
+    for (const account of accounts) {
+      try {
+        const health = await callDO(
+          env.ACCOUNT,
+          account.account_id,
+          "/getHealth",
+        );
+        healthResults.push({
+          account_id: account.account_id,
+          status: account.status,
+          health: health.ok ? health.data : null,
+        });
+      } catch {
+        healthResults.push({
+          account_id: account.account_id,
+          status: account.status,
+          health: null,
+        });
+      }
+    }
+
+    // Get UserGraphDO sync health
+    const userGraphHealth = await callDO(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getSyncHealth",
+    );
+
+    return jsonResponse(
+      successEnvelope({
+        accounts: healthResults,
+        user_graph: userGraphHealth.ok ? userGraphHealth.data : null,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to get aggregate status", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get sync status", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleAccountStatus(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  if (!isValidId(accountId, "account")) {
+    return jsonResponse(
+      errorEnvelope("Invalid account ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Verify ownership
+    const row = await env.DB
+      .prepare(
+        "SELECT account_id FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+      )
+      .bind(accountId, auth.userId)
+      .first<{ account_id: string }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Account not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    const health = await callDO(env.ACCOUNT, accountId, "/getHealth");
+
+    return jsonResponse(
+      successEnvelope(health.ok ? health.data : null),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to get account status", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get account status", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleJournal(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const query: Record<string, unknown> = {};
+
+  const eventId = url.searchParams.get("event_id");
+  const cursor = url.searchParams.get("cursor");
+  const limitStr = url.searchParams.get("limit");
+
+  if (eventId) query.canonical_event_id = eventId;
+  if (cursor) query.cursor = cursor;
+  if (limitStr) {
+    const limit = parseInt(limitStr, 10);
+    if (!isNaN(limit) && limit > 0) query.limit = limit;
+  }
+
+  try {
+    const result = await callDO<{
+      items: unknown[];
+      cursor: string | null;
+      has_more: boolean;
+    }>(env.USER_GRAPH, auth.userId, "/queryJournal", query);
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to query journal", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope(result.data.items, {
+        next_cursor: result.data.cursor ?? undefined,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to query journal", err);
+    return jsonResponse(
+      errorEnvelope("Failed to query journal", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates the worker handler. Factory pattern allows tests to inject
+ * dependencies and validate the full request flow.
+ */
+export function createHandler() {
+  return {
+    async fetch(
+      request: Request,
+      env: Env,
+      _ctx: ExecutionContext,
+    ): Promise<Response> {
+      const url = new URL(request.url);
+      const { pathname } = url;
+      const method = request.method;
+
+      // Health check -- no auth required
+      if (method === "GET" && pathname === "/health") {
+        return new Response("OK", { status: 200 });
+      }
+
+      // CORS preflight
+      if (method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+          },
+        });
+      }
+
+      // All /v1/* routes require auth
+      if (!pathname.startsWith("/v1/")) {
+        return jsonResponse(
+          errorEnvelope("Not Found", "NOT_FOUND"),
+          ErrorCode.NOT_FOUND,
+        );
+      }
+
+      // Authenticate
+      const auth = await extractAuth(request, env.JWT_SECRET);
+      if (!auth) {
+        return jsonResponse(
+          errorEnvelope("Authentication required", "AUTH_REQUIRED"),
+          ErrorCode.AUTH_REQUIRED,
+        );
+      }
+
+      // -- Account routes ---------------------------------------------------
+
+      if (method === "POST" && pathname === "/v1/accounts/link") {
+        return handleAccountLink(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/accounts") {
+        return handleListAccounts(request, auth, env);
+      }
+
+      let match = matchRoute(pathname, "/v1/accounts/:id");
+      if (match) {
+        if (method === "GET") {
+          return handleGetAccount(request, auth, env, match.params[0]);
+        }
+        if (method === "DELETE") {
+          return handleDeleteAccount(request, auth, env, match.params[0]);
+        }
+      }
+
+      // -- Event routes -----------------------------------------------------
+
+      if (method === "GET" && pathname === "/v1/events") {
+        return handleListEvents(request, auth, env);
+      }
+
+      if (method === "POST" && pathname === "/v1/events") {
+        return handleCreateEvent(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/events/:id");
+      if (match) {
+        if (method === "GET") {
+          return handleGetEvent(request, auth, env, match.params[0]);
+        }
+        if (method === "PATCH") {
+          return handleUpdateEvent(request, auth, env, match.params[0]);
+        }
+        if (method === "DELETE") {
+          return handleDeleteEvent(request, auth, env, match.params[0]);
+        }
+      }
+
+      // -- Policy routes ----------------------------------------------------
+
+      if (method === "GET" && pathname === "/v1/policies") {
+        return handleListPolicies(request, auth, env);
+      }
+
+      if (method === "POST" && pathname === "/v1/policies") {
+        return handleCreatePolicy(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/policies/:id");
+      if (match && method === "GET") {
+        return handleGetPolicy(request, auth, env, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/policies/:id/edges");
+      if (match && method === "PUT") {
+        return handleSetPolicyEdges(request, auth, env, match.params[0]);
+      }
+
+      // -- Sync status routes -----------------------------------------------
+
+      if (method === "GET" && pathname === "/v1/sync/status") {
+        return handleAggregateStatus(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/sync/status/:id");
+      if (match && method === "GET") {
+        return handleAccountStatus(request, auth, env, match.params[0]);
+      }
+
+      if (method === "GET" && pathname === "/v1/sync/journal") {
+        return handleJournal(request, auth, env);
+      }
+
+      // -- Fallback ---------------------------------------------------------
+
+      return jsonResponse(
+        errorEnvelope("Not Found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Default export for Cloudflare Workers runtime
+// ---------------------------------------------------------------------------
+
+const handler = createHandler();
+export default handler;
