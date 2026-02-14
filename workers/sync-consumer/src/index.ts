@@ -1,29 +1,36 @@
 /**
  * tminus-sync-consumer -- Queue consumer for sync-queue.
  *
- * Processes SYNC_INCREMENTAL and SYNC_FULL messages:
- * 1. Fetches events from Google Calendar API via GoogleCalendarClient
- * 2. Classifies events (origin vs managed_mirror) via classifyEvent()
- * 3. Normalizes origin events to ProviderDelta via normalizeGoogleEvent()
- * 4. Calls UserGraphDO.applyProviderDelta() via RPC (fetch to DO stub)
- * 5. Updates AccountDO sync cursor
+ * Provider-aware: dispatches to Google or Microsoft Calendar APIs based on
+ * the account's provider type (looked up from D1 registry at consumption time).
  *
- * Error handling per DESIGN.md Section 8:
+ * Processes SYNC_INCREMENTAL and SYNC_FULL messages:
+ * 1. Looks up provider type from D1 accounts table
+ * 2. Fetches events via provider-specific client (Google listEvents or Microsoft delta query)
+ * 3. Classifies events using provider-specific strategy (extended properties or open extensions)
+ * 4. Normalizes origin events to ProviderDelta via provider-specific normalizer
+ * 5. Calls UserGraphDO.applyProviderDelta() via RPC (fetch to DO stub)
+ * 6. Updates AccountDO sync cursor (syncToken for Google, deltaLink for Microsoft)
+ *
+ * Error handling (both Google and Microsoft):
  * - 429: retry with exponential backoff (1s, 2s, 4s, 8s, 16s, max 5)
  * - 500/503: retry with backoff (2s, 4s, 8s, max 3)
  * - 401: refresh token via AccountDO, retry once
- * - 410: enqueue SYNC_FULL, discard current message
- * - 403 (insufficient scope): mark sync failure, no retry
+ * - 410 (Google): enqueue SYNC_FULL, discard current message
+ * - 403 (insufficient scope/privileges): mark sync failure, no retry
  */
 
 import {
-  GoogleCalendarClient,
   SyncTokenExpiredError,
   TokenExpiredError,
   RateLimitError,
   GoogleApiError,
-  classifyEvent,
-  normalizeGoogleEvent,
+  MicrosoftApiError,
+  MicrosoftTokenExpiredError,
+  MicrosoftRateLimitError,
+  createCalendarProvider,
+  getClassificationStrategy,
+  normalizeProviderEvent,
 } from "@tminus/shared";
 import type {
   SyncIncrementalMessage,
@@ -32,6 +39,7 @@ import type {
   ProviderDelta,
   AccountId,
   FetchFn,
+  ProviderType,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -49,7 +57,7 @@ export type SyncQueueMessage = SyncIncrementalMessage | SyncFullMessage;
  * In production these resolve to real Cloudflare bindings.
  */
 export interface SyncConsumerDeps {
-  /** Fetch function for GoogleCalendarClient (injectable for mocking Google API). */
+  /** Fetch function for CalendarProvider (injectable for mocking Google/Microsoft APIs). */
   fetchFn?: FetchFn;
   /** Sleep function override for testing (avoids real delays in retryWithBackoff). */
   sleepFn?: (ms: number) => Promise<void>;
@@ -107,13 +115,14 @@ export default handler;
  * Handle an incremental sync message.
  *
  * Flow:
- * 1. Get access token from AccountDO
- * 2. Get sync token from AccountDO
- * 3. Fetch events.list(syncToken=...) via GoogleCalendarClient
- * 4. If 410 Gone: enqueue SYNC_FULL, return
- * 5. Classify, normalize, and apply deltas
- * 6. Update sync cursor
- * 7. Mark sync success
+ * 1. Look up provider type from D1
+ * 2. Get access token from AccountDO
+ * 3. Get sync token from AccountDO
+ * 4. Fetch events via provider-specific client (Google listEvents or Microsoft delta query)
+ * 5. If 410 Gone (Google) or delta token expired: enqueue SYNC_FULL, return
+ * 6. Classify, normalize, and apply deltas (using provider-specific strategies)
+ * 7. Update sync cursor (syncToken for Google, deltaLink for Microsoft)
+ * 8. Mark sync success
  */
 export async function handleIncrementalSync(
   message: SyncIncrementalMessage,
@@ -122,14 +131,17 @@ export async function handleIncrementalSync(
 ): Promise<void> {
   const { account_id } = message;
 
-  // Step 1: Get access token from AccountDO
+  // Step 1: Look up provider type from D1
+  const provider = await lookupProvider(account_id, env);
+
+  // Step 2: Get access token from AccountDO
   const accessToken = await getAccessToken(account_id, env);
 
-  // Step 2: Get sync token
+  // Step 3: Get sync token (for Google: syncToken, for Microsoft: deltaLink URL)
   const syncToken = await getSyncToken(account_id, env);
 
-  // Step 3: Fetch incremental changes from Google
-  const client = new GoogleCalendarClient(accessToken, deps.fetchFn);
+  // Step 4: Fetch incremental changes via provider-specific client
+  const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
   let events: GoogleCalendarEvent[];
   let nextSyncToken: string | undefined;
@@ -143,7 +155,7 @@ export async function handleIncrementalSync(
     events = response.events;
     nextSyncToken = response.nextSyncToken;
   } catch (err) {
-    // Step 4: Handle 410 Gone -- enqueue SYNC_FULL
+    // Step 5: Handle 410 Gone (Google sync token expired) -- enqueue SYNC_FULL
     if (err instanceof SyncTokenExpiredError) {
       await env.SYNC_QUEUE.send({
         type: "SYNC_FULL",
@@ -153,10 +165,10 @@ export async function handleIncrementalSync(
       return;
     }
 
-    // Handle 401 -- refresh token and retry once
-    if (err instanceof TokenExpiredError) {
+    // Handle 401 -- refresh token and retry once (both Google and Microsoft)
+    if (err instanceof TokenExpiredError || err instanceof MicrosoftTokenExpiredError) {
       const freshToken = await refreshAndGetToken(account_id, env);
-      const freshClient = new GoogleCalendarClient(freshToken, deps.fetchFn);
+      const freshClient = createCalendarProvider(provider, freshToken, deps.fetchFn);
       try {
         const response = await freshClient.listEvents(
           "primary",
@@ -176,21 +188,21 @@ export async function handleIncrementalSync(
         throw retryErr;
       }
     } else if (
-      err instanceof GoogleApiError &&
-      err.statusCode === 403
+      (err instanceof GoogleApiError && err.statusCode === 403) ||
+      (err instanceof MicrosoftApiError && err.statusCode === 403)
     ) {
-      // 403: insufficient scope -- mark failure, do not retry
-      await markSyncFailure(account_id, env, "Insufficient scope (403)");
+      // 403: insufficient scope/privileges -- mark failure, do not retry
+      await markSyncFailure(account_id, env, `Insufficient scope (403)`);
       return;
     } else {
       throw err;
     }
   }
 
-  // Steps 5-7: Process events and update state
-  await processAndApplyDeltas(account_id, events, env);
+  // Steps 6-8: Process events and update state using provider-specific classification/normalization
+  await processAndApplyDeltas(account_id, events, env, provider);
 
-  // Update sync cursor
+  // Update sync cursor (syncToken for Google, deltaLink URL for Microsoft)
   if (nextSyncToken) {
     await setSyncToken(account_id, env, nextSyncToken);
   }
@@ -207,8 +219,9 @@ export async function handleIncrementalSync(
  * Handle a full sync message.
  *
  * Same as incremental but:
- * - No syncToken (fetches ALL events)
- * - Paginated: loop through pageTokens until exhausted
+ * - No syncToken/deltaToken (fetches ALL events)
+ * - Paginated: loop through pageTokens (Google) or @odata.nextLink (Microsoft)
+ * - Stores final syncToken (Google) or @odata.deltaLink (Microsoft)
  */
 export async function handleFullSync(
   message: SyncFullMessage,
@@ -217,15 +230,20 @@ export async function handleFullSync(
 ): Promise<void> {
   const { account_id } = message;
 
+  // Look up provider type from D1
+  const provider = await lookupProvider(account_id, env);
+
   // Get access token
   const accessToken = await getAccessToken(account_id, env);
-  const client = new GoogleCalendarClient(accessToken, deps.fetchFn);
+  const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
   let pageToken: string | undefined;
   let lastSyncToken: string | undefined;
   const allEvents: GoogleCalendarEvent[] = [];
 
   // Paginate through all events
+  // For Google: nextPageToken for pagination, nextSyncToken on last page
+  // For Microsoft: @odata.nextLink for pagination, @odata.deltaLink on last page
   const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
   try {
     do {
@@ -235,18 +253,17 @@ export async function handleFullSync(
       );
       allEvents.push(...response.events);
       pageToken = response.nextPageToken;
-      // The sync token is only on the last page
+      // The sync/delta token is only on the last page
       if (response.nextSyncToken) {
         lastSyncToken = response.nextSyncToken;
       }
     } while (pageToken);
   } catch (err) {
-    // Handle 401 -- refresh token and retry
-    if (err instanceof TokenExpiredError) {
+    // Handle 401 -- refresh token and retry (both Google and Microsoft)
+    if (err instanceof TokenExpiredError || err instanceof MicrosoftTokenExpiredError) {
       const freshToken = await refreshAndGetToken(account_id, env);
-      const freshClient = new GoogleCalendarClient(freshToken, deps.fetchFn);
-      // Restart pagination from where we left off
-      // (In practice we start over since the token changed)
+      const freshClient = createCalendarProvider(provider, freshToken, deps.fetchFn);
+      // Restart pagination from scratch since the token changed
       allEvents.length = 0;
       pageToken = undefined;
       do {
@@ -261,8 +278,8 @@ export async function handleFullSync(
         }
       } while (pageToken);
     } else if (
-      err instanceof GoogleApiError &&
-      err.statusCode === 403
+      (err instanceof GoogleApiError && err.statusCode === 403) ||
+      (err instanceof MicrosoftApiError && err.statusCode === 403)
     ) {
       await markSyncFailure(account_id, env, "Insufficient scope (403)");
       return;
@@ -271,10 +288,10 @@ export async function handleFullSync(
     }
   }
 
-  // Process all events
-  await processAndApplyDeltas(account_id, allEvents, env);
+  // Process all events using provider-specific classification/normalization
+  await processAndApplyDeltas(account_id, allEvents, env, provider);
 
-  // Update sync cursor with the new syncToken from the full sync
+  // Update sync cursor (syncToken for Google, deltaLink for Microsoft)
   if (lastSyncToken) {
     await setSyncToken(account_id, env, lastSyncToken);
   }
@@ -290,6 +307,9 @@ export async function handleFullSync(
 /**
  * Classify, normalize, and apply provider deltas for a batch of events.
  *
+ * Provider-aware: uses the correct classification strategy and normalizer
+ * based on the provider type (Google or Microsoft).
+ *
  * - Origin events: normalize to ProviderDelta and include in batch
  * - Managed mirrors: skip (Invariant E -- never treat as origin)
  * - foreign_managed: treated as origin (per classifyEvent docs)
@@ -298,11 +318,16 @@ async function processAndApplyDeltas(
   accountId: AccountId,
   events: GoogleCalendarEvent[],
   env: Env,
+  provider: ProviderType = "google",
 ): Promise<void> {
   const deltas: ProviderDelta[] = [];
+  const classificationStrategy = getClassificationStrategy(provider);
 
   for (const event of events) {
-    const classification = classifyEvent(event);
+    // For Microsoft events, the MicrosoftCalendarClient stores raw event data
+    // under _msRaw. Use that for classification and normalization when available.
+    const rawEvent = (event as Record<string, unknown>)._msRaw ?? event;
+    const classification = classificationStrategy.classify(rawEvent);
 
     if (classification === "managed_mirror") {
       // Invariant E: managed mirrors are NOT treated as new origins.
@@ -310,8 +335,8 @@ async function processAndApplyDeltas(
       continue;
     }
 
-    // Origin or foreign_managed: normalize to ProviderDelta
-    const delta = normalizeGoogleEvent(event, accountId, classification);
+    // Origin or foreign_managed: normalize to ProviderDelta using provider-specific normalizer
+    const delta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
     deltas.push(delta);
   }
 
@@ -361,6 +386,28 @@ async function lookupUserId(
     .first<{ user_id: string }>();
 
   return result?.user_id ?? null;
+}
+
+/**
+ * Look up provider type for an account_id in the D1 registry.
+ * Returns 'google' as default if the provider column is missing or unrecognized.
+ */
+async function lookupProvider(
+  accountId: AccountId,
+  env: Env,
+): Promise<ProviderType> {
+  const result = await env.DB.prepare(
+    "SELECT provider FROM accounts WHERE account_id = ?1",
+  )
+    .bind(accountId)
+    .first<{ provider: string }>();
+
+  const provider = result?.provider;
+  if (provider === "microsoft") {
+    return "microsoft";
+  }
+  // Default to google for backward compatibility
+  return "google";
 }
 
 // ---------------------------------------------------------------------------
@@ -525,8 +572,9 @@ export interface RetryOptions {
 /**
  * Retry a function with exponential backoff for retryable errors.
  *
- * - 429: backoff 1s, 2s, 4s, 8s, 16s (max 5 retries)
- * - 500/503: backoff 2s, 4s, 8s (max 3 retries)
+ * Handles both Google and Microsoft provider errors:
+ * - 429 (rate limit): backoff 1s, 2s, 4s, 8s, 16s (max 5 retries)
+ * - 500/503 (server error): backoff 2s, 4s, 8s (max 3 retries)
  * - Other errors: thrown immediately
  */
 export async function retryWithBackoff<T>(
@@ -546,7 +594,8 @@ export async function retryWithBackoff<T>(
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof RateLimitError) {
+      // Rate limit errors (Google RateLimitError or Microsoft MicrosoftRateLimitError)
+      if (err instanceof RateLimitError || err instanceof MicrosoftRateLimitError) {
         attempt429++;
         if (attempt429 > maxRetries429) {
           throw err;
@@ -556,9 +605,12 @@ export async function retryWithBackoff<T>(
         continue;
       }
 
+      // Server errors (Google or Microsoft 500/503)
       if (
-        err instanceof GoogleApiError &&
-        (err.statusCode === 500 || err.statusCode === 503)
+        (err instanceof GoogleApiError &&
+          (err.statusCode === 500 || err.statusCode === 503)) ||
+        (err instanceof MicrosoftApiError &&
+          (err.statusCode === 500 || err.statusCode === 503))
       ) {
         attempt5xx++;
         if (attempt5xx > maxRetries5xx) {

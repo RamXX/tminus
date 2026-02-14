@@ -28,7 +28,13 @@ import {
   retryWithBackoff,
 } from "./index";
 import type { SyncQueueMessage } from "./index";
-import { RateLimitError, GoogleApiError } from "@tminus/shared";
+import {
+  RateLimitError,
+  GoogleApiError,
+  MicrosoftApiError,
+  MicrosoftRateLimitError,
+  MicrosoftTokenExpiredError,
+} from "@tminus/shared";
 import type { AccountId, SyncIncrementalMessage, SyncFullMessage } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -1135,5 +1141,475 @@ describe("retryWithBackoff", () => {
     const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
     expect(result).toBe("back up");
     expect(attempts).toBe(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft error handling in retryWithBackoff
+  // -------------------------------------------------------------------------
+
+  it("retries on MicrosoftRateLimitError (429)", async () => {
+    let attempts = 0;
+    const fn = async () => {
+      attempts++;
+      if (attempts <= 2) {
+        throw new MicrosoftRateLimitError("Rate limited by Microsoft Graph API");
+      }
+      return "success after microsoft retries";
+    };
+
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    expect(result).toBe("success after microsoft retries");
+    expect(attempts).toBe(3);
+  });
+
+  it("retries on MicrosoftApiError with 500/503", async () => {
+    let attempts = 0;
+    const fn = async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw new MicrosoftApiError("Server error", 500);
+      }
+      return "recovered from microsoft error";
+    };
+
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    expect(result).toBe("recovered from microsoft error");
+    expect(attempts).toBe(2);
+  });
+
+  it("throws MicrosoftRateLimitError after exhausting max retries", async () => {
+    const fn = async () => {
+      throw new MicrosoftRateLimitError("Rate limited forever");
+    };
+
+    await expect(retryWithBackoff(fn, { maxRetries429: 2, maxRetries5xx: 3, sleepFn: noopSleep })).rejects.toThrow(MicrosoftRateLimitError);
+  });
+
+  it("does not retry non-retryable MicrosoftApiError (e.g., 403)", async () => {
+    let attempts = 0;
+    const fn = async () => {
+      attempts++;
+      throw new MicrosoftApiError("Forbidden", 403);
+    };
+
+    await expect(retryWithBackoff(fn, { sleepFn: noopSleep })).rejects.toThrow(MicrosoftApiError);
+    expect(attempts).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Microsoft provider constants
+// ---------------------------------------------------------------------------
+
+const MS_ACCOUNT_B = {
+  account_id: "acc_01HXYZ00000000000000000B" as AccountId,
+  user_id: TEST_USER.user_id,
+  provider: "microsoft",
+  provider_subject: "ms-sub-sync-b",
+  email: "alice@outlook.com",
+} as const;
+
+const MS_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJ-test-ms-token";
+const MS_DELTA_LINK = "https://graph.microsoft.com/v1.0/me/calendars/primary/events/delta?$deltatoken=abc123";
+const MS_NEW_DELTA_LINK = "https://graph.microsoft.com/v1.0/me/calendars/primary/events/delta?$deltatoken=def456";
+
+// ---------------------------------------------------------------------------
+// Microsoft Graph API mock event helper
+// ---------------------------------------------------------------------------
+
+function makeMicrosoftEvent(overrides?: Record<string, unknown>) {
+  return {
+    id: "AAMkAG-ms-event-100",
+    subject: "MS Teams Standup",
+    body: { contentType: "text", content: "Daily standup notes" },
+    location: { displayName: "Teams Room 1" },
+    start: { dateTime: "2026-02-15T09:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-02-15T10:00:00.0000000", timeZone: "UTC" },
+    isAllDay: false,
+    isCancelled: false,
+    showAs: "busy",
+    sensitivity: "normal",
+    ...overrides,
+  };
+}
+
+function makeMicrosoftManagedMirrorEvent(overrides?: Record<string, unknown>) {
+  return {
+    id: "AAMkAG-ms-mirror-200",
+    subject: "Busy",
+    start: { dateTime: "2026-02-15T11:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-02-15T12:00:00.0000000", timeZone: "UTC" },
+    isAllDay: false,
+    isCancelled: false,
+    showAs: "busy",
+    sensitivity: "normal",
+    extensions: [
+      {
+        "@odata.type": "microsoft.graph.openExtension",
+        extensionName: "com.tminus.metadata",
+        tminus: "true",
+        managed: "true",
+        canonicalId: "evt_01HXYZ000000000000000001",
+        originAccount: "acc_01HXYZ00000000000000000A",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function makeMicrosoftDeletedEvent(overrides?: Record<string, unknown>) {
+  return {
+    id: "AAMkAG-ms-event-300",
+    "@removed": { reason: "deleted" },
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Graph API fetch mock factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates a mock fetch that intercepts Microsoft Graph Calendar API calls.
+ * Returns events in the Microsoft Graph response format (value[] with @odata links).
+ */
+function createMicrosoftApiFetch(options: {
+  events?: unknown[];
+  nextLink?: string;  // @odata.nextLink (pagination)
+  deltaLink?: string; // @odata.deltaLink (incremental sync token)
+  statusCode?: number;
+  errorText?: string;
+}) {
+  return async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    // Handle Microsoft Graph calendar events (including delta queries)
+    if (url.includes("graph.microsoft.com") && (url.includes("/events") || url.includes("delta"))) {
+      if (options.statusCode && options.statusCode !== 200) {
+        return new Response(
+          JSON.stringify({ error: { code: "ErrorAccessDenied", message: options.errorText ?? "Error" } }),
+          { status: options.statusCode },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          value: options.events ?? [],
+          "@odata.nextLink": options.nextLink,
+          "@odata.deltaLink": options.deltaLink,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    return new Response("Not found", { status: 404 });
+  };
+}
+
+/**
+ * Creates a paginated Microsoft Graph API mock that returns different pages.
+ */
+function createPaginatedMicrosoftApiFetch(pages: Array<{
+  events: unknown[];
+  nextLink?: string;  // @odata.nextLink
+  deltaLink?: string; // @odata.deltaLink
+}>) {
+  let callIndex = 0;
+  return async (input: string | URL | Request): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (url.includes("graph.microsoft.com") && (url.includes("/events") || url.includes("delta"))) {
+      const page = pages[callIndex] ?? pages[pages.length - 1];
+      callIndex++;
+
+      return new Response(
+        JSON.stringify({
+          value: page.events,
+          "@odata.nextLink": page.nextLink,
+          "@odata.deltaLink": page.deltaLink,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    return new Response("Not found", { status: 404 });
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft provider dispatch integration tests
+// ---------------------------------------------------------------------------
+
+describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microsoft Graph API + DOs)", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let syncQueue: Queue & { messages: unknown[] };
+  let writeQueue: Queue & { messages: unknown[] };
+  let accountDOState: AccountDOState;
+  let userGraphDOState: UserGraphDOState;
+  let env: Env;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+
+    // Seed with a Microsoft account
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email) VALUES (?, ?, ?, ?, ?)",
+    ).run(
+      MS_ACCOUNT_B.account_id,
+      MS_ACCOUNT_B.user_id,
+      MS_ACCOUNT_B.provider,   // 'microsoft'
+      MS_ACCOUNT_B.provider_subject,
+      MS_ACCOUNT_B.email,
+    );
+
+    d1 = createRealD1(db);
+    syncQueue = createMockQueue();
+    writeQueue = createMockQueue();
+
+    accountDOState = {
+      accessToken: MS_ACCESS_TOKEN,
+      syncToken: MS_DELTA_LINK,  // Microsoft stores full deltaLink URL as sync token
+      syncSuccessCalls: [],
+      syncFailureCalls: [],
+      setSyncTokenCalls: [],
+    };
+
+    userGraphDOState = {
+      applyDeltaCalls: [],
+    };
+
+    env = createMockEnv({
+      d1,
+      syncQueue,
+      writeQueue,
+      accountDOState,
+      userGraphDOState,
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // 1. Microsoft incremental sync uses delta queries
+  // -------------------------------------------------------------------------
+
+  it("incremental sync: uses Microsoft delta query and applies deltas", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftEvent()],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-1",
+      resource_id: "resource-ms-1",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // Verify deltas were passed to UserGraphDO
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const call = userGraphDOState.applyDeltaCalls[0];
+    expect(call.account_id).toBe(MS_ACCOUNT_B.account_id);
+    expect(call.deltas).toHaveLength(1);
+
+    const delta = call.deltas[0] as Record<string, unknown>;
+    expect(delta.type).toBe("updated");
+    expect(delta.origin_event_id).toBe("AAMkAG-ms-event-100");
+    expect(delta.origin_account_id).toBe(MS_ACCOUNT_B.account_id);
+
+    // Verify event payload was normalized via Microsoft normalizer
+    const eventPayload = delta.event as Record<string, unknown>;
+    expect(eventPayload).toBeDefined();
+    expect(eventPayload.title).toBe("MS Teams Standup");
+    expect(eventPayload.description).toBe("Daily standup notes");
+    expect(eventPayload.location).toBe("Teams Room 1");
+
+    // Delta link stored as sync token
+    expect(accountDOState.setSyncTokenCalls).toContain(MS_NEW_DELTA_LINK);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. Microsoft full sync paginates via @odata.nextLink
+  // -------------------------------------------------------------------------
+
+  it("full sync: paginates via @odata.nextLink and stores deltaLink", async () => {
+    const nextLinkUrl = "https://graph.microsoft.com/v1.0/me/calendars/primary/events/delta?$skiptoken=page2";
+
+    const msFetch = createPaginatedMicrosoftApiFetch([
+      {
+        events: [
+          makeMicrosoftEvent({ id: "AAMkAG-p1-1", subject: "Page 1 Event 1" }),
+          makeMicrosoftEvent({ id: "AAMkAG-p1-2", subject: "Page 1 Event 2" }),
+        ],
+        nextLink: nextLinkUrl,
+      },
+      {
+        events: [
+          makeMicrosoftEvent({ id: "AAMkAG-p2-1", subject: "Page 2 Event 1" }),
+        ],
+        deltaLink: MS_NEW_DELTA_LINK,
+      },
+    ]);
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: MS_ACCOUNT_B.account_id,
+      reason: "onboarding",
+    };
+
+    await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // All 3 events across 2 pages
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(3);
+
+    const eventIds = userGraphDOState.applyDeltaCalls[0].deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toContain("AAMkAG-p1-1");
+    expect(eventIds).toContain("AAMkAG-p1-2");
+    expect(eventIds).toContain("AAMkAG-p2-1");
+
+    // Delta link from last page saved as sync token
+    expect(accountDOState.setSyncTokenCalls).toContain(MS_NEW_DELTA_LINK);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Microsoft managed mirror events are filtered (Invariant E)
+  // -------------------------------------------------------------------------
+
+  it("managed mirrors with com.tminus.metadata extension are filtered (Invariant E)", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      events: [
+        makeMicrosoftEvent({ id: "AAMkAG-origin-1" }),
+        makeMicrosoftManagedMirrorEvent(),
+        makeMicrosoftEvent({ id: "AAMkAG-origin-2", subject: "Real Event 2" }),
+      ],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-2",
+      resource_id: "resource-ms-2",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // Only 2 origin events (managed mirror filtered out)
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(2);
+
+    const eventIds = userGraphDOState.applyDeltaCalls[0].deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toContain("AAMkAG-origin-1");
+    expect(eventIds).toContain("AAMkAG-origin-2");
+    expect(eventIds).not.toContain("AAMkAG-ms-mirror-200");
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. Microsoft deleted events (@removed) produce delete deltas
+  // -------------------------------------------------------------------------
+
+  it("@removed events produce 'deleted' type deltas", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftDeletedEvent()],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-3",
+      resource_id: "resource-ms-3",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const delta = userGraphDOState.applyDeltaCalls[0].deltas[0] as Record<string, unknown>;
+    expect(delta.type).toBe("deleted");
+    expect(delta.origin_event_id).toBe("AAMkAG-ms-event-300");
+    expect(delta.event).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. Microsoft 403 marks sync failure
+  // -------------------------------------------------------------------------
+
+  it("403 from Microsoft marks sync failure and does not retry", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      statusCode: 403,
+      errorText: "Insufficient privileges",
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-4",
+      resource_id: "resource-ms-4",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(accountDOState.syncFailureCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls[0].error).toContain("403");
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Provider dispatch is seamless -- no message schema changes
+  // -------------------------------------------------------------------------
+
+  it("same message schema works for Microsoft (provider looked up from D1)", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftEvent()],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    // The message uses account_id -- provider is resolved via D1 lookup
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,  // D1 has provider='microsoft' for this account
+      channel_id: "channel-ms-5",
+      resource_id: "resource-ms-5",
+      ping_ts: new Date().toISOString(),
+    };
+
+    // No special Microsoft-specific fields in the message
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 });

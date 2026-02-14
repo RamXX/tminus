@@ -2,6 +2,10 @@
  * write-consumer -- Processes write-queue messages for mirror creation,
  * update, and deletion with idempotency.
  *
+ * Provider-agnostic: works with any CalendarProvider (Google or Microsoft).
+ * The calendarClientFactory injected at construction determines which provider
+ * API is used for the target account.
+ *
  * Handles two message types:
  * - UPSERT_MIRROR: Create or update mirror events in target calendars
  * - DELETE_MIRROR: Remove mirror events from target calendars
@@ -10,8 +14,8 @@
  * - Idempotency via projection hash comparison (Invariant D)
  * - Busy overlay calendar auto-creation when missing
  * - Mirror state tracking (PENDING -> ACTIVE, ACTIVE -> DELETED, * -> ERROR)
- * - Error handling with typed retry strategies per Google API error
- * - Extended properties set on all managed events (loop prevention)
+ * - Error handling with typed retry strategies per provider API error (Google + Microsoft)
+ * - Extended properties / open extensions set on all managed events (loop prevention)
  */
 
 import {
@@ -20,6 +24,10 @@ import {
   TokenExpiredError,
   RateLimitError,
   ResourceNotFoundError,
+  MicrosoftApiError,
+  MicrosoftTokenExpiredError,
+  MicrosoftRateLimitError,
+  MicrosoftResourceNotFoundError,
   BUSY_OVERLAY_CALENDAR_NAME,
 } from "@tminus/shared";
 import type {
@@ -101,22 +109,36 @@ interface RetryStrategy {
 }
 
 /**
- * Classify a Google API error into a retry strategy.
+ * Classify a provider API error into a retry strategy.
  *
- * | Error       | Strategy              | Max Retries |
- * |-------------|-----------------------|-------------|
- * | Google 429  | Exponential backoff   | 5           |
- * | Google 500/503 | Backoff            | 3           |
- * | Google 401  | Refresh token, retry  | 1           |
- * | Google 403  | Mark ERROR, no retry  | 0           |
+ * Handles both Google and Microsoft error types uniformly:
+ *
+ * | Error               | Strategy              | Max Retries |
+ * |---------------------|-----------------------|-------------|
+ * | 429 (rate limit)    | Exponential backoff   | 5           |
+ * | 500/503 (server)    | Backoff               | 3           |
+ * | 401 (token expired) | Refresh token, retry  | 1           |
+ * | 403 (forbidden)     | Mark ERROR, no retry  | 0           |
+ * | Other 4xx           | Mark ERROR, no retry  | 0           |
  */
 function classifyError(err: unknown): RetryStrategy {
+  // Google rate limit
   if (err instanceof RateLimitError) {
     return { shouldRetry: true, maxRetries: 5 };
   }
+  // Microsoft rate limit
+  if (err instanceof MicrosoftRateLimitError) {
+    return { shouldRetry: true, maxRetries: 5 };
+  }
+  // Google token expired
   if (err instanceof TokenExpiredError) {
     return { shouldRetry: true, maxRetries: 1 };
   }
+  // Microsoft token expired
+  if (err instanceof MicrosoftTokenExpiredError) {
+    return { shouldRetry: true, maxRetries: 1 };
+  }
+  // Google API errors (by status code)
   if (err instanceof GoogleApiError) {
     if (err.statusCode === 500 || err.statusCode === 503) {
       return { shouldRetry: true, maxRetries: 3 };
@@ -125,6 +147,17 @@ function classifyError(err: unknown): RetryStrategy {
       return { shouldRetry: false, maxRetries: 0 };
     }
     // Other 4xx errors: no retry
+    return { shouldRetry: false, maxRetries: 0 };
+  }
+  // Microsoft API errors (by status code)
+  if (err instanceof MicrosoftApiError) {
+    if (err.statusCode === 500 || err.statusCode === 503) {
+      return { shouldRetry: true, maxRetries: 3 };
+    }
+    if (err.statusCode === 403) {
+      return { shouldRetry: false, maxRetries: 0 };
+    }
+    // Other 4xx errors (404, etc.): no retry
     return { shouldRetry: false, maxRetries: 0 };
   }
   // Unknown errors: retry once
@@ -335,8 +368,11 @@ export class WriteConsumer {
       try {
         await client.deleteEvent(calendarId, msg.provider_event_id);
       } catch (err) {
-        // 404 on delete is fine -- event already gone
-        if (err instanceof ResourceNotFoundError) {
+        // 404 on delete is fine -- event already gone (both Google and Microsoft)
+        if (
+          err instanceof ResourceNotFoundError ||
+          err instanceof MicrosoftResourceNotFoundError
+        ) {
           // Event already deleted, proceed to update state
         } else {
           throw err;

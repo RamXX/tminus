@@ -16,6 +16,10 @@ import {
   TokenExpiredError,
   RateLimitError,
   ResourceNotFoundError,
+  MicrosoftApiError,
+  MicrosoftTokenExpiredError,
+  MicrosoftRateLimitError,
+  MicrosoftResourceNotFoundError,
   BUSY_OVERLAY_CALENDAR_NAME,
 } from "@tminus/shared";
 import type {
@@ -1117,6 +1121,198 @@ describe("WriteConsumer integration", () => {
       expect(result1.success).toBe(true);
       expect(result2.success).toBe(true);
       expect(calendarProvider.insertedEvents).toHaveLength(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft error handling
+  // -------------------------------------------------------------------------
+
+  describe("Microsoft error handling in WriteConsumer", () => {
+    it("returns retry=true for MicrosoftRateLimitError (429)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      calendarProvider.insertEventError = new MicrosoftRateLimitError();
+
+      const result = await consumer.processMessage({
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_ms_retry_429",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.retry).toBe(true);
+
+      // Mirror should stay PENDING (not ERROR) for transient failures
+      const mirror = mirrorStore.getMirror(CANONICAL_EVENT_ID, TARGET_ACCOUNT_ID);
+      expect(mirror!.state).toBe("PENDING");
+    });
+
+    it("returns retry=true for MicrosoftTokenExpiredError (401)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      calendarProvider.insertEventError = new MicrosoftTokenExpiredError();
+
+      const result = await consumer.processMessage({
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_ms_retry_401",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.retry).toBe(true);
+    });
+
+    it("marks ERROR immediately for MicrosoftApiError 403 (permanent)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      calendarProvider.insertEventError = new MicrosoftApiError("Forbidden", 403);
+
+      const result = await consumer.processMessage({
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_ms_no_retry_403",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.retry).toBe(false);
+
+      const mirror = mirrorStore.getMirror(CANONICAL_EVENT_ID, TARGET_ACCOUNT_ID);
+      expect(mirror!.state).toBe("ERROR");
+      expect(mirror!.error_message).toBe("Forbidden");
+    });
+
+    it("handles MicrosoftResourceNotFoundError on delete gracefully (event gone)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      calendarProvider.deleteEventError = new MicrosoftResourceNotFoundError();
+
+      const result = await consumer.processMessage({
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_ms_del_404",
+      });
+
+      // Should succeed (event already gone)
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(CANONICAL_EVENT_ID, TARGET_ACCOUNT_ID);
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("returns retry=true for MicrosoftApiError 500/503 (transient)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      calendarProvider.insertEventError = new MicrosoftApiError("Server error", 500);
+
+      const result = await consumer.processMessage({
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_ms_retry_500",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.retry).toBe(true);
+
+      const mirror = mirrorStore.getMirror(CANONICAL_EVENT_ID, TARGET_ACCOUNT_ID);
+      expect(mirror!.state).toBe("PENDING");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cross-provider busy overlay (Google event -> Microsoft busy block)
+  // -------------------------------------------------------------------------
+
+  describe("cross-provider busy overlay", () => {
+    it("WriteConsumer works with any CalendarProvider for cross-provider mirroring", async () => {
+      // This test proves the WriteConsumer is provider-agnostic.
+      // The calendarClientFactory could return Google or Microsoft client.
+      // The consumer doesn't need to know -- CalendarProvider interface is uniform.
+      //
+      // Cross-provider scenario: Google origin event needs a mirror in a Microsoft account.
+      // The WriteConsumer creates the mirror using whatever CalendarProvider the factory gives it.
+
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      // The projected payload includes extended properties from Google origin.
+      // When written to Microsoft, the CalendarProvider (MicrosoftCalendarClient)
+      // maps these to open extensions. The WriteConsumer doesn't care -- it just
+      // passes the ProjectedEvent to the provider.
+      const crossProviderPayload = makeProjectedPayload({
+        summary: "Busy (from Google)",
+        description: "Cross-provider mirror from Google calendar",
+      });
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: crossProviderPayload,
+        idempotency_key: "idem_cross_provider_1",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      // Verify the CalendarProvider received the correct payload
+      expect(calendarProvider.insertedEvents).toHaveLength(1);
+      expect(calendarProvider.insertedEvents[0].event.summary).toBe("Busy (from Google)");
+      expect(calendarProvider.insertedEvents[0].event.extendedProperties.private.tminus).toBe("true");
+      expect(calendarProvider.insertedEvents[0].event.extendedProperties.private.managed).toBe("true");
+
+      // Mirror state updated
+      const mirror = mirrorStore.getMirror(CANONICAL_EVENT_ID, TARGET_ACCOUNT_ID);
+      expect(mirror!.state).toBe("ACTIVE");
+      expect(mirror!.provider_event_id).toBe(MOCK_PROVIDER_EVENT_ID);
     });
   });
 });

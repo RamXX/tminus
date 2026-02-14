@@ -12,6 +12,10 @@ import {
   RateLimitError,
   ResourceNotFoundError,
   SyncTokenExpiredError,
+  MicrosoftApiError,
+  MicrosoftTokenExpiredError,
+  MicrosoftRateLimitError,
+  MicrosoftResourceNotFoundError,
 } from "@tminus/shared";
 import { classifyError } from "./write-consumer";
 
@@ -74,5 +78,45 @@ describe("classifyError", () => {
     const result = classifyError("network failure");
     expect(result.shouldRetry).toBe(true);
     expect(result.maxRetries).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft error classification
+  // -------------------------------------------------------------------------
+
+  it("Microsoft 429 MicrosoftRateLimitError: retry with max 5", () => {
+    const result = classifyError(new MicrosoftRateLimitError());
+    expect(result.shouldRetry).toBe(true);
+    expect(result.maxRetries).toBe(5);
+  });
+
+  it("Microsoft 401 MicrosoftTokenExpiredError: retry with max 1", () => {
+    const result = classifyError(new MicrosoftTokenExpiredError());
+    expect(result.shouldRetry).toBe(true);
+    expect(result.maxRetries).toBe(1);
+  });
+
+  it("Microsoft 500 MicrosoftApiError: retry with max 3", () => {
+    const result = classifyError(new MicrosoftApiError("Internal error", 500));
+    expect(result.shouldRetry).toBe(true);
+    expect(result.maxRetries).toBe(3);
+  });
+
+  it("Microsoft 503 MicrosoftApiError: retry with max 3", () => {
+    const result = classifyError(new MicrosoftApiError("Service unavailable", 503));
+    expect(result.shouldRetry).toBe(true);
+    expect(result.maxRetries).toBe(3);
+  });
+
+  it("Microsoft 403 MicrosoftApiError: no retry (permanent)", () => {
+    const result = classifyError(new MicrosoftApiError("Forbidden", 403));
+    expect(result.shouldRetry).toBe(false);
+    expect(result.maxRetries).toBe(0);
+  });
+
+  it("Microsoft 404 MicrosoftResourceNotFoundError: no retry (permanent)", () => {
+    const result = classifyError(new MicrosoftResourceNotFoundError());
+    expect(result.shouldRetry).toBe(false);
+    expect(result.maxRetries).toBe(0);
   });
 });

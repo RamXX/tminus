@@ -1,8 +1,11 @@
 /**
  * write-consumer -- Cloudflare Worker queue consumer for write-queue.
  *
+ * Provider-aware: dispatches to Google or Microsoft Calendar APIs based on
+ * the target account's provider type (looked up from D1 registry).
+ *
  * Processes UPSERT_MIRROR and DELETE_MIRROR messages to create, update,
- * and delete mirror events in target Google Calendar accounts.
+ * and delete mirror events in target calendar accounts (Google or Microsoft).
  *
  * Queue configuration (from wrangler.toml):
  * - queue: tminus-write-queue
@@ -12,19 +15,19 @@
  * Bindings:
  * - ACCOUNT: AccountDO namespace (for getAccessToken)
  * - USER_GRAPH: UserGraphDO namespace (for mirror state)
- * - DB: D1 registry database
+ * - DB: D1 registry database (for account -> user_id + provider lookup)
  */
 
 import {
   APP_NAME,
-  GoogleCalendarClient,
-  BUSY_OVERLAY_CALENDAR_NAME,
+  createCalendarProvider,
 } from "@tminus/shared";
 import type {
   UpsertMirrorMessage,
   DeleteMirrorMessage,
   MirrorState,
   AccountId,
+  ProviderType,
 } from "@tminus/shared";
 import { WriteConsumer } from "./write-consumer";
 import type {
@@ -270,14 +273,15 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
         try {
           const body = msg.body;
 
-          // Look up user_id from D1 registry for the target account.
-          // This is needed to resolve the correct UserGraphDO instance.
-          const userRow = await env.DB
-            .prepare("SELECT user_id FROM accounts WHERE account_id = ?1")
+          // Look up user_id and provider type from D1 registry for the target account.
+          // user_id is needed to resolve the correct UserGraphDO instance.
+          // provider is needed to create the correct CalendarProvider (Google or Microsoft).
+          const accountRow = await env.DB
+            .prepare("SELECT user_id, provider FROM accounts WHERE account_id = ?1")
             .bind(body.target_account_id as string)
-            .first<{ user_id: string }>();
+            .first<{ user_id: string; provider: string }>();
 
-          if (!userRow) {
+          if (!accountRow) {
             console.error(
               `write-consumer: no user_id found for account ${body.target_account_id}`,
             );
@@ -285,8 +289,10 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
             continue;
           }
 
+          const providerType: ProviderType = accountRow.provider === "microsoft" ? "microsoft" : "google";
+
           // Resolve UserGraphDO stub
-          const userGraphId = env.USER_GRAPH.idFromName(userRow.user_id);
+          const userGraphId = env.USER_GRAPH.idFromName(accountRow.user_id);
           const userGraphStub = env.USER_GRAPH.get(userGraphId);
 
           // Create DO-backed dependencies
@@ -301,13 +307,14 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
             body,
           );
 
-          // Create WriteConsumer with DO-backed dependencies
+          // Create WriteConsumer with DO-backed dependencies.
+          // The calendarClientFactory dispatches to the correct provider (Google or Microsoft).
           const consumer = new WriteConsumer({
             mirrorStore: cachedMirrorStore,
             tokenProvider: doTokenProvider,
             calendarClientFactory: deps.fetchFn
-              ? (token: string) => new GoogleCalendarClient(token, deps.fetchFn)
-              : undefined,
+              ? (token: string) => createCalendarProvider(providerType, token, deps.fetchFn)
+              : (token: string) => createCalendarProvider(providerType, token),
           });
 
           const result = await consumer.processMessage(body);
