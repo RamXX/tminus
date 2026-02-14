@@ -15,6 +15,13 @@
 import { isValidId } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
+// Durable Object class re-exports (required by wrangler for DO hosting)
+// ---------------------------------------------------------------------------
+
+export { UserGraphDO } from "@tminus/do-user-graph";
+export { AccountDO } from "@tminus/do-account";
+
+// ---------------------------------------------------------------------------
 // Error codes (from DESIGN.md Section 3)
 // ---------------------------------------------------------------------------
 

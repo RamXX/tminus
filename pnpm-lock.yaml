@@ -108,6 +108,12 @@ importers:
 
   workers/api:
     dependencies:
+      '@tminus/do-account':
+        specifier: workspace:*
+        version: link:../../durable-objects/account
+      '@tminus/do-user-graph':
+        specifier: workspace:*
+        version: link:../../durable-objects/user-graph
       '@tminus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -145,6 +151,9 @@ importers:
       '@tminus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@tminus/workflow-reconcile':
+        specifier: workspace:*
+        version: link:../../workflows/reconcile
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.8.0
@@ -176,6 +185,9 @@ importers:
       '@tminus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@tminus/workflow-onboarding':
+        specifier: workspace:*
+        version: link:../../workflows/onboarding
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.8.0

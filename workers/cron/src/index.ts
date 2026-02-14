@@ -17,6 +17,12 @@
 import type { ReconcileAccountMessage, AccountId } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
+// Workflow class re-export (required by wrangler for Workflow hosting)
+// ---------------------------------------------------------------------------
+
+export { ReconcileWorkflow } from "@tminus/workflow-reconcile";
+
+// ---------------------------------------------------------------------------
 // Cron schedule constants (must match wrangler.toml [triggers].crons)
 // ---------------------------------------------------------------------------
 

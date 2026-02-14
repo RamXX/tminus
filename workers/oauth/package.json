@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "@tminus/shared": "workspace:*",
-    "@tminus/d1-registry": "workspace:*"
+    "@tminus/d1-registry": "workspace:*",
+    "@tminus/workflow-onboarding": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.8.0",

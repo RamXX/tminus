@@ -11,6 +11,12 @@
  */
 
 import { generateId } from "@tminus/shared";
+
+// ---------------------------------------------------------------------------
+// Workflow class re-export (required by wrangler for Workflow hosting)
+// ---------------------------------------------------------------------------
+
+export { OnboardingWorkflow } from "@tminus/workflow-onboarding";
 import type { FetchFn } from "@tminus/shared";
 export type { FetchFn } from "@tminus/shared";
 import type { AccountRow } from "@tminus/d1-registry";
