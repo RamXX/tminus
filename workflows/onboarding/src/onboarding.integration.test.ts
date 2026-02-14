@@ -659,17 +659,16 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
       user_id: TEST_USER.user_id,
     });
 
-    // All 5 events across 3 pages
+    // All 5 events returned by auto-paginating listEvents (consumes all 3 API pages internally)
     expect(result.eventSync.totalEvents).toBe(5);
     expect(result.eventSync.totalDeltas).toBe(5);
-    expect(result.eventSync.pagesProcessed).toBe(3);
+    // listEvents auto-paginates, so the workflow sees 1 "page" containing all events
+    expect(result.eventSync.pagesProcessed).toBe(1);
     expect(result.eventSync.syncToken).toBe(TEST_SYNC_TOKEN);
 
-    // Deltas applied per page (3 separate applyProviderDelta calls)
-    expect(userGraphDOState.applyDeltaCalls).toHaveLength(3);
-    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(2);
-    expect(userGraphDOState.applyDeltaCalls[1].deltas).toHaveLength(1);
-    expect(userGraphDOState.applyDeltaCalls[2].deltas).toHaveLength(2);
+    // All deltas applied in a single batch (listEvents returns all events at once)
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(5);
 
     // Verify all event IDs
     const allDeltaEventIds = userGraphDOState.applyDeltaCalls.flatMap(

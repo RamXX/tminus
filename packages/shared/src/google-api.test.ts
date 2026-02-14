@@ -57,6 +57,22 @@ function mockFetch204(): FetchFn {
   );
 }
 
+/**
+ * Build a mock FetchFn that returns different responses on successive calls.
+ * Each element in `responses` is returned in order; extra calls return the last response.
+ */
+function mockFetchSequence(responses: unknown[]): FetchFn {
+  let callIndex = 0;
+  return vi.fn(async () => {
+    const body = responses[Math.min(callIndex, responses.length - 1)];
+    callIndex++;
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+}
+
 /** A sample ProjectedEvent for insert/patch tests. */
 function sampleProjectedEvent(): ProjectedEvent {
   return {
@@ -134,28 +150,83 @@ describe("GoogleCalendarClient.listEvents", () => {
     expect(result.nextSyncToken).toBe("sync_empty");
   });
 
-  it("handles pagination with nextPageToken", async () => {
-    const fetchFn = mockFetch({
-      items: [{ id: "evt_1", summary: "Page 1 event" }],
-      nextPageToken: "page_token_2",
-    });
+  it("auto-paginates through all pages and returns final nextSyncToken", async () => {
+    const fetchFn = mockFetchSequence([
+      {
+        items: [{ id: "evt_1", summary: "Page 1 event" }],
+        nextPageToken: "page_token_2",
+      },
+      {
+        items: [{ id: "evt_2", summary: "Page 2 event" }],
+        nextPageToken: "page_token_3",
+      },
+      {
+        items: [{ id: "evt_3", summary: "Page 3 event" }],
+        nextSyncToken: "sync_final",
+      },
+    ]);
     const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
 
     const result = await client.listEvents("primary");
 
-    expect(result.events).toHaveLength(1);
-    expect(result.nextPageToken).toBe("page_token_2");
-    expect(result.nextSyncToken).toBeUndefined();
+    // All events from all pages are accumulated
+    expect(result.events).toHaveLength(3);
+    expect(result.events[0].id).toBe("evt_1");
+    expect(result.events[1].id).toBe("evt_2");
+    expect(result.events[2].id).toBe("evt_3");
+    // nextSyncToken comes from the last page
+    expect(result.nextSyncToken).toBe("sync_final");
+    // nextPageToken is undefined since all pages were consumed
+    expect(result.nextPageToken).toBeUndefined();
+    // Verify 3 fetch calls were made
+    expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
-  it("sends pageToken as query parameter when provided", async () => {
-    const fetchFn = mockFetch({ items: [], nextSyncToken: "sync_final" });
+  it("passes pageToken query parameter on subsequent pagination requests", async () => {
+    const fetchFn = mockFetchSequence([
+      {
+        items: [{ id: "evt_1" }],
+        nextPageToken: "page_tok_2",
+      },
+      {
+        items: [{ id: "evt_2" }],
+        nextSyncToken: "sync_done",
+      },
+    ]);
     const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
 
-    await client.listEvents("primary", undefined, "page_token_2");
+    await client.listEvents("primary");
 
-    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toContain("pageToken=page_token_2");
+    // Second call should include the pageToken from the first response
+    const [url2] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(url2).toContain("pageToken=page_tok_2");
+  });
+
+  it("uses caller-provided pageToken on initial request and continues paginating", async () => {
+    // When caller provides a pageToken (e.g., resuming from a known page),
+    // it is used for the first request. Pagination continues from there.
+    const fetchFn = mockFetchSequence([
+      {
+        items: [{ id: "evt_mid" }],
+        nextPageToken: "page_token_3",
+      },
+      {
+        items: [{ id: "evt_last" }],
+        nextSyncToken: "sync_final",
+      },
+    ]);
+    const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
+
+    const result = await client.listEvents("primary", undefined, "page_token_2");
+
+    const [url1] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url1).toContain("pageToken=page_token_2");
+
+    const [url2] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(url2).toContain("pageToken=page_token_3");
+
+    expect(result.events).toHaveLength(2);
+    expect(result.nextSyncToken).toBe("sync_final");
   });
 
   it("sends syncToken as query parameter for incremental sync", async () => {
@@ -173,7 +244,7 @@ describe("GoogleCalendarClient.listEvents", () => {
     expect(result.nextSyncToken).toBe("sync_new");
   });
 
-  it("sends both syncToken and pageToken when both provided", async () => {
+  it("sends both syncToken and pageToken when both provided on first request", async () => {
     const fetchFn = mockFetch({ items: [], nextSyncToken: "sync_final" });
     const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
 
@@ -182,6 +253,58 @@ describe("GoogleCalendarClient.listEvents", () => {
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toContain("syncToken=sync_tok");
     expect(url).toContain("pageToken=page_tok");
+  });
+
+  it("auto-paginates incremental sync through all pages", async () => {
+    // When incremental sync returns paginated results, listEvents should
+    // follow all pages and return the nextSyncToken from the last page.
+    const fetchFn = mockFetchSequence([
+      {
+        items: [{ id: "evt_changed_1", summary: "Changed 1" }],
+        nextPageToken: "inc_page_2",
+      },
+      {
+        items: [{ id: "evt_changed_2", summary: "Changed 2" }],
+        nextSyncToken: "sync_new_token",
+      },
+    ]);
+    const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
+
+    const result = await client.listEvents("primary", "sync_old_token");
+
+    // First request should include syncToken
+    const [url1] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url1).toContain("syncToken=sync_old_token");
+    expect(url1).not.toContain("pageToken");
+
+    // Second request should include syncToken AND pageToken from first response
+    const [url2] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(url2).toContain("syncToken=sync_old_token");
+    expect(url2).toContain("pageToken=inc_page_2");
+
+    // All events accumulated
+    expect(result.events).toHaveLength(2);
+    expect(result.events[0].id).toBe("evt_changed_1");
+    expect(result.events[1].id).toBe("evt_changed_2");
+    // Final syncToken from last page
+    expect(result.nextSyncToken).toBe("sync_new_token");
+    expect(result.nextPageToken).toBeUndefined();
+  });
+
+  it("single-page response returns immediately without extra requests", async () => {
+    const fetchFn = mockFetch({
+      items: [{ id: "evt_1", summary: "Only event" }],
+      nextSyncToken: "sync_single",
+    });
+    const client = new GoogleCalendarClient(TEST_TOKEN, fetchFn);
+
+    const result = await client.listEvents("primary");
+
+    expect(result.events).toHaveLength(1);
+    expect(result.nextSyncToken).toBe("sync_single");
+    expect(result.nextPageToken).toBeUndefined();
+    // Only one fetch call -- no unnecessary pagination
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it("throws SyncTokenExpiredError on 410 Gone", async () => {

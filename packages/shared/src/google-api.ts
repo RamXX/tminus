@@ -176,31 +176,53 @@ export class GoogleCalendarClient implements CalendarProvider {
    * List events from a calendar. Supports both incremental sync (via syncToken)
    * and pagination (via pageToken).
    *
+   * Automatically paginates through ALL pages, accumulating events, and returns
+   * the nextSyncToken from the final page. The Google Calendar API only returns
+   * nextSyncToken on the last page of results.
+   *
    * When syncToken is provided, returns only events changed since the token was issued.
    * A 410 Gone response means the syncToken is stale -- throws SyncTokenExpiredError.
+   *
+   * @param calendarId - Calendar ID (e.g., "primary")
+   * @param syncToken - Sync token from a previous listEvents call (incremental sync)
+   * @param pageToken - Page token to resume pagination from (optional, rarely needed)
    */
   async listEvents(
     calendarId: string,
     syncToken?: string,
     pageToken?: string,
   ): Promise<ListEventsResponse> {
-    const params = new URLSearchParams();
+    const allEvents: GoogleCalendarEvent[] = [];
+    let currentPageToken: string | undefined = pageToken;
+    let nextSyncToken: string | undefined;
 
-    if (syncToken) {
-      // Incremental sync -- only syncToken and pageToken are allowed
-      params.set("syncToken", syncToken);
-    }
-    if (pageToken) {
-      params.set("pageToken", pageToken);
-    }
+    do {
+      const params = new URLSearchParams();
 
-    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
-    const body = await this.request<GoogleEventsListRaw>(url, { method: "GET" });
+      if (syncToken) {
+        // Incremental sync -- syncToken is included on every page request
+        params.set("syncToken", syncToken);
+      }
+      if (currentPageToken) {
+        params.set("pageToken", currentPageToken);
+      }
+
+      const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
+      const body = await this.request<GoogleEventsListRaw>(url, { method: "GET" });
+
+      allEvents.push(...(body.items ?? []));
+      currentPageToken = body.nextPageToken;
+
+      // nextSyncToken is only present on the final page
+      if (body.nextSyncToken) {
+        nextSyncToken = body.nextSyncToken;
+      }
+    } while (currentPageToken);
 
     return {
-      events: body.items ?? [],
-      nextPageToken: body.nextPageToken,
-      nextSyncToken: body.nextSyncToken,
+      events: allEvents,
+      nextPageToken: undefined,
+      nextSyncToken,
     };
   }
 
