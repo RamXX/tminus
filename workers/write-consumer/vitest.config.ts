@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     name: path.basename(path.resolve()),
     include: ["src/**/*.test.ts"],
+    exclude: ["src/**/*.real.integration.test.ts"],
   },
   resolve: {
     alias: {

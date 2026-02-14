@@ -12,9 +12,15 @@
  *
  * Uses test.projects to define a single project, which overrides
  * vitest.workspace.ts discovery and avoids name collisions.
+ *
+ * Includes:
+ * - scripts/test/ harness smoke tests
+ * - workers/sync-consumer real integration tests
+ * - workers/write-consumer real integration tests
  */
 
 import { defineConfig } from "vitest/config";
+import path from "path";
 
 export default defineConfig({
   test: {
@@ -22,7 +28,10 @@ export default defineConfig({
       {
         test: {
           name: "integration-real",
-          include: ["scripts/test/**/*.integration.test.ts"],
+          include: [
+            "scripts/test/**/*.integration.test.ts",
+            "workers/*/src/**/*.real.integration.test.ts",
+          ],
           // Real integration tests are slow -- generous timeout
           testTimeout: 120_000,
           // Run serially to avoid port conflicts
@@ -31,6 +40,15 @@ export default defineConfig({
             forks: {
               singleFork: true,
             },
+          },
+        },
+        resolve: {
+          alias: {
+            "@tminus/shared": path.resolve(__dirname, "packages/shared/src"),
+            "@tminus/d1-registry": path.resolve(
+              __dirname,
+              "packages/d1-registry/src",
+            ),
           },
         },
       },
