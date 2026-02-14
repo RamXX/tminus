@@ -72,3 +72,20 @@ export {
   getSchemaVersion,
 } from "./schema";
 export type { Migration, SqlStorageLike, SqlStorageCursorLike } from "./schema";
+
+// Re-export Google Calendar API abstraction layer
+export {
+  GoogleCalendarClient,
+  GoogleApiError,
+  TokenExpiredError,
+  ResourceNotFoundError,
+  SyncTokenExpiredError,
+  RateLimitError,
+} from "./google-api";
+export type {
+  FetchFn,
+  CalendarProvider,
+  ListEventsResponse,
+  CalendarListEntry,
+  WatchResponse,
+} from "./google-api";
