@@ -1,3 +1,45 @@
+# ============================================================================
+# tminus-api -- Main API worker
+# Hosts UserGraphDO and AccountDO class definitions.
+# Other workers reference these DOs via script_name = "tminus-api".
+# ============================================================================
+
 name = "tminus-api"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+
+# --- Durable Object class definitions (hosted here) -----------------------
+
+[durable_objects]
+classes = [
+  { binding = "USER_GRAPH", class_name = "UserGraphDO" },
+  { binding = "ACCOUNT", class_name = "AccountDO" },
+]
+
+# DO migrations -- SQLite storage for both DOs
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserGraphDO", "AccountDO"]
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "placeholder-d1-id"
+
+# --- Queue producers -------------------------------------------------------
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+[[queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# MASTER_KEY          -- envelope encryption master key
+# JWT_SECRET          -- API auth JWT signing secret

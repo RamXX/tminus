@@ -1,3 +1,51 @@
+# ============================================================================
+# tminus-sync-consumer -- Processes sync queue messages
+# Consumes from sync-queue, produces to write-queue and sync-queue (410 retry).
+# Extended CPU limit for large batch processing.
+# ============================================================================
+
 name = "tminus-sync-consumer"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+
+# --- CPU limits (extended for large batch processing) -----------------------
+
+[limits]
+cpu_ms = 300000
+
+# --- Durable Object references (hosted on tminus-api) ----------------------
+
+[durable_objects]
+classes = [
+  { binding = "USER_GRAPH", class_name = "UserGraphDO", script_name = "tminus-api" },
+  { binding = "ACCOUNT", class_name = "AccountDO", script_name = "tminus-api" },
+]
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "placeholder-d1-id"
+
+# --- Queue producers -------------------------------------------------------
+
+[[queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+# --- Queue consumer ---------------------------------------------------------
+
+[[queues.consumers]]
+queue = "tminus-sync-queue"
+max_retries = 5
+dead_letter_queue = "tminus-sync-queue-dlq"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# MASTER_KEY          -- envelope encryption master key

@@ -1,3 +1,25 @@
+# ============================================================================
+# tminus-webhook -- Google Calendar push notification receiver
+# Receives webhook callbacks and enqueues sync messages.
+# ============================================================================
+
 name = "tminus-webhook"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "placeholder-d1-id"
+
+# --- Queue producers -------------------------------------------------------
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# MASTER_KEY          -- envelope encryption master key
+# JWT_SECRET          -- API auth JWT signing secret

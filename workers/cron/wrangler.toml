@@ -1,3 +1,52 @@
+# ============================================================================
+# tminus-cron -- Scheduled maintenance worker
+# Handles channel renewal, token health checks, and drift reconciliation.
+# Hosts ReconcileWorkflow class definition.
+# ============================================================================
+
 name = "tminus-cron"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+
+# --- Cron triggers ----------------------------------------------------------
+
+[triggers]
+crons = [
+  "0 */6 * * *",   # Channel renewal: every 6 hours
+  "0 */12 * * *",  # Token health check: every 12 hours
+  "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+]
+
+# --- Durable Object references (hosted on tminus-api) ----------------------
+
+[durable_objects]
+classes = [
+  { binding = "ACCOUNT", class_name = "AccountDO", script_name = "tminus-api" },
+]
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "placeholder-d1-id"
+
+# --- Queue producers -------------------------------------------------------
+
+[[queues.producers]]
+binding = "RECONCILE_QUEUE"
+queue = "tminus-reconcile-queue"
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+# --- Workflow definitions (hosted here) ------------------------------------
+
+[[workflows]]
+binding = "RECONCILE_WORKFLOW"
+name = "reconcile-workflow"
+class_name = "ReconcileWorkflow"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# MASTER_KEY          -- envelope encryption master key

@@ -1,3 +1,41 @@
+# ============================================================================
+# tminus-write-consumer -- Processes write queue messages
+# Consumes from write-queue. Applies calendar writes via Google API.
+# Extended CPU limit for large batch processing.
+# ============================================================================
+
 name = "tminus-write-consumer"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+
+# --- CPU limits (extended for large batch processing) -----------------------
+
+[limits]
+cpu_ms = 300000
+
+# --- Durable Object references (hosted on tminus-api) ----------------------
+
+[durable_objects]
+classes = [
+  { binding = "ACCOUNT", class_name = "AccountDO", script_name = "tminus-api" },
+  { binding = "USER_GRAPH", class_name = "UserGraphDO", script_name = "tminus-api" },
+]
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "placeholder-d1-id"
+
+# --- Queue consumer ---------------------------------------------------------
+
+[[queues.consumers]]
+queue = "tminus-write-queue"
+max_retries = 5
+dead_letter_queue = "tminus-write-queue-dlq"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# MASTER_KEY          -- envelope encryption master key
