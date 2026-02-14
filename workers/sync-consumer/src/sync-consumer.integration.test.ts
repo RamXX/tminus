@@ -479,7 +479,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // Verify deltas were passed to UserGraphDO
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
@@ -524,7 +524,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       reason: "onboarding",
     };
 
-    await handleFullSync(message, env, { fetchFn: googleFetch });
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // All 3 events across 2 pages should be in a single applyProviderDelta call
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
@@ -565,7 +565,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // Only 2 origin events should produce deltas (managed mirror filtered out)
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
@@ -598,7 +598,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // SYNC_FULL should be enqueued
     expect(syncQueue.messages).toHaveLength(1);
@@ -645,7 +645,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
     const delta = userGraphDOState.applyDeltaCalls[0].deltas[0] as Record<
@@ -687,7 +687,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // Verify the specific token was saved
     expect(accountDOState.setSyncTokenCalls).toEqual([specificSyncToken]);
@@ -712,7 +712,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
     const delta = userGraphDOState.applyDeltaCalls[0].deltas[0] as Record<
@@ -743,7 +743,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // Sync failure marked
     expect(accountDOState.syncFailureCalls).toHaveLength(1);
@@ -774,7 +774,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // If D1 lookup failed, processAndApplyDeltas would throw.
     // Successful delta application proves D1 found the user_id.
@@ -799,7 +799,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     // No deltas applied
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
@@ -821,7 +821,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       nextSyncToken: NEW_SYNC_TOKEN,
     });
 
-    const handler = createQueueHandler({ fetchFn: googleFetch });
+    const handler = createQueueHandler({ fetchFn: googleFetch, sleepFn: noopSleep });
 
     const ackedIds: string[] = [];
     const retriedIds: string[] = [];
@@ -874,7 +874,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       reason: "token_410",
     };
 
-    await handleFullSync(message, env, { fetchFn: googleFetch });
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
@@ -905,7 +905,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       ping_ts: new Date().toISOString(),
     };
 
-    await handleIncrementalSync(message, env, { fetchFn: googleFetch });
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
     const delta = userGraphDOState.applyDeltaCalls[0].deltas[0] as Record<
       string,
