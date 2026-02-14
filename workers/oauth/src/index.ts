@@ -11,6 +11,8 @@
  */
 
 import { generateId } from "@tminus/shared";
+import type { FetchFn } from "@tminus/shared";
+export type { FetchFn } from "@tminus/shared";
 import type { AccountRow } from "@tminus/d1-registry";
 import { generateCodeVerifier, generateCodeChallenge } from "./pkce";
 import { encryptState, decryptState } from "./state";
@@ -42,15 +44,6 @@ interface GoogleUserInfo {
   name?: string;
   picture?: string;
 }
-
-/**
- * Injectable fetch function for testing. In production this is
- * globalThis.fetch; in tests it can be replaced with a mock.
- */
-export type FetchFn = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
 
 // ---------------------------------------------------------------------------
 // Error response helpers

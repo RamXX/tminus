@@ -18,7 +18,8 @@ import {
   applyMigrations,
   generateId,
 } from "@tminus/shared";
-import type { SqlStorageLike } from "@tminus/shared";
+import type { SqlStorageLike, FetchFn } from "@tminus/shared";
+export type { FetchFn } from "@tminus/shared";
 import {
   importMasterKey,
   encryptTokens,
@@ -63,15 +64,6 @@ export interface RevokeResult {
   /** Whether the token was successfully revoked server-side at Google. */
   readonly revoked: boolean;
 }
-
-/**
- * Interface for the fetch function, allowing injection for testing.
- * In production this is globalThis.fetch; in tests it can be mocked.
- */
-export type FetchFn = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
 
 // ---------------------------------------------------------------------------
 // AccountDO class
