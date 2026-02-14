@@ -1,6 +1,10 @@
 /**
- * Worker environment bindings. Extend as bindings are added.
+ * Worker environment bindings for the webhook worker.
+ *
+ * DB: D1 registry database containing the accounts table.
+ * SYNC_QUEUE: Queue producer for sync-queue (SYNC_INCREMENTAL messages).
  */
 interface Env {
-  // KV, D1, DO, Queue, etc. bindings will be added here
+  DB: D1Database;
+  SYNC_QUEUE: Queue;
 }
