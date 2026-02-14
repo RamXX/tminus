@@ -378,10 +378,57 @@ describe("AccountDO integration", () => {
   // -------------------------------------------------------------------------
 
   describe("revokeTokens()", () => {
-    it("deletes auth data", async () => {
-      const mockFetch = createMockFetch();
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+    it("calls Google OAuth revoke endpoint with the refresh token", async () => {
+      let capturedUrl = "";
+      let capturedBody = "";
+      let capturedContentType = "";
+      const spyFetch: FetchFn = async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        capturedUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        capturedBody = (init?.body as string) ?? "";
+        capturedContentType =
+          (init?.headers as Record<string, string>)?.["Content-Type"] ?? "";
+        return new Response(null, { status: 200 });
+      };
 
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.revokeTokens();
+
+      // Verify correct endpoint was called
+      expect(capturedUrl).toBe("https://oauth2.googleapis.com/revoke");
+      // Verify correct content type
+      expect(capturedContentType).toBe("application/x-www-form-urlencoded");
+      // Verify refresh token was sent
+      const params = new URLSearchParams(capturedBody);
+      expect(params.get("token")).toBe(TEST_TOKENS.refresh_token);
+    });
+
+    it("returns { revoked: true } when Google accepts the revocation", async () => {
+      const mockFetch: FetchFn = async () => {
+        return new Response(null, { status: 200 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.revokeTokens();
+
+      expect(result).toEqual({ revoked: true });
+    });
+
+    it("deletes auth data after successful server-side revocation", async () => {
+      const mockFetch: FetchFn = async () => {
+        return new Response(null, { status: 200 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
       await acct.initialize(TEST_TOKENS, TEST_SCOPES);
       await acct.revokeTokens();
 
@@ -391,14 +438,91 @@ describe("AccountDO integration", () => {
       expect(row.cnt).toBe(0);
     });
 
-    it("getAccessToken fails after revocation", async () => {
-      const mockFetch = createMockFetch();
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+    it("deletes auth data even when Google revoke endpoint returns 400", async () => {
+      const mockFetch: FetchFn = async () => {
+        return new Response('{"error": "invalid_token"}', { status: 400 });
+      };
 
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.revokeTokens();
+
+      // Local deletion must happen regardless
+      const row = db
+        .prepare("SELECT COUNT(*) as cnt FROM auth")
+        .get() as { cnt: number };
+      expect(row.cnt).toBe(0);
+      // But revoked flag indicates server-side failure
+      expect(result).toEqual({ revoked: false });
+    });
+
+    it("deletes auth data even when Google revoke endpoint returns 500", async () => {
+      const mockFetch: FetchFn = async () => {
+        return new Response("Internal Server Error", { status: 500 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.revokeTokens();
+
+      const row = db
+        .prepare("SELECT COUNT(*) as cnt FROM auth")
+        .get() as { cnt: number };
+      expect(row.cnt).toBe(0);
+      expect(result).toEqual({ revoked: false });
+    });
+
+    it("deletes auth data even when fetch throws a network error", async () => {
+      const mockFetch: FetchFn = async () => {
+        throw new Error("Network error: connection refused");
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.revokeTokens();
+
+      const row = db
+        .prepare("SELECT COUNT(*) as cnt FROM auth")
+        .get() as { cnt: number };
+      expect(row.cnt).toBe(0);
+      expect(result).toEqual({ revoked: false });
+    });
+
+    it("getAccessToken fails after revocation", async () => {
+      const mockFetch: FetchFn = async () => {
+        return new Response(null, { status: 200 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
       await acct.initialize(TEST_TOKENS, TEST_SCOPES);
       await acct.revokeTokens();
 
       await expect(acct.getAccessToken()).rejects.toThrow(/no tokens stored/);
+    });
+
+    it("returns { revoked: false } when no tokens exist (nothing to revoke remotely)", async () => {
+      const fetchCalls: string[] = [];
+      const spyFetch: FetchFn = async (input) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        fetchCalls.push(url);
+        return new Response(null, { status: 200 });
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      // Trigger migration without initializing tokens
+      await acct.getSyncToken();
+
+      const result = await acct.revokeTokens();
+
+      // Should NOT call Google API when no tokens exist
+      expect(fetchCalls).toHaveLength(0);
+      // Should return revoked: false since there was nothing to revoke
+      expect(result).toEqual({ revoked: false });
     });
   });
 

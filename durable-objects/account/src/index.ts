@@ -33,6 +33,9 @@ import type { EncryptedEnvelope, TokenPayload } from "./crypto";
 /** Google OAuth2 token refresh endpoint. */
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
+/** Google OAuth2 token revocation endpoint. */
+const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+
 /** Buffer before expiry to trigger a refresh (5 minutes). */
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
@@ -54,6 +57,11 @@ export interface HealthInfo {
   readonly lastSyncTs: string | null;
   readonly lastSuccessTs: string | null;
   readonly fullSyncNeeded: boolean;
+}
+
+export interface RevokeResult {
+  /** Whether the token was successfully revoked server-side at Google. */
+  readonly revoked: boolean;
 }
 
 /**
@@ -182,15 +190,60 @@ export class AccountDO {
 
   /**
    * Revoke all tokens and clear auth data.
-   * After this, the account is in a disconnected state.
+   *
+   * 1. Decrypts stored tokens to retrieve the refresh token
+   * 2. Calls Google's OAuth revoke endpoint to invalidate the token server-side
+   * 3. Deletes the local auth row REGARDLESS of whether the API call succeeded
+   *
+   * Returns { revoked: true } if Google accepted the revocation,
+   * { revoked: false } if the API call failed or no tokens were stored.
+   * Local auth data is always deleted either way.
    */
-  async revokeTokens(): Promise<void> {
+  async revokeTokens(): Promise<RevokeResult> {
     this.ensureMigrated();
 
+    // Try to load tokens for server-side revocation
+    let revoked = false;
+    const rows = this.sql
+      .exec<{ encrypted_tokens: string }>(
+        "SELECT encrypted_tokens FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length > 0) {
+      try {
+        // Decrypt to get the refresh token
+        const masterKey = await importMasterKey(this.masterKeyHex);
+        const envelope: EncryptedEnvelope = JSON.parse(
+          rows[0].encrypted_tokens,
+        );
+        const tokens = await decryptTokens(masterKey, envelope);
+
+        // Call Google's revoke endpoint
+        const response = await this.fetchFn(GOOGLE_REVOKE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            token: tokens.refresh_token,
+          }).toString(),
+        });
+
+        revoked = response.ok;
+      } catch {
+        // Token may already be revoked, expired, or network may be down.
+        // Proceed with local deletion regardless.
+        revoked = false;
+      }
+    }
+
+    // Always delete local auth row, even if remote revocation failed
     this.sql.exec(
       `DELETE FROM auth WHERE account_id = ?`,
       ACCOUNT_ROW_KEY,
     );
+
+    return { revoked };
   }
 
   // -------------------------------------------------------------------------
@@ -615,8 +668,8 @@ export class AccountDO {
         }
 
         case "/revokeTokens": {
-          await this.revokeTokens();
-          return Response.json({ ok: true });
+          const result = await this.revokeTokens();
+          return Response.json({ ok: true, ...result });
         }
 
         case "/registerChannel": {
