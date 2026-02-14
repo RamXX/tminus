@@ -6,6 +6,7 @@ dist/
 
 # Wrangler
 .wrangler/
+.wrangler-test-shared/
 
 # Environment variables (secrets)
 .dev.vars
