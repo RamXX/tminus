@@ -1816,4 +1816,315 @@ describe("UserGraphDO integration", () => {
       expect(result.policy_edges_removed).toBe(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // handleFetch -- ReconcileWorkflow RPC endpoints
+  // -------------------------------------------------------------------------
+
+  describe("handleFetch: ReconcileWorkflow RPC endpoints", () => {
+    // Helper to make a fetch request to handleFetch
+    async function rpc(path: string, body: unknown): Promise<Response> {
+      return ug.handleFetch(
+        new Request(`https://user-graph.internal${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // /findCanonicalByOrigin
+    // -----------------------------------------------------------------------
+
+    describe("/findCanonicalByOrigin", () => {
+      it("returns canonical event when found by origin keys", async () => {
+        // Create a canonical event first
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+        const resp = await rpc("/findCanonicalByOrigin", {
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: "google_evt_001",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { event: Record<string, unknown> | null };
+        expect(data.event).not.toBeNull();
+        expect(data.event!.canonical_event_id).toBeDefined();
+        expect(data.event!.origin_account_id).toBe(TEST_ACCOUNT_ID);
+        expect(data.event!.origin_event_id).toBe("google_evt_001");
+        expect(data.event!.title).toBe("Team Standup");
+      });
+
+      it("returns null event when not found", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        const resp = await rpc("/findCanonicalByOrigin", {
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: "nonexistent_evt",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { event: null };
+        expect(data.event).toBeNull();
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // /getPolicyEdges
+    // -----------------------------------------------------------------------
+
+    describe("/getPolicyEdges", () => {
+      it("returns policy edges for a from_account_id", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        // Insert a policy edge directly
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+          detailLevel: "BUSY",
+          calendarKind: "BUSY_OVERLAY",
+        });
+
+        const resp = await rpc("/getPolicyEdges", {
+          from_account_id: TEST_ACCOUNT_ID,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { edges: Array<Record<string, unknown>> };
+        expect(data.edges).toHaveLength(1);
+        expect(data.edges[0].from_account_id).toBe(TEST_ACCOUNT_ID);
+        expect(data.edges[0].to_account_id).toBe(OTHER_ACCOUNT_ID);
+        expect(data.edges[0].detail_level).toBe("BUSY");
+        expect(data.edges[0].calendar_kind).toBe("BUSY_OVERLAY");
+        expect(data.edges[0].policy_id).toBe("pol_01TEST000000000000000000001");
+      });
+
+      it("returns empty array when no edges exist for account", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        const resp = await rpc("/getPolicyEdges", {
+          from_account_id: "acc_01NONEXISTENT000000000000",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { edges: Array<Record<string, unknown>> };
+        expect(data.edges).toHaveLength(0);
+      });
+
+      it("returns multiple edges when multiple policies reference same from_account", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        const THIRD_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000003" as AccountId;
+
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+          detailLevel: "BUSY",
+          calendarKind: "BUSY_OVERLAY",
+        });
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000002",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: THIRD_ACCOUNT_ID,
+          detailLevel: "TITLE",
+          calendarKind: "BUSY_OVERLAY",
+        });
+
+        const resp = await rpc("/getPolicyEdges", {
+          from_account_id: TEST_ACCOUNT_ID,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { edges: Array<Record<string, unknown>> };
+        expect(data.edges).toHaveLength(2);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // /getActiveMirrors
+    // -----------------------------------------------------------------------
+
+    describe("/getActiveMirrors", () => {
+      it("returns ACTIVE mirrors targeting a specific account", async () => {
+        // Trigger migration and set up policy edges
+        ug.getSyncHealth();
+
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+          detailLevel: "BUSY",
+          calendarKind: "BUSY_OVERLAY",
+        });
+
+        // Create event with mirror
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+        // Mirror is PENDING by default; update to ACTIVE
+        const mirrors = db
+          .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
+          .all(OTHER_ACCOUNT_ID) as Array<Record<string, unknown>>;
+        expect(mirrors).toHaveLength(1);
+
+        db.prepare(
+          "UPDATE event_mirrors SET state = 'ACTIVE', provider_event_id = 'google_mirror_999' WHERE target_account_id = ?",
+        ).run(OTHER_ACCOUNT_ID);
+
+        const resp = await rpc("/getActiveMirrors", {
+          target_account_id: OTHER_ACCOUNT_ID,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { mirrors: Array<Record<string, unknown>> };
+        expect(data.mirrors).toHaveLength(1);
+        expect(data.mirrors[0].target_account_id).toBe(OTHER_ACCOUNT_ID);
+        expect(data.mirrors[0].state).toBe("ACTIVE");
+        expect(data.mirrors[0].provider_event_id).toBe("google_mirror_999");
+      });
+
+      it("returns empty array when no ACTIVE mirrors exist", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        const resp = await rpc("/getActiveMirrors", {
+          target_account_id: OTHER_ACCOUNT_ID,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { mirrors: Array<Record<string, unknown>> };
+        expect(data.mirrors).toHaveLength(0);
+      });
+
+      it("excludes non-ACTIVE mirrors (PENDING, ERROR, TOMBSTONED)", async () => {
+        ug.getSyncHealth();
+
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        // Create event with a PENDING mirror
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+        // Mirror should be PENDING by default
+        const mirrors = db
+          .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
+          .all(OTHER_ACCOUNT_ID) as Array<Record<string, unknown>>;
+        expect(mirrors).toHaveLength(1);
+        expect(mirrors[0].state).toBe("PENDING");
+
+        const resp = await rpc("/getActiveMirrors", {
+          target_account_id: OTHER_ACCOUNT_ID,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { mirrors: Array<Record<string, unknown>> };
+        expect(data.mirrors).toHaveLength(0); // PENDING is not ACTIVE
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // /logReconcileDiscrepancy
+    // -----------------------------------------------------------------------
+
+    describe("/logReconcileDiscrepancy", () => {
+      it("writes a journal entry for a drift discrepancy", async () => {
+        // Trigger migration
+        ug.getSyncHealth();
+
+        const resp = await rpc("/logReconcileDiscrepancy", {
+          canonical_event_id: "evt_01RECONCILE000000000000001",
+          discrepancy_type: "missing_canonical",
+          details: {
+            origin_event_id: "google_evt_missing",
+            account_id: TEST_ACCOUNT_ID,
+          },
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { ok: boolean };
+        expect(data.ok).toBe(true);
+
+        // Verify journal entry was created
+        const journal = ug.queryJournal();
+        expect(journal.items).toHaveLength(1);
+        expect(journal.items[0].canonical_event_id).toBe("evt_01RECONCILE000000000000001");
+        expect(journal.items[0].change_type).toBe("reconcile:missing_canonical");
+        expect(journal.items[0].actor).toBe("reconcile");
+
+        // Verify details are stored in patch_json
+        const patch = JSON.parse(journal.items[0].patch_json!);
+        expect(patch.origin_event_id).toBe("google_evt_missing");
+        expect(patch.account_id).toBe(TEST_ACCOUNT_ID);
+      });
+
+      it("writes separate journal entries for different discrepancy types", async () => {
+        ug.getSyncHealth();
+
+        // Log two discrepancies
+        await rpc("/logReconcileDiscrepancy", {
+          canonical_event_id: "evt_01RECONCILE000000000000001",
+          discrepancy_type: "orphaned_mirror",
+          details: { provider_event_id: "google_orphan_1" },
+        });
+
+        await rpc("/logReconcileDiscrepancy", {
+          canonical_event_id: "evt_01RECONCILE000000000000002",
+          discrepancy_type: "stale_mirror",
+          details: { provider_event_id: "google_stale_1" },
+        });
+
+        const journal = ug.queryJournal();
+        expect(journal.items).toHaveLength(2);
+
+        const types = journal.items.map((j) => j.change_type);
+        expect(types).toContain("reconcile:orphaned_mirror");
+        expect(types).toContain("reconcile:stale_mirror");
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // handleFetch: existing endpoint /recomputeProjections (reconcile uses it)
+    // -----------------------------------------------------------------------
+
+    describe("/recomputeProjections via handleFetch", () => {
+      it("is accessible via handleFetch and returns enqueued count", async () => {
+        ug.getSyncHealth();
+
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        // Create an event
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+        queue.clear();
+
+        // Change policy so hash differs
+        db.prepare(`UPDATE policy_edges SET detail_level = 'TITLE'`).run();
+
+        // Get event ID for scoped recompute
+        const events = db
+          .prepare("SELECT canonical_event_id FROM canonical_events")
+          .all() as Array<{ canonical_event_id: string }>;
+
+        const resp = await rpc("/recomputeProjections", {
+          canonical_event_id: events[0].canonical_event_id,
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { enqueued: number };
+        expect(data.enqueued).toBe(1);
+      });
+    });
+  });
 });

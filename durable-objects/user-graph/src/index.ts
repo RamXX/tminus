@@ -1539,6 +1539,94 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // ReconcileWorkflow data access methods
+  // -------------------------------------------------------------------------
+
+  /**
+   * Find a canonical event by its origin keys (origin_account_id + origin_event_id).
+   * Used by ReconcileWorkflow to cross-check provider events against canonical store.
+   * Returns the full canonical event or null if not found.
+   */
+  findCanonicalByOrigin(
+    originAccountId: string,
+    originEventId: string,
+  ): CanonicalEvent | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE origin_account_id = ? AND origin_event_id = ?`,
+        originAccountId,
+        originEventId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+    return this.rowToCanonicalEvent(rows[0]);
+  }
+
+  /**
+   * Get all policy edges where from_account_id matches the given account.
+   * Used by ReconcileWorkflow to determine which mirrors should exist for an event.
+   */
+  getPolicyEdges(fromAccountId: string): PolicyEdgeRecord[] {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<PolicyEdgeRow>(
+        `SELECT * FROM policy_edges WHERE from_account_id = ?`,
+        fromAccountId,
+      )
+      .toArray();
+
+    return rows.map((r) => ({
+      policy_id: r.policy_id,
+      from_account_id: r.from_account_id,
+      to_account_id: r.to_account_id,
+      detail_level: r.detail_level,
+      calendar_kind: r.calendar_kind,
+    }));
+  }
+
+  /**
+   * Get all ACTIVE event mirrors targeting a specific account.
+   * Used by ReconcileWorkflow to detect stale mirrors that no longer exist in the provider.
+   */
+  getActiveMirrors(targetAccountId: string): EventMirrorRow[] {
+    this.ensureMigrated();
+
+    return this.sql
+      .exec<EventMirrorRow>(
+        `SELECT * FROM event_mirrors
+         WHERE target_account_id = ? AND state = 'ACTIVE'`,
+        targetAccountId,
+      )
+      .toArray();
+  }
+
+  /**
+   * Log a reconciliation discrepancy to the event journal.
+   * Creates a journal entry with change_type "reconcile:<discrepancy_type>"
+   * and actor "reconcile". Details are stored in patch_json.
+   */
+  logReconcileDiscrepancy(
+    canonicalEventId: string,
+    discrepancyType: string,
+    details: Record<string, unknown>,
+  ): void {
+    this.ensureMigrated();
+
+    this.writeJournal(
+      canonicalEventId,
+      `reconcile:${discrepancyType}`,
+      "reconcile",
+      details,
+      `reconcile:${discrepancyType}`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
 
@@ -1655,6 +1743,58 @@ export class UserGraphDO {
           const body = (await request.json()) as { accounts: string[] };
           await this.ensureDefaultPolicy(body.accounts);
           return Response.json({ ok: true });
+        }
+
+        // ---------------------------------------------------------------
+        // ReconcileWorkflow RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/findCanonicalByOrigin": {
+          const body = (await request.json()) as {
+            origin_account_id: string;
+            origin_event_id: string;
+          };
+          const event = this.findCanonicalByOrigin(
+            body.origin_account_id,
+            body.origin_event_id,
+          );
+          return Response.json({ event });
+        }
+
+        case "/getPolicyEdges": {
+          const body = (await request.json()) as {
+            from_account_id: string;
+          };
+          const edges = this.getPolicyEdges(body.from_account_id);
+          return Response.json({ edges });
+        }
+
+        case "/getActiveMirrors": {
+          const body = (await request.json()) as {
+            target_account_id: string;
+          };
+          const mirrors = this.getActiveMirrors(body.target_account_id);
+          return Response.json({ mirrors });
+        }
+
+        case "/logReconcileDiscrepancy": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            discrepancy_type: string;
+            details: Record<string, unknown>;
+          };
+          this.logReconcileDiscrepancy(
+            body.canonical_event_id,
+            body.discrepancy_type,
+            body.details,
+          );
+          return Response.json({ ok: true });
+        }
+
+        case "/recomputeProjections": {
+          const body = (await request.json()) as RecomputeScope;
+          const enqueued = await this.recomputeProjections(body);
+          return Response.json({ enqueued });
         }
 
         default:
