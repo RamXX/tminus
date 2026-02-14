@@ -14,7 +14,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@tminus/shared": "workspace:*"
+    "@tminus/shared": "workspace:*",
+    "@tminus/d1-registry": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.8.0",

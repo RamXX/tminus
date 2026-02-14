@@ -146,6 +146,9 @@ importers:
 
   workers/oauth:
     dependencies:
+      '@tminus/d1-registry':
+        specifier: workspace:*
+        version: link:../../packages/d1-registry
       '@tminus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
