@@ -2,7 +2,7 @@
  * Tests for tminus-webhook worker.
  *
  * Covers:
- * - Valid webhook with known channel_token enqueues SYNC_INCREMENTAL
+ * - Valid Google webhook with known channel_token enqueues SYNC_INCREMENTAL
  * - Unknown channel_token returns 200 but does NOT enqueue
  * - Missing Google headers returns 200 (always 200 to Google)
  * - 'sync' resource_state returns 200 WITHOUT enqueueing
@@ -11,6 +11,10 @@
  * - Health endpoint returns 200
  * - Unknown routes return 404
  * - Enqueued message has correct shape
+ * - Microsoft validation handshake returns token as plain text
+ * - Microsoft change notification enqueues SYNC_INCREMENTAL
+ * - Microsoft clientState validation returns 403 on mismatch
+ * - Microsoft malformed body returns 400
  *
  * D1 and Queue are mocked with lightweight stubs.
  */
@@ -26,19 +30,31 @@ const TEST_ACCOUNT_ID = "acc_01HXY0000000000000000000AA";
 const TEST_CHANNEL_TOKEN = "secret-token-abc123";
 const TEST_CHANNEL_ID = "channel-uuid-12345";
 const TEST_RESOURCE_ID = "resource-id-67890";
+const TEST_MS_CLIENT_STATE = "ms-webhook-secret-xyz";
+const TEST_MS_SUBSCRIPTION_ID = "ms-sub-aaa-111-bbb";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
 
 /** Minimal mock D1 that supports prepare().bind().first() pattern. */
-function createMockD1(accounts: Array<{ account_id: string; channel_token: string }> = []) {
+function createMockD1(
+  accounts: Array<{ account_id: string; channel_token: string }> = [],
+  msSubscriptions: Array<{ subscription_id: string; account_id: string }> = [],
+) {
   return {
     prepare(sql: string) {
       return {
         bind(...args: unknown[]) {
           return {
             async first<T>(): Promise<T | null> {
+              if (sql.includes("ms_subscriptions")) {
+                const subId = args[0] as string;
+                const match = msSubscriptions.find(
+                  (s) => s.subscription_id === subId,
+                );
+                return (match as T) ?? null;
+              }
               // Look up by channel_token
               const token = args[0] as string;
               const match = accounts.find((a) => a.channel_token === token);
@@ -63,14 +79,17 @@ function createMockQueue() {
 }
 
 /** Build a mock Env with optional D1 data. */
-function createMockEnv(
-  accounts: Array<{ account_id: string; channel_token: string }> = [],
-) {
+function createMockEnv(opts?: {
+  accounts?: Array<{ account_id: string; channel_token: string }>;
+  msSubscriptions?: Array<{ subscription_id: string; account_id: string }>;
+  msClientState?: string;
+}) {
   const queue = createMockQueue();
   return {
     env: {
-      DB: createMockD1(accounts),
+      DB: createMockD1(opts?.accounts ?? [], opts?.msSubscriptions ?? []),
       SYNC_QUEUE: queue,
+      MS_WEBHOOK_CLIENT_STATE: opts?.msClientState ?? TEST_MS_CLIENT_STATE,
     } as Env,
     queue,
   };
@@ -124,15 +143,38 @@ function buildWebhookRequest(overrides?: {
   });
 }
 
+/** Build a Microsoft change notification POST body. */
+function buildMsNotificationBody(overrides?: {
+  subscriptionId?: string;
+  changeType?: string;
+  clientState?: string;
+  resource?: string;
+}) {
+  return {
+    value: [
+      {
+        subscriptionId: overrides?.subscriptionId ?? TEST_MS_SUBSCRIPTION_ID,
+        changeType: overrides?.changeType ?? "updated",
+        clientState: overrides?.clientState ?? TEST_MS_CLIENT_STATE,
+        resource: overrides?.resource ?? "users/abc123/events/evt-1",
+        resourceData: {
+          "@odata.type": "#microsoft.graph.event",
+          id: "evt-1",
+        },
+      },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Webhook tests
+// Google Webhook tests
 // ---------------------------------------------------------------------------
 
 describe("POST /webhook/google", () => {
   it("valid webhook with known channel_token enqueues SYNC_INCREMENTAL and returns 200", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+    });
     const handler = createHandler();
 
     const request = buildWebhookRequest({ resourceState: "exists" });
@@ -156,9 +198,9 @@ describe("POST /webhook/google", () => {
   });
 
   it("unknown channel_token returns 200 but does NOT enqueue", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: "different-token" },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: "different-token" }],
+    });
     const handler = createHandler();
 
     const request = buildWebhookRequest({ channelToken: "unknown-token" });
@@ -183,9 +225,9 @@ describe("POST /webhook/google", () => {
   });
 
   it("'sync' resource_state returns 200 WITHOUT enqueueing", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+    });
     const handler = createHandler();
 
     const request = buildWebhookRequest({ resourceState: "sync" });
@@ -196,9 +238,9 @@ describe("POST /webhook/google", () => {
   });
 
   it("'exists' resource_state enqueues correctly", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+    });
     const handler = createHandler();
 
     const request = buildWebhookRequest({ resourceState: "exists" });
@@ -210,9 +252,9 @@ describe("POST /webhook/google", () => {
   });
 
   it("'not_exists' resource_state enqueues correctly", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+    });
     const handler = createHandler();
 
     const request = buildWebhookRequest({ resourceState: "not_exists" });
@@ -224,9 +266,9 @@ describe("POST /webhook/google", () => {
   });
 
   it("enqueued message has correct shape", async () => {
-    const { env, queue } = createMockEnv([
-      { account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN },
-    ]);
+    const { env, queue } = createMockEnv({
+      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+    });
     const handler = createHandler();
 
     const before = new Date().toISOString();
@@ -258,6 +300,219 @@ describe("POST /webhook/google", () => {
     const pingTs = msg.ping_ts as string;
     expect(pingTs >= before).toBe(true);
     expect(pingTs <= after).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Microsoft Webhook tests
+// ---------------------------------------------------------------------------
+
+describe("POST /webhook/microsoft", () => {
+  // AC 1: Validation handshake
+  it("returns validationToken as plain text for subscription handshake (AC 1)", async () => {
+    const { env } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request(
+      "https://webhook.tminus.dev/webhook/microsoft?validationToken=test-validation-token-xyz",
+      { method: "POST" },
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toBe("test-validation-token-xyz");
+    expect(response.headers.get("Content-Type")).toBe("text/plain");
+  });
+
+  it("returns URL-encoded validationToken correctly", async () => {
+    const { env } = createMockEnv();
+    const handler = createHandler();
+
+    const token = "abc+def/ghi=jkl";
+    const request = new Request(
+      `https://webhook.tminus.dev/webhook/microsoft?validationToken=${encodeURIComponent(token)}`,
+      { method: "POST" },
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toBe(token);
+  });
+
+  // AC 2: Change notification enqueues SYNC_INCREMENTAL
+  it("change notification enqueues SYNC_INCREMENTAL (AC 2)", async () => {
+    const { env, queue } = createMockEnv({
+      msSubscriptions: [{ subscription_id: TEST_MS_SUBSCRIPTION_ID, account_id: TEST_ACCOUNT_ID }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.account_id).toBe(TEST_ACCOUNT_ID);
+    expect(msg.channel_id).toBe(TEST_MS_SUBSCRIPTION_ID);
+    expect(msg.resource_id).toBe("users/abc123/events/evt-1");
+    expect(typeof msg.ping_ts).toBe("string");
+  });
+
+  // AC 3: clientState validation
+  it("returns 403 when clientState does not match (AC 3)", async () => {
+    const { env, queue } = createMockEnv({
+      msSubscriptions: [{ subscription_id: TEST_MS_SUBSCRIPTION_ID, account_id: TEST_ACCOUNT_ID }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody({
+      clientState: "wrong-secret",
+    });
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(403);
+    expect(queue.messages.length).toBe(0);
+  });
+
+  // Malformed body handling
+  it("returns 400 for malformed (non-JSON) body", async () => {
+    const { env, queue } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: "not json at all",
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(400);
+    expect(queue.messages.length).toBe(0);
+  });
+
+  // Empty body
+  it("returns 400 for empty body", async () => {
+    const { env, queue } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    // Empty body fails JSON.parse -> 400
+    expect(response.status).toBe(400);
+    expect(queue.messages.length).toBe(0);
+  });
+
+  // Empty value array
+  it("returns 202 for empty value array", async () => {
+    const { env, queue } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: [] }),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(0);
+  });
+
+  // Unknown subscription
+  it("returns 202 but does not enqueue for unknown subscriptionId", async () => {
+    const { env, queue } = createMockEnv({
+      msSubscriptions: [], // no subscriptions registered
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(0);
+  });
+
+  // Multiple notifications
+  it("processes multiple notifications in a single payload", async () => {
+    const { env, queue } = createMockEnv({
+      msSubscriptions: [
+        { subscription_id: "sub-1", account_id: "acc_01" },
+        { subscription_id: "sub-2", account_id: "acc_02" },
+      ],
+    });
+    const handler = createHandler();
+
+    const body = {
+      value: [
+        {
+          subscriptionId: "sub-1",
+          changeType: "created",
+          clientState: TEST_MS_CLIENT_STATE,
+          resource: "users/a/events/e1",
+        },
+        {
+          subscriptionId: "sub-2",
+          changeType: "updated",
+          clientState: TEST_MS_CLIENT_STATE,
+          resource: "users/b/events/e2",
+        },
+      ],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(2);
+
+    const msgs = queue.messages as Array<Record<string, unknown>>;
+    expect(msgs[0].account_id).toBe("acc_01");
+    expect(msgs[1].account_id).toBe("acc_02");
+  });
+
+  // GET /webhook/microsoft still returns 404
+  it("GET /webhook/microsoft returns 404 (only POST accepted)", async () => {
+    const { env } = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "GET",
+    });
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(404);
   });
 });
 
@@ -295,50 +550,6 @@ describe("Worker routing", () => {
     const handler = createHandler();
 
     const request = new Request("https://webhook.tminus.dev/webhook/google", {
-      method: "GET",
-    });
-    const response = await handler.fetch(request, env, mockCtx);
-
-    expect(response.status).toBe(404);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Provider-based routing (AC 6: Webhook worker routes by provider path)
-// ---------------------------------------------------------------------------
-
-describe("POST /webhook/microsoft (Phase 5 placeholder)", () => {
-  it("returns 501 Not Implemented", async () => {
-    const { env } = createMockEnv();
-    const handler = createHandler();
-
-    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
-      method: "POST",
-    });
-    const response = await handler.fetch(request, env, mockCtx);
-
-    expect(response.status).toBe(501);
-    const body = await response.text();
-    expect(body).toBe("Not Implemented");
-  });
-
-  it("does not enqueue any messages", async () => {
-    const { env, queue } = createMockEnv();
-    const handler = createHandler();
-
-    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
-      method: "POST",
-    });
-    await handler.fetch(request, env, mockCtx);
-
-    expect(queue.messages.length).toBe(0);
-  });
-
-  it("GET /webhook/microsoft returns 404 (only POST accepted)", async () => {
-    const { env } = createMockEnv();
-    const handler = createHandler();
-
-    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
       method: "GET",
     });
     const response = await handler.fetch(request, env, mockCtx);

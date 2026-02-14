@@ -8,7 +8,11 @@
 
 import { describe, it, expect } from "vitest";
 import Database from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA, ALL_MIGRATIONS } from "./schema";
+import {
+  MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0002_MS_SUBSCRIPTIONS,
+  ALL_MIGRATIONS,
+} from "./schema";
 
 describe("schema unit tests", () => {
   it("migration SQL is a non-empty string", () => {
@@ -16,9 +20,16 @@ describe("schema unit tests", () => {
     expect(MIGRATION_0001_INITIAL_SCHEMA.trim().length).toBeGreaterThan(0);
   });
 
-  it("ALL_MIGRATIONS contains exactly one migration", () => {
-    expect(ALL_MIGRATIONS).toHaveLength(1);
+  it("ALL_MIGRATIONS contains all registered migrations in order", () => {
+    expect(ALL_MIGRATIONS.length).toBeGreaterThanOrEqual(2);
     expect(ALL_MIGRATIONS[0]).toBe(MIGRATION_0001_INITIAL_SCHEMA);
+    expect(ALL_MIGRATIONS[1]).toBe(MIGRATION_0002_MS_SUBSCRIPTIONS);
+    // Content-based: verify each migration contains SQL DDL
+    for (const migration of ALL_MIGRATIONS) {
+      expect(typeof migration).toBe("string");
+      expect(migration.trim().length).toBeGreaterThan(0);
+      expect(migration).toMatch(/CREATE\s+(TABLE|INDEX)/i);
+    }
   });
 
   it("migration SQL is valid SQLite", () => {
@@ -79,6 +90,31 @@ describe("schema unit tests", () => {
     expect(channelTokenCol!.type).toBe("TEXT");
     // channel_token is nullable (not required on initial creation)
     expect(channelTokenCol!.notnull).toBe(0);
+
+    db.close();
+  });
+
+  it("MIGRATION_0002 SQL is valid SQLite and creates ms_subscriptions", () => {
+    const db = new Database(":memory:");
+    // Apply 0001 first (ms_subscriptions may reference accounts)
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    expect(() => db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS)).not.toThrow();
+
+    const tables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+      )
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain("ms_subscriptions");
+
+    const indexes = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      )
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((i) => i.name)).toContain(
+      "idx_ms_subscriptions_account",
+    );
 
     db.close();
   });

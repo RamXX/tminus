@@ -5,13 +5,14 @@
  * cross-user registry database (routing, identity, compliance).
  */
 
-export { MIGRATION_0001_INITIAL_SCHEMA, ALL_MIGRATIONS } from "./schema";
+export { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0002_MS_SUBSCRIPTIONS, ALL_MIGRATIONS } from "./schema";
 
 export type {
   OrgRow,
   UserRow,
   AccountRow,
   AccountStatus,
+  MsSubscriptionRow,
   DeletionCertificateRow,
   DeletionEntityType,
 } from "./types";

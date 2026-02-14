@@ -69,6 +69,13 @@ export interface RevokeResult {
   readonly revoked: boolean;
 }
 
+export interface MsSubscriptionInfo {
+  readonly subscriptionId: string;
+  readonly resource: string;
+  readonly clientState: string;
+  readonly expiration: string;
+}
+
 // ---------------------------------------------------------------------------
 // AccountDO class
 // ---------------------------------------------------------------------------
@@ -535,6 +542,237 @@ export class AccountDO {
   }
 
   // -------------------------------------------------------------------------
+  // Microsoft subscription lifecycle
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a Microsoft Graph subscription for calendar event changes.
+   *
+   * Calls MicrosoftCalendarClient.watchEvents() to POST /subscriptions,
+   * then stores the subscription data in the local ms_subscriptions table.
+   *
+   * @param webhookUrl - The notification URL Microsoft will POST to
+   * @param calendarId - The calendar to watch
+   * @param clientState - Shared secret for notification validation
+   * @returns The subscription details (id, resource, expiration)
+   */
+  async createMsSubscription(
+    webhookUrl: string,
+    calendarId: string,
+    clientState: string,
+  ): Promise<{
+    subscriptionId: string;
+    resource: string;
+    expiration: string;
+  }> {
+    this.ensureMigrated();
+
+    // Get access token for Microsoft Graph API call
+    const accessToken = await this.getAccessToken();
+
+    // Build the subscription request to Microsoft Graph
+    const resource = `/me/calendars/${calendarId}/events`;
+    const expirationDateTime = new Date(
+      Date.now() + 3 * 24 * 60 * 60 * 1000, // max 3 days for calendar events
+    ).toISOString();
+
+    const response = await this.fetchFn(
+      "https://graph.microsoft.com/v1.0/subscriptions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          changeType: "created,updated,deleted",
+          notificationUrl: webhookUrl,
+          resource,
+          expirationDateTime,
+          clientState,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Microsoft subscription creation failed (${response.status}): ${body}`,
+      );
+    }
+
+    const data = (await response.json()) as {
+      id: string;
+      resource: string;
+      expirationDateTime: string;
+    };
+
+    // Store subscription in local DO SQLite
+    this.sql.exec(
+      `INSERT OR REPLACE INTO ms_subscriptions
+       (subscription_id, resource, client_state, expiration, created_at)
+       VALUES (?, ?, ?, ?, datetime('now'))`,
+      data.id,
+      data.resource,
+      clientState,
+      data.expirationDateTime,
+    );
+
+    return {
+      subscriptionId: data.id,
+      resource: data.resource,
+      expiration: data.expirationDateTime,
+    };
+  }
+
+  /**
+   * Renew a Microsoft Graph subscription by extending its expiration.
+   *
+   * Microsoft subscriptions max 3 days for calendar events.
+   * PATCH /subscriptions/{id} with new expirationDateTime.
+   */
+  async renewMsSubscription(
+    subscriptionId: string,
+  ): Promise<{ subscriptionId: string; expiration: string }> {
+    this.ensureMigrated();
+
+    // Verify subscription exists locally
+    const rows = this.sql
+      .exec<{ subscription_id: string; resource: string; client_state: string }>(
+        "SELECT subscription_id, resource, client_state FROM ms_subscriptions WHERE subscription_id = ?",
+        subscriptionId,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      throw new Error(`Microsoft subscription not found: ${subscriptionId}`);
+    }
+
+    const accessToken = await this.getAccessToken();
+
+    const newExpiration = new Date(
+      Date.now() + 3 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
+    const response = await this.fetchFn(
+      `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          expirationDateTime: newExpiration,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Microsoft subscription renewal failed (${response.status}): ${body}`,
+      );
+    }
+
+    // Update local expiration
+    this.sql.exec(
+      "UPDATE ms_subscriptions SET expiration = ? WHERE subscription_id = ?",
+      newExpiration,
+      subscriptionId,
+    );
+
+    return { subscriptionId, expiration: newExpiration };
+  }
+
+  /**
+   * Delete a Microsoft Graph subscription.
+   *
+   * DELETE /subscriptions/{id}, then remove from local storage.
+   * Errors from Microsoft are logged but local deletion always occurs.
+   */
+  async deleteMsSubscription(subscriptionId: string): Promise<void> {
+    this.ensureMigrated();
+
+    try {
+      const accessToken = await this.getAccessToken();
+
+      await this.fetchFn(
+        `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+      );
+    } catch (err) {
+      // Subscription may already be expired -- proceed with local cleanup
+      console.error("Microsoft subscription deletion API call failed:", err);
+    }
+
+    // Always delete locally
+    this.sql.exec(
+      "DELETE FROM ms_subscriptions WHERE subscription_id = ?",
+      subscriptionId,
+    );
+  }
+
+  /**
+   * Get all Microsoft subscriptions stored in this AccountDO.
+   * Used by cron worker to determine which subscriptions need renewal.
+   */
+  async getMsSubscriptions(): Promise<
+    Array<{
+      subscriptionId: string;
+      resource: string;
+      clientState: string;
+      expiration: string;
+    }>
+  > {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{
+        subscription_id: string;
+        resource: string;
+        client_state: string;
+        expiration: string;
+      }>(
+        "SELECT subscription_id, resource, client_state, expiration FROM ms_subscriptions ORDER BY created_at",
+      )
+      .toArray();
+
+    return rows.map((r) => ({
+      subscriptionId: r.subscription_id,
+      resource: r.resource,
+      clientState: r.client_state,
+      expiration: r.expiration,
+    }));
+  }
+
+  /**
+   * Validate a clientState value against a specific subscription.
+   * Returns true if the clientState matches the stored value.
+   */
+  async validateMsClientState(
+    subscriptionId: string,
+    clientState: string,
+  ): Promise<boolean> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ client_state: string }>(
+        "SELECT client_state FROM ms_subscriptions WHERE subscription_id = ?",
+        subscriptionId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return false;
+    return rows[0].client_state === clientState;
+  }
+
+  // -------------------------------------------------------------------------
   // Health tracking
   // -------------------------------------------------------------------------
 
@@ -720,6 +958,53 @@ export class AccountDO {
 
         case "/getProvider": {
           return Response.json({ provider: this.provider });
+        }
+
+        case "/createMsSubscription": {
+          const body = (await request.json()) as {
+            webhook_url: string;
+            calendar_id: string;
+            client_state: string;
+          };
+          const result = await this.createMsSubscription(
+            body.webhook_url,
+            body.calendar_id,
+            body.client_state,
+          );
+          return Response.json(result);
+        }
+
+        case "/renewMsSubscription": {
+          const body = (await request.json()) as {
+            subscription_id: string;
+          };
+          const result = await this.renewMsSubscription(body.subscription_id);
+          return Response.json(result);
+        }
+
+        case "/deleteMsSubscription": {
+          const body = (await request.json()) as {
+            subscription_id: string;
+          };
+          await this.deleteMsSubscription(body.subscription_id);
+          return Response.json({ ok: true });
+        }
+
+        case "/getMsSubscriptions": {
+          const subscriptions = await this.getMsSubscriptions();
+          return Response.json({ subscriptions });
+        }
+
+        case "/validateMsClientState": {
+          const body = (await request.json()) as {
+            subscription_id: string;
+            client_state: string;
+          };
+          const valid = await this.validateMsClientState(
+            body.subscription_id,
+            body.client_state,
+          );
+          return Response.json({ valid });
         }
 
         default:

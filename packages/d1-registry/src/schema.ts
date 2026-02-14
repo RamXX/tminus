@@ -66,7 +66,28 @@ CREATE TABLE deletion_certificates (
 ` as const;
 
 /**
+ * Migration 0002: Microsoft Graph subscription lookup table.
+ *
+ * Maps Microsoft subscription IDs to account IDs for incoming webhook routing.
+ * When a Microsoft change notification arrives, we look up the subscriptionId
+ * to find which account it belongs to and enqueue the sync job.
+ */
+export const MIGRATION_0002_MS_SUBSCRIPTIONS = `
+-- Microsoft Graph subscription lookup
+CREATE TABLE ms_subscriptions (
+  subscription_id TEXT PRIMARY KEY,
+  account_id      TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_ms_subscriptions_account ON ms_subscriptions(account_id);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
-export const ALL_MIGRATIONS = [MIGRATION_0001_INITIAL_SCHEMA] as const;
+export const ALL_MIGRATIONS = [
+  MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0002_MS_SUBSCRIPTIONS,
+] as const;

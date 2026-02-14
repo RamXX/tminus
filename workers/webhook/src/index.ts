@@ -3,14 +3,19 @@
  *
  * Routes webhook requests to provider-specific handlers based on URL path:
  * - POST /webhook/google  -> Google Calendar push notification handler
- * - POST /webhook/microsoft -> Microsoft Graph notification handler (placeholder)
+ * - POST /webhook/microsoft -> Microsoft Graph change notification handler
  *
  * Google handler: Receives POST /webhook/google from Google Calendar push
  * notifications, validates the channel_token against D1, and enqueues
  * SYNC_INCREMENTAL messages to sync-queue for actual sync processing.
  *
+ * Microsoft handler: Handles two Microsoft Graph flows:
+ * a. Subscription validation handshake: ?validationToken=<token> -> return token as plain text
+ * b. Change notifications: validate clientState, enqueue SYNC_INCREMENTAL per notification
+ *
  * Key invariant: ALWAYS return 200 to Google. Non-200 responses trigger
  * exponential backoff and eventual channel expiry.
+ * Microsoft expects 202 Accepted for successful notification processing.
  */
 
 import type { SyncIncrementalMessage, AccountId } from "@tminus/shared";
@@ -25,7 +30,34 @@ const HEADER_RESOURCE_STATE = "X-Goog-Resource-State";
 const HEADER_CHANNEL_TOKEN = "X-Goog-Channel-Token";
 
 // ---------------------------------------------------------------------------
-// Handler
+// Microsoft notification types
+// ---------------------------------------------------------------------------
+
+/**
+ * A single Microsoft Graph change notification.
+ * Part of the notification POST body's "value" array.
+ */
+interface MicrosoftChangeNotification {
+  readonly subscriptionId: string;
+  readonly changeType: string;
+  readonly clientState?: string;
+  readonly resource: string;
+  readonly resourceData?: {
+    readonly "@odata.type"?: string;
+    readonly id?: string;
+  };
+}
+
+/**
+ * The top-level Microsoft Graph notification payload.
+ * Contains an array of change notifications.
+ */
+interface MicrosoftNotificationPayload {
+  readonly value: MicrosoftChangeNotification[];
+}
+
+// ---------------------------------------------------------------------------
+// Google Handler
 // ---------------------------------------------------------------------------
 
 /**
@@ -106,24 +138,104 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
-// Microsoft webhook handler (placeholder for Phase 5)
+// Microsoft webhook handler
 // ---------------------------------------------------------------------------
 
 /**
  * Handle a Microsoft Graph change notification.
  *
- * Phase 5 placeholder: logs and returns 202 Accepted.
- * Microsoft Graph expects 202 for successful receipt of notifications.
- * Returns 501 Not Implemented until Microsoft support is built.
+ * Two flows:
+ * 1. Validation handshake: Microsoft POSTs with ?validationToken=<token>.
+ *    Must respond with the token as plain text, 200 OK, within 10 seconds.
+ * 2. Change notifications: POST with JSON body containing notifications.
+ *    Validate clientState, look up subscriptionId -> account_id in D1,
+ *    enqueue SYNC_INCREMENTAL for each valid notification.
+ *    Return 202 Accepted.
  */
 async function handleMicrosoftWebhook(
-  _request: Request,
-  _env: Env,
+  request: Request,
+  env: Env,
 ): Promise<Response> {
-  console.warn(
-    "Microsoft webhook received but not yet implemented (Phase 5)",
-  );
-  return new Response("Not Implemented", { status: 501 });
+  const url = new URL(request.url);
+
+  // Flow 1: Subscription validation handshake
+  const validationToken = url.searchParams.get("validationToken");
+  if (validationToken) {
+    console.log("Microsoft subscription validation handshake received");
+    return new Response(validationToken, {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  // Flow 2: Change notification processing
+  let payload: MicrosoftNotificationPayload;
+  try {
+    payload = await request.json() as MicrosoftNotificationPayload;
+  } catch {
+    // Malformed body (not JSON, load balancer probes, etc.)
+    console.warn("Microsoft webhook: failed to parse JSON body");
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  // Validate payload has notifications
+  if (!payload.value || !Array.isArray(payload.value) || payload.value.length === 0) {
+    console.warn("Microsoft webhook: empty or missing 'value' array");
+    return new Response("Accepted", { status: 202 });
+  }
+
+  // Process each notification
+  for (const notification of payload.value) {
+    // Validate clientState matches the stored secret
+    if (notification.clientState !== env.MS_WEBHOOK_CLIENT_STATE) {
+      console.warn("Microsoft webhook: clientState mismatch", {
+        subscriptionId: notification.subscriptionId,
+      });
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // Look up account_id from subscriptionId via D1 ms_subscriptions table
+    let accountRow: { account_id: string } | null = null;
+    try {
+      accountRow = await env.DB
+        .prepare("SELECT account_id FROM ms_subscriptions WHERE subscription_id = ?1")
+        .bind(notification.subscriptionId)
+        .first<{ account_id: string }>();
+    } catch (err) {
+      console.error("D1 query failed for ms_subscriptions lookup", err);
+      continue;
+    }
+
+    if (!accountRow) {
+      console.warn("Microsoft webhook: unknown subscriptionId", {
+        subscriptionId: notification.subscriptionId,
+      });
+      continue;
+    }
+
+    // Enqueue SYNC_INCREMENTAL
+    const msg: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: accountRow.account_id as AccountId,
+      channel_id: notification.subscriptionId,
+      resource_id: notification.resource,
+      ping_ts: new Date().toISOString(),
+    };
+
+    try {
+      await env.SYNC_QUEUE.send(msg);
+      console.log("Enqueued SYNC_INCREMENTAL for Microsoft notification", {
+        accountId: accountRow.account_id,
+        subscriptionId: notification.subscriptionId,
+        changeType: notification.changeType,
+      });
+    } catch (err) {
+      console.error("Failed to enqueue SYNC_INCREMENTAL for Microsoft notification", err);
+    }
+  }
+
+  // Microsoft expects 202 Accepted for successful notification processing
+  return new Response("Accepted", { status: 202 });
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +248,7 @@ async function handleMicrosoftWebhook(
  *
  * Routes webhook requests by provider path:
  * - POST /webhook/google    -> Google Calendar handler
- * - POST /webhook/microsoft -> Microsoft Graph handler (placeholder)
+ * - POST /webhook/microsoft -> Microsoft Graph handler
  */
 export function createHandler() {
   return {
@@ -150,7 +262,7 @@ export function createHandler() {
         return handleWebhook(request, env);
       }
 
-      // POST /webhook/microsoft -- Microsoft Graph notifications (Phase 5 placeholder)
+      // POST /webhook/microsoft -- Microsoft Graph notifications
       if (method === "POST" && pathname === "/webhook/microsoft") {
         return handleMicrosoftWebhook(request, env);
       }

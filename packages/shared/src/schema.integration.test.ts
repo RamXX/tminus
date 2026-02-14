@@ -351,6 +351,7 @@ describe("AccountDO schema via migration runner", () => {
 
     expect(tables.map((t) => t.name)).toEqual([
       "auth",
+      "ms_subscriptions",
       "sync_state",
       "watch_channels",
     ]);
@@ -358,7 +359,9 @@ describe("AccountDO schema via migration runner", () => {
 
   it("sets schema version to latest after all migrations", () => {
     applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
-    expect(getSchemaVersion(sql, "account")).toBe(2);
+    expect(getSchemaVersion(sql, "account")).toBe(
+      ACCOUNT_DO_MIGRATIONS[ACCOUNT_DO_MIGRATIONS.length - 1].version,
+    );
   });
 
   it("auth table INSERT and SELECT works", () => {
@@ -590,7 +593,9 @@ describe("migration runner", () => {
     applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
 
     expect(getSchemaVersion(sql, "user_graph")).toBe(1);
-    expect(getSchemaVersion(sql, "account")).toBe(2); // v1 + v2 (provider column)
+    expect(getSchemaVersion(sql, "account")).toBe(
+      ACCOUNT_DO_MIGRATIONS[ACCOUNT_DO_MIGRATIONS.length - 1].version,
+    );
 
     // Both schemas share the same _schema_meta table
     const meta = db

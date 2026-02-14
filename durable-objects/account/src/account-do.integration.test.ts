@@ -926,6 +926,7 @@ describe("AccountDO integration", () => {
         .all() as Array<{ name: string }>;
       expect(tablesAfter.map((t) => t.name)).toEqual([
         "auth",
+        "ms_subscriptions",
         "sync_state",
         "watch_channels",
       ]);
@@ -1049,6 +1050,235 @@ describe("AccountDO integration", () => {
       expect(health.lastSuccessTs).toBe("2026-02-14T12:00:00Z");
       expect(channels.channels).toHaveLength(1);
       expect(sync).toBe("token1");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft subscription lifecycle (AC 4)
+  // -------------------------------------------------------------------------
+
+  describe("Microsoft subscription lifecycle", () => {
+    it("createMsSubscription stores subscription data in DO SQLite (AC 4)", async () => {
+      let capturedUrl = "";
+      let capturedBody = "";
+      const mockFetch: FetchFn = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        capturedUrl = url;
+        capturedBody = (init?.body as string) ?? "";
+
+        if (url.includes("/subscriptions")) {
+          return new Response(
+            JSON.stringify({
+              id: "ms-sub-created-123",
+              resource: "/me/calendars/cal-1/events",
+              expirationDateTime: "2026-02-17T12:00:00Z",
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        // Token refresh (won't be needed since tokens are fresh)
+        return new Response(
+          JSON.stringify({ access_token: TEST_TOKENS.access_token, expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const result = await acct.createMsSubscription(
+        "https://webhook.tminus.dev/webhook/microsoft",
+        "cal-1",
+        "test-client-state-secret",
+      );
+
+      // Verify return values
+      expect(result.subscriptionId).toBe("ms-sub-created-123");
+      expect(result.resource).toBe("/me/calendars/cal-1/events");
+      expect(result.expiration).toBe("2026-02-17T12:00:00Z");
+
+      // Verify stored in DB
+      const row = db
+        .prepare("SELECT * FROM ms_subscriptions WHERE subscription_id = ?")
+        .get("ms-sub-created-123") as Record<string, unknown>;
+      expect(row).toBeDefined();
+      expect(row.resource).toBe("/me/calendars/cal-1/events");
+      expect(row.client_state).toBe("test-client-state-secret");
+      expect(row.expiration).toBe("2026-02-17T12:00:00Z");
+
+      // Verify correct API call
+      expect(capturedUrl).toContain("graph.microsoft.com/v1.0/subscriptions");
+      const reqBody = JSON.parse(capturedBody);
+      expect(reqBody.changeType).toBe("created,updated,deleted");
+      expect(reqBody.notificationUrl).toBe("https://webhook.tminus.dev/webhook/microsoft");
+      expect(reqBody.clientState).toBe("test-client-state-secret");
+    });
+
+    it("renewMsSubscription updates expiration (AC 5)", async () => {
+      let patchUrl = "";
+      const mockFetch: FetchFn = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        const method = init?.method ?? "GET";
+
+        if (method === "PATCH" && url.includes("/subscriptions/")) {
+          patchUrl = url;
+          return new Response(
+            JSON.stringify({
+              id: "ms-sub-to-renew",
+              expirationDateTime: "2026-02-20T12:00:00Z",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        // Token (not expired, won't be refreshed -- return directly)
+        return new Response(
+          JSON.stringify({ access_token: TEST_TOKENS.access_token, expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Manually insert a subscription to renew
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("ms-sub-to-renew", "/me/calendars/cal-1/events", "secret", "2026-02-16T12:00:00Z");
+
+      const result = await acct.renewMsSubscription("ms-sub-to-renew");
+
+      expect(result.subscriptionId).toBe("ms-sub-to-renew");
+      // Expiration should be updated (3 days from now, roughly)
+      expect(new Date(result.expiration).getTime()).toBeGreaterThan(Date.now());
+
+      // Verify local DB updated
+      const row = db
+        .prepare("SELECT expiration FROM ms_subscriptions WHERE subscription_id = ?")
+        .get("ms-sub-to-renew") as { expiration: string };
+      expect(row.expiration).toBe(result.expiration);
+
+      // Verify correct API call
+      expect(patchUrl).toContain("subscriptions/ms-sub-to-renew");
+    });
+
+    it("renewMsSubscription throws for non-existent subscription", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      await expect(
+        acct.renewMsSubscription("ms-sub-nonexistent"),
+      ).rejects.toThrow(/Microsoft subscription not found/);
+    });
+
+    it("deleteMsSubscription removes from local storage even if API fails", async () => {
+      const mockFetch: FetchFn = async () => {
+        throw new Error("Network error");
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Insert subscription
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("ms-sub-delete-me", "/me/calendars/cal-1/events", "secret", "2026-02-16T12:00:00Z");
+
+      // Should not throw even though API fails
+      await acct.deleteMsSubscription("ms-sub-delete-me");
+
+      // Verify removed from local DB
+      const row = db
+        .prepare("SELECT COUNT(*) as cnt FROM ms_subscriptions WHERE subscription_id = ?")
+        .get("ms-sub-delete-me") as { cnt: number };
+      expect(row.cnt).toBe(0);
+    });
+
+    it("getMsSubscriptions returns all stored subscriptions", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Insert two subscriptions
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("sub-1", "/me/calendars/cal-1/events", "secret-1", "2026-02-17T00:00:00Z");
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("sub-2", "/me/calendars/cal-2/events", "secret-2", "2026-02-18T00:00:00Z");
+
+      const subs = await acct.getMsSubscriptions();
+
+      expect(subs).toHaveLength(2);
+      expect(subs[0].subscriptionId).toBe("sub-1");
+      expect(subs[0].resource).toBe("/me/calendars/cal-1/events");
+      expect(subs[0].clientState).toBe("secret-1");
+      expect(subs[1].subscriptionId).toBe("sub-2");
+    });
+
+    it("getMsSubscriptions returns empty array when none exist", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const subs = await acct.getMsSubscriptions();
+      expect(subs).toEqual([]);
+    });
+
+    it("validateMsClientState returns true for matching state", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("sub-validate", "/me/calendars/cal-1/events", "correct-secret", "2026-02-17T00:00:00Z");
+
+      const valid = await acct.validateMsClientState("sub-validate", "correct-secret");
+      expect(valid).toBe(true);
+    });
+
+    it("validateMsClientState returns false for wrong state", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))`,
+      ).run("sub-validate", "/me/calendars/cal-1/events", "correct-secret", "2026-02-17T00:00:00Z");
+
+      const valid = await acct.validateMsClientState("sub-validate", "wrong-secret");
+      expect(valid).toBe(false);
+    });
+
+    it("validateMsClientState returns false for unknown subscription", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const valid = await acct.validateMsClientState("sub-nonexistent", "any-secret");
+      expect(valid).toBe(false);
+    });
+
+    it("ms_subscriptions table exists after migration V3", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      // Trigger migration
+      await acct.getSyncToken();
+
+      const tables = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name = 'ms_subscriptions'",
+        )
+        .all() as Array<{ name: string }>;
+      expect(tables).toHaveLength(1);
+      expect(tables[0].name).toBe("ms_subscriptions");
     });
   });
 });

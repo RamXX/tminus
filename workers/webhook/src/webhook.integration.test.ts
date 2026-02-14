@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import { createHandler } from "./index";
-import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0002_MS_SUBSCRIPTIONS } from "@tminus/d1-registry";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -183,6 +183,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     // Apply the REAL D1 registry schema -- the same SQL used in production
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
 
     // Seed the prerequisite rows (FK chain: orgs -> users -> accounts)
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
@@ -220,7 +221,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     );
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({ channelToken: ACCOUNT_A.channel_token });
 
     const response = await handler.fetch(request, env, mockCtx);
@@ -263,7 +264,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     );
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({ channelToken: "completely-unknown-token" });
 
     const response = await handler.fetch(request, env, mockCtx);
@@ -288,7 +289,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     // But sync state should short-circuit before any DB access
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({ resourceState: "sync" });
 
     const response = await handler.fetch(request, env, mockCtx);
@@ -328,7 +329,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     );
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
 
     // Send webhook matching account B's token
     const request = buildWebhookRequest({ channelToken: ACCOUNT_B.channel_token });
@@ -390,7 +391,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     );
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({
       channelToken: ACCOUNT_A.channel_token,
       resourceState: "not_exists",
@@ -413,7 +414,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
   it("empty accounts table: D1 query returns null gracefully, no enqueue", async () => {
     // No accounts seeded -- table exists but is empty
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({ channelToken: "any-token" });
 
     const response = await handler.fetch(request, env, mockCtx);
@@ -440,7 +441,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     );
 
     const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue } as Env;
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     // Send a webhook with some token -- should not match the null-token account
     const request = buildWebhookRequest({ channelToken: "some-token" });
 
@@ -454,5 +455,134 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
       .prepare("SELECT channel_token FROM accounts WHERE account_id = ?")
       .get(ACCOUNT_A.account_id) as { channel_token: string | null };
     expect(row.channel_token).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft webhook integration tests (real D1 with ms_subscriptions)
+  // -------------------------------------------------------------------------
+
+  it("Microsoft validation handshake: returns validationToken as plain text (AC 1)", async () => {
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const request = new Request(
+      "https://webhook.tminus.dev/webhook/microsoft?validationToken=real-validation-abc",
+      { method: "POST" },
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toBe("real-validation-abc");
+    expect(response.headers.get("Content-Type")).toBe("text/plain");
+  });
+
+  it("Microsoft change notification: real D1 ms_subscriptions lookup enqueues SYNC_INCREMENTAL (AC 2, 6)", async () => {
+    // Seed ms_subscriptions and accounts
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      "microsoft",
+      "ms-sub-aaaa",
+      ACCOUNT_A.email,
+    );
+
+    db.prepare(
+      "INSERT INTO ms_subscriptions (subscription_id, account_id) VALUES (?, ?)",
+    ).run("ms-sub-real-123", ACCOUNT_A.account_id);
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [{
+        subscriptionId: "ms-sub-real-123",
+        changeType: "updated",
+        clientState: "test-ms-secret",
+        resource: "users/ms-user/events/evt-42",
+      }],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages).toHaveLength(1);
+
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.account_id).toBe(ACCOUNT_A.account_id);
+    expect(msg.channel_id).toBe("ms-sub-real-123");
+    expect(msg.resource_id).toBe("users/ms-user/events/evt-42");
+  });
+
+  it("Microsoft clientState mismatch: returns 403 (AC 3)", async () => {
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [{
+        subscriptionId: "ms-sub-any",
+        changeType: "created",
+        clientState: "WRONG-secret",
+        resource: "users/x/events/y",
+      }],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(403);
+    expect(queue.messages).toHaveLength(0);
+  });
+
+  it("Microsoft unknown subscriptionId: returns 202 but does not enqueue", async () => {
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [{
+        subscriptionId: "ms-sub-unknown",
+        changeType: "updated",
+        clientState: "test-ms-secret",
+        resource: "users/x/events/y",
+      }],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages).toHaveLength(0);
+  });
+
+  it("Microsoft D1 ms_subscriptions SQL query matches real schema", async () => {
+    db.prepare(
+      "INSERT INTO ms_subscriptions (subscription_id, account_id) VALUES (?, ?)",
+    ).run("ms-sub-verify-sql", "acc_sql_test");
+
+    // Execute the exact query pattern from the handler via the D1 mock
+    const result = await d1
+      .prepare("SELECT account_id FROM ms_subscriptions WHERE subscription_id = ?1")
+      .bind("ms-sub-verify-sql")
+      .first<{ account_id: string }>();
+
+    expect(result).not.toBeNull();
+    expect(result!.account_id).toBe("acc_sql_test");
   });
 });

@@ -40,6 +40,13 @@ export interface AccountRow {
   readonly created_at: string;
 }
 
+/** Row shape for the `ms_subscriptions` table (Microsoft Graph webhook routing). */
+export interface MsSubscriptionRow {
+  readonly subscription_id: string;
+  readonly account_id: string;
+  readonly created_at: string;
+}
+
 /** Valid entity types for the `deletion_certificates.entity_type` column. */
 export type DeletionEntityType = "user" | "account" | "event";
 

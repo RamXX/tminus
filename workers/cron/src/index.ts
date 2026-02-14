@@ -1,10 +1,11 @@
 /**
  * tminus-cron -- Scheduled maintenance worker.
  *
- * Three cron responsibilities:
- * 1. Channel renewal (every 6h): renew Google watch channels expiring within 24h
- * 2. Token health check (every 12h): verify account tokens, mark errors
- * 3. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT messages
+ * Four cron responsibilities:
+ * 1. Google channel renewal (every 6h): renew Google watch channels expiring within 24h
+ * 2. Microsoft subscription renewal (every 6h): renew MS subscriptions at 75% lifetime
+ * 3. Token health check (every 12h): verify account tokens, mark errors
+ * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT messages
  *
  * Design decisions:
  * - Each responsibility is a separate function for testability
@@ -42,6 +43,12 @@ export const CRON_RECONCILIATION = "0 3 * * *";
 /** Renew channels that expire within this window (24 hours). */
 export const CHANNEL_RENEWAL_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Microsoft subscription max lifetime: 3 days (4230 min for calendar events).
+ * Renew at 75% lifetime = ~2.25 days = 54 hours.
+ */
+export const MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS = 54 * 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // D1 row types (query results)
 // ---------------------------------------------------------------------------
@@ -57,8 +64,12 @@ interface ActiveAccountRow {
   readonly user_id: string;
 }
 
+interface MsAccountRow {
+  readonly account_id: string;
+}
+
 // ---------------------------------------------------------------------------
-// Channel Renewal (every 6h)
+// Channel Renewal (every 6h) -- Google
 // ---------------------------------------------------------------------------
 
 /**
@@ -109,6 +120,104 @@ async function handleChannelRenewal(env: Env): Promise<void> {
     } catch (err) {
       console.error(
         `Channel renewal error for account ${row.account_id}:`,
+        err,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Subscription Renewal (every 6h)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query D1 for active Microsoft accounts and renew their subscriptions
+ * if they're at or past 75% of their 3-day lifetime (54 hours).
+ *
+ * For each Microsoft account:
+ * 1. Call AccountDO.getMsSubscriptions() to get all subscriptions
+ * 2. For each subscription expiring within MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
+ *    call AccountDO.renewMsSubscription()
+ */
+async function handleMsSubscriptionRenewal(env: Env): Promise<void> {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT account_id FROM accounts
+       WHERE status = ?1 AND provider = ?2`,
+    )
+    .bind("active", "microsoft")
+    .all<MsAccountRow>();
+
+  console.log(
+    `Microsoft subscription renewal: found ${results.length} active Microsoft accounts`,
+  );
+
+  for (const row of results) {
+    try {
+      const doId = env.ACCOUNT.idFromName(row.account_id);
+      const stub = env.ACCOUNT.get(doId);
+
+      // Get all subscriptions for this account
+      const subsResponse = await stub.fetch(
+        new Request("https://account-do.internal/getMsSubscriptions", {
+          method: "GET",
+        }),
+      );
+
+      if (!subsResponse.ok) {
+        console.error(
+          `Failed to get Microsoft subscriptions for account ${row.account_id}: ${subsResponse.status}`,
+        );
+        continue;
+      }
+
+      const subsData = (await subsResponse.json()) as {
+        subscriptions: Array<{
+          subscriptionId: string;
+          expiration: string;
+        }>;
+      };
+
+      const renewalThreshold = new Date(
+        Date.now() + MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
+      );
+
+      for (const sub of subsData.subscriptions) {
+        const expirationDate = new Date(sub.expiration);
+
+        // Renew if expiration is within the threshold window
+        if (expirationDate <= renewalThreshold) {
+          try {
+            const renewResponse = await stub.fetch(
+              new Request("https://account-do.internal/renewMsSubscription", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  subscription_id: sub.subscriptionId,
+                }),
+              }),
+            );
+
+            if (!renewResponse.ok) {
+              console.error(
+                `Microsoft subscription renewal failed for account ${row.account_id}, sub ${sub.subscriptionId}: ${renewResponse.status}`,
+              );
+            } else {
+              console.log(
+                `Microsoft subscription renewed for account ${row.account_id}, sub ${sub.subscriptionId}`,
+              );
+            }
+          } catch (err) {
+            console.error(
+              `Microsoft subscription renewal error for account ${row.account_id}, sub ${sub.subscriptionId}:`,
+              err,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.error(
+        `Microsoft subscription renewal error for account ${row.account_id}:`,
         err,
       );
     }
@@ -226,6 +335,8 @@ async function handleReconciliation(env: Env): Promise<void> {
 
 // Dispatch to the appropriate handler based on the cron schedule.
 // Each cron string from wrangler.toml maps to exactly one handler.
+// Google channel renewal and Microsoft subscription renewal share the same schedule
+// (every 6 hours) but are separate operations.
 async function handleScheduled(
   event: ScheduledEvent,
   env: Env,
@@ -235,6 +346,7 @@ async function handleScheduled(
   switch (cron) {
     case CRON_CHANNEL_RENEWAL:
       await handleChannelRenewal(env);
+      await handleMsSubscriptionRenewal(env);
       break;
 
     case CRON_TOKEN_HEALTH:

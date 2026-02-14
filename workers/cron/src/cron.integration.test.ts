@@ -25,6 +25,7 @@ import {
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CHANNEL_RENEWAL_THRESHOLD_MS,
+  MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -694,6 +695,186 @@ describe("Channel expiry threshold calculation", () => {
   it("CHANNEL_RENEWAL_THRESHOLD_MS equals 24 hours in milliseconds", () => {
     const twentyFourHoursMs = 24 * 60 * 60 * 1000;
     expect(CHANNEL_RENEWAL_THRESHOLD_MS).toBe(twentyFourHoursMs);
+  });
+
+  it("MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS equals 54 hours in milliseconds (75% of 3 days)", () => {
+    const fiftyFourHoursMs = 54 * 60 * 60 * 1000;
+    expect(MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS).toBe(fiftyFourHoursMs);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration test suite: Microsoft Subscription Renewal (AC 5)
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_MS = {
+  account_id: "acc_01HXYZ0000000000000000MS",
+  user_id: TEST_USER.user_id,
+  provider: "microsoft",
+  provider_subject: "ms-subject-aaaa",
+  email: "alice@outlook.com",
+  status: "active",
+  channel_id: null,
+  channel_token: null,
+} as const;
+
+describe("Cron integration tests: Microsoft Subscription Renewal (AC 5)", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let queue: Queue & { messages: unknown[] };
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+    queue = createMockQueue();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("renews Microsoft subscriptions expiring within 54 hours (75% of 3 days)", async () => {
+    insertAccount(db, ACCOUNT_MS);
+
+    // Subscription expiring in 40 hours (within 54h threshold)
+    const expiresIn40h = new Date(Date.now() + 40 * 60 * 60 * 1000).toISOString();
+
+    // Configure DO to return a subscription that needs renewal
+    const responses = new Map<string, Map<string, Response>>();
+    responses.set(
+      ACCOUNT_MS.account_id,
+      new Map([
+        [
+          "/getMsSubscriptions",
+          new Response(JSON.stringify({
+            subscriptions: [{
+              subscriptionId: "ms-sub-renew-1",
+              expiration: expiresIn40h,
+            }],
+          }), { status: 200, headers: { "Content-Type": "application/json" } }),
+        ],
+        [
+          "/renewMsSubscription",
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ],
+      ]),
+    );
+
+    const doNamespace = createMockAccountDONamespace({ responses });
+    const handler = createHandler();
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should have called getMsSubscriptions and renewMsSubscription
+    const msCalls = doNamespace.calls.filter(
+      (c) => c.accountId === ACCOUNT_MS.account_id,
+    );
+    expect(msCalls.some((c) => c.path === "/getMsSubscriptions")).toBe(true);
+    expect(msCalls.some((c) => c.path === "/renewMsSubscription")).toBe(true);
+  });
+
+  it("does NOT renew subscriptions with more than 54 hours remaining", async () => {
+    insertAccount(db, ACCOUNT_MS);
+
+    // Subscription expiring in 60 hours (outside 54h threshold)
+    const expiresIn60h = new Date(Date.now() + 60 * 60 * 60 * 1000).toISOString();
+
+    const responses = new Map<string, Map<string, Response>>();
+    responses.set(
+      ACCOUNT_MS.account_id,
+      new Map([
+        [
+          "/getMsSubscriptions",
+          new Response(JSON.stringify({
+            subscriptions: [{
+              subscriptionId: "ms-sub-fresh",
+              expiration: expiresIn60h,
+            }],
+          }), { status: 200, headers: { "Content-Type": "application/json" } }),
+        ],
+      ]),
+    );
+
+    const doNamespace = createMockAccountDONamespace({ responses });
+    const handler = createHandler();
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should have called getMsSubscriptions but NOT renewMsSubscription
+    const msCalls = doNamespace.calls.filter(
+      (c) => c.accountId === ACCOUNT_MS.account_id,
+    );
+    expect(msCalls.some((c) => c.path === "/getMsSubscriptions")).toBe(true);
+    expect(msCalls.some((c) => c.path === "/renewMsSubscription")).toBe(false);
+  });
+
+  it("skips Google accounts (only processes provider=microsoft)", async () => {
+    // Only insert Google accounts, no Microsoft
+    insertAccount(db, ACCOUNT_A);
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // No getMsSubscriptions calls (only Google accounts exist)
+    const msCalls = doNamespace.calls.filter(
+      (c) => c.path === "/getMsSubscriptions",
+    );
+    expect(msCalls).toHaveLength(0);
+  });
+
+  it("handles DO errors gracefully during subscription renewal", async () => {
+    insertAccount(db, ACCOUNT_MS);
+
+    // DO returns error for getMsSubscriptions
+    const responses = new Map<string, Map<string, Response>>();
+    responses.set(
+      ACCOUNT_MS.account_id,
+      new Map([
+        [
+          "/getMsSubscriptions",
+          new Response("Internal Error", { status: 500 }),
+        ],
+      ]),
+    );
+
+    const doNamespace = createMockAccountDONamespace({ responses });
+    const handler = createHandler();
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
+    const ctx = buildMockCtx();
+
+    // Should not throw
+    await handler.scheduled(event, env, ctx);
+
+    // getMsSubscriptions was attempted but renewMsSubscription was not
+    const msCalls = doNamespace.calls.filter(
+      (c) => c.accountId === ACCOUNT_MS.account_id,
+    );
+    expect(msCalls.some((c) => c.path === "/getMsSubscriptions")).toBe(true);
+    expect(msCalls.some((c) => c.path === "/renewMsSubscription")).toBe(false);
   });
 });
 

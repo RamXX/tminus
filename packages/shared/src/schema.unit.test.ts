@@ -18,6 +18,7 @@ import {
   USER_GRAPH_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V2,
+  ACCOUNT_DO_MIGRATION_V3,
   USER_GRAPH_DO_MIGRATIONS,
   ACCOUNT_DO_MIGRATIONS,
 } from "./schema";
@@ -357,19 +358,31 @@ describe("migration lists", () => {
   });
 
   it("ACCOUNT_DO_MIGRATIONS has correct structure", () => {
-    expect(ACCOUNT_DO_MIGRATIONS).toHaveLength(2);
-
+    // Assert content-based: each migration includes expected DDL
     const m1 = ACCOUNT_DO_MIGRATIONS[0];
     expect(m1.version).toBe(1);
     expect(m1.sql).toBe(ACCOUNT_DO_MIGRATION_V1);
+    expect(m1.sql).toContain("CREATE TABLE auth");
+    expect(m1.sql).toContain("CREATE TABLE sync_state");
+    expect(m1.sql).toContain("CREATE TABLE watch_channels");
     expect(typeof m1.description).toBe("string");
     expect(m1.description.length).toBeGreaterThan(0);
 
     const m2 = ACCOUNT_DO_MIGRATIONS[1];
     expect(m2.version).toBe(2);
     expect(m2.sql).toBe(ACCOUNT_DO_MIGRATION_V2);
+    expect(m2.sql).toContain("ALTER TABLE auth ADD COLUMN provider");
     expect(typeof m2.description).toBe("string");
     expect(m2.description.length).toBeGreaterThan(0);
+
+    const m3 = ACCOUNT_DO_MIGRATIONS[2];
+    expect(m3.version).toBe(3);
+    expect(m3.sql).toBe(ACCOUNT_DO_MIGRATION_V3);
+    expect(m3.sql).toContain("CREATE TABLE ms_subscriptions");
+    expect(m3.sql).toContain("client_state");
+    expect(m3.sql).toContain("expiration");
+    expect(typeof m3.description).toBe("string");
+    expect(m3.description.length).toBeGreaterThan(0);
   });
 
   it("migration versions are monotonically increasing", () => {

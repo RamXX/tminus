@@ -334,6 +334,23 @@ export const ACCOUNT_DO_MIGRATION_V2 = `
 ALTER TABLE auth ADD COLUMN provider TEXT NOT NULL DEFAULT 'google';
 ` as const;
 
+/**
+ * AccountDO migration v3: Microsoft subscription lifecycle table.
+ *
+ * Stores Microsoft Graph change notification subscriptions in the
+ * per-account DO SQLite. Used for clientState validation and
+ * subscription renewal/deletion.
+ */
+export const ACCOUNT_DO_MIGRATION_V3 = `
+CREATE TABLE ms_subscriptions (
+  subscription_id TEXT PRIMARY KEY,
+  resource        TEXT NOT NULL,
+  client_state    TEXT NOT NULL,
+  expiration      TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+` as const;
+
 /** Ordered migrations for AccountDO. Apply sequentially. */
 export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -345,6 +362,11 @@ export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
     version: 2,
     sql: ACCOUNT_DO_MIGRATION_V2,
     description: "Add provider column to auth table for multi-provider support",
+  },
+  {
+    version: 3,
+    sql: ACCOUNT_DO_MIGRATION_V3,
+    description: "Microsoft subscription lifecycle table for change notifications",
   },
 ] as const;
 
