@@ -66,6 +66,7 @@ const STATUS_SYMBOLS: Record<AccountStatus, string> = {
 const PROVIDER_LABELS: Record<AccountProvider, string> = {
   google: "Google",
   microsoft: "Microsoft",
+  apple: "Apple",
 };
 
 /**

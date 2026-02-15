@@ -1,16 +1,31 @@
 /**
- * Onboarding page -- One-click Google Account Connection.
+ * Consumer-grade Onboarding page.
  *
- * Walking skeleton that proves the end-to-end onboarding flow:
- * 1. User sees branded "Connect your calendar" screen with provider buttons
- * 2. Clicking "Connect Google" initiates OAuth flow with PKCE
- * 3. On callback, renders success state with account name and calendar list
- * 4. Triggers initial sync automatically on successful connection
- * 5. Shows real-time sync progress (events appearing)
+ * Guides non-technical users through connecting their calendar accounts.
+ * This is the first thing a new user sees -- it must feel as simple as
+ * signing up for any modern SaaS product.
+ *
+ * Flow:
+ * 1. Welcome screen with three provider cards (Google, Microsoft, Apple)
+ * 2. Google/Microsoft: click -> OAuth consent -> auto-return -> success
+ * 3. Apple: click -> guided modal for app-specific password -> submit -> success
+ * 4. After each connection: show account card with email, calendar count, sync status
+ * 5. "Add another account" loops back to provider selection
+ * 6. "Done" shows completion screen with summary and link to calendar view
  *
  * State machine:
- *   idle -> connecting -> (browser redirects to OAuth) -> syncing -> complete
- *                                                         syncing -> error
+ *   idle -> connecting (OAuth redirect) -> syncing -> complete
+ *   idle -> apple-modal -> syncing -> complete
+ *   complete -> idle (add another) -> ...
+ *   complete -> finished (done)
+ *   any -> error -> idle (try again)
+ *
+ * Design principles:
+ * - Zero jargon: "Connect your calendar" not "Authorize OAuth scope"
+ * - Progressive disclosure: show only what's needed at each step
+ * - Instant feedback: loading states, success indicators, inline errors
+ * - Recoverable: every error has a "Try again" or "Get help" action
+ * - Provider-specific branding: deterministic colors per retro learning
  *
  * The component accepts injected fetch/navigate functions for testability.
  * In production, these are wired in App.tsx with auth tokens.
@@ -20,10 +35,17 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   buildOnboardingOAuthUrl,
   isSyncComplete,
+  isValidAppleAppPassword,
+  isOAuthProvider,
   SYNC_POLL_INTERVAL_MS,
-  type OnboardingState,
+  PROVIDERS,
+  PROVIDER_COLORS,
+  PROVIDER_ICONS,
+  APPLE_ID_SETTINGS_URL,
   type OnboardingSyncStatus,
+  type ConnectedAccount,
 } from "../lib/onboarding";
+import type { AccountProvider } from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +78,15 @@ export interface OnboardingProps {
    */
   fetchEvents: () => Promise<OnboardingEvent[]>;
   /**
+   * Submit Apple app-specific credentials.
+   * Returns the created account_id for sync polling.
+   */
+  submitAppleCredentials?: (
+    userId: string,
+    email: string,
+    password: string,
+  ) => Promise<{ account_id: string }>;
+  /**
    * Account ID from OAuth callback (null if not returning from OAuth).
    * When provided, the component enters syncing state and polls for status.
    */
@@ -66,6 +97,197 @@ export interface OnboardingProps {
    */
   oauthBaseUrl?: string;
 }
+
+/** Page-level view state (extends OnboardingState with multi-account views). */
+type ViewState =
+  | "idle"         // Showing provider cards
+  | "connecting"   // OAuth redirect in progress
+  | "apple-modal"  // Apple credential modal open
+  | "syncing"      // Polling sync status for current account
+  | "complete"     // Current account connected, showing success
+  | "error"        // Error state with try again
+  | "finished";    // All done, showing completion screen
+
+// ---------------------------------------------------------------------------
+// Styles (responsive, mobile-first)
+// ---------------------------------------------------------------------------
+
+const styles = {
+  container: {
+    maxWidth: 600,
+    width: "100%",
+    margin: "0 auto",
+    padding: "1.5rem 1rem",
+    fontFamily: "system-ui, -apple-system, sans-serif",
+    boxSizing: "border-box" as const,
+  },
+  branding: {
+    textAlign: "center" as const,
+    marginBottom: "2rem",
+  },
+  brandName: {
+    fontSize: "1.5rem",
+    fontWeight: 700,
+    letterSpacing: "-0.02em",
+    color: "#1a1a2e",
+  },
+  heading: {
+    fontSize: "1.75rem",
+    fontWeight: 600,
+    color: "#1a1a2e",
+    margin: "0.5rem 0",
+  },
+  subtitle: {
+    color: "#64748b",
+    fontSize: "0.95rem",
+    margin: 0,
+  },
+  cardContainer: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "1rem",
+  },
+  providerCard: (color: string) => ({
+    display: "flex",
+    alignItems: "center",
+    gap: "0.75rem",
+    padding: "1rem 1.5rem",
+    border: "1px solid #e2e8f0",
+    borderRadius: "0.75rem",
+    backgroundColor: "#fff",
+    cursor: "pointer",
+    fontSize: "1rem",
+    transition: "border-color 0.15s, box-shadow 0.15s",
+    borderLeft: `4px solid ${color}`,
+    width: "100%",
+    textAlign: "left" as const,
+  }),
+  providerIcon: (color: string) => ({
+    fontSize: "1.5rem",
+    fontWeight: 700,
+    color,
+    width: 40,
+    height: 40,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "0.5rem",
+    backgroundColor: `${color}15`,
+    flexShrink: 0,
+  }),
+  connectButton: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0.75rem 2rem",
+    border: "none",
+    borderRadius: "0.5rem",
+    backgroundColor: "#2563eb",
+    color: "#fff",
+    fontSize: "1rem",
+    fontWeight: 600,
+    cursor: "pointer",
+    marginTop: "1rem",
+  },
+  secondaryButton: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0.75rem 2rem",
+    border: "1px solid #e2e8f0",
+    borderRadius: "0.5rem",
+    backgroundColor: "#fff",
+    color: "#1a1a2e",
+    fontSize: "1rem",
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  connectedCard: (color: string) => ({
+    display: "flex",
+    alignItems: "center",
+    gap: "0.75rem",
+    padding: "1rem 1.5rem",
+    border: "1px solid #e2e8f0",
+    borderRadius: "0.75rem",
+    backgroundColor: "#fff",
+    borderLeft: `4px solid ${color}`,
+    marginBottom: "0.75rem",
+  }),
+  successBanner: {
+    textAlign: "center" as const,
+    padding: "1.5rem",
+    backgroundColor: "#f0fdf4",
+    borderRadius: "0.75rem",
+    marginBottom: "1.5rem",
+  },
+  errorBanner: {
+    textAlign: "center" as const,
+    padding: "2rem",
+    backgroundColor: "#fef2f2",
+    borderRadius: "0.75rem",
+  },
+  progressText: {
+    textAlign: "center" as const,
+    color: "#64748b",
+    fontSize: "0.9rem",
+    marginBottom: "1rem",
+  },
+  modal: {
+    overlay: {
+      position: "fixed" as const,
+      inset: 0,
+      backgroundColor: "rgba(0,0,0,0.4)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 100,
+      padding: "1rem",
+    },
+    content: {
+      backgroundColor: "#fff",
+      borderRadius: "1rem",
+      padding: "2rem",
+      maxWidth: 480,
+      width: "100%",
+      maxHeight: "90vh",
+      overflow: "auto" as const,
+    },
+  },
+  input: {
+    width: "100%",
+    padding: "0.75rem",
+    border: "1px solid #e2e8f0",
+    borderRadius: "0.5rem",
+    fontSize: "1rem",
+    boxSizing: "border-box" as const,
+    marginTop: "0.25rem",
+  },
+  label: {
+    display: "block",
+    fontSize: "0.9rem",
+    fontWeight: 500,
+    color: "#374151",
+    marginBottom: "0.5rem",
+  },
+  validationError: {
+    color: "#dc2626",
+    fontSize: "0.85rem",
+    marginTop: "0.25rem",
+  },
+  completionScreen: {
+    textAlign: "center" as const,
+    padding: "2rem 0",
+  },
+  spinner: {
+    width: 40,
+    height: 40,
+    border: "3px solid #e2e8f0",
+    borderTopColor: "#2563eb",
+    borderRadius: "50%",
+    margin: "0 auto",
+    animation: "spin 1s linear infinite",
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Component
@@ -78,30 +300,89 @@ export function Onboarding({
   },
   fetchAccountStatus,
   fetchEvents,
+  submitAppleCredentials,
   callbackAccountId,
   oauthBaseUrl = "https://oauth.tminus.ink",
 }: OnboardingProps) {
-  const [state, setState] = useState<OnboardingState>(
+  // View state management
+  const [viewState, setViewState] = useState<ViewState>(
     callbackAccountId ? "syncing" : "idle",
   );
-  const [syncStatus, setSyncStatus] = useState<OnboardingSyncStatus | null>(
-    null,
+
+  // Connected accounts list
+  const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([]);
+
+  // Current sync state
+  const [syncStatus, setSyncStatus] = useState<OnboardingSyncStatus | null>(null);
+  const [currentAccountId, setCurrentAccountId] = useState<string | null>(
+    callbackAccountId,
   );
   const [events, setEvents] = useState<OnboardingEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const syncCompleteRef = useRef(false);
 
+  // Apple modal state
+  const [appleEmail, setAppleEmail] = useState("");
+  const [applePassword, setApplePassword] = useState("");
+  const [appleError, setAppleError] = useState<string | null>(null);
+  const [appleSubmitting, setAppleSubmitting] = useState(false);
+
   // -------------------------------------------------------------------------
-  // OAuth initiation
+  // OAuth initiation (Google/Microsoft)
   // -------------------------------------------------------------------------
 
-  const handleConnectGoogle = useCallback(() => {
-    setState("connecting");
-    const redirectUri = `${window.location.origin}${window.location.pathname}#/onboard`;
-    const url = buildOnboardingOAuthUrl("google", user.id, redirectUri, oauthBaseUrl);
-    navigateToOAuth(url);
-  }, [user.id, navigateToOAuth, oauthBaseUrl]);
+  const handleConnectOAuth = useCallback(
+    (provider: AccountProvider) => {
+      setViewState("connecting");
+      const redirectUri = `${window.location.origin}${window.location.pathname}#/onboard`;
+      const url = buildOnboardingOAuthUrl(provider, user.id, redirectUri, oauthBaseUrl);
+      navigateToOAuth(url);
+    },
+    [user.id, navigateToOAuth, oauthBaseUrl],
+  );
+
+  // -------------------------------------------------------------------------
+  // Apple credential submission
+  // -------------------------------------------------------------------------
+
+  const handleAppleSubmit = useCallback(async () => {
+    // Validate
+    if (!appleEmail.trim()) {
+      setAppleError("Please enter your Apple ID email");
+      return;
+    }
+    if (!isValidAppleAppPassword(applePassword)) {
+      setAppleError(
+        "Invalid password format. App-specific passwords are 16 letters in the format xxxx-xxxx-xxxx-xxxx",
+      );
+      return;
+    }
+    if (!submitAppleCredentials) {
+      setAppleError("Apple Calendar connection is not configured");
+      return;
+    }
+
+    setAppleError(null);
+    setAppleSubmitting(true);
+
+    try {
+      const result = await submitAppleCredentials(
+        user.id,
+        appleEmail,
+        applePassword,
+      );
+      setCurrentAccountId(result.account_id);
+      syncCompleteRef.current = false;
+      setViewState("syncing");
+    } catch (err) {
+      setAppleError(
+        err instanceof Error ? err.message : "Something went wrong",
+      );
+    } finally {
+      setAppleSubmitting(false);
+    }
+  }, [appleEmail, applePassword, submitAppleCredentials, user.id]);
 
   // -------------------------------------------------------------------------
   // Sync status polling
@@ -115,7 +396,26 @@ export function Onboarding({
 
         if (isSyncComplete(status)) {
           syncCompleteRef.current = true;
-          setState("complete");
+
+          // Add to connected accounts
+          const connected: ConnectedAccount = {
+            account_id: status.account_id,
+            email: status.email,
+            provider: status.provider,
+            calendar_count: status.calendar_count ?? 0,
+            sync_state: "synced",
+          };
+          setConnectedAccounts((prev) => {
+            // Avoid duplicates
+            if (prev.some((a) => a.account_id === connected.account_id)) {
+              return prev.map((a) =>
+                a.account_id === connected.account_id ? connected : a,
+              );
+            }
+            return [...prev, connected];
+          });
+
+          setViewState("complete");
 
           // Stop polling
           if (pollingRef.current) {
@@ -135,7 +435,7 @@ export function Onboarding({
         setError(
           err instanceof Error ? err.message : "Something went wrong",
         );
-        setState("error");
+        setViewState("error");
 
         // Stop polling on error
         if (pollingRef.current) {
@@ -147,18 +447,19 @@ export function Onboarding({
     [fetchAccountStatus, fetchEvents],
   );
 
-  // Start polling when we have a callback account ID
+  // Start polling when we have an account to sync
   useEffect(() => {
-    if (!callbackAccountId) return;
+    if (!currentAccountId) return;
     if (syncCompleteRef.current) return;
+    if (viewState !== "syncing") return;
 
     // Initial poll immediately
-    pollStatus(callbackAccountId);
+    pollStatus(currentAccountId);
 
     // Set up interval polling
     pollingRef.current = setInterval(() => {
       if (!syncCompleteRef.current) {
-        pollStatus(callbackAccountId);
+        pollStatus(currentAccountId);
       }
     }, SYNC_POLL_INTERVAL_MS);
 
@@ -168,7 +469,48 @@ export function Onboarding({
         pollingRef.current = null;
       }
     };
-  }, [callbackAccountId, pollStatus]);
+  }, [currentAccountId, pollStatus, viewState]);
+
+  // -------------------------------------------------------------------------
+  // Actions
+  // -------------------------------------------------------------------------
+
+  const handleAddAnother = useCallback(() => {
+    setSyncStatus(null);
+    setCurrentAccountId(null);
+    syncCompleteRef.current = false;
+    setError(null);
+    setAppleEmail("");
+    setApplePassword("");
+    setAppleError(null);
+    setViewState("idle");
+  }, []);
+
+  const handleDone = useCallback(() => {
+    setViewState("finished");
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    setError(null);
+    setSyncStatus(null);
+    setCurrentAccountId(null);
+    syncCompleteRef.current = false;
+    setViewState("idle");
+  }, []);
+
+  const handleProviderClick = useCallback(
+    (provider: AccountProvider) => {
+      if (isOAuthProvider(provider)) {
+        handleConnectOAuth(provider);
+      } else {
+        setViewState("apple-modal");
+        setAppleEmail("");
+        setApplePassword("");
+        setAppleError(null);
+      }
+    },
+    [handleConnectOAuth],
+  );
 
   // -------------------------------------------------------------------------
   // Render
@@ -176,46 +518,81 @@ export function Onboarding({
 
   return (
     <div
-      style={{
-        maxWidth: 600,
-        margin: "0 auto",
-        padding: "2rem",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-      }}
+      style={styles.container}
+      data-testid="onboarding-container"
     >
       {/* Branding */}
-      <div style={{ textAlign: "center", marginBottom: "2rem" }}>
-        <div
-          style={{
-            fontSize: "1.5rem",
-            fontWeight: 700,
-            letterSpacing: "-0.02em",
-            color: "#1a1a2e",
-          }}
-        >
-          T-Minus
-        </div>
-        <h1
-          style={{
-            fontSize: "1.75rem",
-            fontWeight: 600,
-            color: "#1a1a2e",
-            margin: "0.5rem 0",
-          }}
-        >
-          Connect Your Calendar
-        </h1>
-        <p style={{ color: "#64748b", fontSize: "0.95rem" }}>
+      <div style={styles.branding}>
+        <div style={styles.brandName}>T-Minus</div>
+        <h1 style={styles.heading}>Connect Your Calendar</h1>
+        <p style={styles.subtitle}>
           Link your calendar accounts to get started with intelligent scheduling
         </p>
       </div>
 
+      {/* Connected accounts summary (shown in multi-account flow) */}
+      {connectedAccounts.length > 0 && viewState !== "finished" && (
+        <div style={{ marginBottom: "1.5rem" }}>
+          {connectedAccounts.map((account) => (
+            <div
+              key={account.account_id}
+              style={styles.connectedCard(PROVIDER_COLORS[account.provider])}
+              data-testid={`connected-account-${account.account_id}`}
+            >
+              <div
+                style={styles.providerIcon(PROVIDER_COLORS[account.provider])}
+              >
+                {PROVIDER_ICONS[account.provider]}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600 }}>
+                  {"\u2713"} {account.email}
+                </div>
+                <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+                  {account.calendar_count}{" "}
+                  {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
+                  {"\u00B7"}{" "}
+                  <span
+                    style={{
+                      color:
+                        account.sync_state === "synced"
+                          ? "#16a34a"
+                          : account.sync_state === "error"
+                            ? "#dc2626"
+                            : "#ca8a04",
+                    }}
+                  >
+                    {account.sync_state === "synced"
+                      ? "Synced"
+                      : account.sync_state === "error"
+                        ? "Error"
+                        : "Syncing..."}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+          {viewState === "idle" && (
+            <div style={styles.progressText}>
+              {connectedAccounts.length}{" "}
+              {connectedAccounts.length === 1 ? "account" : "accounts"}{" "}
+              connected
+            </div>
+          )}
+        </div>
+      )}
+
       {/* State-dependent content */}
-      {state === "idle" && renderProviderButtons()}
-      {state === "connecting" && renderConnecting()}
-      {state === "syncing" && renderSyncing()}
-      {state === "complete" && renderComplete()}
-      {state === "error" && renderError()}
+      {viewState === "idle" && renderProviderCards()}
+      {viewState === "connecting" && renderConnecting()}
+      {viewState === "syncing" && renderSyncing()}
+      {viewState === "complete" && renderComplete()}
+      {viewState === "error" && renderError()}
+      {viewState === "apple-modal" && renderAppleModal()}
+      {viewState === "finished" && renderFinished()}
+
+      {/* Spinner keyframes */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 
@@ -223,83 +600,34 @@ export function Onboarding({
   // Render helpers
   // -------------------------------------------------------------------------
 
-  function renderProviderButtons() {
+  function renderProviderCards() {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-        {/* Google */}
-        <button
-          onClick={handleConnectGoogle}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.75rem",
-            padding: "1rem 1.5rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            backgroundColor: "#fff",
-            cursor: "pointer",
-            fontSize: "1rem",
-            transition: "border-color 0.15s",
-          }}
-        >
-          <span style={{ fontSize: "1.5rem" }}>G</span>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontWeight: 600 }}>Connect Google Calendar</div>
-            <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
-              Connect your Google Workspace or personal Google Calendar
+      <div
+        style={styles.cardContainer}
+        data-testid="provider-cards"
+      >
+        {PROVIDERS.map((provider) => (
+          <button
+            key={provider.id}
+            onClick={() => handleProviderClick(provider.id)}
+            style={styles.providerCard(PROVIDER_COLORS[provider.id])}
+            aria-label={`Connect ${provider.label}`}
+            data-testid={`provider-card-${provider.id}`}
+          >
+            <div
+              style={styles.providerIcon(PROVIDER_COLORS[provider.id])}
+              data-testid={`provider-icon-${provider.id}`}
+            >
+              {PROVIDER_ICONS[provider.id]}
             </div>
-          </div>
-        </button>
-
-        {/* Microsoft (coming soon) */}
-        <button
-          disabled
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.75rem",
-            padding: "1rem 1.5rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            backgroundColor: "#f8fafc",
-            cursor: "not-allowed",
-            fontSize: "1rem",
-            opacity: 0.6,
-          }}
-        >
-          <span style={{ fontSize: "1.5rem" }}>M</span>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontWeight: 600 }}>Microsoft Outlook</div>
-            <div style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
-              Coming soon
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600 }}>Connect {provider.label}</div>
+              <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+                {provider.description}
+              </div>
             </div>
-          </div>
-        </button>
-
-        {/* Apple (coming soon) */}
-        <button
-          disabled
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.75rem",
-            padding: "1rem 1.5rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.5rem",
-            backgroundColor: "#f8fafc",
-            cursor: "not-allowed",
-            fontSize: "1rem",
-            opacity: 0.6,
-          }}
-        >
-          <span style={{ fontSize: "1.5rem" }}>A</span>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontWeight: 600 }}>Apple Calendar</div>
-            <div style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
-              Coming soon
-            </div>
-          </div>
-        </button>
+          </button>
+        ))}
       </div>
     );
   }
@@ -308,11 +636,12 @@ export function Onboarding({
     return (
       <div style={{ textAlign: "center", padding: "2rem" }}>
         <div style={{ fontSize: "1.25rem", marginBottom: "1rem" }}>
-          Redirecting to Google...
+          Redirecting to your calendar provider...
         </div>
         <div style={{ color: "#64748b" }}>
           You will be asked to grant calendar access
         </div>
+        <div style={{ ...styles.spinner, marginTop: "1.5rem" }} />
       </div>
     );
   }
@@ -334,18 +663,7 @@ export function Onboarding({
             Connected as {syncStatus.email}
           </div>
         )}
-        <div
-          style={{
-            width: 40,
-            height: 40,
-            border: "3px solid #e2e8f0",
-            borderTopColor: "#2563eb",
-            borderRadius: "50%",
-            margin: "0 auto",
-            animation: "spin 1s linear infinite",
-          }}
-        />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div style={styles.spinner} />
       </div>
     );
   }
@@ -354,15 +672,7 @@ export function Onboarding({
     return (
       <div>
         {/* Success banner */}
-        <div
-          style={{
-            textAlign: "center",
-            padding: "1.5rem",
-            backgroundColor: "#f0fdf4",
-            borderRadius: "0.5rem",
-            marginBottom: "1.5rem",
-          }}
-        >
+        <div style={styles.successBanner}>
           <div
             style={{
               fontSize: "1.5rem",
@@ -373,15 +683,25 @@ export function Onboarding({
             {"\u2713"} Connected
           </div>
           {syncStatus && (
-            <div style={{ color: "#64748b" }}>
-              {syncStatus.email} -- Google Calendar
-            </div>
+            <>
+              <div style={{ color: "#374151", fontWeight: 500 }}>
+                {syncStatus.email}
+              </div>
+              <div style={{ color: "#64748b", fontSize: "0.9rem", marginTop: "0.25rem" }}>
+                {syncStatus.calendar_count ?? 0}{" "}
+                {(syncStatus.calendar_count ?? 0) === 1
+                  ? "calendar"
+                  : "calendars"}{" "}
+                found {"\u00B7"}{" "}
+                <span style={{ color: "#16a34a" }}>Synced</span>
+              </div>
+            </>
           )}
         </div>
 
         {/* Events list */}
         {events.length > 0 && (
-          <div>
+          <div style={{ marginBottom: "1.5rem" }}>
             <h2
               style={{
                 fontSize: "1.1rem",
@@ -419,20 +739,43 @@ export function Onboarding({
             </div>
           </div>
         )}
+
+        {/* Progress + actions */}
+        <div style={styles.progressText}>
+          {connectedAccounts.length}{" "}
+          {connectedAccounts.length === 1 ? "account" : "accounts"} connected
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.75rem",
+            alignItems: "center",
+          }}
+        >
+          <button
+            onClick={handleAddAnother}
+            style={styles.connectButton}
+            aria-label="Add another account"
+          >
+            Add Another Account
+          </button>
+          <button
+            onClick={handleDone}
+            style={styles.secondaryButton}
+            aria-label="Finish onboarding"
+          >
+            I{"'"}m Done
+          </button>
+        </div>
       </div>
     );
   }
 
   function renderError() {
     return (
-      <div
-        style={{
-          textAlign: "center",
-          padding: "2rem",
-          backgroundColor: "#fef2f2",
-          borderRadius: "0.5rem",
-        }}
-      >
+      <div style={styles.errorBanner}>
         <div
           style={{
             fontSize: "1.25rem",
@@ -446,21 +789,233 @@ export function Onboarding({
           <div style={{ color: "#64748b", marginBottom: "1rem" }}>{error}</div>
         )}
         <button
-          onClick={() => {
-            setState("idle");
-            setError(null);
-            setSyncStatus(null);
-          }}
-          style={{
-            padding: "0.5rem 1.5rem",
-            border: "1px solid #e2e8f0",
-            borderRadius: "0.375rem",
-            backgroundColor: "#fff",
-            cursor: "pointer",
-          }}
+          onClick={handleRetry}
+          style={styles.secondaryButton}
+          aria-label="Try again"
         >
           Try Again
         </button>
+      </div>
+    );
+  }
+
+  function renderAppleModal() {
+    return (
+      <div
+        style={styles.modal.overlay}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            setViewState("idle");
+          }
+        }}
+      >
+        <div
+          role="dialog"
+          aria-label="Connect Apple Calendar"
+          style={styles.modal.content}
+        >
+          <h2
+            style={{
+              fontSize: "1.25rem",
+              fontWeight: 600,
+              marginBottom: "1rem",
+              margin: 0,
+            }}
+          >
+            Connect Apple Calendar
+          </h2>
+
+          <p style={{ color: "#64748b", marginBottom: "1.5rem" }}>
+            Apple Calendar uses an app-specific password instead of a
+            sign-in button. Follow these steps:
+          </p>
+
+          {/* Instructions */}
+          <div
+            style={{
+              backgroundColor: "#f8fafc",
+              borderRadius: "0.5rem",
+              padding: "1rem",
+              marginBottom: "1.5rem",
+              fontSize: "0.9rem",
+            }}
+          >
+            <ol
+              style={{
+                margin: 0,
+                paddingLeft: "1.25rem",
+                color: "#374151",
+              }}
+            >
+              <li style={{ marginBottom: "0.5rem" }}>
+                Go to your{" "}
+                <a
+                  href={APPLE_ID_SETTINGS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Apple ID settings"
+                  style={{ color: "#2563eb" }}
+                >
+                  Apple ID settings
+                </a>
+              </li>
+              <li style={{ marginBottom: "0.5rem" }}>
+                Navigate to Sign-In and Security, then App-Specific Passwords
+              </li>
+              <li>
+                Generate a new password and paste it below
+              </li>
+            </ol>
+          </div>
+
+          {/* Form */}
+          <div style={{ marginBottom: "1rem" }}>
+            <label
+              htmlFor="apple-email"
+              style={styles.label}
+            >
+              Apple ID Email
+            </label>
+            <input
+              id="apple-email"
+              type="email"
+              value={appleEmail}
+              onChange={(e) => setAppleEmail(e.target.value)}
+              placeholder="your@icloud.com"
+              style={styles.input}
+              autoComplete="email"
+            />
+          </div>
+
+          <div style={{ marginBottom: "1rem" }}>
+            <label
+              htmlFor="apple-password"
+              style={styles.label}
+            >
+              App-Specific Password
+            </label>
+            <input
+              id="apple-password"
+              type="password"
+              value={applePassword}
+              onChange={(e) => setApplePassword(e.target.value)}
+              placeholder="xxxx-xxxx-xxxx-xxxx"
+              style={styles.input}
+              autoComplete="off"
+            />
+          </div>
+
+          {/* Validation/submission errors */}
+          {appleError && (
+            <div style={styles.validationError}>
+              {appleError}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div
+            style={{
+              display: "flex",
+              gap: "0.75rem",
+              justifyContent: "flex-end",
+              marginTop: "1.5rem",
+            }}
+          >
+            <button
+              onClick={() => setViewState("idle")}
+              style={styles.secondaryButton}
+              aria-label="Cancel"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAppleSubmit}
+              disabled={appleSubmitting}
+              style={{
+                ...styles.connectButton,
+                marginTop: 0,
+                opacity: appleSubmitting ? 0.6 : 1,
+              }}
+              aria-label="Connect"
+            >
+              {appleSubmitting ? "Connecting..." : "Connect"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderFinished() {
+    return (
+      <div style={styles.completionScreen}>
+        <div
+          style={{
+            fontSize: "2rem",
+            marginBottom: "0.5rem",
+            color: "#16a34a",
+          }}
+        >
+          {"\u2713"}
+        </div>
+        <h2
+          style={{
+            fontSize: "1.5rem",
+            fontWeight: 600,
+            color: "#1a1a2e",
+            marginBottom: "0.5rem",
+          }}
+        >
+          You{"'"}re All Set!
+        </h2>
+        <p style={{ color: "#64748b", marginBottom: "2rem" }}>
+          Your calendars are connected and syncing. Here{"'"}s a summary:
+        </p>
+
+        {/* Account summary */}
+        <div style={{ marginBottom: "2rem", textAlign: "left" }}>
+          {connectedAccounts.map((account) => (
+            <div
+              key={account.account_id}
+              style={styles.connectedCard(PROVIDER_COLORS[account.provider])}
+            >
+              <div
+                style={styles.providerIcon(PROVIDER_COLORS[account.provider])}
+              >
+                {PROVIDER_ICONS[account.provider]}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600 }}>{account.email}</div>
+                <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+                  {account.calendar_count}{" "}
+                  {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
+                  {"\u00B7"} Synced
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Link to calendar view */}
+        <a
+          href="#/calendar"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0.75rem 2rem",
+            border: "none",
+            borderRadius: "0.5rem",
+            backgroundColor: "#2563eb",
+            color: "#fff",
+            fontSize: "1rem",
+            fontWeight: 600,
+            textDecoration: "none",
+          }}
+          aria-label="Go to calendar"
+        >
+          Go to Calendar
+        </a>
       </div>
     );
   }

@@ -37,6 +37,7 @@ import { Onboarding } from "./pages/Onboarding";
 import { parseOAuthCallback } from "./lib/onboarding";
 import type { OnboardingSyncStatus } from "./lib/onboarding";
 import {
+  apiFetch,
   fetchSyncStatus,
   fetchAccounts,
   fetchAccountDetail,
@@ -443,6 +444,19 @@ function Router() {
     return fetchEvents(token);
   }, [token]);
 
+  const boundSubmitAppleCredentials = useCallback(
+    async (userId: string, email: string, password: string) => {
+      if (!token) throw new Error("Not authenticated");
+      // POST to the API to create an Apple calendar account with app-specific password
+      const result = await apiFetch<{ account_id: string }>(
+        "/v1/accounts/apple",
+        { method: "POST", body: { user_id: userId, email, password }, token },
+      );
+      return result;
+    },
+    [token],
+  );
+
   // Parse OAuth callback params from hash URL (e.g., #/onboard?account_id=acc-123)
   const onboardCallbackAccountId = (() => {
     if (!route.startsWith("#/onboard")) return null;
@@ -477,6 +491,7 @@ function Router() {
           fetchAccountStatus={boundFetchAccountStatus}
           fetchEvents={boundFetchEventsForOnboarding}
           callbackAccountId={onboardCallbackAccountId}
+          submitAppleCredentials={boundSubmitAppleCredentials}
         />
       ) : null;
     case "#/calendar":

@@ -77,7 +77,7 @@ export interface UpdateEventPayload {
 }
 
 /** Provider type for linked calendar accounts. */
-export type AccountProvider = "google" | "microsoft";
+export type AccountProvider = "google" | "microsoft" | "apple";
 
 /** Status of a linked calendar account. */
 export type AccountStatus = "active" | "error" | "revoked" | "pending";

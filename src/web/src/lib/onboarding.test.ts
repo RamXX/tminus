@@ -168,10 +168,17 @@ describe("PROVIDERS", () => {
     expect(google!.label).toBe("Google Calendar");
   });
 
-  it("includes Microsoft as disabled (coming soon)", () => {
+  it("includes Microsoft as enabled", () => {
     const microsoft = PROVIDERS.find((p) => p.id === "microsoft");
     expect(microsoft).toBeDefined();
-    expect(microsoft!.enabled).toBe(false);
+    expect(microsoft!.enabled).toBe(true);
+  });
+
+  it("includes Apple as enabled", () => {
+    const apple = PROVIDERS.find((p) => p.id === "apple");
+    expect(apple).toBeDefined();
+    expect(apple!.enabled).toBe(true);
+    expect(apple!.label).toBe("Apple Calendar");
   });
 });
 
