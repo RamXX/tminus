@@ -1367,7 +1367,7 @@ export function createHandler() {
 
       // Apply rate limit headers to all authenticated responses
       if (rateLimitResult) {
-        return applyRateLimitHeaders(response, rateLimitResult);
+        return await applyRateLimitHeaders(response, rateLimitResult);
       }
 
       return response;

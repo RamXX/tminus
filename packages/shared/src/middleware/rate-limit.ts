@@ -347,10 +347,10 @@ export function extractClientIp(request: Request): string {
  * @param result - The rate limit check result
  * @returns A new Response with rate limit headers
  */
-export function applyRateLimitHeaders(
+export async function applyRateLimitHeaders(
   response: Response,
   result: RateLimitResult,
-): Response {
+): Promise<Response> {
   const rlHeaders = buildRateLimitHeaders(result);
   const newHeaders = new Headers(response.headers);
 
@@ -358,7 +358,11 @@ export function applyRateLimitHeaders(
     newHeaders.set(name, value);
   }
 
-  return new Response(response.body, {
+  // Read body as text to create a new Response, avoiding TS issues with
+  // response.body across different type environments (Workers vs standard).
+  const bodyText = await response.text();
+
+  return new Response(bodyText, {
     status: response.status,
     statusText: response.statusText,
     headers: newHeaders,

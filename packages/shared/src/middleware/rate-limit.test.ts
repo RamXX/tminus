@@ -515,7 +515,7 @@ describe("extractClientIp", () => {
 // ---------------------------------------------------------------------------
 
 describe("applyRateLimitHeaders", () => {
-  it("adds rate limit headers to an existing response", () => {
+  it("adds rate limit headers to an existing response", async () => {
     const original = new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -529,7 +529,7 @@ describe("applyRateLimitHeaders", () => {
       retryAfter: 55,
     };
 
-    const modified = applyRateLimitHeaders(original, result);
+    const modified = await applyRateLimitHeaders(original, result);
     expect(modified.status).toBe(200);
     expect(modified.headers.get("Content-Type")).toBe("application/json");
     expect(modified.headers.get("X-RateLimit-Limit")).toBe("100");
@@ -537,7 +537,7 @@ describe("applyRateLimitHeaders", () => {
     expect(modified.headers.get("X-RateLimit-Reset")).toBe("1700000060");
   });
 
-  it("preserves original response status", () => {
+  it("preserves original response status", async () => {
     const original = new Response("Created", { status: 201 });
 
     const result: RateLimitResult = {
@@ -548,7 +548,7 @@ describe("applyRateLimitHeaders", () => {
       retryAfter: 55,
     };
 
-    const modified = applyRateLimitHeaders(original, result);
+    const modified = await applyRateLimitHeaders(original, result);
     expect(modified.status).toBe(201);
     expect(modified.headers.get("X-RateLimit-Limit")).toBe("500");
   });
