@@ -444,6 +444,34 @@ ALTER TABLE organizations ADD COLUMN stripe_subscription_id TEXT;
 ` as const;
 
 /**
+ * Migration 0019: Device tokens table for push notifications.
+ *
+ * Stores APNs/FCM device tokens keyed by user_id. Lives in D1
+ * (not UserGraphDO SQLite) because the push worker needs cross-user
+ * lookup to find all device tokens for a given user.
+ *
+ * Constraints:
+ * - UNIQUE(user_id, device_token) prevents duplicate registrations
+ * - platform CHECK constraint restricts to 'ios', 'android', 'web'
+ * - Indexed by user_id for fast lookup and device_token for dedup
+ */
+export const MIGRATION_0019_DEVICE_TOKENS = `
+-- Device tokens for push notifications
+CREATE TABLE device_tokens (
+  token_id      TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(user_id),
+  device_token  TEXT NOT NULL,
+  platform      TEXT NOT NULL CHECK(platform IN ('ios', 'android', 'web')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, device_token)
+);
+
+CREATE INDEX idx_device_tokens_user ON device_tokens(user_id);
+CREATE INDEX idx_device_tokens_token ON device_tokens(device_token);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -466,4 +494,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0016_ORG_MEMBERS,
   MIGRATION_0017_ORG_POLICIES,
   MIGRATION_0018_ORG_SEAT_BILLING,
+  MIGRATION_0019_DEVICE_TOKENS,
 ] as const;

@@ -244,3 +244,20 @@ export interface OrgPolicyRow {
   readonly created_at: string;
   readonly created_by: string;
 }
+
+// ---------------------------------------------------------------------------
+// Device tokens (Migration 0019)
+// ---------------------------------------------------------------------------
+
+/** Valid platform values for device tokens. */
+export type DeviceTokenPlatform = "ios" | "android" | "web";
+
+/** Row shape for the `device_tokens` table. */
+export interface DeviceTokenRow {
+  readonly token_id: string;
+  readonly user_id: string;
+  readonly device_token: string;
+  readonly platform: DeviceTokenPlatform;
+  readonly created_at: string;
+  readonly updated_at: string;
+}

@@ -1,0 +1,99 @@
+# ============================================================================
+# tminus-push -- Push notification delivery worker
+# Consumes push-queue messages and delivers to APNs/FCM.
+# Manages device token registration via HTTP API endpoints.
+# ============================================================================
+
+name = "tminus-push"
+main = "src/index.ts"
+compatibility_date = "2025-02-14"
+
+# --- Durable Object references (hosted on tminus-api) ----------------------
+
+[[durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api"
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
+
+# --- Queue consumer (push-queue) -------------------------------------------
+
+[[queues.consumers]]
+queue = "tminus-push-queue"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "tminus-push-dlq"
+
+[vars]
+ENVIRONMENT = "development"
+APNS_TOPIC = "ink.tminus.app"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# APNS_KEY_ID         -- APNs authentication key ID
+# APNS_TEAM_ID        -- Apple Developer Team ID
+# APNS_PRIVATE_KEY    -- APNs .p8 private key (PEM format)
+
+# ===========================================================================
+# Staging environment: tminus-push-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-push-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+APNS_TOPIC = "ink.tminus.app"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "STAGING_DB_ID_PLACEHOLDER"
+
+[[env.staging.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.queues.consumers]]
+queue = "tminus-push-queue-staging"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "tminus-push-dlq-staging"
+
+# ===========================================================================
+# Production environment: tminus-push-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-push-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+APNS_TOPIC = "ink.tminus.app"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+
+[[env.production.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-production"
+
+[[env.production.queues.consumers]]
+queue = "tminus-push-queue"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "tminus-push-dlq"

@@ -43,6 +43,10 @@ queue = "tminus-sync-queue"
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
 
+[[queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue"
+
 # --- KV namespaces -----------------------------------------------------------
 
 [[kv_namespaces]]
@@ -108,6 +112,10 @@ queue = "tminus-sync-queue-staging"
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue-staging"
 
+[[env.staging.queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue-staging"
+
 [[env.staging.r2_buckets]]
 binding = "PROOF_BUCKET"
 bucket_name = "tminus-proof-exports-staging"
@@ -147,6 +155,10 @@ queue = "tminus-sync-queue"
 [[env.production.queues.producers]]
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
+
+[[env.production.queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue"
 
 [[env.production.r2_buckets]]
 binding = "PROOF_BUCKET"

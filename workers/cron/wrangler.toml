@@ -47,6 +47,10 @@ queue = "tminus-reconcile-queue"
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
 
+[[queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue"
+
 # --- Workflow definitions (hosted here) ------------------------------------
 
 [[workflows]]
@@ -102,6 +106,10 @@ queue = "tminus-reconcile-queue-staging"
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue-staging"
 
+[[env.staging.queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue-staging"
+
 [[env.staging.workflows]]
 binding = "RECONCILE_WORKFLOW"
 name = "reconcile-workflow-staging"
@@ -148,6 +156,10 @@ queue = "tminus-reconcile-queue"
 [[env.production.queues.producers]]
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
+
+[[env.production.queues.producers]]
+binding = "PUSH_QUEUE"
+queue = "tminus-push-queue"
 
 [[env.production.workflows]]
 binding = "RECONCILE_WORKFLOW"
