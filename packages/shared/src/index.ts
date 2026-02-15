@@ -564,3 +564,24 @@ export type {
   CancellationHistory,
   CancellationHistoryEntry,
 } from "./probabilistic-availability";
+
+// Re-export upgrade prompt logic (TM-d17.4: Smart Upgrade Prompts)
+export {
+  evaluatePromptTriggers,
+  shouldShowPrompt,
+  createDismissal,
+  isDismissed,
+  isSessionPromptShown,
+  getPromptMessage,
+  DEFAULT_ENGAGEMENT_THRESHOLDS,
+  DISMISSAL_DURATION_MS,
+} from "./upgrade-prompts";
+export type {
+  PromptTriggerType,
+  EngagementMetrics,
+  FeedContext,
+  PromptThresholds,
+  PromptTriggerResult,
+  PromptDismissal,
+  PromptSettings,
+} from "./upgrade-prompts";

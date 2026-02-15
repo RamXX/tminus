@@ -5,20 +5,81 @@
  * The page provides the header (user info, logout) and passes a bound
  * fetchEvents function to the calendar.
  *
+ * Also integrates the UpgradePromptBanner (TM-d17.4) which shows
+ * contextual upgrade nudges to ICS-only users when relevant triggers fire.
+ *
  * Data pipeline:
  *   UnifiedCalendar -> fetchEvents(start, end) -> apiFetch -> /api/v1/events
  *   -> app-gateway proxy -> api-worker -> UserGraphDO
  */
 
-import { useCallback } from "react";
+import { useCallback, useState, useMemo } from "react";
 import { useAuth } from "../lib/auth";
 import { fetchEvents, createEvent, updateEvent, deleteEvent, fetchEventBriefing, generateExcuse, ApiError } from "../lib/api";
 import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
 import type { ExcuseTone, TruthLevel } from "../lib/briefing";
 import { UnifiedCalendar } from "../components/UnifiedCalendar";
+import { UpgradePromptBanner } from "../components/UpgradePromptBanner";
+import { UpgradePromptManager } from "../lib/upgrade-prompts";
+import type { PromptTriggerResult, EngagementMetrics, FeedContext } from "../lib/upgrade-prompts";
 
 export function Calendar() {
   const { token, user, logout } = useAuth();
+
+  // -------------------------------------------------------------------------
+  // Upgrade prompt state (TM-d17.4)
+  // -------------------------------------------------------------------------
+
+  // Singleton manager survives re-renders but resets on unmount (new session)
+  const promptManager = useMemo(
+    () => new UpgradePromptManager(window.localStorage),
+    [],
+  );
+
+  // The active prompt to display (null = no banner)
+  const [activePrompt, setActivePrompt] = useState<PromptTriggerResult | null>(null);
+
+  /**
+   * Evaluate upgrade prompts with current engagement and context.
+   * Called by child components or effects when context changes.
+   */
+  const evaluateUpgradePrompt = useCallback(
+    (metrics: EngagementMetrics, context: FeedContext) => {
+      const prompt = promptManager.evaluate(metrics, context);
+      setActivePrompt(prompt);
+      if (prompt) {
+        promptManager.markSessionPromptShown(prompt.type);
+      }
+    },
+    [promptManager],
+  );
+
+  /** Handle "Not now" dismissal -- suppresses this prompt type for 7 days. */
+  const handlePromptDismiss = useCallback(() => {
+    if (activePrompt) {
+      promptManager.dismiss(activePrompt.type);
+      setActivePrompt(null);
+    }
+  }, [activePrompt, promptManager]);
+
+  /** Handle permanent dismissal -- disables all upgrade prompts via settings. */
+  const handlePermanentDismiss = useCallback(() => {
+    promptManager.setPermanentlyDismissed(true);
+    setActivePrompt(null);
+  }, [promptManager]);
+
+  /** Handle "Upgrade" click -- navigate to onboarding for the provider. */
+  const handlePromptUpgrade = useCallback(
+    (provider?: string) => {
+      // Navigate to onboarding page (Phase 6A flow)
+      if (provider) {
+        window.location.hash = `#/onboard?provider=${encodeURIComponent(provider)}`;
+      } else {
+        window.location.hash = "#/onboard";
+      }
+    },
+    [],
+  );
 
   /**
    * Adapter between UnifiedCalendar's (start, end) signature and the
@@ -146,6 +207,14 @@ export function Calendar() {
           </button>
         </div>
       </header>
+
+      {/* Upgrade prompt banner (TM-d17.4) */}
+      <UpgradePromptBanner
+        prompt={activePrompt}
+        onDismiss={handlePromptDismiss}
+        onUpgrade={handlePromptUpgrade}
+        onPermanentDismiss={handlePermanentDismiss}
+      />
 
       {/* Calendar */}
       <main style={styles.main}>
