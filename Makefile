@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -75,6 +75,18 @@ deploy-production-dry-run:
 deploy-dns:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
 	. ./.env && node scripts/dns-setup.mjs --env production
+
+dns-setup:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/dns-setup.mjs --env all
+
+dns-setup-staging:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/dns-setup.mjs --env staging
+
+dns-setup-all:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/dns-setup.mjs --env all
 
 smoke-test:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
