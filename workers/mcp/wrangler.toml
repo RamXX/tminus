@@ -1,0 +1,62 @@
+# ============================================================================
+# tminus-mcp -- MCP (Model Context Protocol) server worker
+# Exposes calendar tools via JSON-RPC for AI agent consumption.
+# ============================================================================
+
+name = "tminus-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "development"
+
+# --- D1 registry database --------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
+
+# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
+# JWT_SECRET -- API auth JWT signing secret
+
+# ===========================================================================
+# Staging environment: tminus-mcp-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-mcp-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.routes]]
+pattern = "mcp-staging.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "placeholder-staging-d1-id"
+
+# ===========================================================================
+# Production environment: tminus-mcp-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-mcp-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[[env.production.routes]]
+pattern = "mcp.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
