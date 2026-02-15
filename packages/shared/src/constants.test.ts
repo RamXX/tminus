@@ -50,6 +50,7 @@ describe("constants.ts -- ID_PREFIXES", () => {
       "user", "account", "event", "policy", "calendar",
       "journal", "constraint", "apikey", "cert",
       "session", "candidate", "hold", "vip", "allocation",
+      "commitment", "report",
     ];
     for (const key of requiredKeys) {
       expect(keys).toContain(key);
