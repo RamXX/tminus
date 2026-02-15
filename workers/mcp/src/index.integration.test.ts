@@ -241,7 +241,7 @@ async function makeAuthHeader(userId?: string): Promise<string> {
     {
       sub: userId ?? TEST_USER.user_id,
       email: TEST_USER.email,
-      tier: "free",
+      tier: "premium",
       pwd_ver: 1,
     },
     JWT_SECRET,
@@ -2232,5 +2232,269 @@ describe("MCP integration: full policy CRUD lifecycle", () => {
     expect(ab?.calendar_kind).toBe("BUSY_OVERLAY");
     expect(ba?.detail_level).toBe("FULL");
     expect(ba?.calendar_kind).toBe("TRUE_MIRROR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: tier-based tool permissions
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: generate a JWT with a specific tier for integration tier tests.
+ */
+async function makeAuthHeaderWithTier(tier: string, userId?: string): Promise<string> {
+  const token = await generateJWT(
+    {
+      sub: userId ?? TEST_USER.user_id,
+      email: TEST_USER.email,
+      tier,
+      pwd_ver: 1,
+    },
+    JWT_SECRET,
+    3600,
+  );
+  return `Bearer ${token}`;
+}
+
+/**
+ * Helper: call a tool with a specific tier for tier integration tests.
+ * Returns the raw JSON-RPC response body for flexible assertions.
+ */
+async function callToolWithTier(
+  toolName: string,
+  tier: string,
+  toolArgs?: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const authHeader = await makeAuthHeaderWithTier(tier);
+  return sendMcpRequest(
+    {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { name: toolName, arguments: toolArgs ?? {} },
+      id: Math.floor(Math.random() * 100000),
+    },
+    authHeader,
+  );
+}
+
+describe("MCP integration: tier-based tool permissions", () => {
+  // -- Free tier: read-only tools succeed with real data --
+
+  it("free tier can call calendar.list_accounts (read-only tool)", async () => {
+    const result = await callToolWithTier("calendar.list_accounts", "free");
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(Array.isArray(data)).toBe(true);
+    expect(data.length).toBe(2);
+  });
+
+  it("free tier can call calendar.get_sync_status (read-only tool)", async () => {
+    const result = await callToolWithTier("calendar.get_sync_status", "free");
+    expect(result.body.error).toBeUndefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data).toHaveProperty("overall");
+    expect(data).toHaveProperty("accounts");
+  });
+
+  it("free tier can call calendar.list_events (read-only tool)", async () => {
+    const result = await callToolWithTier("calendar.list_events", "free", {
+      start: "2026-01-01T00:00:00Z",
+      end: "2026-12-31T23:59:59Z",
+    });
+    expect(result.body.error).toBeUndefined();
+  });
+
+  it("free tier can call calendar.get_availability (read-only tool)", async () => {
+    const result = await callToolWithTier("calendar.get_availability", "free", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+    });
+    expect(result.body.error).toBeUndefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data).toHaveProperty("slots");
+  });
+
+  it("free tier can call calendar.list_policies (read-only tool)", async () => {
+    const result = await callToolWithTier("calendar.list_policies", "free");
+    expect(result.body.error).toBeUndefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data).toHaveProperty("policies");
+  });
+
+  // -- Free tier: write tools are denied with TIER_REQUIRED --
+
+  it("free tier calling calendar.create_event returns TIER_REQUIRED", async () => {
+    const result = await callToolWithTier("calendar.create_event", "free", {
+      title: "Test Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const error = result.body.error as {
+      code: number;
+      message: string;
+      data: { code: string; required_tier: string; current_tier: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toBe("Insufficient tier");
+    expect(error.data).toEqual({
+      code: "TIER_REQUIRED",
+      required_tier: "premium",
+      current_tier: "free",
+      tool: "calendar.create_event",
+    });
+  });
+
+  it("free tier calling calendar.update_event returns TIER_REQUIRED", async () => {
+    const result = await callToolWithTier("calendar.update_event", "free", {
+      event_id: "evt_test",
+      patch: { title: "Updated" },
+    });
+    const error = result.body.error as {
+      code: number;
+      data: { code: string; required_tier: string; current_tier: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("premium");
+    expect(error.data.current_tier).toBe("free");
+    expect(error.data.tool).toBe("calendar.update_event");
+  });
+
+  it("free tier calling calendar.delete_event returns TIER_REQUIRED", async () => {
+    const result = await callToolWithTier("calendar.delete_event", "free", {
+      event_id: "evt_test",
+    });
+    const error = result.body.error as {
+      code: number;
+      data: { code: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.tool).toBe("calendar.delete_event");
+  });
+
+  it("free tier calling calendar.set_policy_edge returns TIER_REQUIRED", async () => {
+    const result = await callToolWithTier("calendar.set_policy_edge", "free", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    const error = result.body.error as {
+      code: number;
+      data: { code: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.tool).toBe("calendar.set_policy_edge");
+  });
+
+  // -- Premium tier: write tools succeed --
+
+  it("premium tier can call calendar.create_event (write tool allowed)", async () => {
+    const result = await callToolWithTier("calendar.create_event", "premium", {
+      title: "Premium Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data).toHaveProperty("event_id");
+    expect(data.title).toBe("Premium Event");
+  });
+
+  it("premium tier can call calendar.set_policy_edge (write tool allowed)", async () => {
+    const result = await callToolWithTier("calendar.set_policy_edge", "premium", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data).toHaveProperty("policy_id");
+    expect(data.detail_level).toBe("BUSY");
+  });
+
+  it("premium tier can also call read-only tools", async () => {
+    const result = await callToolWithTier("calendar.list_accounts", "premium");
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+  });
+
+  // -- Enterprise tier: can access everything --
+
+  it("enterprise tier can call premium write tools", async () => {
+    const result = await callToolWithTier("calendar.create_event", "enterprise", {
+      title: "Enterprise Event",
+      start_ts: "2026-04-01T09:00:00Z",
+      end_ts: "2026-04-01T10:00:00Z",
+    });
+    expect(result.body.error).toBeUndefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data.title).toBe("Enterprise Event");
+  });
+
+  it("enterprise tier can call read-only tools", async () => {
+    const result = await callToolWithTier("calendar.list_accounts", "enterprise");
+    expect(result.body.error).toBeUndefined();
+  });
+
+  // -- Tier check is fail-fast (before tool execution) --
+
+  it("tier check happens before input validation (fail fast proof)", async () => {
+    const result = await callToolWithTier("calendar.create_event", "free", {});
+    const error = result.body.error as {
+      code: number;
+      data: { code: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+  });
+
+  // -- Full CRUD flow: premium can create then delete --
+
+  it("premium tier full write cycle: create, update, delete", async () => {
+    const createResult = await callToolWithTier("calendar.create_event", "premium", {
+      title: "Cycle Test Event",
+      start_ts: "2026-05-01T10:00:00Z",
+      end_ts: "2026-05-01T11:00:00Z",
+    });
+    expect(createResult.body.error).toBeUndefined();
+    const createContent = (createResult.body.result as { content: Array<{ text: string }> }).content;
+    const created = JSON.parse(createContent[0].text);
+    const eventId = created.event_id;
+    expect(eventId).toBeDefined();
+
+    const updateResult = await callToolWithTier("calendar.update_event", "premium", {
+      event_id: eventId,
+      patch: { title: "Updated Cycle Event" },
+    });
+    expect(updateResult.body.error).toBeUndefined();
+    const updateContent = (updateResult.body.result as { content: Array<{ text: string }> }).content;
+    const updated = JSON.parse(updateContent[0].text);
+    expect(updated.title).toBe("Updated Cycle Event");
+
+    const deleteResult = await callToolWithTier("calendar.delete_event", "premium", {
+      event_id: eventId,
+    });
+    expect(deleteResult.body.error).toBeUndefined();
+    const deleteContent = (deleteResult.body.result as { content: Array<{ text: string }> }).content;
+    const deleted = JSON.parse(deleteContent[0].text);
+    expect(deleted.deleted).toBe(true);
+    expect(deleted.event_id).toBe(eventId);
   });
 });

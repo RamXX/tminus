@@ -30,6 +30,7 @@ import {
   computeAvailabilitySlots,
   validateGetPolicyEdgeParams,
   validateSetPolicyEdgeParams,
+  checkTierAccess,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -1877,5 +1878,230 @@ describe("POST /mcp -- tools/list includes policy management tools", () => {
     };
     expect(schema.properties.detail_level.enum).toEqual(["BUSY", "TITLE", "FULL"]);
     expect(schema.properties.calendar_kind.enum).toEqual(["BUSY_OVERLAY", "TRUE_MIRROR"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier-based tool permissions (checkTierAccess)
+// ---------------------------------------------------------------------------
+
+describe("checkTierAccess", () => {
+  // -- Free tier: read-only tools are allowed --
+  const FREE_TOOLS = [
+    "calendar.list_accounts",
+    "calendar.get_sync_status",
+    "calendar.list_events",
+    "calendar.get_availability",
+    "calendar.list_policies",
+    "calendar.get_policy_edge",
+  ];
+
+  for (const tool of FREE_TOOLS) {
+    it(`allows free tier to access ${tool}`, () => {
+      const result = checkTierAccess(tool, "free");
+      expect(result.allowed).toBe(true);
+    });
+  }
+
+  // -- Premium tier: write tools require premium --
+  const PREMIUM_TOOLS = [
+    "calendar.create_event",
+    "calendar.update_event",
+    "calendar.delete_event",
+    "calendar.set_policy_edge",
+  ];
+
+  for (const tool of PREMIUM_TOOLS) {
+    it(`denies free tier access to ${tool}`, () => {
+      const result = checkTierAccess(tool, "free");
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) {
+        expect(result.required_tier).toBe("premium");
+        expect(result.current_tier).toBe("free");
+        expect(result.tool).toBe(tool);
+      }
+    });
+
+    it(`allows premium tier to access ${tool}`, () => {
+      const result = checkTierAccess(tool, "premium");
+      expect(result.allowed).toBe(true);
+    });
+
+    it(`allows enterprise tier to access ${tool}`, () => {
+      const result = checkTierAccess(tool, "enterprise");
+      expect(result.allowed).toBe(true);
+    });
+  }
+
+  // -- Tier hierarchy: premium and enterprise can access all free tools --
+  for (const tool of FREE_TOOLS) {
+    it(`allows premium tier to access free tool ${tool}`, () => {
+      const result = checkTierAccess(tool, "premium");
+      expect(result.allowed).toBe(true);
+    });
+
+    it(`allows enterprise tier to access free tool ${tool}`, () => {
+      const result = checkTierAccess(tool, "enterprise");
+      expect(result.allowed).toBe(true);
+    });
+  }
+
+  it("maps every registered tool to a tier", () => {
+    const allTools = [...FREE_TOOLS, ...PREMIUM_TOOLS];
+    for (const tool of allTools) {
+      const result = checkTierAccess(tool, "enterprise");
+      expect(result.allowed).toBe(true);
+    }
+  });
+
+  it("treats unknown tool name as free tier", () => {
+    const result = checkTierAccess("calendar.unknown_tool", "free");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("treats unknown user tier as level 0 (no access to premium)", () => {
+    const result = checkTierAccess("calendar.create_event", "bogus_tier");
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.required_tier).toBe("premium");
+      expect(result.current_tier).toBe("bogus_tier");
+    }
+  });
+
+  it("returns structured error data matching TIER_REQUIRED format", () => {
+    const result = checkTierAccess("calendar.create_event", "free");
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result).toEqual({
+        allowed: false,
+        required_tier: "premium",
+        current_tier: "free",
+        tool: "calendar.create_event",
+      });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier gating in dispatch: free user calling premium tool -> TIER_REQUIRED
+// ---------------------------------------------------------------------------
+
+describe("tier gating in MCP dispatch", () => {
+  it("free user calling a premium tool returns TIER_REQUIRED error", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.create_event", arguments: {} },
+        id: 42,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as {
+      code: number;
+      message: string;
+      data: { code: string; required_tier: string; current_tier: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toBe("Insufficient tier");
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("premium");
+    expect(error.data.current_tier).toBe("free");
+    expect(error.data.tool).toBe("calendar.create_event");
+  });
+
+  it("free user calling a free tool is NOT tier-gated", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.list_accounts", arguments: {} },
+        id: 43,
+      },
+      authHeader,
+    );
+
+    if (result.body.error) {
+      const error = result.body.error as { code: number; data?: { code?: string } };
+      expect(error.data?.code).not.toBe("TIER_REQUIRED");
+    }
+  });
+
+  it("tier check happens before tool execution (fail fast)", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.delete_event", arguments: {} },
+        id: 44,
+      },
+      authHeader,
+    );
+
+    const error = result.body.error as { code: number; data?: { code?: string } };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+  });
+
+  it("TIER_REQUIRED error for each premium tool from free user", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const premiumTools = [
+      "calendar.create_event",
+      "calendar.update_event",
+      "calendar.delete_event",
+      "calendar.set_policy_edge",
+    ];
+
+    for (const toolName of premiumTools) {
+      const result = await sendMcpRequest(
+        handler,
+        env,
+        {
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { name: toolName, arguments: {} },
+          id: Math.random(),
+        },
+        authHeader,
+      );
+
+      const error = result.body.error as {
+        code: number;
+        message: string;
+        data: { code: string; required_tier: string; current_tier: string; tool: string };
+      };
+      expect(error).toBeDefined();
+      expect(error.code).toBe(-32603);
+      expect(error.message).toBe("Insufficient tier");
+      expect(error.data.code).toBe("TIER_REQUIRED");
+      expect(error.data.required_tier).toBe("premium");
+      expect(error.data.current_tier).toBe("free");
+      expect(error.data.tool).toBe(toolName);
+    }
   });
 });
