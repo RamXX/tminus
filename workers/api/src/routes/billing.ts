@@ -23,6 +23,7 @@
  */
 
 import { generateId } from "@tminus/shared";
+import { handleSeatQuantityUpdated } from "./enterprise-billing";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -881,9 +882,24 @@ export async function handleStripeWebhook(
     case "checkout.session.completed":
       result = await handleCheckoutCompleted(env.DB, event.data.object, event.id);
       break;
-    case "customer.subscription.updated":
-      result = await handleSubscriptionUpdated(env.DB, event.data.object as unknown as StripeSubscription, event.id);
+    case "customer.subscription.updated": {
+      const subObj = event.data.object as unknown as StripeSubscription;
+      result = await handleSubscriptionUpdated(env.DB, subObj, event.id);
+
+      // If the subscription has org_id metadata and a quantity, update org seat_limit (AC#6)
+      if (result.success) {
+        const orgId = subObj.metadata?.org_id;
+        const quantity = (subObj.items?.data?.[0] as unknown as { quantity?: number })?.quantity;
+        if (orgId && typeof quantity === "number" && quantity > 0) {
+          await handleSeatQuantityUpdated(env.DB, {
+            stripe_subscription_id: subObj.id,
+            new_quantity: quantity,
+            org_id: orgId,
+          });
+        }
+      }
       break;
+    }
     case "customer.subscription.deleted":
       result = await handleSubscriptionDeleted(env.DB, event.data.object as unknown as StripeSubscription, event.id);
       break;

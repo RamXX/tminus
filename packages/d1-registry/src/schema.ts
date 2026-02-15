@@ -431,6 +431,19 @@ CREATE UNIQUE INDEX idx_org_policies_org_type ON org_policies(org_id, policy_typ
 ` as const;
 
 /**
+ * Migration 0018: Add seat billing columns to organizations.
+ *
+ * Extends the organizations table with per-seat billing support:
+ * - seat_limit: maximum members allowed (default 5 = enterprise base includes)
+ * - stripe_subscription_id: links org to its Stripe subscription for
+ *   seat quantity management
+ */
+export const MIGRATION_0018_ORG_SEAT_BILLING = `
+ALTER TABLE organizations ADD COLUMN seat_limit INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE organizations ADD COLUMN stripe_subscription_id TEXT;
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -452,4 +465,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0015_ORGANIZATIONS,
   MIGRATION_0016_ORG_MEMBERS,
   MIGRATION_0017_ORG_POLICIES,
+  MIGRATION_0018_ORG_SEAT_BILLING,
 ] as const;

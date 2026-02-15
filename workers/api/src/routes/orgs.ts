@@ -18,6 +18,7 @@
 
 import { generateId, isValidId, validateOrgPolicyConfig, isValidOrgPolicyType } from "@tminus/shared";
 import type { OrgMergePolicyType } from "@tminus/shared";
+import { DEFAULT_INCLUDED_SEATS } from "./enterprise-billing";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -363,6 +364,7 @@ export async function handleCreateOrg(
         org_id: orgId,
         name,
         settings_json: settingsJson,
+        seat_limit: DEFAULT_INCLUDED_SEATS,
         created_at: new Date().toISOString(),
       }),
       201,

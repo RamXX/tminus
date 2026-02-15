@@ -80,6 +80,10 @@ import {
   handleUpdateOrgPolicy,
   handleDeleteOrgPolicy,
 } from "./routes/orgs";
+import {
+  handleUpdateSeats,
+  enforceSeatLimit,
+} from "./routes/enterprise-billing";
 
 // ---------------------------------------------------------------------------
 // Version -- read from package.json at build time or fallback
@@ -5887,6 +5891,20 @@ async function routeAuthenticatedRequest(
         return handleCreateOrg(request, auth, env.DB);
       }
 
+      // -- Org billing: seat management (must match before /v1/orgs/:id/members) --
+      match = matchRoute(pathname, "/v1/orgs/:id/billing/seats");
+      if (match && method === "POST") {
+        if (!env.STRIPE_SECRET_KEY) {
+          return jsonResponse(
+            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+            ErrorCode.INTERNAL_ERROR,
+          );
+        }
+        const seatGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+        if (seatGate) return seatGate;
+        return handleUpdateSeats(request, auth.userId, env.DB, match.params[0], env.STRIPE_SECRET_KEY);
+      }
+
       match = matchRoute(pathname, "/v1/orgs/:id/members/:uid/role");
       if (match && method === "PUT") {
         return handleChangeRole(request, auth, env.DB, match.params[0], match.params[1]);
@@ -5900,6 +5918,9 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/members");
       if (match) {
         if (method === "POST") {
+          // Enforce seat limit before adding member (AC#3)
+          const seatDenied = await enforceSeatLimit(match.params[0], env.DB);
+          if (seatDenied) return seatDenied;
           return handleAddMember(request, auth, env.DB, match.params[0]);
         }
         if (method === "GET") {
