@@ -303,7 +303,7 @@ describe("MicrosoftCalendarClient.listCalendars", () => {
 // ---------------------------------------------------------------------------
 
 describe("MicrosoftCalendarClient.listEvents", () => {
-  it("sends GET to /me/calendars/{id}/events for full sync (no syncToken)", async () => {
+  it("sends GET to /me/calendars/{id}/events with filtered $expand for full sync (no syncToken)", async () => {
     const fetchFn = mockFetch({
       value: [
         {
@@ -320,7 +320,10 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     const result = await client.listEvents("cal_1");
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe(`${BASE_URL}/me/calendars/cal_1/events`);
+    // Microsoft Graph requires filtered $expand to avoid 400 ErrorGraphExtensionExpandRequiresFilter
+    expect(url).toBe(
+      `${BASE_URL}/me/calendars/cal_1/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')`,
+    );
   });
 
   it("returns events mapped to GoogleCalendarEvent shape", async () => {
@@ -406,6 +409,54 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     const result = await client.listEvents("cal_1", undefined, pageUrl);
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(pageUrl);
+  });
+
+  it("includes filtered $expand=Extensions in default URL to avoid Graph API 400 error", async () => {
+    const fetchFn = mockFetch({
+      value: [],
+      "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=test",
+    });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+
+    await client.listEvents("cal_special");
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Must use filtered expand to avoid ErrorGraphExtensionExpandRequiresFilter
+    expect(url).toContain("$expand=Extensions($filter=Id eq 'com.tminus.metadata')");
+    // Must NOT contain bare $expand=extensions (no filter)
+    expect(url).not.toMatch(/\$expand=extensions(?!\()/i);
+  });
+
+  it("does NOT modify syncToken (deltaLink) URL -- API returns complete URLs", async () => {
+    const deltaUrl =
+      "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=prev_token&$expand=Extensions";
+    const fetchFn = mockFetch({
+      value: [],
+      "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=new_token",
+    });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+
+    await client.listEvents("cal_1", deltaUrl);
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    // syncToken URL must be used exactly as provided -- no modification
+    expect(url).toBe(deltaUrl);
+  });
+
+  it("does NOT modify pageToken (nextLink) URL -- API returns complete URLs", async () => {
+    const pageUrl =
+      "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events?$skiptoken=page2&$expand=Extensions";
+    const fetchFn = mockFetch({
+      value: [],
+      "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=final",
+    });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+
+    await client.listEvents("cal_1", undefined, pageUrl);
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    // pageToken URL must be used exactly as provided -- no modification
     expect(url).toBe(pageUrl);
   });
 

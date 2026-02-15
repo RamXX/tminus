@@ -263,9 +263,47 @@ describe("MicrosoftTestClient", () => {
     expect(events[0].id).toBe("evt-1");
     expect(events[0].summary).toBe("Meeting 1");
 
-    // Verify calendarView was used
+    // Verify calendarView was used with filtered $expand (not bare $expand=extensions)
     const listCall = mockFetch.mock.calls[2];
     expect(listCall[0]).toContain("calendarView");
+    expect(listCall[0]).toContain("$expand=Extensions($filter=Id eq 'com.tminus.metadata')");
+  });
+
+  it("listEvents uses filtered $expand for non-time-bounded queries", async () => {
+    const mockFetch = createMockFetch([
+      // Token refresh
+      {
+        status: 200,
+        body: { access_token: "access-token", expires_in: 3600 },
+      },
+      // Resolve calendar ID
+      {
+        status: 200,
+        body: {
+          value: [{ id: "cal-123", name: "Calendar", isDefaultCalendar: true }],
+        },
+      },
+      // List events
+      {
+        status: 200,
+        body: { value: [] },
+      },
+    ]);
+
+    const client = new MicrosoftTestClient({
+      clientId: "test-id",
+      clientSecret: "test-secret",
+      refreshToken: "test-refresh",
+      fetchFn: mockFetch,
+    });
+
+    await client.listEvents({ calendarId: "primary" });
+
+    // Verify events endpoint was used with filtered $expand
+    const listCall = mockFetch.mock.calls[2];
+    expect(listCall[0]).toContain("/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')");
+    // Must NOT contain bare $expand=extensions (no filter)
+    expect(listCall[0]).not.toMatch(/\$expand=extensions(?!\()/i);
   });
 
   it("cleanupAllTestEvents deletes all tracked events", async () => {

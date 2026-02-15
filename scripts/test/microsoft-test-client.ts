@@ -93,6 +93,9 @@ const MS_TOKEN_URL =
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const TEST_EVENT_PREFIX = "[tminus-test]";
 
+/** T-Minus open extension name for managed markers. */
+const TMINUS_EXTENSION_NAME = "com.tminus.metadata";
+
 // ---------------------------------------------------------------------------
 // buildTokenRefreshBody: construct URL-encoded form body
 // ---------------------------------------------------------------------------
@@ -325,15 +328,19 @@ export class MicrosoftTestClient {
     const calId = await this.resolveCalendarId(params.calendarId);
 
     // Use calendarView for time-bounded queries (returns expanded recurrences)
+    // Microsoft Graph requires a filter when expanding extensions:
+    // $expand=Extensions($filter=Id eq 'com.tminus.metadata')
+    // Bare $expand=extensions returns 400 ErrorGraphExtensionExpandRequiresFilter.
+    const expandParam = `$expand=Extensions($filter=Id eq '${TMINUS_EXTENSION_NAME}')`;
     let url: string;
     if (params.timeMin && params.timeMax) {
       url =
         `${MS_GRAPH_BASE}/me/calendars/${calId}/calendarView` +
         `?startDateTime=${encodeURIComponent(params.timeMin)}` +
         `&endDateTime=${encodeURIComponent(params.timeMax)}` +
-        `&$expand=extensions`;
+        `&${expandParam}`;
     } else {
-      url = `${MS_GRAPH_BASE}/me/calendars/${calId}/events?$expand=extensions`;
+      url = `${MS_GRAPH_BASE}/me/calendars/${calId}/events?${expandParam}`;
     }
 
     const response = await this.fetchFn(url, {

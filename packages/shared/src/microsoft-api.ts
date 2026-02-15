@@ -223,7 +223,7 @@ export class MicrosoftCalendarClient implements CalendarProvider {
     } else if (syncToken) {
       url = syncToken;
     } else {
-      url = `${MS_GRAPH_BASE}/me/calendars/${calendarId}/events`;
+      url = `${MS_GRAPH_BASE}/me/calendars/${calendarId}/events?$expand=Extensions($filter=Id eq '${TMINUS_EXTENSION_NAME}')`;
     }
 
     const body = await this.request<MicrosoftEventsListRaw>(url, { method: "GET" });
