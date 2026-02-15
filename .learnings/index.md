@@ -14,6 +14,7 @@ Accumulated insights from epic retrospectives. Organized by category.
 | TM-gj5 | Phase 2D: Trip & Constraint System | 2026-02-14 | [TM-gj5-retro.md](TM-gj5-retro.md) |
 | TM-9ue | Phase 3C: Billing | 2026-02-15 | [TM-9ue-retro.md](TM-9ue-retro.md) |
 | TM-946 | Phase 3A: Scheduling Engine | 2026-02-15 | [TM-946-retro.md](TM-946-retro.md) |
+| TM-lfy | Phase 5C: Mobile | 2026-02-15 | [TM-lfy-retro.md](TM-lfy-retro.md) |
 
 ## Categories
 
@@ -32,3 +33,4 @@ Accumulated insights from epic retrospectives. Organized by category.
 - [Epic TM-gj5 Retro](TM-gj5-retro.md) - Phase 2D: Trip & Constraint System (2026-02-14)
 - [Epic TM-9ue Retro](TM-9ue-retro.md) - Phase 3C: Billing (2026-02-15)
 - [Epic TM-946 Retro](TM-946-retro.md) - Phase 3A: Scheduling Engine (2026-02-15)
+- [Epic TM-lfy Retro](TM-lfy-retro.md) - Phase 5C: Mobile (2026-02-15)

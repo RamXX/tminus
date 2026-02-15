@@ -229,3 +229,23 @@ This is a local environment issue, not a code issue, but it caused false test fa
 **Applies to:** Local development setup
 
 **Source stories:** TM-4qw.5
+
+---
+
+## [Added from Epic TM-lfy retro - 2026-02-15]
+
+### watchOS 10+ uses WidgetKit (not ClockKit) for complications
+
+**Priority:** Important
+
+**Context:** Apple deprecated ClockKit in watchOS 10 in favor of WidgetKit-based complications. The old ComplicationFamily enum is replaced by accessoryCircular, accessoryRectangular, accessoryInline widget families.
+
+**Recommendation:** For Apple Watch complication stories:
+- Use WidgetKit timeline providers (not ClockKit complication data sources)
+- Target watchOS 10+ and use accessory* families
+- Document this in D&F for any future watchOS features
+- WidgetKit timeline model provides system-managed updates (better power efficiency)
+
+**Applies to:** All Apple Watch complication stories
+
+**Source stories:** TM-lfy.4

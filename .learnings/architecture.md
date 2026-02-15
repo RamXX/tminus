@@ -89,3 +89,42 @@ Insights related to system design, patterns, and technical decisions.
 **Applies to:** All DO RPC implementations, particularly UserGraphDO and future GroupScheduleDO
 
 **Source stories:** TM-946.1
+
+---
+
+## [Added from Epic TM-lfy retro - 2026-02-15]
+
+### Types used in offline queues must be Codable (not just Encodable)
+
+**Priority:** Critical
+
+**Context:** OfflineQueue and WatchConnectivity both serialize types to Data for persistence/transmission and deserialize them on drain/receive. Types marked Encodable-only fail at decode time with runtime errors.
+
+**Recommendation:** For any request/response type that will be:
+- Queued for offline retry (OfflineQueue)
+- Sent via WatchConnectivity (WCSession)
+- Cached locally with round-trip serialization
+
+Mark as `Codable` (not just `Encodable`), even if the API client only encodes them. Add unit tests for round-trip encode/decode to catch this early.
+
+**Applies to:** All API request types used in offline scenarios or cross-device sync
+
+**Source stories:** TM-lfy.4, TM-lfy.5
+
+---
+
+### Optional constraints should use nil (not false) in JSON payloads
+
+**Priority:** Nice-to-have
+
+**Context:** SchedulingConstraints has optional Boolean fields. Using false for unset constraints creates ambiguity (is it "explicitly false" or "unset"?) and bloats payloads.
+
+**Recommendation:** For API request types with optional Boolean constraints:
+- Use `var field: Bool?` (not `var field: Bool = false`)
+- Encode nil as omitted keys (JSON's natural representation of absence)
+- Backend should treat missing keys as "constraint not specified"
+- Document this pattern in API design guidelines
+
+**Applies to:** All API request types with optional constraint fields
+
+**Source stories:** TM-lfy.5

@@ -238,3 +238,59 @@ Insights related to test coverage, test types, and testing methodology.
 **Applies to:** All E2E tests in tests/e2e/ directory
 
 **Source stories:** TM-946.7
+
+---
+
+## [Added from Epic TM-lfy retro - 2026-02-15]
+
+### Platform guards required for iOS/watchOS SPM tests
+
+**Priority:** Critical
+
+**Context:** Swift Package Manager tests run on macOS during CI and local development, but iOS/watchOS frameworks (UIKit, WatchConnectivity, WidgetKit) are not available on macOS. Without platform guards, tests fail to compile.
+
+**Recommendation:** For all iOS/watchOS-specific code that is exercised by SPM tests:
+1. Use #if os(iOS) / #if os(watchOS) guards around platform-specific APIs
+2. Use #if canImport(WatchConnectivity) for framework-specific imports
+3. Protocol-based DI allows mock implementations for macOS SPM tests
+4. Document in story ACs when platform guards are needed (e.g., "Xcode target for iOS, SPM tests on macOS")
+
+**Applies to:** All iOS/watchOS mobile stories that use SPM for testing
+
+**Source stories:** TM-lfy.1, TM-lfy.4, TM-lfy.5
+
+---
+
+### Swift 6.1 concurrency: @MainActor on view models with @Published
+
+**Priority:** Important
+
+**Context:** Swift 6.1 strict concurrency mode requires explicit @MainActor annotation on view models that use @Published properties. Without it, compile-time warnings about main-thread access appear. Tests of @MainActor types must be async to properly exercise state updates.
+
+**Recommendation:** For all SwiftUI view models:
+1. Add @MainActor to the class definition if it has @Published properties
+2. Write test methods as `func testX() async { ... }` for @MainActor types
+3. Use `await` when calling view model methods in tests
+4. This pattern applies to AuthViewModel, CalendarViewModel, EventFormViewModel, etc.
+
+**Applies to:** All SwiftUI view model stories
+
+**Source stories:** TM-lfy.5, TM-lfy.6
+
+---
+
+### Hash-based color assignment with limited palette causes collisions
+
+**Priority:** Nice-to-have
+
+**Context:** AccountColors uses stable hashing with a 10-color palette. With arbitrary string inputs, hash collisions are inevitable. E2E tests that assert color uniqueness for arbitrary account IDs will fail non-deterministically.
+
+**Recommendation:** For testing account color assignment:
+- Use known-distinct account IDs in tests (e.g., "account-1", "account-2", not random UUIDs)
+- Test stability (same ID always gets same color) rather than uniqueness
+- Document that 10-color palette means collisions are expected with many accounts
+- If uniqueness is required, expand palette or use per-user color assignment
+
+**Applies to:** Account color coding in mobile UI
+
+**Source stories:** TM-lfy.6
