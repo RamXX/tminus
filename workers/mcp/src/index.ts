@@ -194,6 +194,99 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["event_id"],
     },
   },
+  {
+    name: "calendar.get_availability",
+    description:
+      "Get unified free/busy availability across all connected accounts for a time range. Returns time slots with status (free/busy/tentative) and conflict counts. Supports granularity selection and account filtering.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start: {
+          type: "string",
+          description:
+            "Start of time range (ISO 8601 datetime, e.g. '2026-03-15T09:00:00Z').",
+        },
+        end: {
+          type: "string",
+          description:
+            "End of time range (ISO 8601 datetime, e.g. '2026-03-15T17:00:00Z').",
+        },
+        accounts: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional list of account IDs to filter. If omitted, includes all accounts.",
+        },
+        granularity: {
+          type: "string",
+          enum: ["15m", "30m", "1h"],
+          description:
+            "Slot duration: '15m' (15 minutes), '30m' (30 minutes, default), or '1h' (1 hour).",
+        },
+      },
+      required: ["start", "end"],
+    },
+  },
+  {
+    name: "calendar.list_policies",
+    description:
+      "List all policy edges for the authenticated user. Each policy edge defines how events project from one account to another (e.g., BUSY overlay from work to personal).",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "calendar.get_policy_edge",
+    description:
+      "Get a single policy edge by policy_id or by the (from_account, to_account) pair. Returns the policy edge details including detail_level and calendar_kind.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        policy_id: {
+          type: "string",
+          description: "Policy edge ID. If provided, from_account and to_account are ignored.",
+        },
+        from_account: {
+          type: "string",
+          description: "Source account ID. Required if policy_id is not provided.",
+        },
+        to_account: {
+          type: "string",
+          description: "Target account ID. Required if policy_id is not provided.",
+        },
+      },
+    },
+  },
+  {
+    name: "calendar.set_policy_edge",
+    description:
+      "Create or update a policy edge between two accounts. Controls how events project from the source account to the target account. Uses BUSY_OVERLAY calendar kind by default (BR-11).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from_account: {
+          type: "string",
+          description: "Source account ID (events originate here).",
+        },
+        to_account: {
+          type: "string",
+          description: "Target account ID (events project to here).",
+        },
+        detail_level: {
+          type: "string",
+          enum: ["BUSY", "TITLE", "FULL"],
+          description: "How much detail to project: BUSY (time only), TITLE (time + title), FULL (everything).",
+        },
+        calendar_kind: {
+          type: "string",
+          enum: ["BUSY_OVERLAY", "TRUE_MIRROR"],
+          description: "Calendar type for projection. Default: BUSY_OVERLAY (per BR-11).",
+        },
+      },
+      required: ["from_account", "to_account", "detail_level"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -420,8 +513,16 @@ class InvalidParamsError extends Error {
   }
 }
 
+/** Application-level error for policy not found. */
+class PolicyNotFoundError extends Error {
+  constructor(identifier: string) {
+    super(`Policy not found: ${identifier}`);
+    this.name = "PolicyNotFoundError";
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Event ID generation
+// ID generation
 // ---------------------------------------------------------------------------
 
 /**
@@ -431,6 +532,15 @@ class InvalidParamsError extends Error {
 function generateEventId(): string {
   const uuid = crypto.randomUUID().replace(/-/g, "");
   return `evt_${uuid}`;
+}
+
+/**
+ * Generate a unique policy ID with pol_ prefix and random hex suffix.
+ * Uses crypto.randomUUID() for uniqueness.
+ */
+function generatePolicyId(): string {
+  const uuid = crypto.randomUUID().replace(/-/g, "");
+  return `pol_${uuid}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +767,371 @@ function validateDeleteEventParams(args: Record<string, unknown> | undefined): {
 }
 
 // ---------------------------------------------------------------------------
+// Policy validation helpers (pure functions)
+// ---------------------------------------------------------------------------
+
+/** Valid detail_level values for policy edges. */
+const VALID_DETAIL_LEVELS = ["BUSY", "TITLE", "FULL"] as const;
+
+/** Valid calendar_kind values for policy edges. */
+const VALID_CALENDAR_KINDS = ["BUSY_OVERLAY", "TRUE_MIRROR"] as const;
+
+/**
+ * Validate calendar.get_policy_edge input parameters.
+ * Requires either policy_id OR both from_account and to_account.
+ * Throws InvalidParamsError on validation failure.
+ */
+function validateGetPolicyEdgeParams(args: Record<string, unknown> | undefined): {
+  policy_id: string | null;
+  from_account: string | null;
+  to_account: string | null;
+} {
+  if (!args) {
+    throw new InvalidParamsError(
+      "Missing required parameters: provide either policy_id or both from_account and to_account",
+    );
+  }
+
+  const policy_id =
+    typeof args.policy_id === "string" && args.policy_id
+      ? args.policy_id
+      : null;
+
+  const from_account =
+    typeof args.from_account === "string" && args.from_account
+      ? args.from_account
+      : null;
+
+  const to_account =
+    typeof args.to_account === "string" && args.to_account
+      ? args.to_account
+      : null;
+
+  if (!policy_id && (!from_account || !to_account)) {
+    throw new InvalidParamsError(
+      "Provide either 'policy_id' or both 'from_account' and 'to_account'",
+    );
+  }
+
+  return { policy_id, from_account, to_account };
+}
+
+/**
+ * Validate calendar.set_policy_edge input parameters.
+ * Throws InvalidParamsError on validation failure.
+ */
+function validateSetPolicyEdgeParams(args: Record<string, unknown> | undefined): {
+  from_account: string;
+  to_account: string;
+  detail_level: "BUSY" | "TITLE" | "FULL";
+  calendar_kind: "BUSY_OVERLAY" | "TRUE_MIRROR";
+} {
+  if (!args) {
+    throw new InvalidParamsError(
+      "Missing required parameters: from_account, to_account, detail_level",
+    );
+  }
+
+  if (typeof args.from_account !== "string" || !args.from_account) {
+    throw new InvalidParamsError(
+      "Parameter 'from_account' is required and must be a non-empty string",
+    );
+  }
+
+  if (typeof args.to_account !== "string" || !args.to_account) {
+    throw new InvalidParamsError(
+      "Parameter 'to_account' is required and must be a non-empty string",
+    );
+  }
+
+  if (args.from_account === args.to_account) {
+    throw new InvalidParamsError(
+      "Parameters 'from_account' and 'to_account' must be different accounts",
+    );
+  }
+
+  if (
+    typeof args.detail_level !== "string" ||
+    !(VALID_DETAIL_LEVELS as readonly string[]).includes(args.detail_level)
+  ) {
+    throw new InvalidParamsError(
+      "Parameter 'detail_level' must be one of: BUSY, TITLE, FULL",
+    );
+  }
+
+  // Default calendar_kind to BUSY_OVERLAY per BR-11
+  let calendar_kind: "BUSY_OVERLAY" | "TRUE_MIRROR" = "BUSY_OVERLAY";
+  if (args.calendar_kind !== undefined) {
+    if (
+      typeof args.calendar_kind !== "string" ||
+      !(VALID_CALENDAR_KINDS as readonly string[]).includes(args.calendar_kind)
+    ) {
+      throw new InvalidParamsError(
+        "Parameter 'calendar_kind' must be one of: BUSY_OVERLAY, TRUE_MIRROR",
+      );
+    }
+    calendar_kind = args.calendar_kind as "BUSY_OVERLAY" | "TRUE_MIRROR";
+  }
+
+  return {
+    from_account: args.from_account,
+    to_account: args.to_account,
+    detail_level: args.detail_level as "BUSY" | "TITLE" | "FULL",
+    calendar_kind,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Availability validation and computation
+// ---------------------------------------------------------------------------
+
+/** Valid granularity values for availability slots. */
+type AvailabilityGranularity = "15m" | "30m" | "1h";
+
+/** A single availability slot in the response. */
+interface AvailabilitySlot {
+  start: string;
+  end: string;
+  status: "free" | "busy" | "tentative";
+  conflicting_events?: number;
+}
+
+/** Granularity string to milliseconds mapping. */
+const GRANULARITY_MS: Record<AvailabilityGranularity, number> = {
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+};
+
+/**
+ * Validate calendar.get_availability input parameters.
+ * Throws InvalidParamsError on validation failure.
+ */
+function validateGetAvailabilityParams(args: Record<string, unknown> | undefined): {
+  start: string;
+  end: string;
+  accounts: string[] | null;
+  granularity: AvailabilityGranularity;
+} {
+  if (!args) {
+    throw new InvalidParamsError("Missing required parameters: start, end");
+  }
+
+  if (typeof args.start !== "string" || !args.start) {
+    throw new InvalidParamsError(
+      "Parameter 'start' is required and must be an ISO 8601 datetime string",
+    );
+  }
+  if (!isValidIsoDatetime(args.start)) {
+    throw new InvalidParamsError(
+      "Parameter 'start' is not a valid ISO 8601 datetime",
+    );
+  }
+
+  if (typeof args.end !== "string" || !args.end) {
+    throw new InvalidParamsError(
+      "Parameter 'end' is required and must be an ISO 8601 datetime string",
+    );
+  }
+  if (!isValidIsoDatetime(args.end)) {
+    throw new InvalidParamsError(
+      "Parameter 'end' is not a valid ISO 8601 datetime",
+    );
+  }
+
+  const startMs = new Date(args.start).getTime();
+  const endMs = new Date(args.end).getTime();
+
+  if (startMs >= endMs) {
+    throw new InvalidParamsError("Parameter 'start' must be before 'end'");
+  }
+
+  // Validate granularity
+  let granularity: AvailabilityGranularity = "30m";
+  if (args.granularity !== undefined) {
+    if (
+      typeof args.granularity !== "string" ||
+      !["15m", "30m", "1h"].includes(args.granularity)
+    ) {
+      throw new InvalidParamsError(
+        "Parameter 'granularity' must be one of: '15m', '30m', '1h'",
+      );
+    }
+    granularity = args.granularity as AvailabilityGranularity;
+  }
+
+  // Limit time range to prevent excessively large responses.
+  // Max 7 days at 15m granularity = 672 slots (reasonable).
+  const MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+  if (endMs - startMs > MAX_RANGE_MS) {
+    throw new InvalidParamsError(
+      "Time range must not exceed 7 days",
+    );
+  }
+
+  // Validate accounts filter
+  let accounts: string[] | null = null;
+  if (args.accounts !== undefined) {
+    if (!Array.isArray(args.accounts)) {
+      throw new InvalidParamsError(
+        "Parameter 'accounts' must be an array of account ID strings",
+      );
+    }
+    for (const acc of args.accounts) {
+      if (typeof acc !== "string" || !acc) {
+        throw new InvalidParamsError(
+          "Each element in 'accounts' must be a non-empty string",
+        );
+      }
+    }
+    if (args.accounts.length > 0) {
+      accounts = args.accounts as string[];
+    }
+  }
+
+  return { start: args.start, end: args.end, accounts, granularity };
+}
+
+/**
+ * Generate time slots between start and end at the given granularity.
+ * Returns an array of {start, end} ISO strings.
+ * Pure function -- no side effects.
+ */
+function generateTimeSlots(
+  startMs: number,
+  endMs: number,
+  granularityMs: number,
+): Array<{ startMs: number; endMs: number }> {
+  const slots: Array<{ startMs: number; endMs: number }> = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const slotEnd = Math.min(cursor + granularityMs, endMs);
+    slots.push({ startMs: cursor, endMs: slotEnd });
+    cursor = slotEnd;
+  }
+  return slots;
+}
+
+/** Row shape for events used in availability computation. */
+interface AvailabilityEventRow {
+  start_ts: string;
+  end_ts: string;
+  status: string;
+  account_id: string | null;
+}
+
+/**
+ * Compute availability slots from a set of events.
+ * For each time slot, determines if it's free, busy, or tentative based
+ * on overlapping events across all accounts.
+ *
+ * Logic:
+ * - A slot is "busy" if ANY confirmed event overlaps it
+ * - A slot is "tentative" if only tentative events overlap (no confirmed)
+ * - A slot is "free" if no events overlap
+ * - Cancelled events are ignored
+ * - conflicting_events counts the number of events overlapping the slot
+ *
+ * Pure function -- no side effects.
+ */
+function computeAvailabilitySlots(
+  timeSlots: Array<{ startMs: number; endMs: number }>,
+  events: AvailabilityEventRow[],
+): AvailabilitySlot[] {
+  // Pre-parse event timestamps for performance
+  const parsedEvents = events
+    .filter((e) => e.status !== "cancelled")
+    .map((e) => ({
+      startMs: new Date(e.start_ts).getTime(),
+      endMs: new Date(e.end_ts).getTime(),
+      status: e.status,
+    }));
+
+  return timeSlots.map((slot) => {
+    // Find all events that overlap this slot.
+    // An event overlaps a slot if: event.start < slot.end AND event.end > slot.start
+    const overlapping = parsedEvents.filter(
+      (e) => e.startMs < slot.endMs && e.endMs > slot.startMs,
+    );
+
+    const conflictCount = overlapping.length;
+
+    let status: "free" | "busy" | "tentative" = "free";
+    if (conflictCount > 0) {
+      const hasConfirmed = overlapping.some((e) => e.status === "confirmed");
+      status = hasConfirmed ? "busy" : "tentative";
+    }
+
+    const result: AvailabilitySlot = {
+      start: new Date(slot.startMs).toISOString(),
+      end: new Date(slot.endMs).toISOString(),
+      status,
+    };
+
+    if (conflictCount > 0) {
+      result.conflicting_events = conflictCount;
+    }
+
+    return result;
+  });
+}
+
+/**
+ * Execute calendar.get_availability: query D1 for events in the time range,
+ * compute availability slots, and return unified free/busy data.
+ */
+async function handleGetAvailability(
+  user: McpUserContext,
+  db: D1Database,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const { start, end, accounts, granularity } =
+    validateGetAvailabilityParams(args);
+
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  const granularityMs = GRANULARITY_MS[granularity];
+
+  // Query events in the time range.
+  // We need events that OVERLAP the range: event.start < range.end AND event.end > range.start
+  let result: { results: AvailabilityEventRow[] };
+
+  if (accounts && accounts.length > 0) {
+    // Query all events in range, then filter by account in JS.
+    // This is simpler and safer than dynamic IN clause with D1.
+    result = await db
+      .prepare(
+        "SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3 AND status != 'cancelled'",
+      )
+      .bind(user.userId, end, start)
+      .all<AvailabilityEventRow>();
+
+    // Filter by requested accounts
+    const accountSet = new Set(accounts);
+    result.results = (result.results ?? []).filter(
+      (e) => e.account_id !== null && accountSet.has(e.account_id),
+    );
+  } else {
+    result = await db
+      .prepare(
+        "SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3 AND status != 'cancelled'",
+      )
+      .bind(user.userId, end, start)
+      .all<AvailabilityEventRow>();
+  }
+
+  const events = result.results ?? [];
+
+  // Generate time slots
+  const timeSlots = generateTimeSlots(startMs, endMs, granularityMs);
+
+  // Compute availability
+  const slots = computeAvailabilitySlots(timeSlots, events);
+
+  return { slots };
+}
+
+// ---------------------------------------------------------------------------
 // Event tool handlers
 // ---------------------------------------------------------------------------
 
@@ -671,6 +1146,7 @@ interface EventQueryRow {
   timezone: string;
   description: string | null;
   location: string | null;
+  status: string;
   source: string;
   created_at: string;
   updated_at: string;
@@ -691,14 +1167,14 @@ async function handleListEvents(
   if (account_id) {
     result = await db
       .prepare(
-        "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, source, created_at, updated_at FROM mcp_events WHERE user_id = ?1 AND account_id = ?2 AND start_ts >= ?3 AND end_ts <= ?4 ORDER BY start_ts ASC LIMIT ?5",
+        "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, status, source, created_at, updated_at FROM mcp_events WHERE user_id = ?1 AND account_id = ?2 AND start_ts >= ?3 AND end_ts <= ?4 ORDER BY start_ts ASC LIMIT ?5",
       )
       .bind(user.userId, account_id, start, end, limit)
       .all<EventQueryRow>();
   } else {
     result = await db
       .prepare(
-        "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, source, created_at, updated_at FROM mcp_events WHERE user_id = ?1 AND start_ts >= ?2 AND end_ts <= ?3 ORDER BY start_ts ASC LIMIT ?4",
+        "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, status, source, created_at, updated_at FROM mcp_events WHERE user_id = ?1 AND start_ts >= ?2 AND end_ts <= ?3 ORDER BY start_ts ASC LIMIT ?4",
       )
       .bind(user.userId, start, end, limit)
       .all<EventQueryRow>();
@@ -751,7 +1227,7 @@ async function handleCreateEvent(
   // Read back the created event to return accurate timestamps
   const row = await db
     .prepare(
-      "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, source, created_at, updated_at FROM mcp_events WHERE event_id = ?1",
+      "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, status, source, created_at, updated_at FROM mcp_events WHERE event_id = ?1",
     )
     .bind(eventId)
     .first<EventQueryRow>();
@@ -816,7 +1292,7 @@ async function handleUpdateEvent(
   // Read back the updated event
   const row = await db
     .prepare(
-      "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, source, created_at, updated_at FROM mcp_events WHERE event_id = ?1",
+      "SELECT event_id, user_id, account_id, title, start_ts, end_ts, timezone, description, location, status, source, created_at, updated_at FROM mcp_events WHERE event_id = ?1",
     )
     .bind(event_id)
     .first<EventQueryRow>();
@@ -864,6 +1340,186 @@ async function handleDeleteEvent(
     .run();
 
   return { deleted: true, event_id };
+}
+
+// ---------------------------------------------------------------------------
+// Policy tool handlers
+// ---------------------------------------------------------------------------
+
+/** Row shape returned by the mcp_policies D1 query. */
+interface PolicyQueryRow {
+  policy_id: string;
+  user_id: string;
+  from_account: string;
+  to_account: string;
+  detail_level: string;
+  calendar_kind: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Verify that an account_id belongs to the authenticated user.
+ * Throws InvalidParamsError if the account does not exist or belongs to another user.
+ */
+async function verifyAccountOwnership(
+  db: D1Database,
+  userId: string,
+  accountId: string,
+  paramName: string,
+): Promise<void> {
+  const row = await db
+    .prepare(
+      "SELECT account_id FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+    )
+    .bind(accountId, userId)
+    .first<{ account_id: string }>();
+
+  if (!row) {
+    throw new InvalidParamsError(
+      `Account '${accountId}' not found for parameter '${paramName}'. Ensure the account exists and belongs to you.`,
+    );
+  }
+}
+
+/**
+ * Format a policy row for API response. Pure function.
+ */
+function formatPolicyRow(row: PolicyQueryRow): Record<string, unknown> {
+  return {
+    policy_id: row.policy_id,
+    from_account: row.from_account,
+    to_account: row.to_account,
+    detail_level: row.detail_level,
+    calendar_kind: row.calendar_kind,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * Execute calendar.list_policies: query D1 for all policy edges
+ * belonging to the authenticated user.
+ */
+async function handleListPolicies(
+  user: McpUserContext,
+  db: D1Database,
+): Promise<unknown> {
+  const result = await db
+    .prepare(
+      "SELECT policy_id, user_id, from_account, to_account, detail_level, calendar_kind, created_at, updated_at FROM mcp_policies WHERE user_id = ?1 ORDER BY created_at ASC",
+    )
+    .bind(user.userId)
+    .all<PolicyQueryRow>();
+
+  const policies = (result.results ?? []).map(formatPolicyRow);
+  return { policies };
+}
+
+/**
+ * Execute calendar.get_policy_edge: query D1 for a single policy edge
+ * by policy_id or by (from_account, to_account) pair.
+ */
+async function handleGetPolicyEdge(
+  user: McpUserContext,
+  db: D1Database,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const { policy_id, from_account, to_account } =
+    validateGetPolicyEdgeParams(args);
+
+  let row: PolicyQueryRow | null;
+
+  if (policy_id) {
+    row = await db
+      .prepare(
+        "SELECT policy_id, user_id, from_account, to_account, detail_level, calendar_kind, created_at, updated_at FROM mcp_policies WHERE policy_id = ?1 AND user_id = ?2",
+      )
+      .bind(policy_id, user.userId)
+      .first<PolicyQueryRow>();
+  } else {
+    row = await db
+      .prepare(
+        "SELECT policy_id, user_id, from_account, to_account, detail_level, calendar_kind, created_at, updated_at FROM mcp_policies WHERE user_id = ?1 AND from_account = ?2 AND to_account = ?3",
+      )
+      .bind(user.userId, from_account!, to_account!)
+      .first<PolicyQueryRow>();
+  }
+
+  if (!row) {
+    const identifier = policy_id
+      ? policy_id
+      : `${from_account} -> ${to_account}`;
+    throw new PolicyNotFoundError(identifier);
+  }
+
+  return formatPolicyRow(row);
+}
+
+/**
+ * Execute calendar.set_policy_edge: create or update a policy edge in D1.
+ * Upserts based on the UNIQUE(user_id, from_account, to_account) constraint.
+ * Validates that both from_account and to_account belong to the authenticated user.
+ */
+async function handleSetPolicyEdge(
+  user: McpUserContext,
+  db: D1Database,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const { from_account, to_account, detail_level, calendar_kind } =
+    validateSetPolicyEdgeParams(args);
+
+  // Validate account ownership (AC #6)
+  await verifyAccountOwnership(db, user.userId, from_account, "from_account");
+  await verifyAccountOwnership(db, user.userId, to_account, "to_account");
+
+  // Check if policy already exists (for upsert)
+  const existing = await db
+    .prepare(
+      "SELECT policy_id FROM mcp_policies WHERE user_id = ?1 AND from_account = ?2 AND to_account = ?3",
+    )
+    .bind(user.userId, from_account, to_account)
+    .first<{ policy_id: string }>();
+
+  if (existing) {
+    // Update existing policy
+    await db
+      .prepare(
+        "UPDATE mcp_policies SET detail_level = ?1, calendar_kind = ?2, updated_at = datetime('now') WHERE policy_id = ?3",
+      )
+      .bind(detail_level, calendar_kind, existing.policy_id)
+      .run();
+
+    // Read back updated row
+    const row = await db
+      .prepare(
+        "SELECT policy_id, user_id, from_account, to_account, detail_level, calendar_kind, created_at, updated_at FROM mcp_policies WHERE policy_id = ?1",
+      )
+      .bind(existing.policy_id)
+      .first<PolicyQueryRow>();
+
+    return formatPolicyRow(row!);
+  } else {
+    // Create new policy
+    const policyId = generatePolicyId();
+
+    await db
+      .prepare(
+        "INSERT INTO mcp_policies (policy_id, user_id, from_account, to_account, detail_level, calendar_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+      )
+      .bind(policyId, user.userId, from_account, to_account, detail_level, calendar_kind)
+      .run();
+
+    // Read back created row
+    const row = await db
+      .prepare(
+        "SELECT policy_id, user_id, from_account, to_account, detail_level, calendar_kind, created_at, updated_at FROM mcp_policies WHERE policy_id = ?1",
+      )
+      .bind(policyId)
+      .first<PolicyQueryRow>();
+
+    return formatPolicyRow(row!);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1661,18 @@ async function dispatch(
           case "calendar.delete_event":
             result = await handleDeleteEvent(user, db, toolArgs);
             break;
+          case "calendar.get_availability":
+            result = await handleGetAvailability(user, db, toolArgs);
+            break;
+          case "calendar.list_policies":
+            result = await handleListPolicies(user, db);
+            break;
+          case "calendar.get_policy_edge":
+            result = await handleGetPolicyEdge(user, db, toolArgs);
+            break;
+          case "calendar.set_policy_edge":
+            result = await handleSetPolicyEdge(user, db, toolArgs);
+            break;
           default:
             return makeErrorResponse(
               rpcReq.id,
@@ -1025,6 +1693,13 @@ async function dispatch(
           );
         }
         if (err instanceof EventNotFoundError) {
+          return makeErrorResponse(
+            rpcReq.id,
+            RPC_INVALID_PARAMS,
+            err.message,
+          );
+        }
+        if (err instanceof PolicyNotFoundError) {
           return makeErrorResponse(
             rpcReq.id,
             RPC_INVALID_PARAMS,
@@ -1196,4 +1871,9 @@ export {
   validateCreateEventParams,
   validateUpdateEventParams,
   validateDeleteEventParams,
+  validateGetAvailabilityParams,
+  generateTimeSlots,
+  computeAvailabilitySlots,
+  validateGetPolicyEdgeParams,
+  validateSetPolicyEdgeParams,
 };

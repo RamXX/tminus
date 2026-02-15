@@ -910,7 +910,7 @@ async function callTool(
 }
 
 describe("MCP integration: tools/list includes event management tools", () => {
-  it("returns all 6 tools including 4 event management tools", async () => {
+  it("returns tools including event management and availability tools", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 100 },
@@ -924,7 +924,10 @@ describe("MCP integration: tools/list includes event management tools", () => {
     expect(toolNames).toContain("calendar.create_event");
     expect(toolNames).toContain("calendar.update_event");
     expect(toolNames).toContain("calendar.delete_event");
-    expect(resultData.tools.length).toBe(6);
+    expect(toolNames).toContain("calendar.get_availability");
+    // At least 7 tools: list_accounts, get_sync_status, list_events, create_event,
+    // update_event, delete_event, get_availability
+    expect(resultData.tools.length).toBeGreaterThanOrEqual(7);
   });
 });
 
@@ -1390,5 +1393,844 @@ describe("MCP integration: full CRUD lifecycle", () => {
       end: "2026-06-30T23:59:59Z",
     });
     expect(listedAfterDelete.data).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: calendar.get_availability
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: calendar.get_availability", () => {
+  it("returns all free slots when no events exist", async () => {
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { slots: Array<Record<string, unknown>> };
+    expect(data.slots).toBeDefined();
+    expect(data.slots.length).toBe(4); // 2 hours / 30m default granularity = 4 slots
+
+    for (const slot of data.slots) {
+      expect(slot.status).toBe("free");
+      expect(slot.conflicting_events).toBeUndefined();
+    }
+  });
+
+  it("marks slots as busy when events overlap", async () => {
+    // Create an event from 09:00-10:00
+    await callTool("calendar.create_event", {
+      title: "Morning Meeting",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string; conflicting_events?: number }>;
+    };
+    expect(data.slots.length).toBe(4);
+
+    // Slots 09:00-09:30 and 09:30-10:00 should be busy
+    expect(data.slots[0].status).toBe("busy");
+    expect(data.slots[0].conflicting_events).toBe(1);
+    expect(data.slots[1].status).toBe("busy");
+    expect(data.slots[1].conflicting_events).toBe(1);
+    // Slots 10:00-10:30 and 10:30-11:00 should be free
+    expect(data.slots[2].status).toBe("free");
+    expect(data.slots[3].status).toBe("free");
+  });
+
+  it("supports 15m granularity", async () => {
+    await callTool("calendar.create_event", {
+      title: "Quick Sync",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T09:30:00Z",
+    });
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T10:00:00Z",
+      granularity: "15m",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string }>;
+    };
+    expect(data.slots.length).toBe(4); // 1 hour / 15m = 4 slots
+
+    // Event 09:00-09:30 covers first 2 slots
+    expect(data.slots[0].status).toBe("busy"); // 09:00-09:15
+    expect(data.slots[1].status).toBe("busy"); // 09:15-09:30
+    expect(data.slots[2].status).toBe("free"); // 09:30-09:45
+    expect(data.slots[3].status).toBe("free"); // 09:45-10:00
+  });
+
+  it("supports 1h granularity", async () => {
+    await callTool("calendar.create_event", {
+      title: "Long Meeting",
+      start_ts: "2026-03-15T10:00:00Z",
+      end_ts: "2026-03-15T11:00:00Z",
+    });
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T12:00:00Z",
+      granularity: "1h",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string }>;
+    };
+    expect(data.slots.length).toBe(3); // 3 hours / 1h = 3 slots
+
+    expect(data.slots[0].status).toBe("free"); // 09:00-10:00
+    expect(data.slots[1].status).toBe("busy"); // 10:00-11:00
+    expect(data.slots[2].status).toBe("free"); // 11:00-12:00
+  });
+
+  it("marks tentative events as tentative", async () => {
+    // Insert tentative event directly via SQL (create_event defaults to confirmed)
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_tentative_001",
+      TEST_USER.user_id,
+      "Maybe Meeting",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T10:00:00Z",
+      "UTC",
+      "mcp",
+      "tentative",
+    );
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string; conflicting_events?: number }>;
+    };
+
+    // Tentative event in 09:00-10:00 should mark slots as tentative
+    expect(data.slots[0].status).toBe("tentative");
+    expect(data.slots[0].conflicting_events).toBe(1);
+    expect(data.slots[1].status).toBe("tentative");
+    expect(data.slots[1].conflicting_events).toBe(1);
+    expect(data.slots[2].status).toBe("free");
+    expect(data.slots[3].status).toBe("free");
+  });
+
+  it("confirmed event overrides tentative in same time slot", async () => {
+    // Insert tentative event
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_tentative_002",
+      TEST_USER.user_id,
+      "Maybe Meeting",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T10:00:00Z",
+      "UTC",
+      "mcp",
+      "tentative",
+    );
+
+    // Also create a confirmed event overlapping the same time
+    await callTool("calendar.create_event", {
+      title: "Confirmed Meeting",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T09:30:00Z",
+    });
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string; conflicting_events?: number }>;
+    };
+
+    // 09:00-09:30: both tentative and confirmed overlap -> busy (confirmed wins)
+    expect(data.slots[0].status).toBe("busy");
+    expect(data.slots[0].conflicting_events).toBe(2);
+    // 09:30-10:00: only tentative overlaps -> tentative
+    expect(data.slots[1].status).toBe("tentative");
+    expect(data.slots[1].conflicting_events).toBe(1);
+  });
+
+  it("merges availability across multiple accounts", async () => {
+    // Create event on account A
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, account_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_acc_a_001",
+      TEST_USER.user_id,
+      ACCOUNT_A.account_id,
+      "Account A Meeting",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T09:30:00Z",
+      "UTC",
+      "mcp",
+      "confirmed",
+    );
+
+    // Create event on account B
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, account_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_acc_b_001",
+      TEST_USER.user_id,
+      ACCOUNT_B.account_id,
+      "Account B Meeting",
+      "2026-03-15T10:00:00Z",
+      "2026-03-15T10:30:00Z",
+      "UTC",
+      "mcp",
+      "confirmed",
+    );
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string }>;
+    };
+
+    expect(data.slots[0].status).toBe("busy"); // 09:00-09:30 (acc A)
+    expect(data.slots[1].status).toBe("free"); // 09:30-10:00 (both free)
+    expect(data.slots[2].status).toBe("busy"); // 10:00-10:30 (acc B)
+    expect(data.slots[3].status).toBe("free"); // 10:30-11:00 (both free)
+  });
+
+  it("filters by accounts when specified", async () => {
+    // Create events on different accounts
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, account_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_filter_a_001",
+      TEST_USER.user_id,
+      ACCOUNT_A.account_id,
+      "Account A Event",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T10:00:00Z",
+      "UTC",
+      "mcp",
+      "confirmed",
+    );
+
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, account_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_filter_b_001",
+      TEST_USER.user_id,
+      ACCOUNT_B.account_id,
+      "Account B Event",
+      "2026-03-15T10:00:00Z",
+      "2026-03-15T11:00:00Z",
+      "UTC",
+      "mcp",
+      "confirmed",
+    );
+
+    // Filter to only account A -- should only see first event
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+      accounts: [ACCOUNT_A.account_id],
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as {
+      slots: Array<{ start: string; end: string; status: string }>;
+    };
+
+    expect(data.slots[0].status).toBe("busy"); // 09:00-09:30 (acc A event)
+    expect(data.slots[1].status).toBe("busy"); // 09:30-10:00 (acc A event)
+    expect(data.slots[2].status).toBe("free"); // 10:00-10:30 (acc B excluded by filter)
+    expect(data.slots[3].status).toBe("free"); // 10:30-11:00
+  });
+
+  it("enforces user isolation -- other user's events not visible", async () => {
+    // Create event for other user
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_other_user_001",
+      OTHER_USER.user_id,
+      "Other User Meeting",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T11:00:00Z",
+      "UTC",
+      "mcp",
+      "confirmed",
+    );
+
+    // Query as TEST_USER -- should see all free
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { slots: Array<{ status: string }> };
+    for (const slot of data.slots) {
+      expect(slot.status).toBe("free");
+    }
+  });
+
+  it("rejects request with missing start parameter", async () => {
+    const result = await callTool("calendar.get_availability", {
+      end: "2026-03-15T17:00:00Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("start");
+  });
+
+  it("rejects request with invalid granularity", async () => {
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+      granularity: "2h",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("granularity");
+  });
+
+  it("rejects request with time range exceeding 7 days", async () => {
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-15T00:00:00Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("7 days");
+  });
+
+  it("excludes cancelled events from availability", async () => {
+    // Insert a cancelled event
+    db.prepare(
+      "INSERT INTO mcp_events (event_id, user_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "evt_cancelled_001",
+      TEST_USER.user_id,
+      "Cancelled Meeting",
+      "2026-03-15T09:00:00Z",
+      "2026-03-15T11:00:00Z",
+      "UTC",
+      "mcp",
+      "cancelled",
+    );
+
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T11:00:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { slots: Array<{ status: string }> };
+    for (const slot of data.slots) {
+      expect(slot.status).toBe("free");
+    }
+  });
+
+  it("responds under 500ms for a full day at 15m granularity", async () => {
+    // Create some events
+    for (let hour = 9; hour < 17; hour++) {
+      db.prepare(
+        "INSERT INTO mcp_events (event_id, user_id, title, start_ts, end_ts, timezone, source, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        `evt_perf_${hour}`,
+        TEST_USER.user_id,
+        `Meeting ${hour}`,
+        `2026-03-15T${String(hour).padStart(2, "0")}:00:00Z`,
+        `2026-03-15T${String(hour).padStart(2, "0")}:30:00Z`,
+        "UTC",
+        "mcp",
+        "confirmed",
+      );
+    }
+
+    const startTime = performance.now();
+    const result = await callTool("calendar.get_availability", {
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-16T00:00:00Z",
+      granularity: "15m",
+    });
+    const elapsed = performance.now() - startTime;
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { slots: Array<Record<string, unknown>> };
+    expect(data.slots.length).toBe(96); // 24 hours * 4 (15m slots) = 96
+    expect(elapsed).toBeLessThan(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: tools/list includes policy management tools
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: tools/list includes policy management tools", () => {
+  it("returns all 10 tools including 3 policy management tools", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      { jsonrpc: "2.0", method: "tools/list", id: 200 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const toolNames = resultData.tools.map((t) => t.name);
+
+    expect(toolNames).toContain("calendar.list_policies");
+    expect(toolNames).toContain("calendar.get_policy_edge");
+    expect(toolNames).toContain("calendar.set_policy_edge");
+    expect(resultData.tools.length).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: calendar.set_policy_edge
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: calendar.set_policy_edge", () => {
+  it("creates a new policy edge with BUSY detail_level", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeUndefined();
+    const policy = result.data as Record<string, unknown>;
+    expect(policy.policy_id).toBeDefined();
+    expect(typeof policy.policy_id).toBe("string");
+    expect((policy.policy_id as string).startsWith("pol_")).toBe(true);
+    expect(policy.from_account).toBe(ACCOUNT_A.account_id);
+    expect(policy.to_account).toBe(ACCOUNT_B.account_id);
+    expect(policy.detail_level).toBe("BUSY");
+    expect(policy.calendar_kind).toBe("BUSY_OVERLAY"); // default per BR-11
+    expect(policy.created_at).toBeDefined();
+    expect(policy.updated_at).toBeDefined();
+  });
+
+  it("creates a policy edge with TITLE detail_level and TRUE_MIRROR kind", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "TITLE",
+      calendar_kind: "TRUE_MIRROR",
+    });
+
+    expect(result.error).toBeUndefined();
+    const policy = result.data as Record<string, unknown>;
+    expect(policy.detail_level).toBe("TITLE");
+    expect(policy.calendar_kind).toBe("TRUE_MIRROR");
+  });
+
+  it("upserts existing policy edge (updates detail_level)", async () => {
+    // Create initial policy with BUSY
+    const created = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    expect(created.error).toBeUndefined();
+    const originalId = (created.data as Record<string, unknown>).policy_id;
+
+    // Upsert with FULL -- should update same policy, not create new
+    const updated = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "FULL",
+    });
+    expect(updated.error).toBeUndefined();
+    const updatedPolicy = updated.data as Record<string, unknown>;
+    expect(updatedPolicy.policy_id).toBe(originalId); // same policy ID
+    expect(updatedPolicy.detail_level).toBe("FULL"); // updated
+    expect(updatedPolicy.calendar_kind).toBe("BUSY_OVERLAY"); // default
+  });
+
+  it("rejects when from_account does not belong to user", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: OTHER_USER_ACCOUNT.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("not found");
+    expect(result.error!.message).toContain("from_account");
+  });
+
+  it("rejects when to_account does not belong to user", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: OTHER_USER_ACCOUNT.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("not found");
+    expect(result.error!.message).toContain("to_account");
+  });
+
+  it("rejects when from_account equals to_account", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_A.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("different accounts");
+  });
+
+  it("rejects invalid detail_level", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "PARTIAL",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("detail_level");
+    expect(result.error!.message).toContain("BUSY, TITLE, FULL");
+  });
+
+  it("rejects invalid calendar_kind", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+      calendar_kind: "SHARED_VIEW",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("calendar_kind");
+    expect(result.error!.message).toContain("BUSY_OVERLAY, TRUE_MIRROR");
+  });
+
+  it("rejects missing from_account", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("from_account");
+  });
+
+  it("rejects missing to_account", async () => {
+    const result = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      detail_level: "BUSY",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("to_account");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: calendar.list_policies
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: calendar.list_policies", () => {
+  it("returns empty array when no policies exist", async () => {
+    const result = await callTool("calendar.list_policies");
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { policies: unknown[] };
+    expect(data.policies).toEqual([]);
+  });
+
+  it("returns all policies for the authenticated user", async () => {
+    // Create two policy edges
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_B.account_id,
+      to_account: ACCOUNT_A.account_id,
+      detail_level: "FULL",
+      calendar_kind: "TRUE_MIRROR",
+    });
+
+    const result = await callTool("calendar.list_policies");
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { policies: Array<Record<string, unknown>> };
+    expect(data.policies.length).toBe(2);
+
+    // Verify first policy (A -> B)
+    const policyAB = data.policies.find(
+      (p) => p.from_account === ACCOUNT_A.account_id && p.to_account === ACCOUNT_B.account_id,
+    );
+    expect(policyAB).toBeDefined();
+    expect(policyAB?.detail_level).toBe("BUSY");
+    expect(policyAB?.calendar_kind).toBe("BUSY_OVERLAY");
+    expect(policyAB?.policy_id).toBeDefined();
+
+    // Verify second policy (B -> A)
+    const policyBA = data.policies.find(
+      (p) => p.from_account === ACCOUNT_B.account_id && p.to_account === ACCOUNT_A.account_id,
+    );
+    expect(policyBA).toBeDefined();
+    expect(policyBA?.detail_level).toBe("FULL");
+    expect(policyBA?.calendar_kind).toBe("TRUE_MIRROR");
+  });
+
+  it("enforces user isolation -- other user cannot see policies", async () => {
+    // Create a policy as TEST_USER
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+
+    // List as OTHER_USER -- should see nothing
+    const otherAuth = await makeAuthHeader(OTHER_USER.user_id);
+    const result = await callTool("calendar.list_policies", undefined, otherAuth);
+
+    expect(result.error).toBeUndefined();
+    const data = result.data as { policies: unknown[] };
+    expect(data.policies).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: calendar.get_policy_edge
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: calendar.get_policy_edge", () => {
+  it("gets a policy edge by policy_id", async () => {
+    // Create a policy
+    const created = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "TITLE",
+    });
+    const policyId = (created.data as Record<string, unknown>).policy_id as string;
+
+    // Get by policy_id
+    const result = await callTool("calendar.get_policy_edge", {
+      policy_id: policyId,
+    });
+
+    expect(result.error).toBeUndefined();
+    const policy = result.data as Record<string, unknown>;
+    expect(policy.policy_id).toBe(policyId);
+    expect(policy.from_account).toBe(ACCOUNT_A.account_id);
+    expect(policy.to_account).toBe(ACCOUNT_B.account_id);
+    expect(policy.detail_level).toBe("TITLE");
+    expect(policy.calendar_kind).toBe("BUSY_OVERLAY");
+  });
+
+  it("gets a policy edge by from/to account pair", async () => {
+    // Create a policy
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "FULL",
+      calendar_kind: "TRUE_MIRROR",
+    });
+
+    // Get by from/to pair
+    const result = await callTool("calendar.get_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+    });
+
+    expect(result.error).toBeUndefined();
+    const policy = result.data as Record<string, unknown>;
+    expect(policy.from_account).toBe(ACCOUNT_A.account_id);
+    expect(policy.to_account).toBe(ACCOUNT_B.account_id);
+    expect(policy.detail_level).toBe("FULL");
+    expect(policy.calendar_kind).toBe("TRUE_MIRROR");
+  });
+
+  it("returns error for non-existent policy_id", async () => {
+    const result = await callTool("calendar.get_policy_edge", {
+      policy_id: "pol_nonexistent",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Policy not found");
+  });
+
+  it("returns error for non-existent from/to pair", async () => {
+    const result = await callTool("calendar.get_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Policy not found");
+  });
+
+  it("returns error when no params provided", async () => {
+    const result = await callTool("calendar.get_policy_edge", {});
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Provide either");
+  });
+
+  it("enforces user isolation -- cannot get another user's policy by ID", async () => {
+    // Create a policy as TEST_USER
+    const created = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    const policyId = (created.data as Record<string, unknown>).policy_id as string;
+
+    // Try to get as OTHER_USER
+    const otherAuth = await makeAuthHeader(OTHER_USER.user_id);
+    const result = await callTool(
+      "calendar.get_policy_edge",
+      { policy_id: policyId },
+      otherAuth,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Policy not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: full policy CRUD lifecycle
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: full policy CRUD lifecycle", () => {
+  it("create -> list -> get -> update detail_level -> verify change -> list", async () => {
+    // 1. Create a policy edge (A -> B, BUSY, BUSY_OVERLAY)
+    const created = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+    expect(created.error).toBeUndefined();
+    const policyId = (created.data as Record<string, unknown>).policy_id as string;
+    expect(policyId).toBeTruthy();
+    expect((created.data as Record<string, unknown>).detail_level).toBe("BUSY");
+    expect((created.data as Record<string, unknown>).calendar_kind).toBe("BUSY_OVERLAY");
+
+    // 2. List -- should find 1 policy
+    const listed = await callTool("calendar.list_policies");
+    expect(listed.error).toBeUndefined();
+    const policies = (listed.data as { policies: Array<Record<string, unknown>> }).policies;
+    expect(policies.length).toBe(1);
+    expect(policies[0].policy_id).toBe(policyId);
+    expect(policies[0].detail_level).toBe("BUSY");
+
+    // 3. Get by policy_id -- verify details
+    const fetched = await callTool("calendar.get_policy_edge", {
+      policy_id: policyId,
+    });
+    expect(fetched.error).toBeUndefined();
+    const fetchedPolicy = fetched.data as Record<string, unknown>;
+    expect(fetchedPolicy.policy_id).toBe(policyId);
+    expect(fetchedPolicy.from_account).toBe(ACCOUNT_A.account_id);
+    expect(fetchedPolicy.to_account).toBe(ACCOUNT_B.account_id);
+
+    // 4. Update detail_level to FULL (upsert same from/to pair)
+    const updated = await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "FULL",
+      calendar_kind: "TRUE_MIRROR",
+    });
+    expect(updated.error).toBeUndefined();
+    const updatedPolicy = updated.data as Record<string, unknown>;
+    expect(updatedPolicy.policy_id).toBe(policyId); // same ID
+    expect(updatedPolicy.detail_level).toBe("FULL"); // changed
+    expect(updatedPolicy.calendar_kind).toBe("TRUE_MIRROR"); // changed
+
+    // 5. Verify change via get
+    const verified = await callTool("calendar.get_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+    });
+    expect(verified.error).toBeUndefined();
+    const verifiedPolicy = verified.data as Record<string, unknown>;
+    expect(verifiedPolicy.detail_level).toBe("FULL");
+    expect(verifiedPolicy.calendar_kind).toBe("TRUE_MIRROR");
+
+    // 6. List -- should still show 1 policy (not 2)
+    const finalList = await callTool("calendar.list_policies");
+    expect(finalList.error).toBeUndefined();
+    const finalPolicies = (finalList.data as { policies: Array<Record<string, unknown>> }).policies;
+    expect(finalPolicies.length).toBe(1);
+    expect(finalPolicies[0].detail_level).toBe("FULL");
+    expect(finalPolicies[0].calendar_kind).toBe("TRUE_MIRROR");
+  });
+
+  it("supports bidirectional policies between two accounts", async () => {
+    // A -> B: BUSY overlay
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_A.account_id,
+      to_account: ACCOUNT_B.account_id,
+      detail_level: "BUSY",
+    });
+
+    // B -> A: FULL mirror
+    await callTool("calendar.set_policy_edge", {
+      from_account: ACCOUNT_B.account_id,
+      to_account: ACCOUNT_A.account_id,
+      detail_level: "FULL",
+      calendar_kind: "TRUE_MIRROR",
+    });
+
+    // List should show 2 distinct policies
+    const listed = await callTool("calendar.list_policies");
+    expect(listed.error).toBeUndefined();
+    const policies = (listed.data as { policies: Array<Record<string, unknown>> }).policies;
+    expect(policies.length).toBe(2);
+
+    // Verify each direction has correct settings
+    const ab = policies.find(
+      (p) => p.from_account === ACCOUNT_A.account_id && p.to_account === ACCOUNT_B.account_id,
+    );
+    const ba = policies.find(
+      (p) => p.from_account === ACCOUNT_B.account_id && p.to_account === ACCOUNT_A.account_id,
+    );
+
+    expect(ab?.detail_level).toBe("BUSY");
+    expect(ab?.calendar_kind).toBe("BUSY_OVERLAY");
+    expect(ba?.detail_level).toBe("FULL");
+    expect(ba?.calendar_kind).toBe("TRUE_MIRROR");
   });
 });

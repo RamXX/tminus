@@ -25,6 +25,11 @@ import {
   validateCreateEventParams,
   validateUpdateEventParams,
   validateDeleteEventParams,
+  validateGetAvailabilityParams,
+  generateTimeSlots,
+  computeAvailabilitySlots,
+  validateGetPolicyEdgeParams,
+  validateSetPolicyEdgeParams,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -1083,5 +1088,794 @@ describe("computeChannelStatus", () => {
 
   it("returns 'active' when channel exists and expiry is invalid date", () => {
     expect(computeChannelStatus("ch_123", "not-a-date", NOW_MS)).toBe("active");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateGetAvailabilityParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateGetAvailabilityParams", () => {
+  it("throws on undefined args", () => {
+    expect(() => validateGetAvailabilityParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when start is missing", () => {
+    expect(() =>
+      validateGetAvailabilityParams({ end: "2026-03-15T17:00:00Z" }),
+    ).toThrow("'start' is required");
+  });
+
+  it("throws when end is missing", () => {
+    expect(() =>
+      validateGetAvailabilityParams({ start: "2026-03-15T09:00:00Z" }),
+    ).toThrow("'end' is required");
+  });
+
+  it("throws when start is not a valid ISO datetime", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "not-a-date",
+        end: "2026-03-15T17:00:00Z",
+      }),
+    ).toThrow("'start' is not a valid ISO 8601");
+  });
+
+  it("throws when end is not a valid ISO datetime", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "not-a-date",
+      }),
+    ).toThrow("'end' is not a valid ISO 8601");
+  });
+
+  it("throws when start >= end", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T17:00:00Z",
+        end: "2026-03-15T09:00:00Z",
+      }),
+    ).toThrow("'start' must be before 'end'");
+  });
+
+  it("throws when start equals end", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T09:00:00Z",
+      }),
+    ).toThrow("'start' must be before 'end'");
+  });
+
+  it("throws for invalid granularity value", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+        granularity: "45m",
+      }),
+    ).toThrow("'granularity' must be one of");
+  });
+
+  it("throws for non-string granularity", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+        granularity: 30,
+      }),
+    ).toThrow("'granularity' must be one of");
+  });
+
+  it("throws when time range exceeds 7 days", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-01T00:00:00Z",
+        end: "2026-03-15T00:00:00Z",
+      }),
+    ).toThrow("must not exceed 7 days");
+  });
+
+  it("throws when accounts is not an array", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+        accounts: "acc_123",
+      }),
+    ).toThrow("'accounts' must be an array");
+  });
+
+  it("throws when accounts contains non-string elements", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+        accounts: [123],
+      }),
+    ).toThrow("'accounts' must be a non-empty string");
+  });
+
+  it("throws when accounts contains empty strings", () => {
+    expect(() =>
+      validateGetAvailabilityParams({
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+        accounts: [""],
+      }),
+    ).toThrow("'accounts' must be a non-empty string");
+  });
+
+  it("returns validated params with defaults", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+    });
+    expect(result.start).toBe("2026-03-15T09:00:00Z");
+    expect(result.end).toBe("2026-03-15T17:00:00Z");
+    expect(result.granularity).toBe("30m");
+    expect(result.accounts).toBeNull();
+  });
+
+  it("accepts 15m granularity", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+      granularity: "15m",
+    });
+    expect(result.granularity).toBe("15m");
+  });
+
+  it("accepts 1h granularity", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+      granularity: "1h",
+    });
+    expect(result.granularity).toBe("1h");
+  });
+
+  it("passes through accounts filter", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+      accounts: ["acc_123", "acc_456"],
+    });
+    expect(result.accounts).toEqual(["acc_123", "acc_456"]);
+  });
+
+  it("treats empty accounts array as null (no filter)", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-15T09:00:00Z",
+      end: "2026-03-15T17:00:00Z",
+      accounts: [],
+    });
+    expect(result.accounts).toBeNull();
+  });
+
+  it("accepts exactly 7-day range", () => {
+    const result = validateGetAvailabilityParams({
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-08T00:00:00Z",
+    });
+    expect(result.start).toBe("2026-03-01T00:00:00Z");
+    expect(result.end).toBe("2026-03-08T00:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateTimeSlots (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("generateTimeSlots", () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const HALF_HOUR_MS = 30 * 60 * 1000;
+  const QUARTER_HOUR_MS = 15 * 60 * 1000;
+
+  it("generates correct number of 30m slots for 2-hour range", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T11:00:00Z").getTime();
+    const slots = generateTimeSlots(start, end, HALF_HOUR_MS);
+    expect(slots.length).toBe(4); // 2 hours / 30 min = 4 slots
+  });
+
+  it("generates correct number of 15m slots for 1-hour range", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T10:00:00Z").getTime();
+    const slots = generateTimeSlots(start, end, QUARTER_HOUR_MS);
+    expect(slots.length).toBe(4); // 1 hour / 15 min = 4 slots
+  });
+
+  it("generates correct number of 1h slots for 8-hour range", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T17:00:00Z").getTime();
+    const slots = generateTimeSlots(start, end, HOUR_MS);
+    expect(slots.length).toBe(8); // 8 hours / 1 hour = 8 slots
+  });
+
+  it("generates consecutive non-overlapping slots", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T11:00:00Z").getTime();
+    const slots = generateTimeSlots(start, end, HALF_HOUR_MS);
+
+    for (let i = 0; i < slots.length - 1; i++) {
+      expect(slots[i].endMs).toBe(slots[i + 1].startMs);
+    }
+  });
+
+  it("first slot starts at range start and last slot ends at range end", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T11:00:00Z").getTime();
+    const slots = generateTimeSlots(start, end, HALF_HOUR_MS);
+
+    expect(slots[0].startMs).toBe(start);
+    expect(slots[slots.length - 1].endMs).toBe(end);
+  });
+
+  it("handles range that is not evenly divisible by granularity", () => {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T09:45:00Z").getTime(); // 45 min, not divisible by 30m
+    const slots = generateTimeSlots(start, end, HALF_HOUR_MS);
+
+    expect(slots.length).toBe(2);
+    // First slot: 09:00 - 09:30
+    expect(slots[0].startMs).toBe(start);
+    expect(slots[0].endMs).toBe(start + HALF_HOUR_MS);
+    // Second slot: 09:30 - 09:45 (truncated to range end)
+    expect(slots[1].startMs).toBe(start + HALF_HOUR_MS);
+    expect(slots[1].endMs).toBe(end);
+  });
+
+  it("returns empty array for zero-length range", () => {
+    const t = new Date("2026-03-15T09:00:00Z").getTime();
+    const slots = generateTimeSlots(t, t, HALF_HOUR_MS);
+    expect(slots.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeAvailabilitySlots (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("computeAvailabilitySlots", () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const HALF_HOUR_MS = 30 * 60 * 1000;
+
+  // Helper to create time slots for a 2-hour window (9:00 - 11:00) at 30m granularity
+  function makeSlots(): Array<{ startMs: number; endMs: number }> {
+    const start = new Date("2026-03-15T09:00:00Z").getTime();
+    const end = new Date("2026-03-15T11:00:00Z").getTime();
+    return generateTimeSlots(start, end, HALF_HOUR_MS);
+  }
+
+  it("marks all slots as free when no events exist", () => {
+    const slots = makeSlots();
+    const result = computeAvailabilitySlots(slots, []);
+
+    expect(result.length).toBe(4);
+    for (const slot of result) {
+      expect(slot.status).toBe("free");
+      expect(slot.conflicting_events).toBeUndefined();
+    }
+  });
+
+  it("marks overlapping slots as busy for confirmed events", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T10:00:00Z",
+        status: "confirmed",
+        account_id: "acc_1",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    // Slots 09:00-09:30 and 09:30-10:00 should be busy
+    expect(result[0].status).toBe("busy");
+    expect(result[0].conflicting_events).toBe(1);
+    expect(result[1].status).toBe("busy");
+    expect(result[1].conflicting_events).toBe(1);
+    // Slots 10:00-10:30 and 10:30-11:00 should be free
+    expect(result[2].status).toBe("free");
+    expect(result[3].status).toBe("free");
+  });
+
+  it("marks overlapping slots as tentative for tentative-only events", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:30:00Z",
+        end_ts: "2026-03-15T10:30:00Z",
+        status: "tentative",
+        account_id: "acc_1",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    expect(result[0].status).toBe("free"); // 09:00-09:30
+    expect(result[1].status).toBe("tentative"); // 09:30-10:00
+    expect(result[1].conflicting_events).toBe(1);
+    expect(result[2].status).toBe("tentative"); // 10:00-10:30
+    expect(result[2].conflicting_events).toBe(1);
+    expect(result[3].status).toBe("free"); // 10:30-11:00
+  });
+
+  it("confirmed event overrides tentative in same slot", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T09:30:00Z",
+        status: "tentative",
+        account_id: "acc_1",
+      },
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T09:30:00Z",
+        status: "confirmed",
+        account_id: "acc_2",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    expect(result[0].status).toBe("busy"); // confirmed wins
+    expect(result[0].conflicting_events).toBe(2);
+  });
+
+  it("ignores cancelled events", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T11:00:00Z",
+        status: "cancelled",
+        account_id: "acc_1",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    for (const slot of result) {
+      expect(slot.status).toBe("free");
+      expect(slot.conflicting_events).toBeUndefined();
+    }
+  });
+
+  it("counts multiple conflicting events in the same slot", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T10:00:00Z",
+        status: "confirmed",
+        account_id: "acc_1",
+      },
+      {
+        start_ts: "2026-03-15T09:15:00Z",
+        end_ts: "2026-03-15T09:45:00Z",
+        status: "confirmed",
+        account_id: "acc_2",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    // 09:00-09:30 overlaps both events
+    expect(result[0].status).toBe("busy");
+    expect(result[0].conflicting_events).toBe(2);
+    // 09:30-10:00 overlaps both events: event 1 spans to 10:00, event 2 ends at 09:45 (> 09:30)
+    expect(result[1].status).toBe("busy");
+    expect(result[1].conflicting_events).toBe(2);
+  });
+
+  it("merges availability across multiple accounts (any busy = busy)", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:00:00Z",
+        end_ts: "2026-03-15T09:30:00Z",
+        status: "confirmed",
+        account_id: "acc_1",
+      },
+      {
+        start_ts: "2026-03-15T10:00:00Z",
+        end_ts: "2026-03-15T10:30:00Z",
+        status: "confirmed",
+        account_id: "acc_2",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    expect(result[0].status).toBe("busy"); // acc_1 busy
+    expect(result[1].status).toBe("free"); // both free
+    expect(result[2].status).toBe("busy"); // acc_2 busy
+    expect(result[3].status).toBe("free"); // both free
+  });
+
+  it("returns correct ISO 8601 timestamps in slots", () => {
+    const slots = makeSlots();
+    const result = computeAvailabilitySlots(slots, []);
+
+    expect(result[0].start).toBe("2026-03-15T09:00:00.000Z");
+    expect(result[0].end).toBe("2026-03-15T09:30:00.000Z");
+    expect(result[3].start).toBe("2026-03-15T10:30:00.000Z");
+    expect(result[3].end).toBe("2026-03-15T11:00:00.000Z");
+  });
+
+  it("handles event that partially overlaps a slot boundary", () => {
+    const slots = makeSlots();
+    // Event starts at 09:15, ends at 09:45 -- overlaps first two slots
+    const events = [
+      {
+        start_ts: "2026-03-15T09:15:00Z",
+        end_ts: "2026-03-15T09:45:00Z",
+        status: "confirmed",
+        account_id: "acc_1",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    expect(result[0].status).toBe("busy"); // 09:00-09:30 overlaps
+    expect(result[0].conflicting_events).toBe(1);
+    expect(result[1].status).toBe("busy"); // 09:30-10:00 overlaps (event ends at 09:45)
+    expect(result[1].conflicting_events).toBe(1);
+    expect(result[2].status).toBe("free"); // 10:00-10:30 no overlap
+    expect(result[3].status).toBe("free"); // 10:30-11:00 no overlap
+  });
+
+  it("event that exactly matches slot boundaries", () => {
+    const slots = makeSlots();
+    const events = [
+      {
+        start_ts: "2026-03-15T09:30:00Z",
+        end_ts: "2026-03-15T10:00:00Z",
+        status: "confirmed",
+        account_id: "acc_1",
+      },
+    ];
+
+    const result = computeAvailabilitySlots(slots, events);
+
+    expect(result[0].status).toBe("free"); // 09:00-09:30 -- event starts at boundary, no overlap
+    expect(result[1].status).toBe("busy"); // 09:30-10:00 -- exact match
+    expect(result[1].conflicting_events).toBe(1);
+    expect(result[2].status).toBe("free"); // 10:00-10:30 -- event ends at boundary, no overlap
+    expect(result[3].status).toBe("free");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tools/list includes availability tool
+// ---------------------------------------------------------------------------
+
+describe("POST /mcp -- tools/list includes availability tool", () => {
+  it("includes calendar.get_availability with required start and end fields", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const availabilityTool = resultData.tools.find(
+      (t) => t.name === "calendar.get_availability",
+    );
+    expect(availabilityTool).toBeDefined();
+    expect(availabilityTool?.description).toContain("free/busy");
+
+    const schema = availabilityTool?.inputSchema as {
+      type: string;
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(schema.type).toBe("object");
+    expect(schema.required).toContain("start");
+    expect(schema.required).toContain("end");
+    expect(schema.properties).toHaveProperty("start");
+    expect(schema.properties).toHaveProperty("end");
+    expect(schema.properties).toHaveProperty("accounts");
+    expect(schema.properties).toHaveProperty("granularity");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateGetPolicyEdgeParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateGetPolicyEdgeParams", () => {
+  it("throws on undefined args", () => {
+    expect(() => validateGetPolicyEdgeParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when neither policy_id nor from/to_account provided", () => {
+    expect(() => validateGetPolicyEdgeParams({})).toThrow(
+      "Provide either 'policy_id' or both 'from_account' and 'to_account'",
+    );
+  });
+
+  it("throws when only from_account provided (missing to_account)", () => {
+    expect(() =>
+      validateGetPolicyEdgeParams({ from_account: "acc_aaa" }),
+    ).toThrow("Provide either 'policy_id' or both");
+  });
+
+  it("throws when only to_account provided (missing from_account)", () => {
+    expect(() =>
+      validateGetPolicyEdgeParams({ to_account: "acc_bbb" }),
+    ).toThrow("Provide either 'policy_id' or both");
+  });
+
+  it("returns policy_id when provided", () => {
+    const result = validateGetPolicyEdgeParams({ policy_id: "pol_123" });
+    expect(result.policy_id).toBe("pol_123");
+    expect(result.from_account).toBeNull();
+    expect(result.to_account).toBeNull();
+  });
+
+  it("returns from/to_account when both provided", () => {
+    const result = validateGetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+    });
+    expect(result.policy_id).toBeNull();
+    expect(result.from_account).toBe("acc_aaa");
+    expect(result.to_account).toBe("acc_bbb");
+  });
+
+  it("prefers policy_id over from/to_account when all provided", () => {
+    const result = validateGetPolicyEdgeParams({
+      policy_id: "pol_123",
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+    });
+    // When policy_id is provided, it takes precedence
+    expect(result.policy_id).toBe("pol_123");
+  });
+
+  it("treats empty string policy_id as missing", () => {
+    expect(() =>
+      validateGetPolicyEdgeParams({ policy_id: "" }),
+    ).toThrow("Provide either 'policy_id' or both");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateSetPolicyEdgeParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateSetPolicyEdgeParams", () => {
+  it("throws on undefined args", () => {
+    expect(() => validateSetPolicyEdgeParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when from_account is missing", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        to_account: "acc_bbb",
+        detail_level: "BUSY",
+      }),
+    ).toThrow("'from_account' is required");
+  });
+
+  it("throws when to_account is missing", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        detail_level: "BUSY",
+      }),
+    ).toThrow("'to_account' is required");
+  });
+
+  it("throws when from_account equals to_account", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        to_account: "acc_aaa",
+        detail_level: "BUSY",
+      }),
+    ).toThrow("must be different accounts");
+  });
+
+  it("throws when detail_level is missing", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        to_account: "acc_bbb",
+      }),
+    ).toThrow("'detail_level' must be one of: BUSY, TITLE, FULL");
+  });
+
+  it("throws when detail_level is invalid", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        to_account: "acc_bbb",
+        detail_level: "PARTIAL",
+      }),
+    ).toThrow("'detail_level' must be one of: BUSY, TITLE, FULL");
+  });
+
+  it("throws when detail_level is not a string", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        to_account: "acc_bbb",
+        detail_level: 1,
+      }),
+    ).toThrow("'detail_level' must be one of: BUSY, TITLE, FULL");
+  });
+
+  it("throws when calendar_kind is invalid", () => {
+    expect(() =>
+      validateSetPolicyEdgeParams({
+        from_account: "acc_aaa",
+        to_account: "acc_bbb",
+        detail_level: "BUSY",
+        calendar_kind: "SHARED_CALENDAR",
+      }),
+    ).toThrow("'calendar_kind' must be one of: BUSY_OVERLAY, TRUE_MIRROR");
+  });
+
+  it("accepts BUSY detail_level", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "BUSY",
+    });
+    expect(result.detail_level).toBe("BUSY");
+  });
+
+  it("accepts TITLE detail_level", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "TITLE",
+    });
+    expect(result.detail_level).toBe("TITLE");
+  });
+
+  it("accepts FULL detail_level", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "FULL",
+    });
+    expect(result.detail_level).toBe("FULL");
+  });
+
+  it("defaults calendar_kind to BUSY_OVERLAY when not provided (BR-11)", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "BUSY",
+    });
+    expect(result.calendar_kind).toBe("BUSY_OVERLAY");
+  });
+
+  it("accepts BUSY_OVERLAY calendar_kind", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "BUSY",
+      calendar_kind: "BUSY_OVERLAY",
+    });
+    expect(result.calendar_kind).toBe("BUSY_OVERLAY");
+  });
+
+  it("accepts TRUE_MIRROR calendar_kind", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "FULL",
+      calendar_kind: "TRUE_MIRROR",
+    });
+    expect(result.calendar_kind).toBe("TRUE_MIRROR");
+  });
+
+  it("returns all validated params for complete input", () => {
+    const result = validateSetPolicyEdgeParams({
+      from_account: "acc_aaa",
+      to_account: "acc_bbb",
+      detail_level: "TITLE",
+      calendar_kind: "TRUE_MIRROR",
+    });
+    expect(result.from_account).toBe("acc_aaa");
+    expect(result.to_account).toBe("acc_bbb");
+    expect(result.detail_level).toBe("TITLE");
+    expect(result.calendar_kind).toBe("TRUE_MIRROR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tools/list includes policy management tools
+// ---------------------------------------------------------------------------
+
+describe("POST /mcp -- tools/list includes policy management tools", () => {
+  it("includes all 3 policy management tools in registry", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.list_policies");
+    expect(toolNames).toContain("calendar.get_policy_edge");
+    expect(toolNames).toContain("calendar.set_policy_edge");
+  });
+
+  it("calendar.set_policy_edge schema has required from_account, to_account, detail_level fields", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const setPolicyTool = resultData.tools.find(
+      (t) => t.name === "calendar.set_policy_edge",
+    );
+    expect(setPolicyTool).toBeDefined();
+
+    const schema = setPolicyTool?.inputSchema as { required?: string[] };
+    expect(schema.required).toContain("from_account");
+    expect(schema.required).toContain("to_account");
+    expect(schema.required).toContain("detail_level");
+  });
+
+  it("calendar.set_policy_edge schema describes detail_level enum", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const setPolicyTool = resultData.tools.find(
+      (t) => t.name === "calendar.set_policy_edge",
+    );
+
+    const schema = setPolicyTool?.inputSchema as {
+      properties: Record<string, { enum?: string[] }>;
+    };
+    expect(schema.properties.detail_level.enum).toEqual(["BUSY", "TITLE", "FULL"]);
+    expect(schema.properties.calendar_kind.enum).toEqual(["BUSY_OVERLAY", "TRUE_MIRROR"]);
   });
 });

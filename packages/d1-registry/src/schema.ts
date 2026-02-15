@@ -233,6 +233,49 @@ CREATE INDEX idx_mcp_events_user_time ON mcp_events(user_id, start_ts, end_ts);
 ` as const;
 
 /**
+ * Migration 0010: Add status column to mcp_events.
+ *
+ * Tracks event status ('confirmed', 'tentative', 'cancelled') to support
+ * availability computation. Tentative events are shown as tentative slots
+ * in calendar.get_availability. Cancelled events are excluded.
+ * Default is 'confirmed' for backward compatibility with existing events.
+ */
+export const MIGRATION_0010_MCP_EVENTS_STATUS = `
+ALTER TABLE mcp_events ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed';
+` as const;
+
+/**
+ * Migration 0011: MCP policy edges table.
+ *
+ * Stores directional projection policies between accounts. A policy edge
+ * defines how events from one account project to another (e.g., BUSY overlay
+ * from work calendar to personal calendar).
+ *
+ * Business rules:
+ * - detail_level: BUSY (time only), TITLE (time + title), FULL (everything)
+ * - calendar_kind: BUSY_OVERLAY (default per BR-11), TRUE_MIRROR
+ * - UNIQUE on (user_id, from_account, to_account) ensures one policy per direction
+ */
+export const MIGRATION_0011_MCP_POLICIES = `
+-- MCP policy edges table
+CREATE TABLE mcp_policies (
+  policy_id      TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL REFERENCES users(user_id),
+  from_account   TEXT NOT NULL REFERENCES accounts(account_id),
+  to_account     TEXT NOT NULL REFERENCES accounts(account_id),
+  detail_level   TEXT NOT NULL CHECK(detail_level IN ('BUSY', 'TITLE', 'FULL')),
+  calendar_kind  TEXT NOT NULL DEFAULT 'BUSY_OVERLAY' CHECK(calendar_kind IN ('BUSY_OVERLAY', 'TRUE_MIRROR')),
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, from_account, to_account)
+);
+
+CREATE INDEX idx_mcp_policies_user ON mcp_policies(user_id);
+CREATE INDEX idx_mcp_policies_from ON mcp_policies(from_account);
+CREATE INDEX idx_mcp_policies_to ON mcp_policies(to_account);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -246,4 +289,6 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY,
   MIGRATION_0008_SYNC_STATUS_COLUMNS,
   MIGRATION_0009_MCP_EVENTS,
+  MIGRATION_0010_MCP_EVENTS_STATUS,
+  MIGRATION_0011_MCP_POLICIES,
 ] as const;

@@ -115,8 +115,29 @@ export interface KeyRotationLogRow {
   readonly completed_at: string | null;
 }
 
+/** Valid detail level values for MCP policy edges. */
+export type McpPolicyDetailLevel = "BUSY" | "TITLE" | "FULL";
+
+/** Valid calendar kind values for MCP policy edges. */
+export type McpPolicyCalendarKind = "BUSY_OVERLAY" | "TRUE_MIRROR";
+
+/** Row shape for the `mcp_policies` table. */
+export interface McpPolicyRow {
+  readonly policy_id: string;
+  readonly user_id: string;
+  readonly from_account: string;
+  readonly to_account: string;
+  readonly detail_level: McpPolicyDetailLevel;
+  readonly calendar_kind: McpPolicyCalendarKind;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 /** Valid source values for MCP events. */
 export type McpEventSource = "mcp" | "provider" | "ui" | "system";
+
+/** Valid status values for MCP events (matches Google Calendar API). */
+export type McpEventStatus = "confirmed" | "tentative" | "cancelled";
 
 /** Row shape for the `mcp_events` table. */
 export interface McpEventRow {
@@ -130,6 +151,7 @@ export interface McpEventRow {
   readonly description: string | null;
   readonly location: string | null;
   readonly source: McpEventSource;
+  readonly status: McpEventStatus;
   readonly created_at: string;
   readonly updated_at: string;
 }
