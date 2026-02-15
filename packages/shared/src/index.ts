@@ -87,6 +87,7 @@ export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 // Re-export DO SQLite schema definitions and migration runner
 export {
   USER_GRAPH_DO_MIGRATION_V1,
+  USER_GRAPH_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V3,

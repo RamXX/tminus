@@ -16,6 +16,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import {
   USER_GRAPH_DO_MIGRATION_V1,
+  USER_GRAPH_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V3,
@@ -348,13 +349,19 @@ describe("AccountDO schema SQL", () => {
 
 describe("migration lists", () => {
   it("USER_GRAPH_DO_MIGRATIONS has correct structure", () => {
-    expect(USER_GRAPH_DO_MIGRATIONS).toHaveLength(1);
+    expect(USER_GRAPH_DO_MIGRATIONS).toHaveLength(2);
 
-    const m = USER_GRAPH_DO_MIGRATIONS[0];
-    expect(m.version).toBe(1);
-    expect(m.sql).toBe(USER_GRAPH_DO_MIGRATION_V1);
-    expect(typeof m.description).toBe("string");
-    expect(m.description.length).toBeGreaterThan(0);
+    const m1 = USER_GRAPH_DO_MIGRATIONS[0];
+    expect(m1.version).toBe(1);
+    expect(m1.sql).toBe(USER_GRAPH_DO_MIGRATION_V1);
+    expect(typeof m1.description).toBe("string");
+    expect(m1.description.length).toBeGreaterThan(0);
+
+    const m2 = USER_GRAPH_DO_MIGRATIONS[1];
+    expect(m2.version).toBe(2);
+    expect(m2.sql).toBe(USER_GRAPH_DO_MIGRATION_V2);
+    expect(typeof m2.description).toBe("string");
+    expect(m2.description.length).toBeGreaterThan(0);
   });
 
   it("ACCOUNT_DO_MIGRATIONS has correct structure", () => {

@@ -315,12 +315,29 @@ CREATE TABLE watch_channels (
 // Migration lists
 // ---------------------------------------------------------------------------
 
+/**
+ * UserGraphDO migration v2: Add constraint_id to canonical_events.
+ *
+ * Links derived canonical events (e.g., trip busy blocks) back to their
+ * source constraint. Nullable because most events are provider-sourced
+ * and have no associated constraint.
+ */
+export const USER_GRAPH_DO_MIGRATION_V2 = `
+ALTER TABLE canonical_events ADD COLUMN constraint_id TEXT REFERENCES constraints(constraint_id);
+CREATE INDEX idx_events_constraint ON canonical_events(constraint_id);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
     sql: USER_GRAPH_DO_MIGRATION_V1,
     description: "Initial UserGraphDO schema: all tables Phase 1-4",
+  },
+  {
+    version: 2,
+    sql: USER_GRAPH_DO_MIGRATION_V2,
+    description: "Add constraint_id column to canonical_events for trip/constraint linking",
   },
 ] as const;
 
