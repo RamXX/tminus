@@ -123,6 +123,7 @@ describe("UserGraphDO schema via migration runner", () => {
       "event_participants",
       "interaction_ledger",
       "milestones",
+      "onboarding_sessions",
       "policies",
       "policy_edges",
       "relationships",
@@ -358,6 +359,7 @@ describe("AccountDO schema via migration runner", () => {
 
     expect(tables.map((t) => t.name)).toEqual([
       "auth",
+      "caldav_calendar_state",
       "encryption_monitor",
       "ms_subscriptions",
       "sync_state",

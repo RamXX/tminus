@@ -930,6 +930,7 @@ describe("AccountDO integration", () => {
         .all() as Array<{ name: string }>;
       expect(tablesAfter.map((t) => t.name)).toEqual([
         "auth",
+        "caldav_calendar_state",
         "encryption_monitor",
         "ms_subscriptions",
         "sync_state",
