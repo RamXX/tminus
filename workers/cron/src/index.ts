@@ -18,12 +18,22 @@
 
 import type { ReconcileAccountMessage, AccountId, DeleteMirrorMessage, EventId } from "@tminus/shared";
 import {
+  computeContentHash,
+  detectFeedChanges,
+  classifyFeedError,
+  isRateLimited,
+  buildConditionalHeaders,
+  DEFAULT_REFRESH_INTERVAL_MS,
+  normalizeIcsFeedEvents,
+} from "@tminus/shared";
+import {
   CRON_CHANNEL_RENEWAL,
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CRON_DELETION_CHECK,
   CRON_HOLD_EXPIRY,
   CRON_DRIFT_COMPUTATION,
+  CRON_FEED_REFRESH,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
@@ -626,6 +636,275 @@ async function handleDriftComputation(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// ICS Feed Refresh (every 15 minutes) -- TM-d17.3
+// ---------------------------------------------------------------------------
+
+interface IcsFeedAccountRow {
+  readonly account_id: string;
+  readonly user_id: string;
+  readonly provider_subject: string; // stores the feed URL
+  readonly feed_etag: string | null;
+  readonly feed_last_modified: string | null;
+  readonly feed_content_hash: string | null;
+  readonly feed_last_refresh_at: string | null;
+  readonly feed_last_fetch_at: string | null;
+  readonly feed_consecutive_failures: number;
+  readonly feed_refresh_interval_ms: number | null;
+}
+
+/**
+ * Query D1 for all active ICS feed accounts and refresh each one.
+ *
+ * For each feed:
+ * 1. Check rate limit (max 1 request per feed per 5 minutes, BR-4)
+ * 2. Check if refresh is due based on configured interval
+ * 3. Fetch feed URL with HTTP conditional headers (ETag/Last-Modified, BR-2)
+ * 4. Detect changes via content hashing
+ * 5. If changed, parse events and apply deltas to UserGraphDO
+ * 6. Update D1 with refresh metadata
+ *
+ * Errors in one feed do not block processing of others.
+ */
+async function handleFeedRefresh(env: Env): Promise<void> {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT account_id, user_id, provider_subject,
+              feed_etag, feed_last_modified, feed_content_hash,
+              feed_last_refresh_at, feed_last_fetch_at,
+              feed_consecutive_failures,
+              feed_refresh_interval_ms
+       FROM accounts
+       WHERE status = ?1 AND provider = ?2`,
+    )
+    .bind("active", "ics_feed")
+    .all<IcsFeedAccountRow>();
+
+  console.log(`ICS feed refresh: found ${results.length} active feeds`);
+
+  let refreshed = 0;
+  let skipped = 0;
+  let errored = 0;
+
+  for (const feed of results) {
+    try {
+      const now = Date.now();
+
+      // BR-4: Rate limit -- max 1 request per feed per 5 minutes
+      if (isRateLimited(feed.feed_last_fetch_at, now)) {
+        skipped++;
+        continue;
+      }
+
+      // Check if refresh is due based on configured interval
+      const intervalMs = feed.feed_refresh_interval_ms ?? DEFAULT_REFRESH_INTERVAL_MS;
+      if (intervalMs === 0) {
+        // Manual-only feeds: skip automatic refresh
+        skipped++;
+        continue;
+      }
+
+      if (feed.feed_last_refresh_at) {
+        const elapsed = now - new Date(feed.feed_last_refresh_at).getTime();
+        if (elapsed < intervalMs) {
+          skipped++;
+          continue;
+        }
+      }
+
+      // Build conditional headers (BR-2: minimize bandwidth)
+      const headers = buildConditionalHeaders({
+        etag: feed.feed_etag ?? undefined,
+        lastModified: feed.feed_last_modified ?? undefined,
+      });
+
+      // Fetch the feed
+      let response: Response;
+      try {
+        response = await fetch(feed.provider_subject, { headers });
+      } catch (err) {
+        // Network error / timeout
+        console.error(
+          `ICS feed fetch failed for account ${feed.account_id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        const newFailures = feed.feed_consecutive_failures + 1;
+        await env.DB
+          .prepare(
+            `UPDATE accounts
+             SET feed_last_fetch_at = ?1,
+                 feed_consecutive_failures = ?2
+             WHERE account_id = ?3`,
+          )
+          .bind(new Date(now).toISOString(), newFailures, feed.account_id)
+          .run();
+        errored++;
+        continue;
+      }
+
+      // Record fetch timestamp
+      const fetchTimestamp = new Date(now).toISOString();
+
+      // Handle error responses
+      if (!response.ok && response.status !== 304) {
+        const errorClass = classifyFeedError(response.status);
+        const newFailures = feed.feed_consecutive_failures + 1;
+
+        console.error(
+          `ICS feed HTTP ${response.status} for account ${feed.account_id}: ${errorClass.category}`,
+        );
+
+        // Mark feed as error if dead (404/410) or auth required (401/403)
+        const newStatus = errorClass.userActionRequired ? "error" : "active";
+        await env.DB
+          .prepare(
+            `UPDATE accounts
+             SET feed_last_fetch_at = ?1,
+                 feed_consecutive_failures = ?2,
+                 status = ?3
+             WHERE account_id = ?4`,
+          )
+          .bind(fetchTimestamp, newFailures, newStatus, feed.account_id)
+          .run();
+        errored++;
+        continue;
+      }
+
+      // Detect changes
+      const responseBody = response.status === 304 ? null : await response.text();
+      const etag = response.headers.get("ETag") ?? feed.feed_etag ?? undefined;
+      const lastModified = response.headers.get("Last-Modified") ?? feed.feed_last_modified ?? undefined;
+
+      const changeResult = detectFeedChanges({
+        httpStatus: response.status,
+        responseBody,
+        previousContentHash: feed.feed_content_hash ?? undefined,
+        etag,
+        lastModified,
+      });
+
+      if (!changeResult.changed) {
+        // No change -- just update timestamps
+        await env.DB
+          .prepare(
+            `UPDATE accounts
+             SET feed_last_fetch_at = ?1,
+                 feed_last_refresh_at = ?2,
+                 feed_consecutive_failures = 0,
+                 feed_etag = ?3,
+                 feed_last_modified = ?4
+             WHERE account_id = ?5`,
+          )
+          .bind(
+            fetchTimestamp,
+            fetchTimestamp,
+            changeResult.newEtag ?? feed.feed_etag,
+            changeResult.newLastModified ?? feed.feed_last_modified,
+            feed.account_id,
+          )
+          .run();
+        refreshed++;
+        continue;
+      }
+
+      // Feed changed -- parse events and apply deltas
+      const icsText = responseBody!;
+      const feedEvents = normalizeIcsFeedEvents(icsText, feed.account_id);
+
+      // Build deltas for UserGraphDO
+      const deltas = feedEvents.map((evt) => ({
+        type: "created" as const,
+        origin_event_id: evt.origin_event_id,
+        origin_account_id: evt.origin_account_id,
+        event: {
+          origin_account_id: evt.origin_account_id,
+          origin_event_id: evt.origin_event_id,
+          title: evt.title,
+          description: evt.description,
+          location: evt.location,
+          start: evt.start,
+          end: evt.end,
+          all_day: evt.all_day,
+          status: evt.status,
+          visibility: evt.visibility,
+          transparency: evt.transparency,
+          recurrence_rule: evt.recurrence_rule,
+        },
+      }));
+
+      // Apply deltas to UserGraphDO
+      const doId = env.USER_GRAPH.idFromName(feed.user_id);
+      const stub = env.USER_GRAPH.get(doId);
+
+      const doResp = await stub.fetch(
+        new Request("https://user-graph.internal/applyProviderDelta", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            account_id: feed.account_id,
+            deltas,
+          }),
+        }),
+      );
+
+      if (!doResp.ok) {
+        console.error(
+          `ICS feed delta apply failed for account ${feed.account_id}: ${doResp.status}`,
+        );
+        errored++;
+        continue;
+      }
+
+      // Build event sequence map for future per-event diffing
+      const eventSequencesMap: Record<string, number> = {};
+      // Parse raw events to get UID -> SEQUENCE mapping
+      // We use the normalized events; SEQUENCE is not in NormalizedFeedEvent so we
+      // default to 0 for now. The per-event diff is still valid via UID presence/absence.
+      for (const evt of feedEvents) {
+        eventSequencesMap[evt.origin_event_id] = 0;
+      }
+
+      // Update D1 with all refresh metadata
+      await env.DB
+        .prepare(
+          `UPDATE accounts
+           SET feed_last_fetch_at = ?1,
+               feed_last_refresh_at = ?2,
+               feed_consecutive_failures = 0,
+               feed_etag = ?3,
+               feed_last_modified = ?4,
+               feed_content_hash = ?5,
+               feed_event_sequences_json = ?6
+           WHERE account_id = ?7`,
+        )
+        .bind(
+          fetchTimestamp,
+          fetchTimestamp,
+          changeResult.newEtag ?? null,
+          changeResult.newLastModified ?? null,
+          changeResult.newContentHash ?? null,
+          JSON.stringify(eventSequencesMap),
+          feed.account_id,
+        )
+        .run();
+
+      refreshed++;
+      console.log(
+        `ICS feed refreshed account ${feed.account_id}: ${feedEvents.length} events applied`,
+      );
+    } catch (err) {
+      console.error(
+        `ICS feed refresh error for account ${feed.account_id}:`,
+        err,
+      );
+      errored++;
+    }
+  }
+
+  console.log(
+    `ICS feed refresh: ${refreshed} refreshed, ${skipped} skipped, ${errored} errored`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled handler dispatch
 // ---------------------------------------------------------------------------
 
@@ -663,6 +942,10 @@ async function handleScheduled(
 
     case CRON_DRIFT_COMPUTATION:
       await handleDriftComputation(env);
+      break;
+
+    case CRON_FEED_REFRESH:
+      await handleFeedRefresh(env);
       break;
 
     default:

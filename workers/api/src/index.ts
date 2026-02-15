@@ -87,6 +87,8 @@ import {
 import {
   handleImportFeed,
   handleListFeeds,
+  handleUpdateFeedConfig,
+  handleGetFeedHealth,
 } from "./routes/feeds";
 
 // ---------------------------------------------------------------------------
@@ -5968,6 +5970,26 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/feeds") {
         return handleListFeeds(request, auth, env);
+      }
+
+      // Feed-specific routes: /v1/feeds/:id/config, /v1/feeds/:id/health
+      const feedConfigMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/config$/);
+      if (method === "PATCH" && feedConfigMatch) {
+        let body: { refreshIntervalMs?: number };
+        try {
+          body = await request.json() as { refreshIntervalMs?: number };
+        } catch {
+          return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return handleUpdateFeedConfig(request, auth, env, feedConfigMatch[1], body);
+      }
+
+      const feedHealthMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/health$/);
+      if (method === "GET" && feedHealthMatch) {
+        return handleGetFeedHealth(request, auth, env, feedHealthMatch[1]);
       }
 
       // -- Event routes -----------------------------------------------------

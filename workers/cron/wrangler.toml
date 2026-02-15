@@ -16,6 +16,7 @@ crons = [
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
+  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
 ]
 
 # --- Durable Object references (hosted on tminus-api) ----------------------
@@ -81,6 +82,7 @@ crons = [
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
+  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
 ]
 
 [[env.staging.d1_databases]]
@@ -132,6 +134,7 @@ crons = [
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
+  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
 ]
 
 [[env.production.d1_databases]]

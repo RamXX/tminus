@@ -18,13 +18,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import {
+  MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0008_SYNC_STATUS_COLUMNS,
+  MIGRATION_0020_FEED_REFRESH,
+} from "@tminus/d1-registry";
 import { createHandler } from "./index";
 import {
   CRON_CHANNEL_RENEWAL,
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CRON_DRIFT_COMPUTATION,
+  CRON_FEED_REFRESH,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
@@ -1234,5 +1239,514 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
 
     // No DO calls
     expect(userGraphCalls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration test suite: ICS Feed Refresh (TM-d17.3)
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_ICS_FEED = {
+  account_id: "acc_01HXYZ000000000000FEED01",
+  user_id: TEST_USER.user_id,
+  provider: "ics_feed",
+  provider_subject: "https://example.com/feed.ics",
+  email: "https://example.com/feed.ics",
+  status: "active",
+  channel_id: null,
+  channel_token: null,
+} as const;
+
+const VALID_ICS_CONTENT = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:refresh-event-001@example.com
+DTSTART:20260301T090000Z
+DTEND:20260301T100000Z
+SUMMARY:Morning Standup
+END:VEVENT
+BEGIN:VEVENT
+UID:refresh-event-002@example.com
+DTSTART:20260302T140000Z
+DTEND:20260302T150000Z
+SUMMARY:Design Review
+END:VEVENT
+END:VCALENDAR`;
+
+const CHANGED_ICS_CONTENT = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:refresh-event-001@example.com
+DTSTART:20260301T090000Z
+DTEND:20260301T100000Z
+SUMMARY:Morning Standup (Updated)
+END:VEVENT
+BEGIN:VEVENT
+UID:refresh-event-003@example.com
+DTSTART:20260303T100000Z
+DTEND:20260303T110000Z
+SUMMARY:New Meeting
+END:VEVENT
+END:VCALENDAR`;
+
+describe("Cron integration tests: ICS Feed Refresh (TM-d17.3)", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let queue: Queue & { messages: unknown[] };
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    // Apply migrations for feed refresh columns
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec(MIGRATION_0020_FEED_REFRESH);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+    queue = createMockQueue();
+  });
+
+  afterEach(() => {
+    db.close();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fetches active ICS feed accounts and applies deltas to UserGraphDO", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+
+    // Mock global fetch for the ICS feed URL
+    globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("example.com/feed.ics")) {
+        return new Response(VALID_ICS_CONTENT, {
+          status: 200,
+          headers: { "Content-Type": "text/calendar", "ETag": '"etag-001"' },
+        });
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    // UserGraphDO mock
+    const userGraphCalls: DOCallRecord[] = [];
+    const userGraphNamespace = {
+      calls: userGraphCalls,
+      idFromName(name: string): DurableObjectId {
+        return { toString: () => name, name, equals: () => false } as unknown as DurableObjectId;
+      },
+      get(_id: DurableObjectId): DurableObjectStub {
+        return {
+          fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+            const method = init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET");
+            userGraphCalls.push({ accountId: _id.toString(), path: url.pathname, method });
+            return Promise.resolve(new Response(JSON.stringify({ created: 2, updated: 0, deleted: 0, mirrors_enqueued: 0, errors: [] }), {
+              status: 200, headers: { "Content-Type": "application/json" },
+            }));
+          },
+        } as unknown as DurableObjectStub;
+      },
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace & { calls: DOCallRecord[] };
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // UserGraphDO should have received applyProviderDelta call
+    expect(userGraphCalls).toHaveLength(1);
+    expect(userGraphCalls[0].path).toBe("/applyProviderDelta");
+    expect(userGraphCalls[0].method).toBe("POST");
+
+    // D1 should be updated with refresh metadata
+    const row = db.prepare("SELECT feed_etag, feed_last_refresh_at, feed_content_hash, feed_consecutive_failures FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as {
+      feed_etag: string | null;
+      feed_last_refresh_at: string | null;
+      feed_content_hash: string | null;
+      feed_consecutive_failures: number;
+    };
+    expect(row.feed_etag).toBe('"etag-001"');
+    expect(row.feed_last_refresh_at).toBeTruthy();
+    expect(row.feed_content_hash).toBeTruthy();
+    expect(row.feed_consecutive_failures).toBe(0);
+  });
+
+  it("skips re-parsing when server returns 304 Not Modified (ETag match)", async () => {
+    // Set up feed with existing etag
+    insertAccount(db, ACCOUNT_ICS_FEED);
+    db.prepare(
+      `UPDATE accounts SET feed_etag = ?, feed_last_refresh_at = ?, feed_content_hash = ?
+       WHERE account_id = ?`,
+    ).run('"etag-001"', new Date(Date.now() - 20 * 60 * 1000).toISOString(), "abc123", ACCOUNT_ICS_FEED.account_id);
+
+    // Mock fetch: return 304 Not Modified
+    globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = (init as { headers?: Record<string, string> })?.headers ?? {};
+      // Server recognizes the ETag
+      if (headers["If-None-Match"] === '"etag-001"') {
+        return new Response(null, { status: 304 });
+      }
+      return new Response(VALID_ICS_CONTENT, {
+        status: 200,
+        headers: { "Content-Type": "text/calendar" },
+      });
+    });
+
+    const userGraphCalls: DOCallRecord[] = [];
+    const userGraphNamespace = {
+      calls: userGraphCalls,
+      idFromName(name: string): DurableObjectId {
+        return { toString: () => name, name, equals: () => false } as unknown as DurableObjectId;
+      },
+      get(): DurableObjectStub {
+        return {
+          fetch(): Promise<Response> {
+            return Promise.resolve(new Response("should not be called", { status: 500 }));
+          },
+        } as unknown as DurableObjectStub;
+      },
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace & { calls: DOCallRecord[] };
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should NOT have called UserGraphDO (no change)
+    expect(userGraphCalls).toHaveLength(0);
+
+    // Should have sent conditional request with If-None-Match
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const fetchCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentHeaders = fetchCall[1]?.headers as Record<string, string>;
+    expect(sentHeaders["If-None-Match"]).toBe('"etag-001"');
+
+    // D1 metadata should still be updated (timestamp refreshed)
+    const row = db.prepare("SELECT feed_last_refresh_at FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as { feed_last_refresh_at: string | null };
+    expect(row.feed_last_refresh_at).toBeTruthy();
+  });
+
+  it("skips feeds with manual-only refresh interval (0)", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+    db.prepare("UPDATE accounts SET feed_refresh_interval_ms = 0 WHERE account_id = ?").run(ACCOUNT_ICS_FEED.account_id);
+
+    globalThis.fetch = vi.fn();
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should not fetch anything
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("respects rate limit: skips feed fetched less than 5 minutes ago (BR-4)", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+    // Feed was fetched 2 minutes ago
+    const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    db.prepare("UPDATE accounts SET feed_last_fetch_at = ? WHERE account_id = ?").run(twoMinAgo, ACCOUNT_ICS_FEED.account_id);
+
+    globalThis.fetch = vi.fn();
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should not fetch anything (rate limited)
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("marks feed as error when HTTP 404 (dead feed)", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("Not Found", { status: 404 }),
+    );
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Feed should be marked as error in D1
+    const row = db.prepare("SELECT status, feed_consecutive_failures FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as { status: string; feed_consecutive_failures: number };
+    expect(row.status).toBe("error");
+    expect(row.feed_consecutive_failures).toBe(1);
+  });
+
+  it("marks feed as error when HTTP 401 (auth required)", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("Unauthorized", { status: 401 }),
+    );
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    const row = db.prepare("SELECT status, feed_consecutive_failures FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as { status: string; feed_consecutive_failures: number };
+    expect(row.status).toBe("error");
+    expect(row.feed_consecutive_failures).toBe(1);
+  });
+
+  it("increments consecutive failures on server error but keeps status active", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("Internal Server Error", { status: 500 }),
+    );
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Status stays active for server errors (retryable)
+    const row = db.prepare("SELECT status, feed_consecutive_failures FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as { status: string; feed_consecutive_failures: number };
+    expect(row.status).toBe("active");
+    expect(row.feed_consecutive_failures).toBe(1);
+  });
+
+  it("does not fetch non-ICS feeds (Google, Microsoft accounts)", async () => {
+    insertAccount(db, { ...ACCOUNT_A });  // Google account
+
+    globalThis.fetch = vi.fn();
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Should not fetch anything (not an ICS feed)
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("handles network errors gracefully", async () => {
+    insertAccount(db, ACCOUNT_ICS_FEED);
+
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network timeout"));
+
+    const userGraphNamespace = {
+      idFromName: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      get: () => ({} as unknown as DurableObjectStub),
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace;
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    // Should not throw
+    await handler.scheduled(event, env, ctx);
+
+    // Consecutive failures should increment
+    const row = db.prepare("SELECT feed_consecutive_failures, feed_last_fetch_at FROM accounts WHERE account_id = ?").get(ACCOUNT_ICS_FEED.account_id) as { feed_consecutive_failures: number; feed_last_fetch_at: string | null };
+    expect(row.feed_consecutive_failures).toBe(1);
+    expect(row.feed_last_fetch_at).toBeTruthy();
+  });
+
+  it("continues processing other feeds when one feed fails", async () => {
+    // Insert two feeds
+    insertAccount(db, ACCOUNT_ICS_FEED);
+    const FEED_B = {
+      ...ACCOUNT_ICS_FEED,
+      account_id: "acc_01HXYZ000000000000FEED02",
+      provider_subject: "https://example.com/feed-b.ics",
+      email: "https://example.com/feed-b.ics",
+    };
+    insertAccount(db, FEED_B);
+
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      callCount++;
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("feed.ics")) {
+        throw new Error("Network error for feed A");
+      }
+      return new Response(VALID_ICS_CONTENT, {
+        status: 200,
+        headers: { "Content-Type": "text/calendar" },
+      });
+    });
+
+    const userGraphCalls: DOCallRecord[] = [];
+    const userGraphNamespace = {
+      calls: userGraphCalls,
+      idFromName(name: string): DurableObjectId {
+        return { toString: () => name, name, equals: () => false } as unknown as DurableObjectId;
+      },
+      get(_id: DurableObjectId): DurableObjectStub {
+        return {
+          fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+            const method = init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET");
+            userGraphCalls.push({ accountId: _id.toString(), path: url.pathname, method });
+            return Promise.resolve(new Response(JSON.stringify({ created: 2, updated: 0, deleted: 0, mirrors_enqueued: 0, errors: [] }), {
+              status: 200, headers: { "Content-Type": "application/json" },
+            }));
+          },
+        } as unknown as DurableObjectStub;
+      },
+      idFromString: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      newUniqueId: () => ({ toString: () => "x", equals: () => false } as unknown as DurableObjectId),
+      jurisdiction: function() { return this; },
+    } as unknown as DurableObjectNamespace & { calls: DOCallRecord[] };
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = {
+      DB: d1,
+      ACCOUNT: doNamespace,
+      USER_GRAPH: userGraphNamespace,
+      RECONCILE_QUEUE: queue,
+    } as Env;
+    const event = buildScheduledEvent(CRON_FEED_REFRESH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    // Both feeds should be attempted
+    expect(callCount).toBe(2);
+    // Feed B should have succeeded
+    expect(userGraphCalls).toHaveLength(1);
   });
 });

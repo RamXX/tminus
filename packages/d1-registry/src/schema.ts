@@ -472,6 +472,36 @@ CREATE INDEX idx_device_tokens_token ON device_tokens(device_token);
 ` as const;
 
 /**
+ * Migration 0020: ICS feed refresh metadata (TM-d17.3).
+ *
+ * Stores per-feed refresh tracking state for ICS feed polling:
+ * - feed_etag: ETag from last successful response (BR-2 conditional requests)
+ * - feed_last_modified: Last-Modified header from last response
+ * - feed_content_hash: djb2 hash of last response body for change detection
+ * - feed_last_refresh_at: ISO timestamp of last successful refresh
+ * - feed_last_fetch_at: ISO timestamp of last fetch attempt (success or failure)
+ * - feed_consecutive_failures: backoff counter for error handling
+ * - feed_refresh_interval_ms: user-configurable interval (default: 15 min, 0 = manual)
+ * - feed_event_sequences_json: JSON map of event UID -> SEQUENCE for per-event diff
+ *
+ * Only applicable to accounts with provider = 'ics_feed'. For other providers
+ * these columns remain NULL.
+ *
+ * Per story learning from TM-lfy retro: optional fields use NULL (key omission
+ * pattern), not sentinel values like false/0.
+ */
+export const MIGRATION_0020_FEED_REFRESH = `
+ALTER TABLE accounts ADD COLUMN feed_etag TEXT;
+ALTER TABLE accounts ADD COLUMN feed_last_modified TEXT;
+ALTER TABLE accounts ADD COLUMN feed_content_hash TEXT;
+ALTER TABLE accounts ADD COLUMN feed_last_refresh_at TEXT;
+ALTER TABLE accounts ADD COLUMN feed_last_fetch_at TEXT;
+ALTER TABLE accounts ADD COLUMN feed_consecutive_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN feed_refresh_interval_ms INTEGER;
+ALTER TABLE accounts ADD COLUMN feed_event_sequences_json TEXT;
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -495,4 +525,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0017_ORG_POLICIES,
   MIGRATION_0018_ORG_SEAT_BILLING,
   MIGRATION_0019_DEVICE_TOKENS,
+  MIGRATION_0020_FEED_REFRESH,
 ] as const;

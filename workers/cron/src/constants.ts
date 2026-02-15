@@ -28,6 +28,9 @@ export const CRON_HOLD_EXPIRY = "30 * * * *";
 /** Social drift computation: daily at 04:00 UTC (after reconciliation at 03:00). */
 export const CRON_DRIFT_COMPUTATION = "0 4 * * *";
 
+/** ICS feed refresh: every 15 minutes. */
+export const CRON_FEED_REFRESH = "*/15 * * * *";
+
 // ---------------------------------------------------------------------------
 // Renewal thresholds
 // ---------------------------------------------------------------------------

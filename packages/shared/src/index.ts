@@ -220,6 +220,30 @@ export type {
   RecurrenceInstance,
 } from "./ics-feed-parser";
 
+// Re-export ICS feed refresh & staleness detection (TM-d17.3)
+export {
+  computeContentHash,
+  detectFeedChanges,
+  classifyFeedError,
+  computeStaleness,
+  isRateLimited,
+  buildConditionalHeaders,
+  diffFeedEvents,
+  DEFAULT_REFRESH_INTERVAL_MS,
+  STALE_MULTIPLIER,
+  DEAD_THRESHOLD_MS,
+  MIN_REFRESH_INTERVAL_MS,
+  VALID_REFRESH_INTERVALS,
+} from "./ics-feed-refresh";
+export type {
+  FeedRefreshConfig,
+  FeedRefreshState,
+  FeedChangeResult,
+  FeedErrorClassification,
+  FeedStaleness,
+  FeedEventDiff,
+} from "./ics-feed-refresh";
+
 // Re-export authentication utilities (JWT, password hashing)
 export {
   generateJWT,

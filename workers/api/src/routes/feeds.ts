@@ -19,6 +19,10 @@ import {
   validateFeedUrl,
   normalizeIcsFeedEvents,
   generateId,
+  computeStaleness,
+  VALID_REFRESH_INTERVALS,
+  DEFAULT_REFRESH_INTERVAL_MS,
+  type FeedRefreshState,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -243,6 +247,161 @@ export async function handleListFeeds(
   } catch (err) {
     return jsonResp(
       { ok: false, error: `Failed to list feeds: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: PATCH /v1/feeds/:id/config
+// ---------------------------------------------------------------------------
+
+/** Body shape for PATCH /v1/feeds/:id/config */
+export interface UpdateFeedConfigBody {
+  /** Refresh interval in milliseconds. Must be a valid interval or omitted. */
+  readonly refreshIntervalMs?: number;
+}
+
+/**
+ * Handle PATCH /v1/feeds/:id/config -- update feed refresh configuration.
+ *
+ * Per story learning from TM-lfy retro: optional fields use key omission
+ * (not false/0). Missing refreshIntervalMs means "use default".
+ */
+export async function handleUpdateFeedConfig(
+  _request: Request,
+  auth: { userId: string },
+  env: { DB: D1Database },
+  feedId: string,
+  body: UpdateFeedConfigBody,
+): Promise<Response> {
+  // Validate the feed belongs to the user and is an ICS feed
+  try {
+    const row = await env.DB
+      .prepare(
+        `SELECT account_id, user_id, provider FROM accounts
+         WHERE account_id = ?1 AND user_id = ?2 AND provider = 'ics_feed'`,
+      )
+      .bind(feedId, auth.userId)
+      .first<{ account_id: string }>();
+
+    if (!row) {
+      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+    }
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+
+  // Validate refresh interval if provided
+  if (body.refreshIntervalMs !== undefined) {
+    if (!VALID_REFRESH_INTERVALS.includes(body.refreshIntervalMs)) {
+      return jsonResp(
+        {
+          ok: false,
+          error: `Invalid refresh interval. Valid values: ${VALID_REFRESH_INTERVALS.join(", ")} (milliseconds)`,
+        },
+        400,
+      );
+    }
+  }
+
+  // Update the feed config
+  try {
+    const intervalValue = body.refreshIntervalMs ?? null;
+    await env.DB
+      .prepare(
+        `UPDATE accounts SET feed_refresh_interval_ms = ?1 WHERE account_id = ?2`,
+      )
+      .bind(intervalValue, feedId)
+      .run();
+
+    return jsonResp({
+      ok: true,
+      data: {
+        account_id: feedId,
+        refresh_interval_ms: body.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
+      },
+    }, 200);
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to update feed config: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: GET /v1/feeds/:id/health
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle GET /v1/feeds/:id/health -- get feed staleness and refresh status.
+ *
+ * Returns:
+ * - staleness: fresh/stale/dead
+ * - last_refresh_at: ISO timestamp
+ * - consecutive_failures: error count
+ * - refresh_interval_ms: configured interval
+ */
+export async function handleGetFeedHealth(
+  _request: Request,
+  auth: { userId: string },
+  env: { DB: D1Database },
+  feedId: string,
+): Promise<Response> {
+  try {
+    const row = await env.DB
+      .prepare(
+        `SELECT account_id, feed_last_refresh_at, feed_consecutive_failures,
+                feed_refresh_interval_ms, feed_last_fetch_at, status
+         FROM accounts
+         WHERE account_id = ?1 AND user_id = ?2 AND provider = 'ics_feed'`,
+      )
+      .bind(feedId, auth.userId)
+      .first<{
+        account_id: string;
+        feed_last_refresh_at: string | null;
+        feed_consecutive_failures: number;
+        feed_refresh_interval_ms: number | null;
+        feed_last_fetch_at: string | null;
+        status: string;
+      }>();
+
+    if (!row) {
+      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+    }
+
+    const intervalMs = row.feed_refresh_interval_ms ?? DEFAULT_REFRESH_INTERVAL_MS;
+    const state: FeedRefreshState = {
+      lastSuccessfulRefreshAt: row.feed_last_refresh_at,
+      refreshIntervalMs: intervalMs,
+      consecutiveFailures: row.feed_consecutive_failures,
+    };
+
+    const staleness = computeStaleness(state);
+
+    return jsonResp({
+      ok: true,
+      data: {
+        account_id: row.account_id,
+        status: row.status,
+        staleness: staleness.status,
+        is_dead: staleness.isDead,
+        last_refresh_at: row.feed_last_refresh_at,
+        last_fetch_at: row.feed_last_fetch_at,
+        consecutive_failures: row.feed_consecutive_failures,
+        refresh_interval_ms: intervalMs,
+        ms_since_last_refresh: staleness.msSinceLastRefresh === Infinity
+          ? null
+          : staleness.msSinceLastRefresh,
+      },
+    }, 200);
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to get feed health: ${err instanceof Error ? err.message : String(err)}` },
       500,
     );
   }
