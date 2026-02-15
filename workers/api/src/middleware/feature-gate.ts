@@ -73,6 +73,7 @@ export const FEATURE_TIERS: Record<string, FeatureTier> = {
   "vip": "enterprise",
   "commitments": "enterprise",
   "priority_support": "enterprise",
+  "organizations": "enterprise",
 };
 
 /** Base URL for upgrade checkout page. */

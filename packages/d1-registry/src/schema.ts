@@ -372,6 +372,37 @@ CREATE INDEX idx_group_sessions_status ON group_scheduling_sessions(status);
 ` as const;
 
 /**
+ * Migration 0015: Multi-tenant organizations table.
+ *
+ * Organizations provide multi-tenant grouping for enterprise users.
+ * Each organization has a settings_json column for tenant-specific config.
+ */
+export const MIGRATION_0015_ORGANIZATIONS = `
+CREATE TABLE organizations (
+  org_id        TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  settings_json TEXT DEFAULT '{}'
+);
+` as const;
+
+/**
+ * Migration 0016: Organization members table.
+ *
+ * Maps users to organizations with role-based access (admin/member).
+ * Admins can manage members; members have read-only org access.
+ */
+export const MIGRATION_0016_ORG_MEMBERS = `
+CREATE TABLE org_members (
+  org_id    TEXT NOT NULL,
+  user_id   TEXT NOT NULL,
+  role      TEXT NOT NULL CHECK(role IN ('admin','member')),
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(org_id, user_id)
+);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -390,4 +421,6 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0012_SUBSCRIPTIONS,
   MIGRATION_0013_SUBSCRIPTION_LIFECYCLE,
   MIGRATION_0014_GROUP_SCHEDULING_SESSIONS,
+  MIGRATION_0015_ORGANIZATIONS,
+  MIGRATION_0016_ORG_MEMBERS,
 ] as const;

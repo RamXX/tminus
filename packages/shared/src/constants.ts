@@ -68,6 +68,7 @@ export const ID_PREFIXES = {
   milestone: "mst_",
   proof: "prf_",
   schedHist: "shx_",
+  org: "org_",
 } as const;
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,14 @@ import {
   buildGraphOpenApiSpec,
 } from "./routes/graph";
 import type { GraphEventInput, GraphRelationshipInput, TimelineEntryInput } from "./routes/graph";
+import {
+  handleCreateOrg,
+  handleGetOrg,
+  handleAddMember,
+  handleListMembers,
+  handleRemoveMember,
+  handleChangeRole,
+} from "./routes/orgs";
 
 // ---------------------------------------------------------------------------
 // Version -- read from package.json at build time or fallback
@@ -3083,6 +3091,78 @@ async function handleGetContextSwitches(
   }
 }
 
+// -- Deep work window optimization ------------------------------------------------
+
+async function handleGetDeepWork(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const date = url.searchParams.get("date");
+  const range = url.searchParams.get("range") ?? "day";
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return jsonResponse(
+      errorEnvelope(
+        "date query parameter is required (YYYY-MM-DD format)",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (range !== "day" && range !== "week") {
+    return jsonResponse(
+      errorEnvelope(
+        "range must be 'day' or 'week'",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Optional min_block_minutes parameter
+  const minBlockStr = url.searchParams.get("min_block_minutes");
+  const minBlockMinutes = minBlockStr ? parseInt(minBlockStr, 10) : undefined;
+  if (minBlockMinutes !== undefined && (isNaN(minBlockMinutes) || minBlockMinutes < 1)) {
+    return jsonResponse(
+      errorEnvelope(
+        "min_block_minutes must be a positive integer",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const body: Record<string, unknown> = { date, range };
+    if (minBlockMinutes !== undefined) body.min_block_minutes = minBlockMinutes;
+
+    const result = await callDO<{
+      blocks: unknown[];
+      total_deep_hours: number;
+      protected_hours_target: number;
+      suggestions: unknown[];
+    }>(env.USER_GRAPH, auth.userId, "/getDeepWork", body);
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to compute deep work report", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to compute deep work report", err);
+    return jsonResponse(
+      errorEnvelope("Failed to compute deep work report", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Temporal Graph API (TM-b3i.4) -----------------------------------------------
 
 /**
@@ -5589,6 +5669,10 @@ async function routeAuthenticatedRequest(
         return handleGetContextSwitches(request, auth, env);
       }
 
+      if (method === "GET" && pathname === "/v1/intelligence/deep-work") {
+        return handleGetDeepWork(request, auth, env);
+      }
+
       // -- Temporal Graph API routes (TM-b3i.4) --------------------------------
 
       if (method === "GET" && pathname === "/v1/graph/events") {
@@ -5605,6 +5689,39 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/graph/openapi.json") {
         return handleGraphOpenApi();
+      }
+
+      // -- Organization routes (Enterprise) -----------------------------------
+
+      if (method === "POST" && pathname === "/v1/orgs") {
+        const orgGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+        if (orgGate) return orgGate;
+        return handleCreateOrg(request, auth, env.DB);
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/members/:uid/role");
+      if (match && method === "PUT") {
+        return handleChangeRole(request, auth, env.DB, match.params[0], match.params[1]);
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/members/:uid");
+      if (match && method === "DELETE") {
+        return handleRemoveMember(request, auth, env.DB, match.params[0], match.params[1]);
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/members");
+      if (match) {
+        if (method === "POST") {
+          return handleAddMember(request, auth, env.DB, match.params[0]);
+        }
+        if (method === "GET") {
+          return handleListMembers(request, auth, env.DB, match.params[0]);
+        }
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id");
+      if (match && method === "GET") {
+        return handleGetOrg(request, auth, env.DB, match.params[0]);
       }
 
       // -- Fallback ---------------------------------------------------------
