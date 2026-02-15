@@ -421,6 +421,71 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["session_id", "candidate_id"],
     },
   },
+  {
+    name: "calendar.set_vip",
+    description:
+      "Create or update a VIP policy for a contact/participant. VIP policies allow scheduling overrides (e.g., meetings outside working hours) for important contacts. The participant is identified by their email hash. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        participant_email: {
+          type: "string",
+          description: "Email address of the VIP participant. Will be hashed for privacy.",
+        },
+        display_name: {
+          type: "string",
+          description: "Human-readable name for the VIP (e.g., 'Sarah - Investor').",
+        },
+        priority: {
+          type: "number",
+          description: "Priority weight (1.0 = normal, 2.0 = high, 3.0 = critical). Default: 1.0.",
+        },
+        conditions: {
+          type: "object",
+          description: "Override conditions for this VIP.",
+          properties: {
+            allow_after_hours: {
+              type: "boolean",
+              description: "Allow scheduling outside working hours for this VIP. Default: false.",
+            },
+            min_notice_hours: {
+              type: "number",
+              description: "Minimum notice period in hours before a meeting. Default: 0.",
+            },
+            override_deep_work: {
+              type: "boolean",
+              description: "Allow scheduling during deep work blocks for this VIP. Default: false.",
+            },
+          },
+        },
+      },
+      required: ["participant_email", "display_name"],
+    },
+  },
+  {
+    name: "calendar.list_vips",
+    description:
+      "List all VIP policies for the authenticated user. Returns participant hashes, display names, priority weights, and override conditions.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "calendar.delete_vip",
+    description:
+      "Delete a VIP policy by its ID. Removes the scheduling override for that participant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vip_id: {
+          type: "string",
+          description: "The VIP policy ID to delete.",
+        },
+      },
+      required: ["vip_id"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -473,6 +538,9 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.list_constraints": "free",
   "calendar.propose_times": "premium",
   "calendar.commit_candidate": "premium",
+  "calendar.set_vip": "premium",
+  "calendar.list_vips": "free",
+  "calendar.delete_vip": "premium",
 };
 
 /**
@@ -2259,6 +2327,123 @@ async function handleCommitCandidate(
 }
 
 // ---------------------------------------------------------------------------
+// VIP policy tool handlers (route through API service binding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute SHA-256 hash of a participant email + salt for privacy.
+ * Uses the same hashing scheme as the relationship graph.
+ */
+async function computeParticipantHash(email: string): Promise<string> {
+  // Per-org salt -- in production this would come from env.
+  // For now, use a fixed salt that matches the relationship graph convention.
+  const salt = "tminus-org-salt";
+  const data = new TextEncoder().encode(email.toLowerCase().trim() + salt);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Execute calendar.set_vip: hash the participant email, then forward
+ * to the API worker to create the VIP policy.
+ */
+async function handleSetVip(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.participant_email !== "string" || args.participant_email.trim().length === 0) {
+    throw new InvalidParamsError("participant_email is required");
+  }
+  if (typeof args.display_name !== "string" || args.display_name.trim().length === 0) {
+    throw new InvalidParamsError("display_name is required");
+  }
+
+  const participantHash = await computeParticipantHash(args.participant_email as string);
+  const priority = typeof args.priority === "number" ? args.priority : 1.0;
+  const conditions = (args.conditions as Record<string, unknown>) ?? {};
+
+  const conditionsJson = {
+    allow_after_hours: conditions.allow_after_hours ?? false,
+    min_notice_hours: conditions.min_notice_hours ?? 0,
+    override_deep_work: conditions.override_deep_work ?? false,
+  };
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "POST", "/v1/vip-policies", {
+    participant_hash: participantHash,
+    display_name: args.display_name,
+    priority_weight: priority,
+    conditions_json: conditionsJson,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create VIP policy");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.list_vips: forward to the API worker to list VIP policies.
+ */
+async function handleListVips(
+  request: Request,
+  api: Fetcher,
+): Promise<unknown> {
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "GET", "/v1/vip-policies");
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to list VIP policies");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.delete_vip: forward to the API worker to delete a VIP policy.
+ */
+async function handleDeleteVip(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.vip_id !== "string" || args.vip_id.trim().length === 0) {
+    throw new InvalidParamsError("vip_id is required");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "DELETE",
+    `/v1/vip-policies/${encodeURIComponent(args.vip_id)}`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to delete VIP policy");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+// ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
@@ -2457,6 +2642,21 @@ async function dispatch(
           case "calendar.commit_candidate": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleCommitCandidate(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.set_vip": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleSetVip(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.list_vips": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleListVips(request, env.API);
+            break;
+          }
+          case "calendar.delete_vip": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleDeleteVip(request, env.API, toolArgs);
             break;
           }
           default:

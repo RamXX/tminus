@@ -58,4 +58,5 @@ export const ID_PREFIXES = {
   session: "ses_",
   candidate: "cnd_",
   hold: "hld_",
+  vip: "vip_",
 } as const;

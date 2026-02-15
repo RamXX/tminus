@@ -812,4 +812,172 @@ describe("greedySolver with constraints", () => {
       }
     });
   });
+
+  // -----------------------------------------------------------------------
+  // VIP override constraints (TM-5rp.1)
+  // -----------------------------------------------------------------------
+
+  describe("VIP override constraints", () => {
+    const workingHoursConstraint: SolverConstraint = {
+      kind: "working_hours",
+      config: {
+        days: [1, 2, 3, 4, 5], // Mon-Fri
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      },
+    };
+
+    const vipConstraint: SolverConstraint = {
+      kind: "vip_override",
+      config: {
+        participant_hash: "abc123hash",
+        display_name: "Sarah - Investor",
+        priority_weight: 2.0,
+        allow_after_hours: true,
+        min_notice_hours: 0,
+        override_deep_work: false,
+      },
+    };
+
+    it("VIP with allow_after_hours compensates working hours penalty for after-hours slots", () => {
+      const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T08:00:00Z", // Monday
+        windowEnd: "2026-03-02T22:00:00Z",   // Monday evening
+        durationMinutes: 60,
+        constraints,
+        participantHashes: ["abc123hash"],
+      });
+
+      const result = greedySolver(input, 50);
+      expect(result.length).toBeGreaterThan(0);
+
+      // After-hours slot (18:00) should have VIP override bonus
+      const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(slot18).toBeDefined();
+      expect(slot18!.explanation).toContain("VIP override");
+      expect(slot18!.explanation).toContain("VIP priority weight");
+    });
+
+    it("non-VIP meetings still penalized outside working hours", () => {
+      // Same constraints but NO participant hashes (non-VIP meeting)
+      const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // No participantHashes -- non-VIP meeting
+      });
+
+      const result = greedySolver(input, 50);
+      expect(result.length).toBeGreaterThan(0);
+
+      // After-hours slot should still be penalized
+      const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(slot18).toBeDefined();
+      expect(slot18!.explanation).toContain("outside working hours");
+      expect(slot18!.explanation).not.toContain("VIP override");
+    });
+
+    it("VIP priority weight adds score bonus", () => {
+      const highPriorityVip: SolverConstraint = {
+        kind: "vip_override",
+        config: {
+          participant_hash: "highprio123",
+          display_name: "Board Member",
+          priority_weight: 3.0,
+          allow_after_hours: true,
+          min_notice_hours: 0,
+          override_deep_work: false,
+        },
+      };
+
+      const constraints: SolverConstraint[] = [workingHoursConstraint, highPriorityVip];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        participantHashes: ["highprio123"],
+      });
+
+      const result = greedySolver(input, 50);
+      const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(slot18).toBeDefined();
+      // Priority weight 3.0 * 10 = +30 points from weight
+      expect(slot18!.explanation).toContain("VIP priority weight (+30)");
+    });
+
+    it("VIP override only activates for matching participant hashes", () => {
+      const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        participantHashes: ["different_hash"], // does NOT match abc123hash
+      });
+
+      const result = greedySolver(input, 50);
+      const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(slot18).toBeDefined();
+      // No VIP override since hash doesn't match
+      expect(slot18!.explanation).not.toContain("VIP override");
+      expect(slot18!.explanation).toContain("outside working hours");
+    });
+
+    it("VIP after-hours slot scores higher than without VIP", () => {
+      // Run solver with VIP override
+      const constraintsWithVip: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+      const inputWithVip = makeInput({
+        windowStart: "2026-03-02T17:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints: constraintsWithVip,
+        participantHashes: ["abc123hash"],
+      });
+      const vipResult = greedySolver(inputWithVip, 5);
+
+      // Run solver without VIP
+      const constraintsNoVip: SolverConstraint[] = [workingHoursConstraint];
+      const inputNoVip = makeInput({
+        windowStart: "2026-03-02T17:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints: constraintsNoVip,
+      });
+      const noVipResult = greedySolver(inputNoVip, 5);
+
+      // Same slot should score higher with VIP
+      const vipSlot18 = vipResult.find(c => c.start === "2026-03-02T18:00:00Z");
+      const noVipSlot18 = noVipResult.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(vipSlot18).toBeDefined();
+      expect(noVipSlot18).toBeDefined();
+      expect(vipSlot18!.score).toBeGreaterThan(noVipSlot18!.score);
+    });
+
+    it("backward compatible: works without participantHashes", () => {
+      const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+      const input = makeInput({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // participantHashes intentionally omitted
+      });
+
+      const result = greedySolver(input);
+      expect(result.length).toBeGreaterThanOrEqual(3);
+      // No VIP scoring should appear
+      for (const c of result) {
+        expect(c.explanation).not.toContain("VIP override");
+      }
+    });
+  });
 });

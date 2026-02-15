@@ -20,7 +20,7 @@
 import { generateId } from "@tminus/shared";
 import type { CanonicalEvent, AccountId, CalendarId, EventId } from "@tminus/shared";
 import { greedySolver } from "./solver";
-import type { SolverInput, BusyInterval, ScoredCandidate, SolverConstraint } from "./solver";
+import type { SolverInput, BusyInterval, ScoredCandidate, SolverConstraint, VipOverrideConstraint } from "./solver";
 import {
   createHoldRecord,
   buildHoldUpsertMessage,
@@ -39,8 +39,9 @@ export { greedySolver, CONSTRAINT_SCORES } from "./solver";
 export type {
   SolverInput, BusyInterval, ScoredCandidate, SolverConstraint,
   WorkingHoursConstraint, TripConstraint, BufferConstraint,
-  NoMeetingsAfterConstraint,
+  NoMeetingsAfterConstraint, VipOverrideConstraint,
 } from "./solver";
+export { scoreVipOverride } from "./solver";
 
 // Re-export holds types and helpers for consumers
 export {
@@ -90,6 +91,8 @@ export interface SchedulingParams {
   readonly holdTimeoutMs?: number;
   /** Target calendar ID for creating tentative hold events. */
   readonly targetCalendarId?: string;
+  /** Participant email hashes for VIP matching. */
+  readonly participantHashes?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +146,8 @@ export class SchedulingWorkflow {
     const sessionId = generateId("session");
     const now = new Date().toISOString();
 
-    // Step 2: Gather availability and constraints from UserGraphDO
-    const [availability, constraints] = await Promise.all([
+    // Step 2: Gather availability, constraints, and VIP policies from UserGraphDO
+    const [availability, constraints, vipConstraints] = await Promise.all([
       this.gatherAvailability(
         params.userId,
         params.windowStart,
@@ -152,16 +155,21 @@ export class SchedulingWorkflow {
         params.requiredAccountIds,
       ),
       this.getActiveConstraints(params.userId, params.windowStart, params.windowEnd),
+      this.getVipOverrideConstraints(params.userId),
     ]);
 
-    // Step 3: Run greedy solver with constraint-aware scoring
+    // Merge VIP override constraints into the constraint list
+    const allConstraints: SolverConstraint[] = [...constraints, ...vipConstraints];
+
+    // Step 3: Run greedy solver with constraint-aware + VIP-aware scoring
     const solverInput: SolverInput = {
       windowStart: params.windowStart,
       windowEnd: params.windowEnd,
       durationMinutes: params.durationMinutes,
       busyIntervals: availability.busy_intervals,
       requiredAccountIds: params.requiredAccountIds,
-      constraints,
+      constraints: allConstraints,
+      participantHashes: params.participantHashes,
     };
     const rawCandidates = greedySolver(solverInput, params.maxCandidates ?? 5);
 
@@ -352,6 +360,65 @@ export class SchedulingWorkflow {
     }
 
     return this.getSession(userId, sessionId);
+  }
+
+  // -------------------------------------------------------------------------
+  // VIP policy interactions
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch VIP policies from UserGraphDO and convert to VipOverrideConstraint
+   * objects for the solver. Non-fatal: returns empty array on failure.
+   */
+  private async getVipOverrideConstraints(
+    userId: string,
+  ): Promise<VipOverrideConstraint[]> {
+    try {
+      const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+      const stub = this.env.USER_GRAPH.get(userGraphId);
+
+      const response = await stub.fetch(
+        new Request("https://user-graph.internal/listVipPolicies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      if (!response.ok) {
+        // Non-fatal: VIP policies enhance scoring but are not required
+        return [];
+      }
+
+      const { items } = (await response.json()) as {
+        items: Array<{
+          vip_id: string;
+          participant_hash: string;
+          display_name: string;
+          priority_weight: number;
+          conditions_json: {
+            allow_after_hours?: boolean;
+            min_notice_hours?: number;
+            override_deep_work?: boolean;
+          };
+        }>;
+      };
+
+      return items.map((vip) => ({
+        kind: "vip_override" as const,
+        config: {
+          participant_hash: vip.participant_hash,
+          display_name: vip.display_name ?? "VIP",
+          priority_weight: vip.priority_weight,
+          allow_after_hours: vip.conditions_json.allow_after_hours ?? false,
+          min_notice_hours: vip.conditions_json.min_notice_hours ?? 0,
+          override_deep_work: vip.conditions_json.override_deep_work ?? false,
+        },
+      }));
+    } catch {
+      // Non-fatal: VIP policies enhance scoring but are not required
+      return [];
+    }
   }
 
   // -------------------------------------------------------------------------

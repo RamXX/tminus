@@ -1128,4 +1128,207 @@ describe("SchedulingWorkflow integration", () => {
       }
     });
   });
+
+  // -----------------------------------------------------------------------
+  // VIP Override E2E (TM-5rp.1)
+  // -----------------------------------------------------------------------
+
+  describe("VIP override integration", () => {
+    it("VIP policy CRUD through UserGraphDO", async () => {
+      // Create a VIP policy
+      const createResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01TEST00000000000000001",
+            participant_hash: "abc123investorhash",
+            display_name: "Sarah - Investor",
+            priority_weight: 2.0,
+            conditions_json: {
+              allow_after_hours: true,
+              min_notice_hours: 1,
+              override_deep_work: false,
+            },
+          }),
+        }),
+      );
+      expect(createResp.ok).toBe(true);
+      const created = (await createResp.json()) as {
+        vip_id: string;
+        participant_hash: string;
+        display_name: string;
+        priority_weight: number;
+        conditions_json: string;
+      };
+      expect(created.vip_id).toBe("vip_01TEST00000000000000001");
+      expect(created.participant_hash).toBe("abc123investorhash");
+
+      // List VIP policies
+      const listResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listVipPolicies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(listResp.ok).toBe(true);
+      const listed = (await listResp.json()) as { items: Array<{ vip_id: string }> };
+      expect(listed.items.length).toBe(1);
+      expect(listed.items[0].vip_id).toBe("vip_01TEST00000000000000001");
+
+      // Delete VIP policy
+      const deleteResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/deleteVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vip_id: "vip_01TEST00000000000000001" }),
+        }),
+      );
+      expect(deleteResp.ok).toBe(true);
+      const deleted = (await deleteResp.json()) as { deleted: boolean };
+      expect(deleted.deleted).toBe(true);
+
+      // Verify deletion
+      const listAfter = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listVipPolicies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      const listedAfter = (await listAfter.json()) as { items: Array<{ vip_id: string }> };
+      expect(listedAfter.items.length).toBe(0);
+    });
+
+    it("VIP appears in vip_policies table after creation", async () => {
+      // Create a VIP
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01TABLECHK0000000000001",
+            participant_hash: "tablecheckhash",
+            display_name: "Table Check VIP",
+            priority_weight: 1.5,
+            conditions_json: { allow_after_hours: true },
+          }),
+        }),
+      );
+
+      // Query the table directly via SQL
+      const rows = db.prepare("SELECT * FROM vip_policies WHERE vip_id = ?").all("vip_01TABLECHK0000000000001") as Array<{
+        vip_id: string;
+        participant_hash: string;
+        display_name: string;
+        priority_weight: number;
+        conditions_json: string;
+      }>;
+      expect(rows.length).toBe(1);
+      expect(rows[0].participant_hash).toBe("tablecheckhash");
+      expect(rows[0].priority_weight).toBe(1.5);
+      const conditions = JSON.parse(rows[0].conditions_json);
+      expect(conditions.allow_after_hours).toBe(true);
+    });
+
+    it("create VIP -> schedule meeting outside hours -> VIP override allows it", async () => {
+      // 1. Create working hours constraint (9-17 Mon-Fri UTC)
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/addConstraint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "working_hours",
+            config_json: {
+              days: [1, 2, 3, 4, 5],
+              start_time: "09:00",
+              end_time: "17:00",
+              timezone: "UTC",
+            },
+            active_from: null,
+            active_to: null,
+          }),
+        }),
+      );
+
+      // 2. Create VIP policy for investor
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01INVESTOR000000000001",
+            participant_hash: "investor_hash_abc",
+            display_name: "Sarah - Lead Investor",
+            priority_weight: 2.5,
+            conditions_json: {
+              allow_after_hours: true,
+              min_notice_hours: 0,
+              override_deep_work: false,
+            },
+          }),
+        }),
+      );
+
+      // 3. Schedule a meeting WITH VIP participant in after-hours window
+      const workflow = createWorkflow();
+      const vipSession = await workflow.createSession(makeParams({
+        title: "Investor Pitch",
+        windowStart: "2026-03-02T17:00:00Z", // Monday 5pm (after hours)
+        windowEnd: "2026-03-02T22:00:00Z",   // Monday 10pm
+        durationMinutes: 60,
+        holdTimeoutMs: 0, // Skip holds for simplicity
+        participantHashes: ["investor_hash_abc"],
+      }));
+
+      // Should get candidates in the after-hours window
+      expect(vipSession.candidates.length).toBeGreaterThan(0);
+
+      // Candidates should include VIP override scoring
+      const hasVipScoring = vipSession.candidates.some(
+        c => c.explanation.includes("VIP override") || c.explanation.includes("VIP priority"),
+      );
+      expect(hasVipScoring).toBe(true);
+
+      // 4. Schedule same window WITHOUT VIP participant (non-VIP meeting)
+      const regularSession = await workflow.createSession(makeParams({
+        title: "Regular Meeting",
+        windowStart: "2026-03-02T17:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        holdTimeoutMs: 0,
+        // No participantHashes -- non-VIP
+      }));
+
+      // Non-VIP meeting also gets candidates (they exist but are scored lower)
+      expect(regularSession.candidates.length).toBeGreaterThan(0);
+
+      // Non-VIP meeting should NOT have VIP override scoring
+      const hasNoVipScoring = regularSession.candidates.every(
+        c => !c.explanation.includes("VIP override"),
+      );
+      expect(hasNoVipScoring).toBe(true);
+
+      // VIP candidates should have higher scores than non-VIP for the same slot
+      const vipSlot = vipSession.candidates[0];
+      const regularSlot = regularSession.candidates.find(c => c.start === vipSlot.start);
+      if (regularSlot) {
+        expect(vipSlot.score).toBeGreaterThan(regularSlot.score);
+      }
+    });
+
+    it("delete nonexistent VIP policy returns deleted=false", async () => {
+      const resp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/deleteVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vip_id: "vip_nonexistent" }),
+        }),
+      );
+      expect(resp.ok).toBe(true);
+      const data = (await resp.json()) as { deleted: boolean };
+      expect(data.deleted).toBe(false);
+    });
+  });
 });

@@ -103,6 +103,16 @@ interface EventMirrorRow {
   error_message: string | null;
 }
 
+interface VipPolicyRow {
+  [key: string]: unknown;
+  vip_id: string;
+  participant_hash: string;
+  display_name: string | null;
+  priority_weight: number;
+  conditions_json: string;
+  created_at: string;
+}
+
 interface PolicyRow {
   [key: string]: unknown;
   policy_id: string;
@@ -2312,6 +2322,124 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // VIP policy management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a VIP policy for a participant.
+   * participant_hash = SHA-256(email + per-org salt), computed by the caller.
+   */
+  createVipPolicy(
+    vipId: string,
+    participantHash: string,
+    displayName: string | null,
+    priorityWeight: number,
+    conditionsJson: Record<string, unknown>,
+  ): VipPolicyRow {
+    this.ensureMigrated();
+
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO vip_policies (vip_id, participant_hash, display_name, priority_weight, conditions_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      vipId,
+      participantHash,
+      displayName,
+      priorityWeight,
+      JSON.stringify(conditionsJson),
+      now,
+    );
+
+    return {
+      vip_id: vipId,
+      participant_hash: participantHash,
+      display_name: displayName,
+      priority_weight: priorityWeight,
+      conditions_json: JSON.stringify(conditionsJson),
+      created_at: now,
+    };
+  }
+
+  /**
+   * List all VIP policies for this user.
+   */
+  listVipPolicies(): Array<{
+    vip_id: string;
+    participant_hash: string;
+    display_name: string | null;
+    priority_weight: number;
+    conditions_json: Record<string, unknown>;
+    created_at: string;
+  }> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<VipPolicyRow>(
+        "SELECT vip_id, participant_hash, display_name, priority_weight, conditions_json, created_at FROM vip_policies ORDER BY created_at DESC",
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      vip_id: row.vip_id,
+      participant_hash: row.participant_hash,
+      display_name: row.display_name,
+      priority_weight: row.priority_weight,
+      conditions_json: JSON.parse(row.conditions_json) as Record<string, unknown>,
+      created_at: row.created_at,
+    }));
+  }
+
+  /**
+   * Get a single VIP policy by ID.
+   */
+  getVipPolicy(vipId: string): {
+    vip_id: string;
+    participant_hash: string;
+    display_name: string | null;
+    priority_weight: number;
+    conditions_json: Record<string, unknown>;
+    created_at: string;
+  } | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<VipPolicyRow>(
+        "SELECT vip_id, participant_hash, display_name, priority_weight, conditions_json, created_at FROM vip_policies WHERE vip_id = ?",
+        vipId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      vip_id: row.vip_id,
+      participant_hash: row.participant_hash,
+      display_name: row.display_name,
+      priority_weight: row.priority_weight,
+      conditions_json: JSON.parse(row.conditions_json) as Record<string, unknown>,
+      created_at: row.created_at,
+    };
+  }
+
+  /**
+   * Delete a VIP policy by ID.
+   * Returns true if a row was deleted, false if not found.
+   */
+  deleteVipPolicy(vipId: string): boolean {
+    this.ensureMigrated();
+
+    const before = this.sql
+      .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM vip_policies WHERE vip_id = ?", vipId)
+      .toArray()[0].cnt;
+
+    if (before === 0) return false;
+
+    this.sql.exec("DELETE FROM vip_policies WHERE vip_id = ?", vipId);
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
 
@@ -2707,6 +2835,45 @@ export class UserGraphDO {
           const body = (await request.json()) as { session_id: string };
           this.releaseSessionHolds(body.session_id);
           return Response.json({ ok: true });
+        }
+
+        // ---------------------------------------------------------------
+        // VIP policy RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/createVipPolicy": {
+          const body = (await request.json()) as {
+            vip_id: string;
+            participant_hash: string;
+            display_name: string | null;
+            priority_weight: number;
+            conditions_json: Record<string, unknown>;
+          };
+          const vip = this.createVipPolicy(
+            body.vip_id,
+            body.participant_hash,
+            body.display_name,
+            body.priority_weight,
+            body.conditions_json,
+          );
+          return Response.json(vip);
+        }
+
+        case "/listVipPolicies": {
+          const items = this.listVipPolicies();
+          return Response.json({ items });
+        }
+
+        case "/getVipPolicy": {
+          const body = (await request.json()) as { vip_id: string };
+          const vip = this.getVipPolicy(body.vip_id);
+          return Response.json(vip);
+        }
+
+        case "/deleteVipPolicy": {
+          const body = (await request.json()) as { vip_id: string };
+          const deleted = this.deleteVipPolicy(body.vip_id);
+          return Response.json({ deleted });
         }
 
         default:

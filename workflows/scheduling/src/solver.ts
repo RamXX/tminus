@@ -74,12 +74,26 @@ export interface NoMeetingsAfterConstraint {
   };
 }
 
+/** VIP override constraint: relaxes working hours for VIP participants. */
+export interface VipOverrideConstraint {
+  readonly kind: "vip_override";
+  readonly config: {
+    readonly participant_hash: string;
+    readonly display_name: string;
+    readonly priority_weight: number;
+    readonly allow_after_hours: boolean;
+    readonly min_notice_hours: number;
+    readonly override_deep_work: boolean;
+  };
+}
+
 /** Union type for all solver constraints. */
 export type SolverConstraint =
   | WorkingHoursConstraint
   | TripConstraint
   | BufferConstraint
-  | NoMeetingsAfterConstraint;
+  | NoMeetingsAfterConstraint
+  | VipOverrideConstraint;
 
 /** Input to the greedy solver. */
 export interface SolverInput {
@@ -95,6 +109,8 @@ export interface SolverInput {
   readonly requiredAccountIds: readonly string[];
   /** Optional constraints for enhanced scoring and filtering. */
   readonly constraints?: readonly SolverConstraint[];
+  /** Participant hashes for the meeting attendees (for VIP matching). */
+  readonly participantHashes?: readonly string[];
 }
 
 /** A scored candidate slot. */
@@ -194,13 +210,14 @@ export function greedySolver(
 
     if (blocked) continue;
 
-    // Score this slot (base + constraint-aware)
+    // Score this slot (base + constraint-aware + VIP-aware)
     const { score, explanation } = scoreSlot(
       slotStart,
       slotEnd,
       windowStartMs,
       busyRanges,
       constraints,
+      input.participantHashes,
     );
 
     candidates.push({
@@ -230,6 +247,7 @@ function scoreSlot(
   windowStartMs: number,
   busyRanges: ReadonlyArray<{ start: number; end: number }>,
   constraints: readonly SolverConstraint[],
+  participantHashes?: readonly string[],
 ): { score: number; explanation: string } {
   let score = 0;
   const reasons: string[] = [];
@@ -293,6 +311,12 @@ function scoreSlot(
     const nmaResult = scoreNoMeetingsAfter(slotStartMs, slotEndMs, constraints);
     score += nmaResult.delta;
     if (nmaResult.reason) reasons.push(nmaResult.reason);
+
+    // VIP override: if participants include a VIP with allow_after_hours,
+    // compensate for working hours violation and add priority weight bonus
+    const vipResult = scoreVipOverride(slotStartMs, slotEndMs, constraints, participantHashes, whResult);
+    score += vipResult.delta;
+    if (vipResult.reason) reasons.push(vipResult.reason);
   }
 
   return {
@@ -312,6 +336,8 @@ export const CONSTRAINT_SCORES = {
   BUFFER_ADEQUATE_BONUS: 10,
   BUFFER_INADEQUATE_PENALTY: -5,
   NO_MEETINGS_AFTER_PENALTY: -20,
+  VIP_OVERRIDE_BONUS: 25,
+  VIP_PRIORITY_WEIGHT_MULTIPLIER: 10,
 } as const;
 
 /**
@@ -542,6 +568,82 @@ function scoreNoMeetingsAfter(
   }
 
   return { delta: 0, reason: null };
+}
+
+/**
+ * Score a slot based on VIP override policies.
+ *
+ * When participants include a VIP with allow_after_hours=true and the slot
+ * was penalized for being outside working hours, the VIP override:
+ * 1. Compensates the working hours violation penalty (reverses -10 to neutral)
+ * 2. Adds a VIP override bonus (+25)
+ * 3. Adds priority weight bonus (weight * 10)
+ *
+ * This ensures VIP meetings can be scheduled outside working hours while
+ * non-VIP meetings remain blocked by working hours constraints.
+ */
+export function scoreVipOverride(
+  _slotStartMs: number,
+  _slotEndMs: number,
+  constraints: readonly SolverConstraint[],
+  participantHashes?: readonly string[],
+  workingHoursResult?: { delta: number; reason: string | null },
+): { delta: number; reason: string | null } {
+  if (!participantHashes || participantHashes.length === 0) {
+    return { delta: 0, reason: null };
+  }
+
+  const vipConstraints = constraints.filter(
+    (c): c is VipOverrideConstraint => c.kind === "vip_override",
+  );
+
+  if (vipConstraints.length === 0) return { delta: 0, reason: null };
+
+  // Find matching VIP policies for the meeting participants
+  const participantSet = new Set(participantHashes);
+  const matchingVips = vipConstraints.filter((v) =>
+    participantSet.has(v.config.participant_hash),
+  );
+
+  if (matchingVips.length === 0) return { delta: 0, reason: null };
+
+  // Use the highest priority VIP for scoring
+  const bestVip = matchingVips.reduce((best, current) =>
+    current.config.priority_weight > best.config.priority_weight ? current : best,
+  );
+
+  let delta = 0;
+  const reasons: string[] = [];
+
+  // If slot was penalized for being outside working hours and VIP allows after hours,
+  // compensate the penalty and add VIP bonus
+  const isOutsideWorkingHours =
+    workingHoursResult &&
+    workingHoursResult.delta === CONSTRAINT_SCORES.WORKING_HOURS_VIOLATION;
+
+  if (isOutsideWorkingHours && bestVip.config.allow_after_hours) {
+    // Reverse the working hours violation
+    delta -= CONSTRAINT_SCORES.WORKING_HOURS_VIOLATION; // removes -10 (adds +10)
+    // Add VIP override bonus
+    delta += CONSTRAINT_SCORES.VIP_OVERRIDE_BONUS;
+    reasons.push(
+      `VIP override for ${bestVip.config.display_name}: after-hours allowed (+${CONSTRAINT_SCORES.VIP_OVERRIDE_BONUS + Math.abs(CONSTRAINT_SCORES.WORKING_HOURS_VIOLATION)})`,
+    );
+  }
+
+  // Add priority weight bonus regardless
+  const weightBonus = Math.round(
+    bestVip.config.priority_weight * CONSTRAINT_SCORES.VIP_PRIORITY_WEIGHT_MULTIPLIER,
+  );
+  if (weightBonus > 0) {
+    delta += weightBonus;
+    reasons.push(`VIP priority weight (+${weightBonus})`);
+  }
+
+  return {
+    delta,
+    reason: reasons.length > 0 ? reasons.join(", ") : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
