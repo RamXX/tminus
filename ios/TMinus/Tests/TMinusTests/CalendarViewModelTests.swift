@@ -15,7 +15,7 @@ final class CalendarViewModelTests: XCTestCase {
         super.setUp()
         mockAPI = MockAPIClient()
         mockCache = MockEventCache()
-        viewModel = CalendarViewModel(apiClient: mockAPI, cache: mockCache)
+        viewModel = CalendarViewModel(apiClient: mockAPI, cache: mockCache, widgetDataProvider: nil)
     }
 
     // MARK: - Initial State

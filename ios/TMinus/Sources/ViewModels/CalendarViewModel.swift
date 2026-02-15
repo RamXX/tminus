@@ -44,13 +44,16 @@ final class CalendarViewModel: ObservableObject {
 
     private let apiClient: APIClientProtocol
     private let cache: EventCacheProtocol
+    private let widgetDataProvider: WidgetDataProvider?
 
     init(
         apiClient: APIClientProtocol,
-        cache: EventCacheProtocol = EventCache()
+        cache: EventCacheProtocol = EventCache(),
+        widgetDataProvider: WidgetDataProvider? = WidgetDataProvider()
     ) {
         self.apiClient = apiClient
         self.cache = cache
+        self.widgetDataProvider = widgetDataProvider
         self.lastSyncDate = cache.lastSyncDate
     }
 
@@ -69,6 +72,7 @@ final class CalendarViewModel: ObservableObject {
             events = fetched
             groupEventsByDate()
             cache.cacheEvents(fetched, for: range)
+            widgetDataProvider?.writeEvents(fetched)
             isOffline = false
             lastSyncDate = Date()
         } catch {
@@ -99,6 +103,7 @@ final class CalendarViewModel: ObservableObject {
             events = fetched
             groupEventsByDate()
             cache.cacheEvents(fetched, for: range)
+            widgetDataProvider?.writeEvents(fetched)
             isOffline = false
             lastSyncDate = Date()
         } catch {
