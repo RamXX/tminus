@@ -2015,7 +2015,7 @@ describe("tier gating in MCP dispatch", () => {
     };
     expect(error).toBeDefined();
     expect(error.code).toBe(-32603);
-    expect(error.message).toBe("Insufficient tier");
+    expect(error.message).toContain("requires a premium subscription");
     expect(error.data.code).toBe("TIER_REQUIRED");
     expect(error.data.required_tier).toBe("premium");
     expect(error.data.current_tier).toBe("free");
@@ -2102,7 +2102,7 @@ describe("tier gating in MCP dispatch", () => {
       };
       expect(error).toBeDefined();
       expect(error.code).toBe(-32603);
-      expect(error.message).toBe("Insufficient tier");
+      expect(error.message).toContain("requires a premium subscription");
       expect(error.data.code).toBe("TIER_REQUIRED");
       expect(error.data.required_tier).toBe("premium");
       expect(error.data.current_tier).toBe("free");
