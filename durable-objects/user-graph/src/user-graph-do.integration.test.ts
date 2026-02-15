@@ -22,8 +22,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } from "@tminus/shared";
-import { UserGraphDO, mergeIntervals, computeFreeIntervals, expandWorkingHoursToOutsideBusy } from "./index";
-import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult, Constraint, WorkingHoursConfig } from "./index";
+import { UserGraphDO, mergeIntervals, computeFreeIntervals, expandWorkingHoursToOutsideBusy, expandBuffersToBusy } from "./index";
+import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult, Constraint, WorkingHoursConfig, BufferConfig } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -3699,5 +3699,603 @@ describe("UserGraphDO.validateWorkingHoursConfig (static)", () => {
         timezone: "UTC",
       }),
     ).toThrow("non-empty 'days' array");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Buffer constraint integration tests
+// ---------------------------------------------------------------------------
+
+describe("UserGraphDO buffer constraints", () => {
+  let db: DatabaseType;
+  let sql: SqlStorageLike;
+  let queue: MockQueue;
+  let ug: UserGraphDO;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    sql = createSqlStorageAdapter(db);
+    queue = new MockQueue();
+    ug = new UserGraphDO(sql, queue);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // addConstraint with kind=buffer
+  // -------------------------------------------------------------------------
+
+  describe("addConstraint with kind=buffer", () => {
+    it("creates a travel buffer constraint", () => {
+      const constraint = ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      expect(constraint.kind).toBe("buffer");
+      expect(constraint.config_json).toEqual({
+        type: "travel",
+        minutes: 15,
+        applies_to: "all",
+      });
+      expect(constraint.constraint_id).toMatch(/^cst_/);
+    });
+
+    it("creates a prep buffer constraint", () => {
+      const constraint = ug.addConstraint(
+        "buffer",
+        { type: "prep", minutes: 30, applies_to: "external" },
+        null,
+        null,
+      );
+
+      expect(constraint.kind).toBe("buffer");
+      expect(constraint.config_json).toEqual({
+        type: "prep",
+        minutes: 30,
+        applies_to: "external",
+      });
+    });
+
+    it("creates a cooldown buffer constraint", () => {
+      const constraint = ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+
+      expect(constraint.kind).toBe("buffer");
+      expect(constraint.config_json).toEqual({
+        type: "cooldown",
+        minutes: 10,
+        applies_to: "all",
+      });
+    });
+
+    it("does NOT create any derived calendar events", () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Verify no canonical events were created
+      const events = ug.listCanonicalEvents({});
+      expect(events.items).toHaveLength(0);
+    });
+
+    it("rejects invalid buffer type", () => {
+      expect(() =>
+        ug.addConstraint(
+          "buffer",
+          { type: "nap", minutes: 15, applies_to: "all" },
+          null,
+          null,
+        ),
+      ).toThrow("type must be one of: travel, prep, cooldown");
+    });
+
+    it("rejects zero minutes", () => {
+      expect(() =>
+        ug.addConstraint(
+          "buffer",
+          { type: "travel", minutes: 0, applies_to: "all" },
+          null,
+          null,
+        ),
+      ).toThrow("minutes must be a positive integer");
+    });
+
+    it("rejects invalid applies_to", () => {
+      expect(() =>
+        ug.addConstraint(
+          "buffer",
+          { type: "travel", minutes: 15, applies_to: "internal" },
+          null,
+          null,
+        ),
+      ).toThrow("applies_to must be one of: all, external");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer constraints in listConstraints
+  // -------------------------------------------------------------------------
+
+  describe("listConstraints with buffer", () => {
+    it("lists buffer constraints filtered by kind", () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 10, applies_to: "external" },
+        null,
+        null,
+      );
+
+      const buffers = ug.listConstraints("buffer");
+      expect(buffers).toHaveLength(2);
+      expect(buffers[0].kind).toBe("buffer");
+      expect(buffers[1].kind).toBe("buffer");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // deleteConstraint for buffer
+  // -------------------------------------------------------------------------
+
+  describe("deleteConstraint buffer", () => {
+    it("deletes a buffer constraint without cascade (no derived events)", async () => {
+      const constraint = ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      const deleted = await ug.deleteConstraint(constraint.constraint_id);
+      expect(deleted).toBe(true);
+
+      const remaining = ug.listConstraints("buffer");
+      expect(remaining).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer in availability computation -- travel (before)
+  // -------------------------------------------------------------------------
+
+  describe("buffer in availability computation -- travel (before events)", () => {
+    it("reduces available slot by adding travel buffer before event", async () => {
+      // Add a 15-minute travel buffer
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Add a meeting at 10:00-11:00
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_travel_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_travel_1",
+          title: "Client Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T12:00:00Z",
+      });
+
+      // Buffer (09:45-10:00) + Event (10:00-11:00) merge into single busy: 09:45-11:00
+      // Free: 09:00-09:45, 11:00-12:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:45:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T12:00:00Z");
+    });
+
+    it("applies travel buffer to multiple events", async () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 30, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Two meetings with a gap
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_buf_multi_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_multi_1",
+          title: "Morning Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_buf_multi_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_multi_2",
+          title: "Afternoon Meeting",
+          start: { dateTime: "2026-02-16T14:00:00Z" },
+          end: { dateTime: "2026-02-16T15:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T16:00:00Z",
+      });
+
+      // Busy: 09:30-11:00 (buffer+event1), 13:30-15:00 (buffer+event2)
+      // Free: 09:00-09:30, 11:00-13:30, 15:00-16:00
+      expect(result.free_intervals).toHaveLength(3);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:30:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T13:30:00.000Z");
+      expect(result.free_intervals[2].start).toBe("2026-02-16T15:00:00Z");
+      expect(result.free_intervals[2].end).toBe("2026-02-16T16:00:00Z");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer in availability computation -- prep (before)
+  // -------------------------------------------------------------------------
+
+  describe("buffer in availability computation -- prep (before events)", () => {
+    it("reduces available slot by adding prep buffer before event", async () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "prep", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_prep_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_prep_1",
+          title: "Presentation",
+          start: { dateTime: "2026-02-16T14:00:00Z" },
+          end: { dateTime: "2026-02-16T15:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T13:00:00Z",
+        end: "2026-02-16T16:00:00Z",
+      });
+
+      // Buffer (13:50-14:00) + Event (14:00-15:00) merge into 13:50-15:00
+      // Free: 13:00-13:50, 15:00-16:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T13:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T13:50:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T15:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T16:00:00Z");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer in availability computation -- cooldown (after)
+  // -------------------------------------------------------------------------
+
+  describe("buffer in availability computation -- cooldown (after events)", () => {
+    it("reduces available slot by adding cooldown buffer after event", async () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_cd_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_cd_1",
+          title: "Intense Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T12:00:00Z",
+      });
+
+      // Event (10:00-11:00) + Cooldown (11:00-11:15) merge into 10:00-11:15
+      // Free: 09:00-10:00, 11:15-12:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T10:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:15:00.000Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T12:00:00Z");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer with applies_to='external' filtering
+  // -------------------------------------------------------------------------
+
+  describe("buffer applies_to external filtering in availability", () => {
+    it("external buffer skips internal (system-generated) events", async () => {
+      // Create a trip constraint (generates an internal event)
+      ug.addConstraint(
+        "trip",
+        { name: "Conference", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-16T08:00:00Z",
+        "2026-02-16T12:00:00Z",
+      );
+
+      // Add a travel buffer for external events only
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "external" },
+        null,
+        null,
+      );
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T07:00:00Z",
+        end: "2026-02-16T13:00:00Z",
+      });
+
+      // Trip event is 08:00-12:00 (origin_account_id='internal')
+      // Buffer should NOT apply to the trip event since applies_to='external'
+      // So busy is just 08:00-12:00
+      // Free: 07:00-08:00, 12:00-13:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T07:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T08:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T12:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T13:00:00Z");
+    });
+
+    it("external buffer applies to external calendar events", async () => {
+      // Add a real calendar event (external)
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_ext_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_ext_1",
+          title: "External Call",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Add a travel buffer for external events only
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "external" },
+        null,
+        null,
+      );
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T12:00:00Z",
+      });
+
+      // Buffer (09:45-10:00) + Event (10:00-11:00) = busy 09:45-11:00
+      // Free: 09:00-09:45, 11:00-12:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:45:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T12:00:00Z");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Combined buffer constraints (travel + cooldown)
+  // -------------------------------------------------------------------------
+
+  describe("multiple buffer constraints in availability", () => {
+    it("stacks travel before and cooldown after the same event", async () => {
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_stack_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_stack_1",
+          title: "Important Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T12:00:00Z",
+      });
+
+      // Travel buffer: 09:45-10:00 (before)
+      // Event: 10:00-11:00
+      // Cooldown buffer: 11:00-11:10 (after)
+      // All merge into: 09:45-11:10
+      // Free: 09:00-09:45, 11:10-12:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:45:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:10:00.000Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T12:00:00Z");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Verify buffers do NOT create calendar events
+  // -------------------------------------------------------------------------
+
+  describe("buffer does not create calendar events", () => {
+    it("adding buffer constraint + events leaves only the real events in DB", async () => {
+      // Add buffer constraints
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Add events
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_no_cal_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_no_cal_1",
+          title: "Real Meeting 1",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_no_cal_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_no_cal_2",
+          title: "Real Meeting 2",
+          start: { dateTime: "2026-02-16T14:00:00Z" },
+          end: { dateTime: "2026-02-16T15:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      // Verify only the 2 real events exist in canonical_events
+      const allEvents = ug.listCanonicalEvents({});
+      expect(allEvents.items).toHaveLength(2);
+      expect(allEvents.items.map((e) => e.title).sort()).toEqual([
+        "Real Meeting 1",
+        "Real Meeting 2",
+      ]);
+
+      // Verify computeAvailability still shows buffer-reduced slots
+      const result = ug.computeAvailability({
+        start: "2026-02-16T09:00:00Z",
+        end: "2026-02-16T16:00:00Z",
+      });
+
+      // With buffers, availability is reduced even though no extra events exist
+      // Travel (09:45-10:00) + Event1 (10:00-11:00) + Cooldown (11:00-11:10) = 09:45-11:10
+      // Travel (13:45-14:00) + Event2 (14:00-15:00) + Cooldown (15:00-15:10) = 13:45-15:10
+      // Free: 09:00-09:45, 11:10-13:45, 15:10-16:00
+      expect(result.free_intervals).toHaveLength(3);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:45:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:10:00.000Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T13:45:00.000Z");
+      expect(result.free_intervals[2].start).toBe("2026-02-16T15:10:00.000Z");
+      expect(result.free_intervals[2].end).toBe("2026-02-16T16:00:00Z");
+
+      // Verify no new events were created by checking count again
+      const postCheck = ug.listCanonicalEvents({});
+      expect(postCheck.items).toHaveLength(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Buffer with working hours interaction
+  // -------------------------------------------------------------------------
+
+  describe("buffer interacts correctly with working hours", () => {
+    it("buffers apply within working hours context", async () => {
+      // Working hours: Mon 09:00-17:00 UTC
+      // Monday Feb 16, 2026
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Travel buffer: 15 min before
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Meeting at 10:00-11:00
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_buf_wh_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_buf_wh_1",
+          title: "Morning Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+      });
+
+      // Outside working hours: 08:00-09:00 and 17:00-18:00 are busy
+      // Travel buffer: 09:45-10:00 (before meeting)
+      // Meeting: 10:00-11:00
+      // Merged busy: 08:00-09:00, 09:45-11:00, 17:00-18:00
+      // Free: 09:00-09:45, 11:00-17:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00.000Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T09:45:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T17:00:00.000Z");
+    });
   });
 });

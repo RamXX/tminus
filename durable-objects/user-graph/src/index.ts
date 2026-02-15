@@ -1360,6 +1360,45 @@ export class UserGraphDO {
   }
 
   /**
+   * Validate a buffer config_json object.
+   *
+   * Required fields:
+   * - type: 'travel' | 'prep' | 'cooldown'
+   * - minutes: positive integer
+   * - applies_to: 'all' | 'external'
+   *
+   * Throws on validation failure.
+   */
+  static validateBufferConfig(configJson: Record<string, unknown>): void {
+    const validTypes = ["travel", "prep", "cooldown"];
+    if (typeof configJson.type !== "string" || !validTypes.includes(configJson.type)) {
+      throw new Error(
+        `Buffer config_json.type must be one of: ${validTypes.join(", ")}`,
+      );
+    }
+
+    if (
+      typeof configJson.minutes !== "number" ||
+      !Number.isInteger(configJson.minutes) ||
+      configJson.minutes <= 0
+    ) {
+      throw new Error(
+        "Buffer config_json.minutes must be a positive integer",
+      );
+    }
+
+    const validAppliesTo = ["all", "external"];
+    if (
+      typeof configJson.applies_to !== "string" ||
+      !validAppliesTo.includes(configJson.applies_to)
+    ) {
+      throw new Error(
+        `Buffer config_json.applies_to must be one of: ${validAppliesTo.join(", ")}`,
+      );
+    }
+  }
+
+  /**
    * Add a new constraint and generate any derived canonical events.
    *
    * For kind="trip": creates a single continuous busy block event
@@ -1389,6 +1428,10 @@ export class UserGraphDO {
     // Kind-specific validation
     if (kind === "working_hours") {
       UserGraphDO.validateWorkingHoursConfig(configJson);
+    }
+
+    if (kind === "buffer") {
+      UserGraphDO.validateBufferConfig(configJson);
     }
 
     if (kind === "trip") {
@@ -2449,6 +2492,14 @@ export class UserGraphDO {
     );
     rawIntervals.push(...outsideWorkingHours);
 
+    // Add busy intervals from buffer constraints
+    // (buffers add time before/after events without creating calendar events)
+    const bufferConstraints = this.listConstraints("buffer");
+    if (bufferConstraints.length > 0) {
+      const bufferIntervals = expandBuffersToBusy(bufferConstraints, rows);
+      rawIntervals.push(...bufferIntervals);
+    }
+
     // Merge overlapping intervals
     const busyIntervals = mergeIntervals(rawIntervals);
 
@@ -2936,4 +2987,94 @@ function getLocalTimeParts(
   }
 
   return { hours, minutes, dateStr: `${year}-${month}-${day}` };
+}
+
+// ---------------------------------------------------------------------------
+// Buffer constraint helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Buffer config shape as stored in config_json.
+ */
+export interface BufferConfig {
+  /** Buffer type: travel and prep apply before events, cooldown applies after. */
+  readonly type: "travel" | "prep" | "cooldown";
+  /** Buffer duration in minutes. */
+  readonly minutes: number;
+  /** Which events the buffer applies to: 'all' or 'external' only. */
+  readonly applies_to: "all" | "external";
+}
+
+/**
+ * Minimal event row shape needed by expandBuffersToBusy.
+ * Matches the columns queried by computeAvailability.
+ */
+export interface EventRowForBuffer {
+  readonly start_ts: string;
+  readonly end_ts: string;
+  readonly origin_account_id: string;
+}
+
+/**
+ * Expand buffer constraints into busy intervals around existing events.
+ *
+ * For each buffer constraint, generates additional busy time around events:
+ * - type='travel': adds buffer BEFORE the event (travel time to get there)
+ * - type='prep': adds buffer BEFORE the event (preparation time)
+ * - type='cooldown': adds buffer AFTER the event (recovery/wind-down time)
+ *
+ * When applies_to='external', buffers only apply to events where
+ * origin_account_id is not 'internal' (i.e., real calendar events,
+ * not system-generated ones like trip blocks).
+ *
+ * Returns BusyInterval[] -- these are NOT calendar events, just busy slots
+ * that reduce availability.
+ *
+ * Pure function: no side effects, no database access.
+ */
+export function expandBuffersToBusy(
+  constraints: readonly { config_json: Record<string, unknown> }[],
+  events: readonly EventRowForBuffer[],
+): BusyInterval[] {
+  if (constraints.length === 0 || events.length === 0) return [];
+
+  const configs: BufferConfig[] = constraints.map(
+    (c) => c.config_json as unknown as BufferConfig,
+  );
+
+  const bufferIntervals: BusyInterval[] = [];
+
+  for (const config of configs) {
+    const bufferMs = config.minutes * 60 * 1000;
+
+    for (const event of events) {
+      // Skip internal events when applies_to is 'external'
+      if (config.applies_to === "external" && event.origin_account_id === "internal") {
+        continue;
+      }
+
+      const eventStartMs = new Date(event.start_ts).getTime();
+      const eventEndMs = new Date(event.end_ts).getTime();
+
+      if (config.type === "travel" || config.type === "prep") {
+        // Buffer goes BEFORE the event
+        const bufferStart = new Date(eventStartMs - bufferMs).toISOString();
+        bufferIntervals.push({
+          start: bufferStart,
+          end: event.start_ts,
+          account_ids: ["buffer"],
+        });
+      } else if (config.type === "cooldown") {
+        // Buffer goes AFTER the event
+        const bufferEnd = new Date(eventEndMs + bufferMs).toISOString();
+        bufferIntervals.push({
+          start: event.end_ts,
+          end: bufferEnd,
+          account_ids: ["buffer"],
+        });
+      }
+    }
+  }
+
+  return bufferIntervals;
 }
