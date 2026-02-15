@@ -369,6 +369,28 @@ CREATE TABLE event_participants (
 CREATE INDEX idx_event_participants_hash ON event_participants(participant_hash);
 ` as const;
 
+/**
+ * UserGraphDO migration v5: Add scheduling_history table.
+ *
+ * Tracks per-participant scheduling outcomes for fairness scoring (TM-82s.3).
+ * Each row records whether a participant got their preferred time in a given
+ * scheduling session. The aggregate (sessions_participated, sessions_preferred)
+ * is computed at query time to drive fairness adjustments.
+ */
+export const USER_GRAPH_DO_MIGRATION_V5 = `
+CREATE TABLE scheduling_history (
+  id                 TEXT PRIMARY KEY,
+  session_id         TEXT NOT NULL,
+  participant_hash   TEXT NOT NULL,
+  got_preferred      INTEGER NOT NULL DEFAULT 0,
+  scheduled_ts       TEXT NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_sched_hist_participant ON scheduling_history(participant_hash);
+CREATE INDEX idx_sched_hist_session ON scheduling_history(session_id);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -390,6 +412,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 4,
     sql: USER_GRAPH_DO_MIGRATION_V4,
     description: "Add event_participants table for briefing participant matching",
+  },
+  {
+    version: 5,
+    sql: USER_GRAPH_DO_MIGRATION_V5,
+    description: "Add scheduling_history table for fairness scoring",
   },
 ] as const;
 

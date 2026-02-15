@@ -40,6 +40,22 @@ import {
   createSolverFromEnv,
 } from "./external-solver";
 import type { Solver, SolverResult } from "./external-solver";
+import {
+  computeFairnessScore,
+  applyVipWeight,
+  computeMultiFactorScore,
+  buildExplanation,
+  recordSchedulingOutcome,
+} from "./fairness";
+import type {
+  SchedulingHistoryEntry,
+  VipPolicy,
+  MultiFactorInput,
+  ScoreComponents,
+  SchedulingOutcome,
+  FairnessContext,
+  MultiFactorResult,
+} from "./fairness";
 
 // Re-export solver types and constants for consumers
 export { greedySolver, CONSTRAINT_SCORES } from "./solver";
@@ -73,6 +89,24 @@ export {
   MIN_HOLD_TIMEOUT_MS,
 } from "./holds";
 export type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage } from "./holds";
+
+// Re-export fairness scoring types and functions for consumers (TM-82s.3)
+export {
+  computeFairnessScore,
+  applyVipWeight,
+  computeMultiFactorScore,
+  buildExplanation,
+  recordSchedulingOutcome,
+} from "./fairness";
+export type {
+  SchedulingHistoryEntry,
+  VipPolicy,
+  MultiFactorInput,
+  ScoreComponents,
+  SchedulingOutcome,
+  FairnessContext,
+  MultiFactorResult,
+} from "./fairness";
 
 // ---------------------------------------------------------------------------
 // Env bindings
@@ -173,8 +207,8 @@ export class SchedulingWorkflow {
     const sessionId = generateId("session");
     const now = new Date().toISOString();
 
-    // Step 2: Gather availability, constraints, and VIP policies from UserGraphDO
-    const [availability, constraints, vipConstraints] = await Promise.all([
+    // Step 2: Gather availability, constraints, VIP policies, and scheduling history
+    const [availability, constraints, vipConstraints, schedulingHistory] = await Promise.all([
       this.gatherAvailability(
         params.userId,
         params.windowStart,
@@ -183,10 +217,18 @@ export class SchedulingWorkflow {
       ),
       this.getActiveConstraints(params.userId, params.windowStart, params.windowEnd),
       this.getVipOverrideConstraints(params.userId),
+      this.getSchedulingHistory(params.userId, params.participantHashes ?? []),
     ]);
 
     // Merge VIP override constraints into the constraint list
     const allConstraints: SolverConstraint[] = [...constraints, ...vipConstraints];
+
+    // Extract VIP policies for fairness scoring (from vip_override constraints)
+    const vipPolicies: VipPolicy[] = vipConstraints.map((vc) => ({
+      participant_hash: vc.config.participant_hash,
+      display_name: vc.config.display_name,
+      priority_weight: vc.config.priority_weight,
+    }));
 
     // Step 3: Run solver with constraint-aware + VIP-aware scoring.
     // Uses pluggable solver: external for complex cases, greedy as default + fallback.
@@ -203,8 +245,61 @@ export class SchedulingWorkflow {
     const solverResult = await this.runSolverWithFallback(solverInput, maxCandidates);
     const rawCandidates = solverResult.candidates;
 
+    // Step 3b: Apply fairness and VIP multi-factor scoring (TM-82s.3)
+    const hasFairnessData = schedulingHistory.length > 0 && (params.participantHashes?.length ?? 0) > 0;
+    const hasVipData = vipPolicies.length > 0 && (params.participantHashes?.length ?? 0) > 0;
+
+    const fairnessEnhancedCandidates = rawCandidates.map((c) => {
+      if (!hasFairnessData && !hasVipData) {
+        // No fairness or VIP data: use raw solver scores unchanged
+        return c;
+      }
+
+      // Compute per-participant fairness (use first matching participant as representative)
+      const targetHash = params.participantHashes?.[0];
+      const fairness = hasFairnessData
+        ? computeFairnessScore(schedulingHistory, targetHash)
+        : { adjustment: 1.0, explanation: null as string | null };
+
+      // Compute VIP weight
+      const vipResult = hasVipData
+        ? applyVipWeight(vipPolicies, params.participantHashes ?? [])
+        : { weight: 1.0, explanation: null as string | null };
+
+      // Multi-factor scoring
+      const multiResult = computeMultiFactorScore({
+        timePreferenceScore: c.score,
+        constraintScore: 0, // Already included in solver base score
+        fairnessAdjustment: fairness.adjustment,
+        vipWeight: vipResult.weight,
+      });
+
+      // Build enhanced explanation
+      const enhanced = buildExplanation({
+        timePreferenceScore: c.score,
+        constraintScore: 0,
+        fairnessAdjustment: fairness.adjustment,
+        vipWeight: vipResult.weight,
+        baseExplanation: c.explanation,
+        fairnessExplanation: fairness.explanation,
+        vipExplanation: vipResult.explanation,
+      });
+
+      return {
+        ...c,
+        score: multiResult.finalScore,
+        explanation: enhanced,
+      };
+    });
+
+    // Re-sort by enhanced scores (descending, then by start time for stability)
+    fairnessEnhancedCandidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.start.localeCompare(b.start);
+    });
+
     // Step 4: Store session and candidates in UserGraphDO
-    const candidates: StoredCandidate[] = rawCandidates.map((c) => ({
+    const candidates: StoredCandidate[] = fairnessEnhancedCandidates.map((c) => ({
       candidateId: generateId("candidate"),
       sessionId,
       start: c.start,
@@ -354,6 +449,23 @@ export class SchedulingWorkflow {
     // Mark session as committed
     await this.commitSession(userId, sessionId, candidateId, eventId);
 
+    // Record scheduling outcome for fairness tracking (TM-82s.3)
+    if (session.params.participantHashes && session.params.participantHashes.length > 0) {
+      // The participant who got their preferred slot is determined by the
+      // highest-scoring candidate being the one committed. For fairness,
+      // we record the first participant as the one who "got preferred" since
+      // the committed candidate presumably matched their preference best.
+      // A more sophisticated approach would compare each participant's
+      // individual preference, but for MVP this captures the outcome.
+      const outcomes = recordSchedulingOutcome(
+        sessionId,
+        session.params.participantHashes,
+        session.params.participantHashes[0], // organizer got their preferred time
+        candidate.start,
+      );
+      await this.recordSchedulingHistory(userId, outcomes);
+    }
+
     const updatedSession = await this.getSession(userId, sessionId);
 
     return { eventId, session: updatedSession };
@@ -448,6 +560,70 @@ export class SchedulingWorkflow {
     } catch {
       // Non-fatal: VIP policies enhance scoring but are not required
       return [];
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Scheduling history for fairness scoring (TM-82s.3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch scheduling history for the given participants from UserGraphDO.
+   * Non-fatal: returns empty array on failure.
+   */
+  private async getSchedulingHistory(
+    userId: string,
+    participantHashes: readonly string[],
+  ): Promise<SchedulingHistoryEntry[]> {
+    if (participantHashes.length === 0) return [];
+
+    try {
+      const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+      const stub = this.env.USER_GRAPH.get(userGraphId);
+
+      const response = await stub.fetch(
+        new Request("https://user-graph.internal/getSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ participant_hashes: participantHashes }),
+        }),
+      );
+
+      if (!response.ok) return [];
+
+      const { history } = (await response.json()) as {
+        history: SchedulingHistoryEntry[];
+      };
+      return history;
+    } catch {
+      // Non-fatal: scheduling history enhances fairness but is not required
+      return [];
+    }
+  }
+
+  /**
+   * Record scheduling outcomes in UserGraphDO for fairness tracking.
+   * Non-fatal: silently fails if the DO is unavailable.
+   */
+  private async recordSchedulingHistory(
+    userId: string,
+    outcomes: SchedulingOutcome[],
+  ): Promise<void> {
+    if (outcomes.length === 0) return;
+
+    try {
+      const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+      const stub = this.env.USER_GRAPH.get(userGraphId);
+
+      await stub.fetch(
+        new Request("https://user-graph.internal/recordSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: outcomes }),
+        }),
+      );
+    } catch {
+      // Non-fatal: recording history is best-effort
     }
   }
 

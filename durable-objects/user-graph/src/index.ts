@@ -4216,6 +4216,99 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Scheduling history for fairness scoring (TM-82s.3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record scheduling outcomes for fairness tracking.
+   *
+   * Inserts one row per participant per session into scheduling_history.
+   * Records whether each participant got their preferred time slot.
+   */
+  recordSchedulingHistory(
+    entries: Array<{
+      session_id: string;
+      participant_hash: string;
+      got_preferred: boolean;
+      scheduled_ts: string;
+    }>,
+  ): void {
+    this.ensureMigrated();
+
+    for (const entry of entries) {
+      const id = generateId("schedHist");
+      this.sql.exec(
+        `INSERT INTO scheduling_history (id, session_id, participant_hash, got_preferred, scheduled_ts)
+         VALUES (?, ?, ?, ?, ?)`,
+        id,
+        entry.session_id,
+        entry.participant_hash,
+        entry.got_preferred ? 1 : 0,
+        entry.scheduled_ts,
+      );
+    }
+  }
+
+  /**
+   * Get aggregated scheduling history for a set of participants.
+   *
+   * Returns one row per participant with:
+   * - sessions_participated: total sessions they were part of
+   * - sessions_preferred: sessions where they got preferred time
+   * - last_session_ts: most recent session timestamp
+   */
+  getSchedulingHistory(
+    participantHashes: string[],
+  ): Array<{
+    participant_hash: string;
+    sessions_participated: number;
+    sessions_preferred: number;
+    last_session_ts: string;
+  }> {
+    this.ensureMigrated();
+
+    if (participantHashes.length === 0) return [];
+
+    // Query aggregate per participant
+    const results: Array<{
+      participant_hash: string;
+      sessions_participated: number;
+      sessions_preferred: number;
+      last_session_ts: string;
+    }> = [];
+
+    for (const hash of participantHashes) {
+      const rows = this.sql
+        .exec<{
+          [key: string]: unknown;
+          sessions_participated: number;
+          sessions_preferred: number;
+          last_session_ts: string | null;
+        }>(
+          `SELECT
+             COUNT(*) as sessions_participated,
+             SUM(got_preferred) as sessions_preferred,
+             MAX(scheduled_ts) as last_session_ts
+           FROM scheduling_history
+           WHERE participant_hash = ?`,
+          hash,
+        )
+        .toArray();
+
+      if (rows.length > 0 && rows[0].sessions_participated > 0) {
+        results.push({
+          participant_hash: hash,
+          sessions_participated: rows[0].sessions_participated,
+          sessions_preferred: rows[0].sessions_preferred ?? 0,
+          last_session_ts: rows[0].last_session_ts ?? "",
+        });
+      }
+    }
+
+    return results;
+  }
+
+  // -------------------------------------------------------------------------
   // Pre-meeting context briefing (Phase 4C)
   // -------------------------------------------------------------------------
 
@@ -5182,6 +5275,27 @@ export class UserGraphDO {
             body.participant_hashes,
           );
           return Response.json({ stored: body.participant_hashes.length });
+        }
+
+        case "/recordSchedulingHistory": {
+          const body = (await request.json()) as {
+            entries: Array<{
+              session_id: string;
+              participant_hash: string;
+              got_preferred: boolean;
+              scheduled_ts: string;
+            }>;
+          };
+          this.recordSchedulingHistory(body.entries);
+          return Response.json({ recorded: body.entries.length });
+        }
+
+        case "/getSchedulingHistory": {
+          const body = (await request.json()) as {
+            participant_hashes: string[];
+          };
+          const history = this.getSchedulingHistory(body.participant_hashes);
+          return Response.json({ history });
         }
 
         default:

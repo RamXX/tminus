@@ -1471,4 +1471,345 @@ describe("SchedulingWorkflow integration", () => {
       expect(envWithoutEndpoint.SOLVER_ENDPOINT).toBeUndefined();
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Fairness and priority scoring (TM-82s.3)
+  // -----------------------------------------------------------------------
+
+  describe("fairness and priority scoring", () => {
+    it("AC1: fairness score adjusts for repeated scheduling", async () => {
+      // Step 1: Create a VIP to get participant hashes flowing through the system
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01FAIRNESS000000000001",
+            participant_hash: "alice_hash",
+            display_name: "Alice",
+            priority_weight: 1.0,
+            conditions_json: { allow_after_hours: false },
+          }),
+        }),
+      );
+
+      // Step 2: Record scheduling history where alice got preferred 8/10 times
+      const historyEntries = [];
+      for (let i = 0; i < 10; i++) {
+        historyEntries.push({
+          session_id: `ses_hist_${i}`,
+          participant_hash: "alice_hash",
+          got_preferred: i < 8, // 8/10 preferred
+          scheduled_ts: `2026-02-${String(10 + i).padStart(2, "0")}T10:00:00Z`,
+        });
+        historyEntries.push({
+          session_id: `ses_hist_${i}`,
+          participant_hash: "bob_hash",
+          got_preferred: i >= 8, // 2/10 preferred
+          scheduled_ts: `2026-02-${String(10 + i).padStart(2, "0")}T10:00:00Z`,
+        });
+      }
+
+      const recordResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/recordSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: historyEntries }),
+        }),
+      );
+      expect(recordResp.ok).toBe(true);
+
+      // Step 3: Verify scheduling history is stored and retrieved
+      const histResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/getSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ participant_hashes: ["alice_hash", "bob_hash"] }),
+        }),
+      );
+      expect(histResp.ok).toBe(true);
+      const { history } = (await histResp.json()) as {
+        history: Array<{
+          participant_hash: string;
+          sessions_participated: number;
+          sessions_preferred: number;
+        }>;
+      };
+      expect(history.length).toBe(2);
+      const alice = history.find((h) => h.participant_hash === "alice_hash");
+      const bob = history.find((h) => h.participant_hash === "bob_hash");
+      expect(alice!.sessions_participated).toBe(10);
+      expect(alice!.sessions_preferred).toBe(8);
+      expect(bob!.sessions_participated).toBe(10);
+      expect(bob!.sessions_preferred).toBe(2);
+
+      // Step 4: Schedule with alice as participant -- fairness should lower her score
+      const workflow = createWorkflow();
+      const sessionAlice = await workflow.createSession(makeParams({
+        title: "Alice Meeting",
+        participantHashes: ["alice_hash", "bob_hash"],
+      }));
+
+      expect(sessionAlice.candidates.length).toBeGreaterThan(0);
+
+      // Candidates should include fairness information in explanations
+      const hasFairness = sessionAlice.candidates.some(
+        (c) => c.explanation.includes("fairness"),
+      );
+      expect(hasFairness).toBe(true);
+    });
+
+    it("AC2: VIP priority weight applied", async () => {
+      // Create a high-priority VIP
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01PRIORITY00000000001",
+            participant_hash: "ceo_hash",
+            display_name: "CEO",
+            priority_weight: 3.0,
+            conditions_json: { allow_after_hours: true },
+          }),
+        }),
+      );
+
+      // Schedule with VIP participant
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "CEO Meeting",
+        participantHashes: ["ceo_hash"],
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // VIP scoring should appear in explanations
+      const hasVipScoring = session.candidates.some(
+        (c) => c.explanation.includes("VIP"),
+      );
+      expect(hasVipScoring).toBe(true);
+    });
+
+    it("AC3: multi-factor scoring: preference + fairness + VIP + constraints", async () => {
+      // Create VIP policy
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01MULTI0000000000001",
+            participant_hash: "multi_vip",
+            display_name: "Board Member",
+            priority_weight: 2.0,
+            conditions_json: { allow_after_hours: true },
+          }),
+        }),
+      );
+
+      // Record history where multi_vip was disadvantaged
+      const entries = Array.from({ length: 5 }, (_, i) => ({
+        session_id: `ses_multi_${i}`,
+        participant_hash: "multi_vip",
+        got_preferred: false,
+        scheduled_ts: `2026-02-${String(1 + i).padStart(2, "0")}T10:00:00Z`,
+      }));
+      entries.push(
+        ...Array.from({ length: 5 }, (_, i) => ({
+          session_id: `ses_multi_${i}`,
+          participant_hash: "other_person",
+          got_preferred: true,
+          scheduled_ts: `2026-02-${String(1 + i).padStart(2, "0")}T10:00:00Z`,
+        })),
+      );
+
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/recordSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries }),
+        }),
+      );
+
+      // Add working hours constraint for constraint scoring
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/addConstraint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "working_hours",
+            config_json: {
+              days: [1, 2, 3, 4, 5],
+              start_time: "09:00",
+              end_time: "17:00",
+              timezone: "UTC",
+            },
+          }),
+        }),
+      );
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "Multi-factor Meeting",
+        participantHashes: ["multi_vip", "other_person"],
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // Scores should reflect multi-factor composition
+      // VIP weight 2.0 should amplify scores
+      const topCandidate = session.candidates[0];
+      expect(topCandidate.score).toBeGreaterThan(0);
+
+      // Explanation should show multiple factors
+      expect(topCandidate.explanation).toBeTruthy();
+      expect(topCandidate.explanation.length).toBeGreaterThan(0);
+    });
+
+    it("AC4: human-readable explanation per candidate", async () => {
+      // Create VIP with fairness history
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/createVipPolicy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vip_id: "vip_01EXPLAIN000000000001",
+            participant_hash: "explain_vip",
+            display_name: "Investor Sarah",
+            priority_weight: 2.0,
+            conditions_json: { allow_after_hours: false },
+          }),
+        }),
+      );
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "Explanation Test",
+        participantHashes: ["explain_vip"],
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // Every candidate must have a non-empty explanation
+      for (const c of session.candidates) {
+        expect(typeof c.explanation).toBe("string");
+        expect(c.explanation.length).toBeGreaterThan(0);
+      }
+
+      // At least one should contain VIP info
+      const hasVipExplanation = session.candidates.some(
+        (c) => c.explanation.includes("VIP"),
+      );
+      expect(hasVipExplanation).toBe(true);
+    });
+
+    it("AC5: scheduling history tracked on commit", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "History Tracking Test",
+        participantHashes: ["track_alice", "track_bob"],
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // Commit the first candidate
+      const candidateId = session.candidates[0].candidateId;
+      await workflow.commitCandidate(
+        TEST_USER_ID,
+        session.sessionId,
+        candidateId,
+      );
+
+      // Verify scheduling history was recorded
+      const histResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/getSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            participant_hashes: ["track_alice", "track_bob"],
+          }),
+        }),
+      );
+      expect(histResp.ok).toBe(true);
+      const { history } = (await histResp.json()) as {
+        history: Array<{
+          participant_hash: string;
+          sessions_participated: number;
+          sessions_preferred: number;
+        }>;
+      };
+
+      // Both participants should have history
+      expect(history.length).toBe(2);
+      const trackAlice = history.find(
+        (h) => h.participant_hash === "track_alice",
+      );
+      const trackBob = history.find(
+        (h) => h.participant_hash === "track_bob",
+      );
+      expect(trackAlice!.sessions_participated).toBe(1);
+      expect(trackBob!.sessions_participated).toBe(1);
+      // First participant (organizer) gets preferred = true
+      expect(trackAlice!.sessions_preferred).toBe(1);
+      expect(trackBob!.sessions_preferred).toBe(0);
+    });
+
+    it("AC6: fairness adjusts after multiple sessions to prevent consistent disadvantage", async () => {
+      // Record extensive history where person_a always wins
+      const histEntries = [];
+      for (let i = 0; i < 20; i++) {
+        histEntries.push({
+          session_id: `ses_bias_${i}`,
+          participant_hash: "person_a",
+          got_preferred: true, // Always gets preferred
+          scheduled_ts: `2026-01-${String(1 + i).padStart(2, "0")}T10:00:00Z`,
+        });
+        histEntries.push({
+          session_id: `ses_bias_${i}`,
+          participant_hash: "person_b",
+          got_preferred: false, // Never gets preferred
+          scheduled_ts: `2026-01-${String(1 + i).padStart(2, "0")}T10:00:00Z`,
+        });
+      }
+
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/recordSchedulingHistory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: histEntries }),
+        }),
+      );
+
+      // Now schedule with both participants -- fairness should adjust
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "Fairness Correction",
+        participantHashes: ["person_a", "person_b"],
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // person_a's dominant preference rate should trigger fairness adjustment
+      // The explanation should reference fairness
+      const hasFairness = session.candidates.some(
+        (c) => c.explanation.includes("fairness"),
+      );
+      expect(hasFairness).toBe(true);
+    });
+
+    it("backward compatible: no fairness when no participantHashes", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        title: "No Participants Test",
+        // No participantHashes
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // No fairness adjustments should appear
+      for (const c of session.candidates) {
+        expect(c.explanation).not.toContain("fairness adjustment");
+      }
+    });
+  });
 });

@@ -67,6 +67,7 @@ export const ID_PREFIXES = {
   alert: "alt_",
   milestone: "mst_",
   proof: "prf_",
+  schedHist: "shx_",
 } as const;
 
 // ---------------------------------------------------------------------------

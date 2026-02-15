@@ -129,6 +129,7 @@ describe("UserGraphDO schema via migration runner", () => {
       "schedule_candidates",
       "schedule_holds",
       "schedule_sessions",
+      "scheduling_history",
       "time_allocations",
       "time_commitments",
       "vip_policies",
