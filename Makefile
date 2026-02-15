@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -41,7 +41,30 @@ clean:
 # All deploy targets source .env for Cloudflare credentials.
 # Run `cp .env.example .env` and fill in values before deploying.
 
+# Full stage-to-prod pipeline: build -> staging (deploy+health+smoke) -> production
 deploy: build
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/promote.mjs --skip-build
+
+# Stage-only: deploy all workers to staging, verify health, run smoke tests
+deploy-stage: build
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/promote.mjs --stage-only --skip-build
+
+# Production-only: deploy all workers to production (assumes staging already verified)
+deploy-prod: build
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/promote.mjs --prod-only --skip-build
+
+# Alias for full pipeline
+deploy-promote: deploy
+
+deploy-promote-dry-run:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/promote.mjs --dry-run
+
+# Legacy single-service deploy (deploy.mjs -- creates D1/queues/workers without env separation)
+deploy-legacy:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
 	. ./.env && node scripts/deploy.mjs
 
