@@ -266,6 +266,6 @@ describe("schema unit tests", () => {
 
   it("ALL_MIGRATIONS includes MIGRATION_0005_DELETION_REQUESTS", () => {
     expect(ALL_MIGRATIONS).toContain(MIGRATION_0005_DELETION_REQUESTS);
-    expect(ALL_MIGRATIONS.length).toBe(5);
+    expect(ALL_MIGRATIONS.length).toBe(6);
   });
 });

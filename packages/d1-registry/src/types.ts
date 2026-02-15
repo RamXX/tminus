@@ -93,3 +93,16 @@ export interface DeletionCertificateRow {
   readonly proof_hash: string;
   readonly signature: string;
 }
+
+/** Valid status values for the `key_rotation_log.status` column. */
+export type KeyRotationStatus = "started" | "completed" | "failed";
+
+/** Row shape for the `key_rotation_log` table. */
+export interface KeyRotationLogRow {
+  readonly rotation_id: string;
+  readonly account_id: string;
+  readonly status: KeyRotationStatus;
+  readonly error_message: string | null;
+  readonly started_at: string;
+  readonly completed_at: string | null;
+}

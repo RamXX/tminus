@@ -25,8 +25,10 @@ import {
   importMasterKey,
   encryptTokens,
   decryptTokens,
+  reEncryptDek,
+  extractDekForBackup,
 } from "./crypto";
-import type { EncryptedEnvelope, TokenPayload } from "./crypto";
+import type { EncryptedEnvelope, TokenPayload, DekBackupEntry } from "./crypto";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -267,10 +269,211 @@ export class AccountDO {
   }
 
   // -------------------------------------------------------------------------
+  // Key rotation (AC 1, 2, 8)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rotate the master key: decrypt DEK with old key, re-encrypt with new key.
+   *
+   * This is atomic within the DO (single SQLite write). The token ciphertext
+   * remains unchanged because tokens are encrypted with the DEK, not the
+   * master key. Only the DEK's encryption wrapper changes.
+   *
+   * @param oldMasterKeyHex - Current master key (hex-encoded)
+   * @param newMasterKeyHex - New master key (hex-encoded)
+   */
+  async rotateKey(
+    oldMasterKeyHex: string,
+    newMasterKeyHex: string,
+  ): Promise<void> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ encrypted_tokens: string }>(
+        "SELECT encrypted_tokens FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      throw new Error("AccountDO.rotateKey: no tokens stored. Nothing to rotate.");
+    }
+
+    const oldMasterKey = await importMasterKey(oldMasterKeyHex);
+    const newMasterKey = await importMasterKey(newMasterKeyHex);
+
+    const envelope: EncryptedEnvelope = JSON.parse(rows[0].encrypted_tokens);
+
+    // Re-encrypt DEK atomically: decrypt with old, encrypt with new
+    const rotatedEnvelope = await reEncryptDek(
+      oldMasterKey,
+      newMasterKey,
+      envelope,
+    );
+
+    // Atomic update in DO SQLite
+    this.sql.exec(
+      `UPDATE auth SET encrypted_tokens = ?, updated_at = datetime('now')
+       WHERE account_id = ?`,
+      JSON.stringify(rotatedEnvelope),
+      ACCOUNT_ROW_KEY,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // DEK backup/restore (AC 4, 5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Export the encrypted DEK material for backup.
+   *
+   * Returns the encrypted DEK and its IV (still encrypted with master key).
+   * The token ciphertext is NOT included in the backup -- only the DEK wrapper.
+   *
+   * @param accountId - External account identifier for the backup record
+   */
+  async getEncryptedDekForBackup(accountId: string): Promise<DekBackupEntry> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ encrypted_tokens: string }>(
+        "SELECT encrypted_tokens FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      throw new Error("AccountDO: no tokens stored. Nothing to backup.");
+    }
+
+    const envelope: EncryptedEnvelope = JSON.parse(rows[0].encrypted_tokens);
+    return extractDekForBackup(accountId, envelope);
+  }
+
+  /**
+   * Restore the encrypted DEK from a backup entry.
+   *
+   * Replaces the current encryptedDek and dekIv with values from the backup.
+   * The token ciphertext (iv + ciphertext) is preserved from the existing envelope.
+   *
+   * WARNING: This should only be used for disaster recovery. The backup's
+   * master key must match the current MASTER_KEY for decryption to work.
+   */
+  async restoreDekFromBackup(backup: DekBackupEntry): Promise<void> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ encrypted_tokens: string }>(
+        "SELECT encrypted_tokens FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      throw new Error("AccountDO: no tokens stored. Cannot restore DEK without existing token ciphertext.");
+    }
+
+    const existingEnvelope: EncryptedEnvelope = JSON.parse(rows[0].encrypted_tokens);
+
+    // Replace only the DEK encryption, keep token ciphertext
+    const restoredEnvelope: EncryptedEnvelope = {
+      iv: existingEnvelope.iv,
+      ciphertext: existingEnvelope.ciphertext,
+      encryptedDek: backup.encryptedDek,
+      dekIv: backup.dekIv,
+    };
+
+    this.sql.exec(
+      `UPDATE auth SET encrypted_tokens = ?, updated_at = datetime('now')
+       WHERE account_id = ?`,
+      JSON.stringify(restoredEnvelope),
+      ACCOUNT_ROW_KEY,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Encryption failure monitoring (AC 6, 7)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record an encryption failure in the monitoring table.
+   * Called internally when DEK decryption fails.
+   */
+  private recordEncryptionFailure(error: string): void {
+    this.sql.exec(
+      `INSERT INTO encryption_monitor (account_id, failure_count, last_failure_ts, last_failure_error)
+       VALUES (?, 1, datetime('now'), ?)
+       ON CONFLICT(account_id) DO UPDATE SET
+         failure_count = failure_count + 1,
+         last_failure_ts = datetime('now'),
+         last_failure_error = ?`,
+      ACCOUNT_ROW_KEY,
+      error,
+      error,
+    );
+  }
+
+  /**
+   * Record a successful encryption operation in the monitoring table.
+   */
+  private recordEncryptionSuccess(): void {
+    this.sql.exec(
+      `INSERT INTO encryption_monitor (account_id, failure_count, last_success_ts)
+       VALUES (?, 0, datetime('now'))
+       ON CONFLICT(account_id) DO UPDATE SET
+         last_success_ts = datetime('now')`,
+      ACCOUNT_ROW_KEY,
+    );
+  }
+
+  /**
+   * Get encryption failure monitoring info.
+   *
+   * Returns the current failure count and last failure details.
+   * A failure_count > 0 is critical and should trigger alerts.
+   */
+  async getEncryptionHealth(): Promise<{
+    failureCount: number;
+    lastFailureTs: string | null;
+    lastFailureError: string | null;
+    lastSuccessTs: string | null;
+  }> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{
+        failure_count: number;
+        last_failure_ts: string | null;
+        last_failure_error: string | null;
+        last_success_ts: string | null;
+      }>(
+        "SELECT failure_count, last_failure_ts, last_failure_error, last_success_ts FROM encryption_monitor WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      return {
+        failureCount: 0,
+        lastFailureTs: null,
+        lastFailureError: null,
+        lastSuccessTs: null,
+      };
+    }
+
+    return {
+      failureCount: rows[0].failure_count,
+      lastFailureTs: rows[0].last_failure_ts,
+      lastFailureError: rows[0].last_failure_error,
+      lastSuccessTs: rows[0].last_success_ts,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Token internal helpers
   // -------------------------------------------------------------------------
 
-  /** Load and decrypt tokens from storage. */
+  /** Load and decrypt tokens from storage, with encryption monitoring. */
   private async loadTokens(masterKey: CryptoKey): Promise<TokenPayload> {
     const rows = this.sql
       .exec<{ encrypted_tokens: string }>(
@@ -284,7 +487,26 @@ export class AccountDO {
     }
 
     const envelope: EncryptedEnvelope = JSON.parse(rows[0].encrypted_tokens);
-    return decryptTokens(masterKey, envelope);
+
+    try {
+      const tokens = await decryptTokens(masterKey, envelope);
+      this.recordEncryptionSuccess();
+      return tokens;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.recordEncryptionFailure(message);
+
+      // Structured error log for monitoring/alerting
+      console.error(JSON.stringify({
+        level: "CRITICAL",
+        event: "encryption_failure",
+        component: "AccountDO",
+        error: message,
+        timestamp: new Date().toISOString(),
+      }));
+
+      throw err;
+    }
   }
 
   /**
@@ -1005,6 +1227,37 @@ export class AccountDO {
             body.client_state,
           );
           return Response.json({ valid });
+        }
+
+        case "/rotateKey": {
+          const body = (await request.json()) as {
+            old_master_key_hex: string;
+            new_master_key_hex: string;
+          };
+          await this.rotateKey(body.old_master_key_hex, body.new_master_key_hex);
+          return Response.json({ ok: true });
+        }
+
+        case "/getEncryptedDekForBackup": {
+          const body = (await request.json()) as { account_id: string };
+          const backup = await this.getEncryptedDekForBackup(body.account_id);
+          return Response.json(backup);
+        }
+
+        case "/restoreDekFromBackup": {
+          const body = (await request.json()) as {
+            accountId: string;
+            encryptedDek: string;
+            dekIv: string;
+            backedUpAt: string;
+          };
+          await this.restoreDekFromBackup(body);
+          return Response.json({ ok: true });
+        }
+
+        case "/getEncryptionHealth": {
+          const encHealth = await this.getEncryptionHealth();
+          return Response.json(encHealth);
         }
 
         default:

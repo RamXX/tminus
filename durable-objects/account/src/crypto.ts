@@ -185,3 +185,100 @@ export async function decryptTokens(
 
   return JSON.parse(new TextDecoder().decode(plaintext)) as TokenPayload;
 }
+
+/**
+ * Re-encrypt the DEK from an existing envelope with a new master key.
+ *
+ * This is the core operation for master key rotation:
+ * 1. Decrypt the DEK using the old master key
+ * 2. Re-encrypt the same DEK using the new master key (new IV)
+ * 3. Return a new envelope with updated encryptedDek and dekIv
+ *
+ * The token ciphertext (iv + ciphertext) remains unchanged because
+ * it is encrypted with the DEK, not the master key. Only the DEK's
+ * encryption wrapper changes.
+ */
+export async function reEncryptDek(
+  oldMasterKey: CryptoKey,
+  newMasterKey: CryptoKey,
+  envelope: EncryptedEnvelope,
+): Promise<EncryptedEnvelope> {
+  // Step 1: Decrypt the DEK with the old master key
+  const dekBytes = new Uint8Array(
+    await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromBase64(envelope.dekIv) },
+      oldMasterKey,
+      fromBase64(envelope.encryptedDek),
+    ),
+  );
+
+  // Step 2: Re-encrypt the DEK with the new master key (fresh IV)
+  const newDekIv = crypto.getRandomValues(new Uint8Array(12));
+  const newEncryptedDek = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: newDekIv },
+      newMasterKey,
+      dekBytes,
+    ),
+  );
+
+  // Step 3: Return envelope with updated DEK encryption, token data unchanged
+  return {
+    iv: envelope.iv,
+    ciphertext: envelope.ciphertext,
+    encryptedDek: toBase64(newEncryptedDek),
+    dekIv: toBase64(newDekIv),
+  };
+}
+
+/**
+ * Serialize an encrypted envelope to a portable backup format.
+ *
+ * The backup contains only the encrypted DEK material (encryptedDek + dekIv),
+ * NOT the token ciphertext. The DEK remains encrypted with the master key.
+ *
+ * Used by the DEK backup script to export encrypted DEKs to R2.
+ */
+export interface DekBackupEntry {
+  /** Account identifier. */
+  readonly accountId: string;
+  /** Base64 DEK encrypted with the master key. */
+  readonly encryptedDek: string;
+  /** Base64 IV used to encrypt the DEK. */
+  readonly dekIv: string;
+  /** ISO 8601 timestamp of the backup. */
+  readonly backedUpAt: string;
+}
+
+/**
+ * Extract the encrypted DEK material from an envelope for backup.
+ */
+export function extractDekForBackup(
+  accountId: string,
+  envelope: EncryptedEnvelope,
+): DekBackupEntry {
+  return {
+    accountId,
+    encryptedDek: envelope.encryptedDek,
+    dekIv: envelope.dekIv,
+    backedUpAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Restore an encrypted DEK from a backup entry into an existing envelope.
+ *
+ * The iv and ciphertext fields remain from the existing envelope;
+ * only encryptedDek and dekIv are replaced from the backup.
+ */
+export function restoreDekFromBackup(
+  existingEnvelope: EncryptedEnvelope,
+  backup: DekBackupEntry,
+): EncryptedEnvelope {
+  return {
+    iv: existingEnvelope.iv,
+    ciphertext: existingEnvelope.ciphertext,
+    encryptedDek: backup.encryptedDek,
+    dekIv: backup.dekIv,
+  };
+}

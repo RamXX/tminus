@@ -351,6 +351,23 @@ CREATE TABLE ms_subscriptions (
 );
 ` as const;
 
+/**
+ * AccountDO migration v4: Encryption failure monitoring table.
+ *
+ * Tracks encryption/decryption failures for operational monitoring.
+ * Any failure count > 0 is critical and indicates key corruption,
+ * rotation issues, or data integrity problems.
+ */
+export const ACCOUNT_DO_MIGRATION_V4 = `
+CREATE TABLE encryption_monitor (
+  account_id         TEXT PRIMARY KEY,
+  failure_count      INTEGER NOT NULL DEFAULT 0,
+  last_failure_ts    TEXT,
+  last_failure_error TEXT,
+  last_success_ts    TEXT
+);
+` as const;
+
 /** Ordered migrations for AccountDO. Apply sequentially. */
 export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -367,6 +384,11 @@ export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
     version: 3,
     sql: ACCOUNT_DO_MIGRATION_V3,
     description: "Microsoft subscription lifecycle table for change notifications",
+  },
+  {
+    version: 4,
+    sql: ACCOUNT_DO_MIGRATION_V4,
+    description: "Encryption failure monitoring table for operational alerting",
   },
 ] as const;
 

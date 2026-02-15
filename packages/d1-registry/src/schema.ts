@@ -151,6 +151,31 @@ CREATE INDEX idx_deletion_requests_status ON deletion_requests(status);
 ` as const;
 
 /**
+ * Migration 0006: Key rotation log table.
+ *
+ * Tracks master key rotation status per account for idempotent
+ * rotation operations. The rotation script uses this to:
+ * - Skip accounts already rotated (idempotent re-runs)
+ * - Track failed rotations for retry
+ * - Audit the rotation history
+ */
+export const MIGRATION_0006_KEY_ROTATION_LOG = `
+-- Key rotation audit log
+CREATE TABLE key_rotation_log (
+  rotation_id   TEXT NOT NULL,
+  account_id    TEXT NOT NULL,
+  status        TEXT NOT NULL CHECK(status IN ('started','completed','failed')),
+  error_message TEXT,
+  started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at  TEXT,
+  PRIMARY KEY (rotation_id, account_id)
+);
+
+CREATE INDEX idx_key_rotation_log_rotation ON key_rotation_log(rotation_id);
+CREATE INDEX idx_key_rotation_log_status ON key_rotation_log(status);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -160,4 +185,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0003_API_KEYS,
   MIGRATION_0004_AUTH_FIELDS,
   MIGRATION_0005_DELETION_REQUESTS,
+  MIGRATION_0006_KEY_ROTATION_LOG,
 ] as const;

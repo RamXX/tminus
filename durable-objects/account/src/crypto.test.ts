@@ -10,8 +10,11 @@ import {
   importMasterKey,
   encryptTokens,
   decryptTokens,
+  reEncryptDek,
+  extractDekForBackup,
+  restoreDekFromBackup,
 } from "./crypto";
-import type { EncryptedEnvelope, TokenPayload } from "./crypto";
+import type { EncryptedEnvelope, TokenPayload, DekBackupEntry } from "./crypto";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -179,5 +182,161 @@ describe("encryptTokens / decryptTokens", () => {
 
     const decrypted = await decryptTokens(masterKey, parsed);
     expect(decrypted).toEqual(TEST_TOKENS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reEncryptDek tests (master key rotation)
+// ---------------------------------------------------------------------------
+
+describe("reEncryptDek", () => {
+  it("re-encrypts DEK with new master key and tokens are still accessible", async () => {
+    const oldKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const newKey = await importMasterKey(WRONG_MASTER_KEY_HEX); // using "wrong" key as new key
+
+    const envelope = await encryptTokens(oldKey, TEST_TOKENS);
+    const rotated = await reEncryptDek(oldKey, newKey, envelope);
+
+    // Decrypt with the NEW key should work
+    const decrypted = await decryptTokens(newKey, rotated);
+    expect(decrypted).toEqual(TEST_TOKENS);
+  });
+
+  it("old master key cannot decrypt after rotation", async () => {
+    const oldKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const newKey = await importMasterKey(WRONG_MASTER_KEY_HEX);
+
+    const envelope = await encryptTokens(oldKey, TEST_TOKENS);
+    const rotated = await reEncryptDek(oldKey, newKey, envelope);
+
+    // Old key should fail to decrypt the rotated envelope
+    await expect(decryptTokens(oldKey, rotated)).rejects.toThrow();
+  });
+
+  it("preserves token ciphertext (iv and ciphertext unchanged)", async () => {
+    const oldKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const newKey = await importMasterKey(WRONG_MASTER_KEY_HEX);
+
+    const envelope = await encryptTokens(oldKey, TEST_TOKENS);
+    const rotated = await reEncryptDek(oldKey, newKey, envelope);
+
+    // Token IV and ciphertext must NOT change (only DEK wrapper changes)
+    expect(rotated.iv).toBe(envelope.iv);
+    expect(rotated.ciphertext).toBe(envelope.ciphertext);
+
+    // DEK encryption wrapper MUST change
+    expect(rotated.encryptedDek).not.toBe(envelope.encryptedDek);
+    expect(rotated.dekIv).not.toBe(envelope.dekIv);
+  });
+
+  it("fails when old master key is wrong", async () => {
+    const realKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const wrongOldKey = await importMasterKey(WRONG_MASTER_KEY_HEX);
+    const newKey = await importMasterKey(
+      "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd",
+    );
+
+    const envelope = await encryptTokens(realKey, TEST_TOKENS);
+
+    // Using wrong old key should fail (cannot decrypt DEK)
+    await expect(reEncryptDek(wrongOldKey, newKey, envelope)).rejects.toThrow();
+  });
+
+  it("produces different DEK IV on each rotation (fresh random IV)", async () => {
+    const oldKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const newKey = await importMasterKey(WRONG_MASTER_KEY_HEX);
+
+    const envelope = await encryptTokens(oldKey, TEST_TOKENS);
+    const rotated1 = await reEncryptDek(oldKey, newKey, envelope);
+
+    // Re-encrypt again (rotate to yet another key)
+    const thirdKey = await importMasterKey(
+      "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd",
+    );
+    const rotated2 = await reEncryptDek(newKey, thirdKey, rotated1);
+
+    // DEK IVs should differ between rotations
+    expect(rotated1.dekIv).not.toBe(rotated2.dekIv);
+    expect(rotated1.encryptedDek).not.toBe(rotated2.encryptedDek);
+
+    // But tokens should still be accessible with the latest key
+    const decrypted = await decryptTokens(thirdKey, rotated2);
+    expect(decrypted).toEqual(TEST_TOKENS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DEK backup/restore tests
+// ---------------------------------------------------------------------------
+
+describe("extractDekForBackup / restoreDekFromBackup", () => {
+  it("extracts DEK material for backup (encryptedDek + dekIv only)", async () => {
+    const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const envelope = await encryptTokens(masterKey, TEST_TOKENS);
+
+    const backup = extractDekForBackup("acct_123", envelope);
+
+    expect(backup.accountId).toBe("acct_123");
+    expect(backup.encryptedDek).toBe(envelope.encryptedDek);
+    expect(backup.dekIv).toBe(envelope.dekIv);
+    expect(backup.backedUpAt).toBeDefined();
+    expect(new Date(backup.backedUpAt).getTime()).toBeGreaterThan(0);
+  });
+
+  it("backup does NOT contain token ciphertext", async () => {
+    const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const envelope = await encryptTokens(masterKey, TEST_TOKENS);
+
+    const backup = extractDekForBackup("acct_123", envelope);
+
+    // Backup should NOT have iv or ciphertext (token data)
+    expect(backup).not.toHaveProperty("iv");
+    expect(backup).not.toHaveProperty("ciphertext");
+  });
+
+  it("restoreDekFromBackup replaces DEK in envelope while preserving token data", async () => {
+    const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const envelope = await encryptTokens(masterKey, TEST_TOKENS);
+
+    // Create a backup from the original envelope
+    const backup = extractDekForBackup("acct_123", envelope);
+
+    // Simulate a corrupted envelope (wrong DEK)
+    const corruptedEnvelope: EncryptedEnvelope = {
+      iv: envelope.iv,
+      ciphertext: envelope.ciphertext,
+      encryptedDek: "corrupted_dek_data",
+      dekIv: "corrupted_iv_data",
+    };
+
+    // Restore the DEK from backup
+    const restored = restoreDekFromBackup(corruptedEnvelope, backup);
+
+    // Token data should be preserved from the corrupted envelope
+    expect(restored.iv).toBe(envelope.iv);
+    expect(restored.ciphertext).toBe(envelope.ciphertext);
+
+    // DEK should be restored from backup
+    expect(restored.encryptedDek).toBe(backup.encryptedDek);
+    expect(restored.dekIv).toBe(backup.dekIv);
+
+    // Should be able to decrypt tokens with the restored envelope
+    const decrypted = await decryptTokens(masterKey, restored);
+    expect(decrypted).toEqual(TEST_TOKENS);
+  });
+
+  it("backup can be serialized to JSON and parsed back", async () => {
+    const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+    const envelope = await encryptTokens(masterKey, TEST_TOKENS);
+
+    const backup = extractDekForBackup("acct_123", envelope);
+
+    // Simulate R2 storage: serialize to JSON, parse back
+    const json = JSON.stringify(backup);
+    const parsed: DekBackupEntry = JSON.parse(json);
+
+    expect(parsed.accountId).toBe(backup.accountId);
+    expect(parsed.encryptedDek).toBe(backup.encryptedDek);
+    expect(parsed.dekIv).toBe(backup.dekIv);
   });
 });

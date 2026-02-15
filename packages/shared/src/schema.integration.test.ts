@@ -351,6 +351,7 @@ describe("AccountDO schema via migration runner", () => {
 
     expect(tables.map((t) => t.name)).toEqual([
       "auth",
+      "encryption_monitor",
       "ms_subscriptions",
       "sync_state",
       "watch_channels",

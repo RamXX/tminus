@@ -19,8 +19,8 @@ import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike } from "@tminus/shared";
 import { AccountDO } from "./index";
 import type { FetchFn } from "./index";
-import { encryptTokens, importMasterKey, decryptTokens } from "./crypto";
-import type { EncryptedEnvelope } from "./crypto";
+import { encryptTokens, importMasterKey, decryptTokens, reEncryptDek } from "./crypto";
+import type { EncryptedEnvelope, DekBackupEntry } from "./crypto";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -28,6 +28,10 @@ import type { EncryptedEnvelope } from "./crypto";
 
 const TEST_MASTER_KEY_HEX =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/** A different valid master key for rotation tests. */
+const NEW_MASTER_KEY_HEX =
+  "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
 const TEST_TOKENS = {
   access_token: "ya29.test-access-token",
@@ -926,6 +930,7 @@ describe("AccountDO integration", () => {
         .all() as Array<{ name: string }>;
       expect(tablesAfter.map((t) => t.name)).toEqual([
         "auth",
+        "encryption_monitor",
         "ms_subscriptions",
         "sync_state",
         "watch_channels",
@@ -1279,6 +1284,510 @@ describe("AccountDO integration", () => {
         .all() as Array<{ name: string }>;
       expect(tables).toHaveLength(1);
       expect(tables[0].name).toBe("ms_subscriptions");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Master key rotation (AC 1, 2, 8)
+  // -------------------------------------------------------------------------
+
+  describe("rotateKey()", () => {
+    it("rotates DEK from old master key to new master key (AC 1)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Rotate the master key
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Create a new AccountDO with the NEW master key -- tokens should still be accessible
+      const acctNew = new AccountDO(sql, NEW_MASTER_KEY_HEX, mockFetch);
+      const token = await acctNew.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+    });
+
+    it("old master key cannot access tokens after rotation (AC 2)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Old key should fail to decrypt
+      const acctOld = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await expect(acctOld.getAccessToken()).rejects.toThrow();
+    });
+
+    it("rotation is atomic -- single DB update (AC 2)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Capture auth row before rotation
+      const before = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Capture after rotation
+      const after = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+
+      // Still exactly one row
+      const count = db
+        .prepare("SELECT COUNT(*) as cnt FROM auth")
+        .get() as { cnt: number };
+      expect(count.cnt).toBe(1);
+
+      // Envelope changed (DEK re-encrypted)
+      const envBefore: EncryptedEnvelope = JSON.parse(before.encrypted_tokens);
+      const envAfter: EncryptedEnvelope = JSON.parse(after.encrypted_tokens);
+
+      // Token data unchanged
+      expect(envAfter.iv).toBe(envBefore.iv);
+      expect(envAfter.ciphertext).toBe(envBefore.ciphertext);
+
+      // DEK wrapper changed
+      expect(envAfter.encryptedDek).not.toBe(envBefore.encryptedDek);
+      expect(envAfter.dekIv).not.toBe(envBefore.dekIv);
+    });
+
+    it("tokens remain fully accessible through encrypt/decrypt after rotation (AC 8)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Manually verify full round-trip with new key
+      const authRow = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+
+      const envelope: EncryptedEnvelope = JSON.parse(authRow.encrypted_tokens);
+      const newKey = await importMasterKey(NEW_MASTER_KEY_HEX);
+      const decrypted = await decryptTokens(newKey, envelope);
+
+      expect(decrypted.access_token).toBe(TEST_TOKENS.access_token);
+      expect(decrypted.refresh_token).toBe(TEST_TOKENS.refresh_token);
+      expect(decrypted.expiry).toBe(TEST_TOKENS.expiry);
+    });
+
+    it("throws when no tokens are stored", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      // Trigger migration but don't initialize
+      await acct.getSyncToken();
+
+      await expect(
+        acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX),
+      ).rejects.toThrow(/no tokens stored/);
+    });
+
+    it("throws when old master key is wrong", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const wrongOldKey =
+        "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd";
+
+      await expect(
+        acct.rotateKey(wrongOldKey, NEW_MASTER_KEY_HEX),
+      ).rejects.toThrow();
+    });
+
+    it("supports chained rotations (rotate twice)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // First rotation
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Second rotation to a third key
+      const thirdKey =
+        "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd";
+      const acctNew = new AccountDO(sql, NEW_MASTER_KEY_HEX, mockFetch);
+      await acctNew.rotateKey(NEW_MASTER_KEY_HEX, thirdKey);
+
+      // Tokens accessible with third key
+      const acctThird = new AccountDO(sql, thirdKey, mockFetch);
+      const token = await acctThird.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // DEK backup/restore (AC 4, 5)
+  // -------------------------------------------------------------------------
+
+  describe("getEncryptedDekForBackup() / restoreDekFromBackup()", () => {
+    it("exports encrypted DEK for backup (AC 4)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const backup = await acct.getEncryptedDekForBackup("acct_test_123");
+
+      expect(backup.accountId).toBe("acct_test_123");
+      expect(backup.encryptedDek).toBeDefined();
+      expect(backup.encryptedDek.length).toBeGreaterThan(0);
+      expect(backup.dekIv).toBeDefined();
+      expect(backup.dekIv.length).toBeGreaterThan(0);
+      expect(backup.backedUpAt).toBeDefined();
+    });
+
+    it("backup DEK is still encrypted with master key (not plaintext)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const backup = await acct.getEncryptedDekForBackup("acct_test_123");
+
+      // The backup should contain base64-encoded encrypted data
+      // Not contain any token plaintext
+      const backupJson = JSON.stringify(backup);
+      expect(backupJson).not.toContain(TEST_TOKENS.access_token);
+      expect(backupJson).not.toContain(TEST_TOKENS.refresh_token);
+    });
+
+    it("restores DEK from backup and tokens are accessible (AC 5)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Backup the DEK
+      const backup = await acct.getEncryptedDekForBackup("acct_test_123");
+
+      // Simulate corruption: overwrite the encrypted_tokens with bad DEK data
+      const authRow = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+      const envelope: EncryptedEnvelope = JSON.parse(authRow.encrypted_tokens);
+
+      const corruptedEnvelope: EncryptedEnvelope = {
+        iv: envelope.iv,
+        ciphertext: envelope.ciphertext,
+        encryptedDek: "corrupted_data_here",
+        dekIv: "corrupted_iv_here",
+      };
+      db.prepare("UPDATE auth SET encrypted_tokens = ? WHERE account_id = 'self'")
+        .run(JSON.stringify(corruptedEnvelope));
+
+      // Verify tokens are now inaccessible (corrupted DEK)
+      const acctCorrupted = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await expect(acctCorrupted.getAccessToken()).rejects.toThrow();
+
+      // Restore from backup
+      const acctRestore = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acctRestore.restoreDekFromBackup(backup);
+
+      // Tokens should be accessible again
+      const acctRestored = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      const token = await acctRestored.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+    });
+
+    it("full flow: initialize -> rotate -> backup -> verify (AC 1, 4, 8)", async () => {
+      const mockFetch = createMockFetch();
+
+      // Step 1: Initialize with original key
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Step 2: Rotate to new key
+      await acct.rotateKey(TEST_MASTER_KEY_HEX, NEW_MASTER_KEY_HEX);
+
+      // Step 3: Backup with new key
+      const acctNew = new AccountDO(sql, NEW_MASTER_KEY_HEX, mockFetch);
+      const backup = await acctNew.getEncryptedDekForBackup("acct_full_flow");
+
+      // Step 4: Verify tokens accessible with new key
+      const token = await acctNew.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+
+      // Step 5: Backup is valid and contains new key's encryption
+      expect(backup.encryptedDek).toBeDefined();
+      expect(backup.dekIv).toBeDefined();
+    });
+
+    it("throws when no tokens stored for backup", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.getSyncToken(); // trigger migration
+
+      await expect(
+        acct.getEncryptedDekForBackup("acct_123"),
+      ).rejects.toThrow(/no tokens stored/);
+    });
+
+    it("throws when no tokens stored for restore", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.getSyncToken(); // trigger migration
+
+      const fakeBackup: DekBackupEntry = {
+        accountId: "acct_123",
+        encryptedDek: "fake_dek",
+        dekIv: "fake_iv",
+        backedUpAt: new Date().toISOString(),
+      };
+
+      await expect(
+        acct.restoreDekFromBackup(fakeBackup),
+      ).rejects.toThrow(/no tokens stored/);
+    });
+
+    it("backup can be serialized to JSON and restored (simulates R2 round-trip)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Backup -> serialize -> parse (simulating R2 put/get)
+      const backup = await acct.getEncryptedDekForBackup("acct_r2_test");
+      const json = JSON.stringify(backup);
+      const parsed: DekBackupEntry = JSON.parse(json);
+
+      // Corrupt the DEK
+      const authRow = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+      const envelope: EncryptedEnvelope = JSON.parse(authRow.encrypted_tokens);
+      db.prepare("UPDATE auth SET encrypted_tokens = ? WHERE account_id = 'self'")
+        .run(JSON.stringify({
+          iv: envelope.iv,
+          ciphertext: envelope.ciphertext,
+          encryptedDek: "broken",
+          dekIv: "broken",
+        }));
+
+      // Restore from parsed backup
+      const acctRestore = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acctRestore.restoreDekFromBackup(parsed);
+
+      // Verify tokens accessible
+      const acctVerify = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      const token = await acctVerify.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Encryption failure monitoring (AC 6, 7)
+  // -------------------------------------------------------------------------
+
+  describe("encryption failure monitoring", () => {
+    it("reports zero failures in normal operation (AC 7)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Normal access should succeed
+      await acct.getAccessToken();
+
+      const health = await acct.getEncryptionHealth();
+      expect(health.failureCount).toBe(0);
+      expect(health.lastFailureTs).toBeNull();
+      expect(health.lastFailureError).toBeNull();
+      expect(health.lastSuccessTs).toBeDefined();
+    });
+
+    it("returns default health when no operations performed", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      // Only trigger migration
+      await acct.getSyncToken();
+
+      const health = await acct.getEncryptionHealth();
+      expect(health.failureCount).toBe(0);
+      expect(health.lastFailureTs).toBeNull();
+      expect(health.lastFailureError).toBeNull();
+      expect(health.lastSuccessTs).toBeNull();
+    });
+
+    it("increments failure counter on decryption failure (AC 6)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Corrupt the encrypted tokens to force a decryption failure
+      db.prepare("UPDATE auth SET encrypted_tokens = ? WHERE account_id = 'self'")
+        .run(JSON.stringify({
+          iv: "bad_iv",
+          ciphertext: "bad_ct",
+          encryptedDek: "bad_dek",
+          dekIv: "bad_dekiv",
+        }));
+
+      // Access should fail
+      const acctBad = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await expect(acctBad.getAccessToken()).rejects.toThrow();
+
+      // Check monitoring recorded the failure
+      const health = await acctBad.getEncryptionHealth();
+      expect(health.failureCount).toBe(1);
+      expect(health.lastFailureTs).toBeDefined();
+      expect(health.lastFailureError).toBeDefined();
+    });
+
+    it("tracks multiple failures (counter increments) (AC 6)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Corrupt tokens
+      db.prepare("UPDATE auth SET encrypted_tokens = ? WHERE account_id = 'self'")
+        .run(JSON.stringify({
+          iv: "x", ciphertext: "x", encryptedDek: "x", dekIv: "x",
+        }));
+
+      // Multiple failures
+      const acctBad = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await expect(acctBad.getAccessToken()).rejects.toThrow();
+      await expect(acctBad.getAccessToken()).rejects.toThrow();
+      await expect(acctBad.getAccessToken()).rejects.toThrow();
+
+      const health = await acctBad.getEncryptionHealth();
+      expect(health.failureCount).toBe(3);
+    });
+
+    it("logs structured error on decryption failure (AC 6)", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Corrupt tokens
+      db.prepare("UPDATE auth SET encrypted_tokens = ? WHERE account_id = 'self'")
+        .run(JSON.stringify({
+          iv: "x", ciphertext: "x", encryptedDek: "x", dekIv: "x",
+        }));
+
+      // Spy on console.error for structured log
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const acctBad = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await expect(acctBad.getAccessToken()).rejects.toThrow();
+
+      // Verify structured error was logged
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const loggedMessage = errorSpy.mock.calls[0][0];
+      const parsed = JSON.parse(loggedMessage);
+      expect(parsed.level).toBe("CRITICAL");
+      expect(parsed.event).toBe("encryption_failure");
+      expect(parsed.component).toBe("AccountDO");
+      expect(parsed.error).toBeDefined();
+      expect(parsed.timestamp).toBeDefined();
+
+      errorSpy.mockRestore();
+    });
+
+    it("encryption_monitor table exists after migration V4", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      // Trigger migration
+      await acct.getSyncToken();
+
+      const tables = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name = 'encryption_monitor'",
+        )
+        .all() as Array<{ name: string }>;
+      expect(tables).toHaveLength(1);
+      expect(tables[0].name).toBe("encryption_monitor");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // handleFetch for new endpoints
+  // -------------------------------------------------------------------------
+
+  describe("handleFetch -- key rotation and monitoring endpoints", () => {
+    it("/rotateKey rotates the master key via fetch handler", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const response = await acct.handleFetch(
+        new Request("https://do/rotateKey", {
+          method: "POST",
+          body: JSON.stringify({
+            old_master_key_hex: TEST_MASTER_KEY_HEX,
+            new_master_key_hex: NEW_MASTER_KEY_HEX,
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { ok: boolean };
+      expect(body.ok).toBe(true);
+
+      // Verify tokens accessible with new key
+      const acctNew = new AccountDO(sql, NEW_MASTER_KEY_HEX, mockFetch);
+      const token = await acctNew.getAccessToken();
+      expect(token).toBe(TEST_TOKENS.access_token);
+    });
+
+    it("/getEncryptedDekForBackup exports DEK via fetch handler", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const response = await acct.handleFetch(
+        new Request("https://do/getEncryptedDekForBackup", {
+          method: "POST",
+          body: JSON.stringify({ account_id: "acct_fetch_test" }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as DekBackupEntry;
+      expect(body.accountId).toBe("acct_fetch_test");
+      expect(body.encryptedDek).toBeDefined();
+      expect(body.dekIv).toBeDefined();
+    });
+
+    it("/getEncryptionHealth returns monitoring info via fetch handler", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken(); // trigger success recording
+
+      const response = await acct.handleFetch(
+        new Request("https://do/getEncryptionHealth", {
+          method: "POST",
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        failureCount: number;
+        lastSuccessTs: string | null;
+      };
+      expect(body.failureCount).toBe(0);
+      expect(body.lastSuccessTs).toBeDefined();
     });
   });
 });
