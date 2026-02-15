@@ -11,6 +11,7 @@
  *   #/errors      -> Error Recovery (requires auth)
  *   #/billing     -> Billing & Subscription (requires auth)
  *   #/scheduling  -> Scheduling Dashboard (requires auth)
+ *   #/governance  -> Governance Dashboard (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -24,6 +25,7 @@ import { Policies } from "./pages/Policies";
 import { ErrorRecovery } from "./pages/ErrorRecovery";
 import { Billing } from "./pages/Billing";
 import { Scheduling } from "./pages/Scheduling";
+import { Governance } from "./pages/Governance";
 import {
   fetchSyncStatus,
   fetchAccounts,
@@ -38,6 +40,11 @@ import {
   listSessions,
   commitCandidate,
   cancelSession,
+  fetchCommitments,
+  fetchVips,
+  addVip,
+  removeVip,
+  exportCommitmentProof,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
@@ -173,6 +180,41 @@ function Router() {
     [token],
   );
 
+  // Bound governance functions -- injects current token
+  const boundFetchCommitments = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchCommitments(token);
+  }, [token]);
+
+  const boundFetchVips = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchVips(token);
+  }, [token]);
+
+  const boundAddVip = useCallback(
+    async (payload: import("./lib/governance").AddVipPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      return addVip(token, payload);
+    },
+    [token],
+  );
+
+  const boundRemoveVip = useCallback(
+    async (vipId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return removeVip(token, vipId);
+    },
+    [token],
+  );
+
+  const boundExportProof = useCallback(
+    async (commitmentId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return exportCommitmentProof(token, commitmentId);
+    },
+    [token],
+  );
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -234,6 +276,16 @@ function Router() {
           createSession={boundCreateSchedulingSession}
           commitCandidate={boundCommitCandidate}
           cancelSession={boundCancelSession}
+        />
+      );
+    case "#/governance":
+      return (
+        <Governance
+          fetchCommitments={boundFetchCommitments}
+          fetchVips={boundFetchVips}
+          addVip={boundAddVip}
+          removeVip={boundRemoveVip}
+          exportProof={boundExportProof}
         />
       );
     default:

@@ -373,3 +373,60 @@ export async function commitCandidate(
     { method: "POST", token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Governance
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/commitments -- list all commitments. */
+export async function fetchCommitments(
+  token: string,
+): Promise<import("./governance").Commitment[]> {
+  return apiFetch<import("./governance").Commitment[]>(
+    "/v1/commitments",
+    { token },
+  );
+}
+
+/** GET /api/v1/vips -- list VIP contacts. */
+export async function fetchVips(
+  token: string,
+): Promise<import("./governance").VipContact[]> {
+  return apiFetch<import("./governance").VipContact[]>(
+    "/v1/vips",
+    { token },
+  );
+}
+
+/** POST /api/v1/vips -- add a VIP contact. */
+export async function addVip(
+  token: string,
+  payload: import("./governance").AddVipPayload,
+): Promise<import("./governance").VipContact> {
+  return apiFetch<import("./governance").VipContact>(
+    "/v1/vips",
+    { method: "POST", body: payload, token },
+  );
+}
+
+/** DELETE /api/v1/vips/:id -- remove a VIP contact. */
+export async function removeVip(
+  token: string,
+  vipId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/v1/vips/${encodeURIComponent(vipId)}`,
+    { method: "DELETE", token },
+  );
+}
+
+/** POST /api/v1/commitments/:id/export -- export proof for a commitment. */
+export async function exportCommitmentProof(
+  token: string,
+  commitmentId: string,
+): Promise<import("./governance").ExportProofResponse> {
+  return apiFetch<import("./governance").ExportProofResponse>(
+    `/v1/commitments/${encodeURIComponent(commitmentId)}/export`,
+    { method: "POST", token },
+  );
+}
