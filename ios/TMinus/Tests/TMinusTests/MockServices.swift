@@ -39,8 +39,25 @@ final class MockAPIClient: APIClientProtocol {
     var refreshResult: Result<AuthResponse, Error> = .failure(APIError.unauthorized)
     var fetchEventsResult: Result<[CanonicalEvent], Error> = .success([])
     var fetchAccountsResult: Result<[CalendarAccount], Error> = .success([])
+    var createEventResult: Result<CreateEventResponse, Error> = .success(
+        CreateEventResponse(canonicalEventId: "evt_created_001", originEventId: "google_evt_new")
+    )
+    var proposeTimesResult: Result<ProposeTimesResponse, Error> = .success(
+        ProposeTimesResponse(sessionId: "sched_001", candidates: [])
+    )
+    var commitCandidateResult: Result<CommitCandidateResponse, Error> = .success(
+        CommitCandidateResponse(canonicalEventId: "evt_committed_001", originEventId: "google_evt_committed")
+    )
     var _isAuthenticated = false
     var logoutCalled = false
+
+    // Call tracking
+    var createEventCalled = false
+    var lastCreateEventRequest: CreateEventRequest?
+    var proposeTimesCalled = false
+    var lastProposeTimesRequest: ProposeTimesRequest?
+    var commitCandidateCalled = false
+    var lastCommitCandidateRequest: CommitCandidateRequest?
 
     var isAuthenticated: Bool { _isAuthenticated }
 
@@ -81,9 +98,95 @@ final class MockAPIClient: APIClientProtocol {
         }
     }
 
+    func createEvent(_ request: CreateEventRequest) async throws -> CreateEventResponse {
+        createEventCalled = true
+        lastCreateEventRequest = request
+        switch createEventResult {
+        case .success(let response):
+            return response
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func proposeTimes(_ request: ProposeTimesRequest) async throws -> ProposeTimesResponse {
+        proposeTimesCalled = true
+        lastProposeTimesRequest = request
+        switch proposeTimesResult {
+        case .success(let response):
+            return response
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func commitCandidate(_ request: CommitCandidateRequest) async throws -> CommitCandidateResponse {
+        commitCandidateCalled = true
+        lastCommitCandidateRequest = request
+        switch commitCandidateResult {
+        case .success(let response):
+            return response
+        case .failure(let error):
+            throw error
+        }
+    }
+
     func logout() {
         _isAuthenticated = false
         logoutCalled = true
+    }
+}
+
+// MARK: - Mock Haptic Service
+
+final class MockHapticService: HapticServiceProtocol {
+    var triggeredFeedbacks: [HapticFeedbackType] = []
+    var lastTriggered: HapticFeedbackType?
+
+    func trigger(_ type: HapticFeedbackType) {
+        triggeredFeedbacks.append(type)
+        lastTriggered = type
+    }
+}
+
+// MARK: - Mock Offline Queue
+
+final class MockOfflineQueue: OfflineQueueProtocol {
+    var operations: [PendingOperation] = []
+    var enqueueCalled = false
+    var clearCalled = false
+
+    func enqueue(_ operation: PendingOperation) {
+        enqueueCalled = true
+        operations.append(operation)
+    }
+
+    func dequeue() -> PendingOperation? {
+        guard !operations.isEmpty else { return nil }
+        return operations.removeFirst()
+    }
+
+    func peek() -> PendingOperation? {
+        return operations.first
+    }
+
+    func remove(id: String) {
+        operations.removeAll { $0.id == id }
+    }
+
+    func updateRetryCount(id: String, retryCount: Int) {
+        if let index = operations.firstIndex(where: { $0.id == id }) {
+            operations[index].retryCount = retryCount
+        }
+    }
+
+    var count: Int { operations.count }
+
+    var allOperations: [PendingOperation] { operations }
+
+    func clear() {
+        clearCalled = true
+        operations.removeAll()
     }
 }
 
@@ -189,5 +292,46 @@ enum TestFixtures {
         makeEvent(id: "evt_01C", accountId: "acc_01ACCT001", title: "1:1 with Manager",
                   startISO: "2026-02-16T10:00:00Z", endISO: "2026-02-16T10:30:00Z"),
         makeAllDayEvent(),
+    ]
+
+    static let sampleAccounts: [CalendarAccount] = [
+        CalendarAccount(
+            accountId: "acc_01ACCT001",
+            provider: "google",
+            email: "work@example.com",
+            displayName: "Work Calendar",
+            status: "active"
+        ),
+        CalendarAccount(
+            accountId: "acc_01ACCT002",
+            provider: "google",
+            email: "personal@example.com",
+            displayName: "Personal Calendar",
+            status: "active"
+        ),
+    ]
+
+    static let sampleCandidates: [SchedulingCandidate] = [
+        SchedulingCandidate(
+            candidateId: "cand_001",
+            start: "2026-02-17T09:00:00Z",
+            end: "2026-02-17T09:30:00Z",
+            score: 0.95,
+            reason: "Best available slot"
+        ),
+        SchedulingCandidate(
+            candidateId: "cand_002",
+            start: "2026-02-17T14:00:00Z",
+            end: "2026-02-17T14:30:00Z",
+            score: 0.82,
+            reason: "Afternoon option"
+        ),
+        SchedulingCandidate(
+            candidateId: "cand_003",
+            start: "2026-02-18T10:00:00Z",
+            end: "2026-02-18T10:30:00Z",
+            score: 0.71,
+            reason: "Next day fallback"
+        ),
     ]
 }

@@ -37,6 +37,9 @@ protocol APIClientProtocol {
     func refreshToken() async throws -> AuthResponse
     func fetchEvents(start: Date, end: Date, accountId: String?) async throws -> [CanonicalEvent]
     func fetchAccounts() async throws -> [CalendarAccount]
+    func createEvent(_ request: CreateEventRequest) async throws -> CreateEventResponse
+    func proposeTimes(_ request: ProposeTimesRequest) async throws -> ProposeTimesResponse
+    func commitCandidate(_ request: CommitCandidateRequest) async throws -> CommitCandidateResponse
     var isAuthenticated: Bool { get }
     func logout()
 }
@@ -182,6 +185,61 @@ final class APIClient: APIClientProtocol {
         }
 
         return accounts
+    }
+
+    // MARK: - Event Creation
+
+    func createEvent(_ request: CreateEventRequest) async throws -> CreateEventResponse {
+        let body = try encoder.encode(request)
+
+        let envelope: APIEnvelope<CreateEventResponse> = try await self.request(
+            method: "POST",
+            path: "/v1/events",
+            body: body,
+            authenticated: true
+        )
+
+        guard envelope.ok, let result = envelope.data else {
+            throw APIError.serverError(500, envelope.error ?? "Failed to create event")
+        }
+
+        return result
+    }
+
+    // MARK: - Scheduling
+
+    func proposeTimes(_ request: ProposeTimesRequest) async throws -> ProposeTimesResponse {
+        let body = try encoder.encode(request)
+
+        let envelope: APIEnvelope<ProposeTimesResponse> = try await self.request(
+            method: "POST",
+            path: "/v1/scheduling/propose",
+            body: body,
+            authenticated: true
+        )
+
+        guard envelope.ok, let result = envelope.data else {
+            throw APIError.serverError(500, envelope.error ?? "Failed to propose times")
+        }
+
+        return result
+    }
+
+    func commitCandidate(_ request: CommitCandidateRequest) async throws -> CommitCandidateResponse {
+        let body = try encoder.encode(request)
+
+        let envelope: APIEnvelope<CommitCandidateResponse> = try await self.request(
+            method: "POST",
+            path: "/v1/scheduling/commit",
+            body: body,
+            authenticated: true
+        )
+
+        guard envelope.ok, let result = envelope.data else {
+            throw APIError.serverError(500, envelope.error ?? "Failed to commit candidate")
+        }
+
+        return result
     }
 
     // MARK: - Generic Request

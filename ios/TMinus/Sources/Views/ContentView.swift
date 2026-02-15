@@ -21,7 +21,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             if authVM.isAuthenticated {
-                CalendarView(calendarVM: calendarVM, authVM: authVM)
+                CalendarView(calendarVM: calendarVM, authVM: authVM, apiClient: apiClient)
                     .transition(.move(edge: .trailing))
             } else {
                 LoginView(viewModel: authVM)

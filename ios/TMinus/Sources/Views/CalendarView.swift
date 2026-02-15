@@ -13,6 +13,11 @@ struct CalendarView: View {
     @ObservedObject var calendarVM: CalendarViewModel
     @ObservedObject var authVM: AuthViewModel
 
+    /// API client reference for creating the EventFormViewModel.
+    var apiClient: APIClientProtocol?
+
+    @State private var showEventForm = false
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -54,14 +59,35 @@ struct CalendarView: View {
             #endif
             .toolbar {
                 #if os(iOS)
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showEventForm = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityIdentifier("createEventButton")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     profileMenuButton
                 }
                 #else
                 ToolbarItem(placement: .automatic) {
+                    Button {
+                        showEventForm = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityIdentifier("createEventButton")
+                }
+                ToolbarItem(placement: .automatic) {
                     profileMenuButton
                 }
                 #endif
+            }
+            .sheet(isPresented: $showEventForm) {
+                if let client = apiClient {
+                    EventFormView(viewModel: EventFormViewModel(apiClient: client))
+                }
             }
             .task {
                 await calendarVM.loadEvents()

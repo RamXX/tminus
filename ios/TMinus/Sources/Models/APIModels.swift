@@ -172,6 +172,134 @@ struct CalendarAccount: Decodable, Identifiable, Equatable {
     }
 }
 
+// MARK: - Event Creation
+
+/// Request body for POST /v1/events.
+struct CreateEventRequest: Codable, Equatable {
+    let title: String
+    let accountId: String
+    let start: String  // ISO 8601
+    let end: String    // ISO 8601
+    let allDay: Bool
+    let description: String?
+    let location: String?
+    let visibility: String
+    let transparency: String
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case accountId = "account_id"
+        case start, end
+        case allDay = "all_day"
+        case description, location, visibility, transparency
+    }
+}
+
+/// Response data from POST /v1/events.
+struct CreateEventResponse: Decodable, Equatable {
+    let canonicalEventId: String
+    let originEventId: String
+
+    enum CodingKeys: String, CodingKey {
+        case canonicalEventId = "canonical_event_id"
+        case originEventId = "origin_event_id"
+    }
+}
+
+// MARK: - Scheduling
+
+/// Request body for POST /v1/scheduling/propose.
+struct ProposeTimesRequest: Encodable, Equatable {
+    let title: String
+    let durationMinutes: Int
+    let participants: [String]?  // account IDs or email addresses
+    let constraints: SchedulingConstraints?
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case durationMinutes = "duration_minutes"
+        case participants, constraints
+    }
+}
+
+/// Constraints for scheduling proposals.
+struct SchedulingConstraints: Codable, Equatable {
+    let preferMorning: Bool?
+    let preferAfternoon: Bool?
+    let avoidBackToBack: Bool?
+    let minimumNotice: Int?  // hours
+
+    enum CodingKeys: String, CodingKey {
+        case preferMorning = "prefer_morning"
+        case preferAfternoon = "prefer_afternoon"
+        case avoidBackToBack = "avoid_back_to_back"
+        case minimumNotice = "minimum_notice"
+    }
+}
+
+/// A scheduling time candidate returned by propose endpoint.
+struct SchedulingCandidate: Decodable, Identifiable, Equatable {
+    let candidateId: String
+    let start: String  // ISO 8601
+    let end: String    // ISO 8601
+    let score: Double
+    let reason: String?
+
+    var id: String { candidateId }
+
+    enum CodingKeys: String, CodingKey {
+        case candidateId = "candidate_id"
+        case start, end, score, reason
+    }
+
+    /// Resolved start date.
+    var startDate: Date? {
+        ISO8601DateFormatter().date(from: start)
+            ?? DateFormatter.flexibleISO8601.date(from: start)
+    }
+
+    /// Resolved end date.
+    var endDate: Date? {
+        ISO8601DateFormatter().date(from: end)
+            ?? DateFormatter.flexibleISO8601.date(from: end)
+    }
+}
+
+/// Response from POST /v1/scheduling/propose.
+struct ProposeTimesResponse: Decodable, Equatable {
+    let sessionId: String
+    let candidates: [SchedulingCandidate]
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case candidates
+    }
+}
+
+/// Request body for POST /v1/scheduling/commit.
+struct CommitCandidateRequest: Codable, Equatable {
+    let sessionId: String
+    let candidateId: String
+    let accountId: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case candidateId = "candidate_id"
+        case accountId = "account_id"
+    }
+}
+
+/// Response from POST /v1/scheduling/commit.
+struct CommitCandidateResponse: Decodable, Equatable {
+    let canonicalEventId: String
+    let originEventId: String
+
+    enum CodingKeys: String, CodingKey {
+        case canonicalEventId = "canonical_event_id"
+        case originEventId = "origin_event_id"
+    }
+}
+
 // MARK: - Helpers
 
 extension DateFormatter {
