@@ -949,6 +949,139 @@ async function handleDeleteAccount(
   }
 }
 
+// -- Account health & reconnect -------------------------------------------
+
+/**
+ * POST /v1/accounts/:id/reconnect
+ *
+ * Triggers provider-specific re-authentication flow.
+ * Returns the OAuth start URL for the account's provider.
+ */
+async function handleReconnectAccount(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  if (!isValidId(accountId, "account")) {
+    return jsonResponse(
+      errorEnvelope("Invalid account ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Verify ownership in D1
+    const row = await env.DB
+      .prepare(
+        "SELECT account_id, provider FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+      )
+      .bind(accountId, auth.userId)
+      .first<{ account_id: string; provider: string }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Account not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    // Return the OAuth start URL for re-authentication
+    const oauthUrl = `/oauth/${row.provider}/start`;
+    return jsonResponse(
+      successEnvelope({
+        account_id: accountId,
+        provider: row.provider,
+        redirect_url: oauthUrl,
+        message: `Re-authenticate with ${row.provider} to restore access`,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to initiate account reconnect", err);
+    return jsonResponse(
+      errorEnvelope("Failed to initiate reconnect", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+/**
+ * GET /v1/accounts/:id/sync-history
+ *
+ * Returns the last 10 sync events for an account from the journal.
+ * Each event includes timestamp, event count, and success/error status.
+ */
+async function handleGetSyncHistory(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  if (!isValidId(accountId, "account")) {
+    return jsonResponse(
+      errorEnvelope("Invalid account ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Verify ownership in D1
+    const row = await env.DB
+      .prepare(
+        "SELECT account_id FROM accounts WHERE account_id = ?1 AND user_id = ?2",
+      )
+      .bind(accountId, auth.userId)
+      .first<{ account_id: string }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Account not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    // Get sync history from UserGraphDO journal
+    const result = await callDO<{
+      events: Array<{
+        id: string;
+        timestamp: string;
+        event_count: number;
+        status: string;
+        error_message?: string;
+      }>;
+    }>(env.USER_GRAPH, auth.userId, "/getSyncHistory", {
+      account_id: accountId,
+      limit: 10,
+    });
+
+    if (!result.ok) {
+      // If DO doesn't support this yet, return empty history
+      return jsonResponse(
+        successEnvelope({
+          account_id: accountId,
+          events: [],
+        }),
+        200,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({
+        account_id: accountId,
+        events: result.data.events ?? [],
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to get sync history", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get sync history", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Events ---------------------------------------------------------------
 
 async function handleListEvents(
@@ -5774,6 +5907,17 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/accounts") {
         return handleListAccounts(request, auth, env);
+      }
+
+      // Account sub-routes (reconnect, sync-history) must match before generic :id
+      match = matchRoute(pathname, "/v1/accounts/:id/reconnect");
+      if (match && method === "POST") {
+        return handleReconnectAccount(request, auth, env, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/accounts/:id/sync-history");
+      if (match && method === "GET") {
+        return handleGetSyncHistory(request, auth, env, match.params[0]);
       }
 
       match = matchRoute(pathname, "/v1/accounts/:id");

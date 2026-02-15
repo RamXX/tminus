@@ -706,3 +706,50 @@ export async function completeOnboardingSession(
     token,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Provider Health Dashboard
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/accounts/health -- accounts with health status and tier info. */
+export async function fetchAccountsHealth(
+  token: string,
+): Promise<import("./provider-health").AccountsHealthResponse> {
+  return apiFetch<import("./provider-health").AccountsHealthResponse>(
+    "/v1/accounts",
+    { token },
+  );
+}
+
+/** POST /api/v1/accounts/:id/reconnect -- trigger re-auth for an account. */
+export async function reconnectAccount(
+  token: string,
+  accountId: string,
+): Promise<{ redirect_url: string }> {
+  return apiFetch<{ redirect_url: string }>(
+    `/v1/accounts/${encodeURIComponent(accountId)}/reconnect`,
+    { method: "POST", token },
+  );
+}
+
+/** DELETE /api/v1/accounts/:id -- disconnect and clean up. */
+export async function removeAccount(
+  token: string,
+  accountId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/v1/accounts/${encodeURIComponent(accountId)}`,
+    { method: "DELETE", token },
+  );
+}
+
+/** GET /api/v1/accounts/:id/sync-history -- recent sync events. */
+export async function fetchSyncHistory(
+  token: string,
+  accountId: string,
+): Promise<import("./provider-health").SyncHistoryResponse> {
+  return apiFetch<import("./provider-health").SyncHistoryResponse>(
+    `/v1/accounts/${encodeURIComponent(accountId)}/sync-history`,
+    { token },
+  );
+}

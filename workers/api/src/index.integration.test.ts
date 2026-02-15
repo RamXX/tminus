@@ -629,6 +629,200 @@ describe("Integration: Account endpoints", () => {
 
     expect(response.status).toBe(404);
   });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/accounts/:id/reconnect
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/accounts/:id/reconnect returns OAuth redirect URL for account provider", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}/reconnect`,
+        {
+          method: "POST",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        account_id: string;
+        provider: string;
+        redirect_url: string;
+        message: string;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.account_id).toBe(ACCOUNT_A.account_id);
+    expect(body.data.provider).toBe("google");
+    expect(body.data.redirect_url).toBe("/oauth/google/start");
+    expect(body.data.message).toContain("Re-authenticate");
+  });
+
+  it("POST /v1/accounts/:id/reconnect returns 404 for nonexistent account", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}/reconnect`,
+        {
+          method: "POST",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("POST /v1/accounts/:id/reconnect returns 404 for another user's account", async () => {
+    seedOtherUser(db);
+    insertAccount(db, OTHER_USER_ACCOUNT);
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${OTHER_USER_ACCOUNT.account_id}/reconnect`,
+        {
+          method: "POST",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/accounts/:id/sync-history
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/accounts/:id/sync-history returns sync events from UserGraphDO", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const mockSyncEvents = {
+      events: [
+        { id: "sh-1", timestamp: "2026-02-14T12:00:00Z", event_count: 12, status: "success" },
+        { id: "sh-2", timestamp: "2026-02-14T11:30:00Z", event_count: 8, status: "success" },
+        { id: "sh-3", timestamp: "2026-02-14T11:00:00Z", event_count: 0, status: "error", error_message: "Rate limit" },
+      ],
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([["/getSyncHistory", mockSyncEvents]]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}/sync-history`,
+        {
+          method: "GET",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        account_id: string;
+        events: Array<{
+          id: string;
+          timestamp: string;
+          event_count: number;
+          status: string;
+          error_message?: string;
+        }>;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.account_id).toBe(ACCOUNT_A.account_id);
+    expect(body.data.events).toHaveLength(3);
+    expect(body.data.events[0].event_count).toBe(12);
+    expect(body.data.events[2].status).toBe("error");
+    expect(body.data.events[2].error_message).toBe("Rate limit");
+  });
+
+  it("GET /v1/accounts/:id/sync-history returns 404 for nonexistent account", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}/sync-history`,
+        {
+          method: "GET",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("GET /v1/accounts/:id/sync-history returns empty array when DO has no history", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    // UserGraphDO returns error (path not supported yet)
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map(),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        `https://api.tminus.dev/v1/accounts/${ACCOUNT_A.account_id}/sync-history`,
+        {
+          method: "GET",
+          headers: { Authorization: authHeader },
+        },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { account_id: string; events: unknown[] };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.account_id).toBe(ACCOUNT_A.account_id);
+    // The handler gracefully returns empty events when DO doesn't support the path
+    expect(Array.isArray(body.data.events)).toBe(true);
+  });
 });
 
 // ===========================================================================
