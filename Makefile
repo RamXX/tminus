@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -55,6 +55,13 @@ test-e2e-phase2b-staging: install
 
 test-e2e-phase2b-production: install
 	MCP_BASE_URL=https://mcp.tminus.ink npx vitest run --config vitest.e2e.phase2b.config.ts
+
+# ---- Phase 3A E2E validation ----
+# Scheduling engine E2E tests: propose times, commit candidates, verify events.
+# Uses real SQLite + real UserGraphDO + real SchedulingWorkflow (no HTTP server).
+
+test-e2e-phase3a: install
+	npx vitest run --config vitest.e2e.phase3a.config.ts
 
 lint: install
 	pnpm run lint

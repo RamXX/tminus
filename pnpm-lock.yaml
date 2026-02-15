@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      better-sqlite3:
+        specifier: ^12.6.2
+        version: 12.6.2
       smol-toml:
         specifier: ^1.6.0
         version: 1.6.0
