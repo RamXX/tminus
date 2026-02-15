@@ -20,6 +20,57 @@ database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
 
+[vars]
+ENVIRONMENT = "development"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # MASTER_KEY          -- envelope encryption master key
 # JWT_SECRET          -- API auth JWT signing secret
+
+# ===========================================================================
+# Staging environment: tminus-webhook-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-webhook-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.routes]]
+pattern = "webhooks-staging.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "STAGING_DB_ID_PLACEHOLDER"
+
+[[env.staging.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue-staging"
+
+# ===========================================================================
+# Production environment: tminus-webhook-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-webhook-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[[env.production.routes]]
+pattern = "webhooks.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+
+[[env.production.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"

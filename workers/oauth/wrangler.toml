@@ -34,6 +34,9 @@ binding = "ONBOARDING_WORKFLOW"
 name = "onboarding-workflow"
 class_name = "OnboardingWorkflow"
 
+[vars]
+ENVIRONMENT = "development"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
@@ -41,3 +44,73 @@ class_name = "OnboardingWorkflow"
 # MS_CLIENT_SECRET    -- Microsoft Entra ID (Azure AD) client secret
 # MASTER_KEY          -- envelope encryption master key
 # JWT_SECRET          -- API auth JWT signing secret
+
+# ===========================================================================
+# Staging environment: tminus-oauth-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-oauth-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.routes]]
+pattern = "oauth-staging.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "STAGING_DB_ID_PLACEHOLDER"
+
+[[env.staging.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.workflows]]
+binding = "ONBOARDING_WORKFLOW"
+name = "onboarding-workflow-staging"
+class_name = "OnboardingWorkflow"
+
+# ===========================================================================
+# Production environment: tminus-oauth-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-oauth-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[[env.production.routes]]
+pattern = "oauth.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+
+[[env.production.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-production"
+
+[[env.production.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-production"
+
+[[env.production.workflows]]
+binding = "ONBOARDING_WORKFLOW"
+name = "onboarding-workflow"
+class_name = "OnboardingWorkflow"

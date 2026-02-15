@@ -48,5 +48,90 @@ binding = "RECONCILE_WORKFLOW"
 name = "reconcile-workflow"
 class_name = "ReconcileWorkflow"
 
+[vars]
+ENVIRONMENT = "development"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # MASTER_KEY          -- envelope encryption master key
+
+# ===========================================================================
+# Staging environment: tminus-cron-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-cron-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[env.staging.triggers]
+crons = [
+  "0 */6 * * *",   # Channel renewal: every 6 hours
+  "0 */12 * * *",  # Token health check: every 12 hours
+  "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+]
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "STAGING_DB_ID_PLACEHOLDER"
+
+[[env.staging.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.queues.producers]]
+binding = "RECONCILE_QUEUE"
+queue = "tminus-reconcile-queue-staging"
+
+[[env.staging.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue-staging"
+
+[[env.staging.workflows]]
+binding = "RECONCILE_WORKFLOW"
+name = "reconcile-workflow-staging"
+class_name = "ReconcileWorkflow"
+
+# ===========================================================================
+# Production environment: tminus-cron-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-cron-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[env.production.triggers]
+crons = [
+  "0 */6 * * *",   # Channel renewal: every 6 hours
+  "0 */12 * * *",  # Token health check: every 12 hours
+  "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+]
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+
+[[env.production.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-production"
+
+[[env.production.queues.producers]]
+binding = "RECONCILE_QUEUE"
+queue = "tminus-reconcile-queue"
+
+[[env.production.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+[[env.production.workflows]]
+binding = "RECONCILE_WORKFLOW"
+name = "reconcile-workflow"
+class_name = "ReconcileWorkflow"

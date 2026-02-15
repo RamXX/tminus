@@ -548,4 +548,460 @@ describe("wrangler.toml configuration validation", () => {
       expect(workflows).toContain("RECONCILE_WORKFLOW");
     });
   });
+
+  // ==========================================================================
+  // TM-as6.5: Multi-environment wrangler config validation
+  // ==========================================================================
+
+  describe("TM-as6.5: Multi-environment wrangler config", () => {
+    // --- Helper to extract env-level config ---
+    function getEnv(
+      config: Record<string, unknown>,
+      envName: string
+    ): Record<string, unknown> | undefined {
+      const envSection = config["env"] as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      if (!envSection) return undefined;
+      return envSection[envName];
+    }
+
+    /** Extract D1 database entries from an env section. */
+    function envD1Databases(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const entries = envConfig["d1_databases"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(entries) ? entries : [];
+    }
+
+    /** Extract KV namespace entries from an env section. */
+    function envKvNamespaces(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const entries = envConfig["kv_namespaces"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(entries) ? entries : [];
+    }
+
+    /** Extract queue producer entries from an env section. */
+    function envQueueProducers(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const queues = envConfig["queues"] as
+        | Record<string, unknown>
+        | undefined;
+      if (!queues) return [];
+      const producers = queues["producers"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(producers) ? producers : [];
+    }
+
+    /** Extract queue consumer entries from an env section. */
+    function envQueueConsumers(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const queues = envConfig["queues"] as
+        | Record<string, unknown>
+        | undefined;
+      if (!queues) return [];
+      const consumers = queues["consumers"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(consumers) ? consumers : [];
+    }
+
+    /** Extract route patterns from an env section. */
+    function envRoutePatterns(
+      envConfig: Record<string, unknown>
+    ): string[] {
+      const routes = envConfig["routes"] as
+        | Array<Record<string, string>>
+        | undefined;
+      if (!Array.isArray(routes)) return [];
+      return routes.map((r) => r.pattern);
+    }
+
+    /** Extract ENVIRONMENT var from env section. */
+    function envEnvironmentVar(
+      envConfig: Record<string, unknown>
+    ): string | undefined {
+      const vars = envConfig["vars"] as
+        | Record<string, string>
+        | undefined;
+      return vars?.ENVIRONMENT;
+    }
+
+    /** Extract DO bindings from an env section. */
+    function envDoBindings(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const doSection = envConfig["durable_objects"] as
+        | Record<string, unknown>
+        | undefined;
+      if (!doSection) return [];
+      const bindings = doSection["bindings"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(bindings) ? bindings : [];
+    }
+
+    /** Extract workflow entries from an env section. */
+    function envWorkflows(
+      envConfig: Record<string, unknown>
+    ): Array<Record<string, string>> {
+      const entries = envConfig["workflows"] as
+        | Array<Record<string, string>>
+        | undefined;
+      return Array.isArray(entries) ? entries : [];
+    }
+
+    // ---- AC1: All workers have stage+prod in wrangler config ----
+
+    describe("AC1: All workers have env.staging and env.production sections", () => {
+      for (const workerName of Object.keys(WORKER_PATHS)) {
+        it(`${workerName} has env.staging section`, () => {
+          const staging = getEnv(configs[workerName], "staging");
+          expect(staging).toBeDefined();
+        });
+
+        it(`${workerName} has env.production section`, () => {
+          const production = getEnv(configs[workerName], "production");
+          expect(production).toBeDefined();
+        });
+
+        it(`${workerName} staging has ENVIRONMENT=staging var`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          expect(envEnvironmentVar(staging)).toBe("staging");
+        });
+
+        it(`${workerName} production has ENVIRONMENT=production var`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          expect(envEnvironmentVar(production)).toBe("production");
+        });
+
+        it(`${workerName} staging has worker name with -staging suffix`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const baseName = configs[workerName]["name"] as string;
+          expect(staging["name"]).toBe(`${baseName}-staging`);
+        });
+
+        it(`${workerName} production has worker name with -production suffix`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          const baseName = configs[workerName]["name"] as string;
+          expect(production["name"]).toBe(`${baseName}-production`);
+        });
+      }
+    });
+
+    // ---- AC2: Stage uses separate D1 database ----
+
+    describe("AC2: Stage uses separate D1 database", () => {
+      for (const workerName of Object.keys(WORKER_PATHS)) {
+        it(`${workerName} staging D1 uses tminus-registry-staging`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const d1 = envD1Databases(staging);
+          expect(d1.length).toBeGreaterThan(0);
+          const db = d1.find((d) => d.binding === "DB");
+          expect(db).toBeDefined();
+          expect(db!.database_name).toBe("tminus-registry-staging");
+        });
+
+        it(`${workerName} staging D1 ID differs from production D1 ID`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const production = getEnv(configs[workerName], "production")!;
+          const stagingDb = envD1Databases(staging).find(
+            (d) => d.binding === "DB"
+          );
+          const prodDb = envD1Databases(production).find(
+            (d) => d.binding === "DB"
+          );
+          expect(stagingDb).toBeDefined();
+          expect(prodDb).toBeDefined();
+          expect(stagingDb!.database_id).not.toBe(prodDb!.database_id);
+        });
+
+        it(`${workerName} production D1 uses tminus-registry (not staging)`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          const d1 = envD1Databases(production);
+          const db = d1.find((d) => d.binding === "DB");
+          expect(db).toBeDefined();
+          expect(db!.database_name).toBe("tminus-registry");
+        });
+      }
+    });
+
+    // ---- AC3: Stage uses separate KV namespaces and queues ----
+
+    describe("AC3: Stage uses separate KV namespaces and queues", () => {
+      // API worker has KV (SESSIONS, RATE_LIMITS)
+      it("api staging has separate KV namespace IDs from production", () => {
+        const staging = getEnv(configs["api"], "staging")!;
+        const production = getEnv(configs["api"], "production")!;
+        const stagingKv = envKvNamespaces(staging);
+        const prodKv = envKvNamespaces(production);
+
+        // staging should have same bindings but different IDs
+        for (const stagingNs of stagingKv) {
+          const prodNs = prodKv.find((p) => p.binding === stagingNs.binding);
+          expect(prodNs).toBeDefined();
+          expect(stagingNs.id).not.toBe(prodNs!.id);
+        }
+      });
+
+      // Workers with queue producers should use staging queues
+      const workersWithQueues: Record<string, string[]> = {
+        api: ["SYNC_QUEUE", "WRITE_QUEUE"],
+        webhook: ["SYNC_QUEUE"],
+        "sync-consumer": ["WRITE_QUEUE", "SYNC_QUEUE"],
+        cron: ["RECONCILE_QUEUE", "SYNC_QUEUE"],
+      };
+
+      for (const [workerName, expectedBindings] of Object.entries(
+        workersWithQueues
+      )) {
+        it(`${workerName} staging queue producers use -staging suffix`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const producers = envQueueProducers(staging);
+          for (const binding of expectedBindings) {
+            const producer = producers.find((p) => p.binding === binding);
+            expect(producer).toBeDefined();
+            expect(producer!.queue).toMatch(/-staging$/);
+          }
+        });
+
+        it(`${workerName} production queue producers do NOT use -staging suffix`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          const producers = envQueueProducers(production);
+          for (const binding of expectedBindings) {
+            const producer = producers.find((p) => p.binding === binding);
+            expect(producer).toBeDefined();
+            expect(producer!.queue).not.toMatch(/-staging$/);
+          }
+        });
+      }
+
+      // Queue consumers use staging queues
+      it("sync-consumer staging consumes from tminus-sync-queue-staging", () => {
+        const staging = getEnv(configs["sync-consumer"], "staging")!;
+        const consumers = envQueueConsumers(staging);
+        const syncConsumer = consumers.find(
+          (c) => c.queue === "tminus-sync-queue-staging"
+        );
+        expect(syncConsumer).toBeDefined();
+      });
+
+      it("write-consumer staging consumes from tminus-write-queue-staging", () => {
+        const staging = getEnv(configs["write-consumer"], "staging")!;
+        const consumers = envQueueConsumers(staging);
+        const writeConsumer = consumers.find(
+          (c) => c.queue === "tminus-write-queue-staging"
+        );
+        expect(writeConsumer).toBeDefined();
+      });
+
+      it("sync-consumer staging DLQ uses -staging suffix", () => {
+        const staging = getEnv(configs["sync-consumer"], "staging")!;
+        const consumers = envQueueConsumers(staging);
+        const syncConsumer = consumers.find(
+          (c) => c.queue === "tminus-sync-queue-staging"
+        );
+        expect(syncConsumer).toBeDefined();
+        expect(syncConsumer!.dead_letter_queue).toBe(
+          "tminus-sync-queue-staging-dlq"
+        );
+      });
+
+      it("write-consumer staging DLQ uses -staging suffix", () => {
+        const staging = getEnv(configs["write-consumer"], "staging")!;
+        const consumers = envQueueConsumers(staging);
+        const writeConsumer = consumers.find(
+          (c) => c.queue === "tminus-write-queue-staging"
+        );
+        expect(writeConsumer).toBeDefined();
+        expect(writeConsumer!.dead_letter_queue).toBe(
+          "tminus-write-queue-staging-dlq"
+        );
+      });
+    });
+
+    // ---- AC4: Routes map subdomains correctly per env ----
+
+    describe("AC4: Routes map subdomains correctly per env", () => {
+      // Workers with HTTP routes (not consumers or cron)
+      const routedWorkers: Record<
+        string,
+        { staging: string; production: string }
+      > = {
+        api: {
+          staging: "api-staging.tminus.ink/*",
+          production: "api.tminus.ink/*",
+        },
+        oauth: {
+          staging: "oauth-staging.tminus.ink/*",
+          production: "oauth.tminus.ink/*",
+        },
+        webhook: {
+          staging: "webhooks-staging.tminus.ink/*",
+          production: "webhooks.tminus.ink/*",
+        },
+      };
+
+      for (const [workerName, routes] of Object.entries(routedWorkers)) {
+        it(`${workerName} staging route is ${routes.staging}`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const patterns = envRoutePatterns(staging);
+          expect(patterns).toContain(routes.staging);
+        });
+
+        it(`${workerName} production route is ${routes.production}`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          const patterns = envRoutePatterns(production);
+          expect(patterns).toContain(routes.production);
+        });
+
+        it(`${workerName} staging routes use zone_name = tminus.ink`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const routes = staging["routes"] as Array<Record<string, string>>;
+          for (const route of routes) {
+            expect(route.zone_name).toBe("tminus.ink");
+          }
+        });
+      }
+
+      // Consumers and cron do NOT have routes (they are triggered by queues/cron)
+      for (const workerName of [
+        "sync-consumer",
+        "write-consumer",
+        "cron",
+      ]) {
+        it(`${workerName} staging does not define routes (not HTTP-routed)`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const patterns = envRoutePatterns(staging);
+          expect(patterns).toHaveLength(0);
+        });
+      }
+    });
+
+    // ---- AC5/AC6: Config validity (structural) ----
+
+    describe("AC5/AC6: Env configs are structurally valid for wrangler deploy", () => {
+      // Workers with DOs that reference tminus-api should reference the
+      // correct staging/production script name in their env sections
+      const workersWithDoRefs = [
+        "oauth",
+        "sync-consumer",
+        "write-consumer",
+        "cron",
+      ];
+
+      for (const workerName of workersWithDoRefs) {
+        it(`${workerName} staging DO refs point to tminus-api-staging`, () => {
+          const staging = getEnv(configs[workerName], "staging")!;
+          const doBindings = envDoBindings(staging);
+          expect(doBindings.length).toBeGreaterThan(0);
+          for (const binding of doBindings) {
+            if (binding.script_name) {
+              expect(binding.script_name).toBe("tminus-api-staging");
+            }
+          }
+        });
+
+        it(`${workerName} production DO refs point to tminus-api-production`, () => {
+          const production = getEnv(configs[workerName], "production")!;
+          const doBindings = envDoBindings(production);
+          expect(doBindings.length).toBeGreaterThan(0);
+          for (const binding of doBindings) {
+            if (binding.script_name) {
+              expect(binding.script_name).toBe("tminus-api-production");
+            }
+          }
+        });
+      }
+
+      // oauth and cron have workflows - staging should use -staging names
+      it("oauth staging workflow uses staging name", () => {
+        const staging = getEnv(configs["oauth"], "staging")!;
+        const workflows = envWorkflows(staging);
+        const onboarding = workflows.find(
+          (w) => w.binding === "ONBOARDING_WORKFLOW"
+        );
+        expect(onboarding).toBeDefined();
+        expect(onboarding!.name).toBe("onboarding-workflow-staging");
+      });
+
+      it("cron staging workflow uses staging name", () => {
+        const staging = getEnv(configs["cron"], "staging")!;
+        const workflows = envWorkflows(staging);
+        const reconcile = workflows.find(
+          (w) => w.binding === "RECONCILE_WORKFLOW"
+        );
+        expect(reconcile).toBeDefined();
+        expect(reconcile!.name).toBe("reconcile-workflow-staging");
+      });
+
+      it("oauth production workflow uses production name", () => {
+        const production = getEnv(configs["oauth"], "production")!;
+        const workflows = envWorkflows(production);
+        const onboarding = workflows.find(
+          (w) => w.binding === "ONBOARDING_WORKFLOW"
+        );
+        expect(onboarding).toBeDefined();
+        expect(onboarding!.name).toBe("onboarding-workflow");
+      });
+
+      it("cron production workflow uses production name", () => {
+        const production = getEnv(configs["cron"], "production")!;
+        const workflows = envWorkflows(production);
+        const reconcile = workflows.find(
+          (w) => w.binding === "RECONCILE_WORKFLOW"
+        );
+        expect(reconcile).toBeDefined();
+        expect(reconcile!.name).toBe("reconcile-workflow");
+      });
+
+      // Cron triggers should be preserved in staging and production
+      it("cron staging preserves cron triggers", () => {
+        const staging = getEnv(configs["cron"], "staging")!;
+        const triggers = staging["triggers"] as
+          | Record<string, unknown>
+          | undefined;
+        expect(triggers).toBeDefined();
+        const crons = triggers!["crons"] as string[];
+        expect(crons.length).toBeGreaterThanOrEqual(3);
+      });
+
+      it("cron production preserves cron triggers", () => {
+        const production = getEnv(configs["cron"], "production")!;
+        const triggers = production["triggers"] as
+          | Record<string, unknown>
+          | undefined;
+        expect(triggers).toBeDefined();
+        const crons = triggers!["crons"] as string[];
+        expect(crons.length).toBeGreaterThanOrEqual(3);
+      });
+
+      // CPU limits should be preserved for consumers in staging
+      it("sync-consumer staging preserves CPU limits", () => {
+        const staging = getEnv(configs["sync-consumer"], "staging")!;
+        const limits = staging["limits"] as
+          | Record<string, number>
+          | undefined;
+        expect(limits).toBeDefined();
+        expect(limits!.cpu_ms).toBe(300000);
+      });
+
+      it("write-consumer staging preserves CPU limits", () => {
+        const staging = getEnv(configs["write-consumer"], "staging")!;
+        const limits = staging["limits"] as
+          | Record<string, number>
+          | undefined;
+        expect(limits).toBeDefined();
+        expect(limits!.cpu_ms).toBe(300000);
+      });
+    });
+  });
 });

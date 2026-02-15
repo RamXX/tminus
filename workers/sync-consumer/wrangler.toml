@@ -49,7 +49,94 @@ queue = "tminus-sync-queue"
 max_retries = 5
 dead_letter_queue = "tminus-sync-queue-dlq"
 
+[vars]
+ENVIRONMENT = "development"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
 # MASTER_KEY          -- envelope encryption master key
+
+# ===========================================================================
+# Staging environment: tminus-sync-consumer-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-sync-consumer-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[env.staging.limits]
+cpu_ms = 300000
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "STAGING_DB_ID_PLACEHOLDER"
+
+[[env.staging.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue-staging"
+
+[[env.staging.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue-staging"
+
+[[env.staging.queues.consumers]]
+queue = "tminus-sync-queue-staging"
+max_retries = 5
+dead_letter_queue = "tminus-sync-queue-staging-dlq"
+
+# ===========================================================================
+# Production environment: tminus-sync-consumer-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-sync-consumer-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[env.production.limits]
+cpu_ms = 300000
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+
+[[env.production.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+script_name = "tminus-api-production"
+
+[[env.production.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+script_name = "tminus-api-production"
+
+[[env.production.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"
+
+[[env.production.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+[[env.production.queues.consumers]]
+queue = "tminus-sync-queue"
+max_retries = 5
+dead_letter_queue = "tminus-sync-queue-dlq"
