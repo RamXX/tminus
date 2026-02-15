@@ -41,12 +41,16 @@ export const D1_MIGRATIONS_PATH = "migrations/d1-registry";
 /**
  * Secret mapping: which secrets go to which workers.
  * Key = env var name, Value = array of worker names (without tminus- prefix).
+ *
+ * OAuth secrets are on BOTH api and oauth because:
+ *   - oauth: handles OAuth callback flows (authorization code exchange)
+ *   - api: hosts AccountDO which performs token refresh for connected accounts
  */
 export const SECRET_MAP = {
-  GOOGLE_CLIENT_ID: ["oauth"],
-  GOOGLE_CLIENT_SECRET: ["oauth"],
-  MS_CLIENT_ID: ["oauth"],
-  MS_CLIENT_SECRET: ["oauth"],
+  GOOGLE_CLIENT_ID: ["api", "oauth"],
+  GOOGLE_CLIENT_SECRET: ["api", "oauth"],
+  MS_CLIENT_ID: ["api", "oauth"],
+  MS_CLIENT_SECRET: ["api", "oauth"],
   MASTER_KEY: ["api", "oauth"],
   JWT_SECRET: ["api", "oauth"],
 };

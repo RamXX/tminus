@@ -54,10 +54,12 @@ binding = "RATE_LIMITS"
 id = "placeholder-rate-limits-id"  # Replace with real ID after `wrangler kv namespace create tminus-rate-limits`
 
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
-# GOOGLE_CLIENT_ID
-# GOOGLE_CLIENT_SECRET
-# MASTER_KEY          -- envelope encryption master key
 # JWT_SECRET          -- API auth JWT signing secret
+# MASTER_KEY          -- envelope encryption master key (DEK wrapping in AccountDO)
+# GOOGLE_CLIENT_ID    -- Google OAuth client ID (AccountDO token refresh)
+# GOOGLE_CLIENT_SECRET-- Google OAuth client secret (AccountDO token refresh)
+# MS_CLIENT_ID        -- Microsoft Entra ID client ID (AccountDO token refresh)
+# MS_CLIENT_SECRET    -- Microsoft Entra ID client secret (AccountDO token refresh)
 
 # ===========================================================================
 # Staging environment: tminus-api-staging

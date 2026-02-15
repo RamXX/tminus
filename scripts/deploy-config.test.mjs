@@ -94,9 +94,12 @@ describe("buildSecretPlan", () => {
     };
     const plan = buildSecretPlan(envVars);
 
-    // GOOGLE_CLIENT_ID -> oauth only
-    expect(plan.filter((p) => p.secretName === "GOOGLE_CLIENT_ID")).toEqual([
-      { secretName: "GOOGLE_CLIENT_ID", workerName: "tminus-oauth", value: "gid" },
+    // GOOGLE_CLIENT_ID -> api AND oauth (api hosts AccountDO for token refresh)
+    const gcidEntries = plan.filter((p) => p.secretName === "GOOGLE_CLIENT_ID");
+    expect(gcidEntries).toHaveLength(2);
+    expect(gcidEntries.map((e) => e.workerName).sort()).toEqual([
+      "tminus-api",
+      "tminus-oauth",
     ]);
 
     // MASTER_KEY -> api AND oauth

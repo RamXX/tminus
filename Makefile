@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns smoke-test install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -82,3 +82,23 @@ smoke-test:
 
 smoke-test-staging:
 	node scripts/smoke-test.mjs --env staging
+
+# ---- Secrets management ----
+# Dedicated secrets setup for all workers across environments.
+# See SECRETS.md for full documentation.
+
+secrets-setup:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/setup-secrets.mjs
+
+secrets-setup-staging:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/setup-secrets.mjs --env staging
+
+secrets-setup-production:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/setup-secrets.mjs --env production
+
+secrets-setup-dry-run:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/setup-secrets.mjs --dry-run
