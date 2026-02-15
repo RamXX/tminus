@@ -291,3 +291,14 @@ export {
   CORS_EXPOSED_HEADERS,
   CORS_MAX_AGE,
 } from "./middleware/cors";
+
+// Re-export iCalendar generation (Phase 5A: CalDAV feed)
+export {
+  formatICalDate,
+  formatICalDateTime,
+  buildVEvent,
+  buildVCalendar,
+  collectTimezones,
+  foldLine,
+} from "./ical";
+export type { VCalendarOptions } from "./ical";

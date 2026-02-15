@@ -2996,3 +2996,292 @@ describe("Integration: Enhanced Commitment Proof Export", () => {
     expect(body.error).toContain("format must be");
   });
 });
+
+// ===========================================================================
+// CalDAV Feed Integration Tests (Phase 5A)
+// ===========================================================================
+
+describe("Integration: CalDAV feed endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_ORG.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("GET /v1/caldav/:user_id/calendar.ics returns valid iCalendar with events", async () => {
+    // Configure DO to return canonical events
+    const mockEvents = [
+      {
+        canonical_event_id: "evt_01HXY000000000000000000001",
+        origin_account_id: "acc_01HXY0000000000000000000AA",
+        origin_event_id: "google-evt-001",
+        title: "Morning standup",
+        description: "Daily sync",
+        location: "Room 101",
+        start: { dateTime: "2025-06-15T09:00:00Z" },
+        end: { dateTime: "2025-06-15T09:15:00Z" },
+        all_day: false,
+        status: "confirmed",
+        visibility: "default",
+        transparency: "opaque",
+        source: "provider",
+        version: 1,
+        created_at: "2025-06-01T00:00:00Z",
+        updated_at: "2025-06-01T00:00:00Z",
+      },
+      {
+        canonical_event_id: "evt_01HXY000000000000000000002",
+        origin_account_id: "acc_01HXY0000000000000000000AA",
+        origin_event_id: "google-evt-002",
+        title: "Team offsite",
+        description: null,
+        location: null,
+        start: { date: "2025-06-20" },
+        end: { date: "2025-06-21" },
+        all_day: true,
+        status: "confirmed",
+        visibility: "default",
+        transparency: "opaque",
+        source: "provider",
+        version: 1,
+        created_at: "2025-06-01T00:00:00Z",
+        updated_at: "2025-06-01T00:00:00Z",
+      },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: mockEvents, cursor: null, has_more: false }],
+      ]),
+    });
+
+    const env = buildEnv(d1, userGraphDO);
+    const handler = createHandler();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.test/v1/caldav/${TEST_USER.user_id}/calendar.ics`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    // Should return 200 with iCalendar content
+    expect(response.status).toBe(200);
+
+    // Verify Content-Type header
+    expect(response.headers.get("Content-Type")).toBe("text/calendar; charset=utf-8");
+
+    // Verify Cache-Control header (5-minute cache)
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=300");
+
+    // Verify Content-Disposition header
+    expect(response.headers.get("Content-Disposition")).toContain("calendar.ics");
+
+    // Verify subscription URL header
+    expect(response.headers.get("X-Calendar-Subscription-URL")).toContain("/v1/caldav/");
+
+    // Parse the iCalendar body
+    const icalBody = await response.text();
+
+    // Verify VCALENDAR structure
+    expect(icalBody).toContain("BEGIN:VCALENDAR");
+    expect(icalBody).toContain("END:VCALENDAR");
+    expect(icalBody).toContain("VERSION:2.0");
+    expect(icalBody).toContain("PRODID:-//T-Minus//Calendar Feed//EN");
+    expect(icalBody).toContain("CALSCALE:GREGORIAN");
+    expect(icalBody).toContain("METHOD:PUBLISH");
+    expect(icalBody).toContain("X-WR-CALNAME:T-Minus Unified Calendar");
+
+    // Verify first event (timed, UTC)
+    expect(icalBody).toContain("BEGIN:VEVENT");
+    expect(icalBody).toContain("UID:evt_01HXY000000000000000000001");
+    expect(icalBody).toContain("SUMMARY:Morning standup");
+    expect(icalBody).toContain("DESCRIPTION:Daily sync");
+    expect(icalBody).toContain("LOCATION:Room 101");
+    expect(icalBody).toContain("DTSTART:20250615T090000Z");
+    expect(icalBody).toContain("DTEND:20250615T091500Z");
+    expect(icalBody).toContain("STATUS:CONFIRMED");
+
+    // Verify second event (all-day)
+    expect(icalBody).toContain("UID:evt_01HXY000000000000000000002");
+    expect(icalBody).toContain("SUMMARY:Team offsite");
+    expect(icalBody).toContain("DTSTART;VALUE=DATE:20250620");
+    expect(icalBody).toContain("DTEND;VALUE=DATE:20250621");
+
+    // Verify exactly 2 VEVENTs
+    const eventCount = (icalBody.match(/BEGIN:VEVENT/g) || []).length;
+    expect(eventCount).toBe(2);
+
+    // Verify DO was called correctly
+    expect(userGraphDO.calls.length).toBe(1);
+    expect(userGraphDO.calls[0].path).toBe("/listCanonicalEvents");
+  });
+
+  it("GET /v1/caldav/:user_id/calendar.ics returns empty calendar when no events", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const env = buildEnv(d1, userGraphDO);
+    const handler = createHandler();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.test/v1/caldav/${TEST_USER.user_id}/calendar.ics`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/calendar; charset=utf-8");
+
+    const icalBody = await response.text();
+    expect(icalBody).toContain("BEGIN:VCALENDAR");
+    expect(icalBody).toContain("END:VCALENDAR");
+    expect(icalBody).not.toContain("BEGIN:VEVENT");
+  });
+
+  it("GET /v1/caldav/:user_id/calendar.ics returns 401 without auth", async () => {
+    const env = buildEnv(d1);
+    const handler = createHandler();
+
+    const response = await handler.fetch(
+      new Request(`https://api.test/v1/caldav/${TEST_USER.user_id}/calendar.ics`, {
+        method: "GET",
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(401);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Authentication required");
+  });
+
+  it("GET /v1/caldav/:other_user_id/calendar.ics returns 403 for wrong user", async () => {
+    const userGraphDO = createMockDONamespace();
+    const env = buildEnv(d1, userGraphDO);
+    const handler = createHandler();
+    const authHeader = await makeAuthHeader();
+
+    // Try to access another user's calendar feed
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/caldav/usr_01HXY0000000000000000000ZZ/calendar.ics", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(403);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Forbidden");
+  });
+
+  it("GET /v1/caldav/:user_id/calendar.ics includes timezone events with VTIMEZONE", async () => {
+    const mockEvents = [
+      {
+        canonical_event_id: "evt_01HXY000000000000000000003",
+        origin_account_id: "acc_01HXY0000000000000000000AA",
+        origin_event_id: "google-evt-003",
+        title: "Chicago meeting",
+        description: null,
+        location: null,
+        start: { dateTime: "2025-06-15T14:00:00", timeZone: "America/Chicago" },
+        end: { dateTime: "2025-06-15T15:00:00", timeZone: "America/Chicago" },
+        all_day: false,
+        status: "confirmed",
+        visibility: "default",
+        transparency: "opaque",
+        source: "provider",
+        version: 1,
+        created_at: "2025-06-01T00:00:00Z",
+        updated_at: "2025-06-01T00:00:00Z",
+      },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: mockEvents, cursor: null, has_more: false }],
+      ]),
+    });
+
+    const env = buildEnv(d1, userGraphDO);
+    const handler = createHandler();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.test/v1/caldav/${TEST_USER.user_id}/calendar.ics`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const icalBody = await response.text();
+
+    // Should include VTIMEZONE for America/Chicago
+    expect(icalBody).toContain("BEGIN:VTIMEZONE");
+    expect(icalBody).toContain("TZID:America/Chicago");
+    expect(icalBody).toContain("END:VTIMEZONE");
+
+    // DTSTART should reference the timezone
+    expect(icalBody).toContain("DTSTART;TZID=America/Chicago:20250615T140000");
+    expect(icalBody).toContain("DTEND;TZID=America/Chicago:20250615T150000");
+  });
+
+  it("GET /v1/caldav/subscription-url returns the subscription URL for the user", async () => {
+    const env = buildEnv(d1);
+    const handler = createHandler();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/caldav/subscription-url", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      ok: boolean;
+      data: { subscription_url: string; content_type: string; instructions: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.subscription_url).toContain(`/v1/caldav/${TEST_USER.user_id}/calendar.ics`);
+    expect(body.data.content_type).toBe("text/calendar");
+    expect(body.data.instructions).toContain("subscription");
+  });
+});
