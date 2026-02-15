@@ -303,6 +303,73 @@ const RPC_INTERNAL_ERROR = -32603;
 const RPC_AUTH_REQUIRED = -32000;
 
 // ---------------------------------------------------------------------------
+// Tier-based tool permissions (Layer 3 authorization)
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscription tier hierarchy. Higher numeric value = more access.
+ * Used for comparing whether a user's tier meets a tool's requirement.
+ */
+const TIER_HIERARCHY: Record<string, number> = {
+  free: 0,
+  premium: 1,
+  enterprise: 2,
+};
+
+/**
+ * Map of tool name to the minimum subscription tier required.
+ * Tools not in this map default to "free" (no restriction).
+ *
+ * Free tier: read-only tools (list, get, query).
+ * Premium tier: write/mutate tools (create, update, delete, set).
+ */
+const TOOL_TIERS: Record<string, string> = {
+  "calendar.list_accounts": "free",
+  "calendar.get_sync_status": "free",
+  "calendar.list_events": "free",
+  "calendar.get_availability": "free",
+  "calendar.list_policies": "free",
+  "calendar.get_policy_edge": "free",
+  "calendar.create_event": "premium",
+  "calendar.update_event": "premium",
+  "calendar.delete_event": "premium",
+  "calendar.set_policy_edge": "premium",
+};
+
+/**
+ * Check whether a user's subscription tier grants access to a tool.
+ *
+ * @param toolName - The MCP tool being invoked.
+ * @param userTier - The authenticated user's subscription tier.
+ * @returns Object with `allowed: true` on success, or `allowed: false`
+ *          with structured error data on failure.
+ */
+function checkTierAccess(
+  toolName: string,
+  userTier: string,
+): { allowed: true } | {
+  allowed: false;
+  required_tier: string;
+  current_tier: string;
+  tool: string;
+} {
+  const requiredTier = TOOL_TIERS[toolName] ?? "free";
+  const userLevel = TIER_HIERARCHY[userTier] ?? 0;
+  const requiredLevel = TIER_HIERARCHY[requiredTier] ?? 0;
+
+  if (userLevel >= requiredLevel) {
+    return { allowed: true };
+  }
+
+  return {
+    allowed: false,
+    required_tier: requiredTier,
+    current_tier: userTier,
+    tool: toolName,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Health status computation
 // ---------------------------------------------------------------------------
 
@@ -1634,6 +1701,22 @@ async function dispatch(
         );
       }
 
+      // Tier-based authorization: check BEFORE executing the tool (fail fast)
+      const tierCheck = checkTierAccess(toolName, user.tier);
+      if (!tierCheck.allowed) {
+        return makeErrorResponse(
+          rpcReq.id,
+          RPC_INTERNAL_ERROR,
+          "Insufficient tier",
+          {
+            code: "TIER_REQUIRED",
+            required_tier: tierCheck.required_tier,
+            current_tier: tierCheck.current_tier,
+            tool: tierCheck.tool,
+          },
+        );
+      }
+
       // Extract tool arguments from params.arguments (MCP spec)
       const toolArgs = rpcReq.params?.arguments as
         | Record<string, unknown>
@@ -1876,4 +1959,5 @@ export {
   computeAvailabilitySlots,
   validateGetPolicyEdgeParams,
   validateSetPolicyEdgeParams,
+  checkTierAccess,
 };
