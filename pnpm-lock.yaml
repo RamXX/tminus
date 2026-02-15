@@ -160,6 +160,9 @@ importers:
       '@tminus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@tminus/workflow-scheduling':
+        specifier: workspace:*
+        version: link:../../workflows/scheduling
       hono:
         specifier: ^4.0.0
         version: 4.11.9
@@ -456,6 +459,34 @@ importers:
       '@tminus/d1-registry':
         specifier: workspace:*
         version: link:../../packages/d1-registry
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      better-sqlite3:
+        specifier: ^12.6.2
+        version: 12.6.2
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/node@25.2.3)(jsdom@28.1.0)
+
+  workflows/scheduling:
+    dependencies:
+      '@tminus/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+    devDependencies:
+      '@cloudflare/vitest-pool-workers':
+        specifier: ^0.8.0
+        version: 0.8.71(@cloudflare/workers-types@4.20260214.0)(@vitest/runner@3.2.4)(@vitest/snapshot@3.2.4)(vitest@3.2.4(@types/node@25.2.3)(jsdom@28.1.0))
+      '@cloudflare/workers-types':
+        specifier: ^4.20250214.0
+        version: 4.20260214.0
+      '@tminus/do-user-graph':
+        specifier: workspace:*
+        version: link:../../durable-objects/user-graph
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13

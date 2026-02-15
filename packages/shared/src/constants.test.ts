@@ -43,7 +43,7 @@ describe("constants.ts -- calendar defaults", () => {
 });
 
 describe("constants.ts -- ID_PREFIXES", () => {
-  it("contains all nine entity prefixes", () => {
+  it("contains all twelve entity prefixes", () => {
     const expectedKeys = [
       "user",
       "account",
@@ -54,6 +54,9 @@ describe("constants.ts -- ID_PREFIXES", () => {
       "constraint",
       "apikey",
       "cert",
+      "session",
+      "candidate",
+      "hold",
     ];
     expect(Object.keys(ID_PREFIXES).sort()).toEqual(expectedKeys.sort());
   });
@@ -92,6 +95,18 @@ describe("constants.ts -- ID_PREFIXES", () => {
 
   it("cert prefix is 'crt_'", () => {
     expect(ID_PREFIXES.cert).toBe("crt_");
+  });
+
+  it("session prefix is 'ses_'", () => {
+    expect(ID_PREFIXES.session).toBe("ses_");
+  });
+
+  it("candidate prefix is 'cnd_'", () => {
+    expect(ID_PREFIXES.candidate).toBe("cnd_");
+  });
+
+  it("hold prefix is 'hld_'", () => {
+    expect(ID_PREFIXES.hold).toBe("hld_");
   });
 
   it("all prefixes end with underscore", () => {

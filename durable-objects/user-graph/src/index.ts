@@ -2398,6 +2398,27 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/upsertCanonicalEvent": {
+          const body = (await request.json()) as {
+            event: import("@tminus/shared").CanonicalEvent;
+            source: string;
+          };
+          const eventId = await this.upsertCanonicalEvent(body.event, body.source);
+          return Response.json(eventId);
+        }
+
+        case "/deleteCanonicalEvent": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            source: string;
+          };
+          const deleted = await this.deleteCanonicalEvent(
+            body.canonical_event_id,
+            body.source,
+          );
+          return Response.json(deleted);
+        }
+
         case "/queryJournal": {
           const body = (await request.json()) as JournalQuery;
           const result = this.queryJournal(body);
@@ -2572,6 +2593,45 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        // ---------------------------------------------------------------
+        // Scheduling RPC endpoints (Phase 3)
+        // ---------------------------------------------------------------
+
+        case "/storeSchedulingSession": {
+          const body = (await request.json()) as {
+            session_id: string;
+            status: string;
+            objective_json: string;
+            candidates: Array<{
+              candidateId: string;
+              sessionId: string;
+              start: string;
+              end: string;
+              score: number;
+              explanation: string;
+            }>;
+            created_at: string;
+          };
+          this.storeSchedulingSession(body);
+          return Response.json({ ok: true });
+        }
+
+        case "/getSchedulingSession": {
+          const body = (await request.json()) as { session_id: string };
+          const session = this.getSchedulingSession(body.session_id);
+          return Response.json(session);
+        }
+
+        case "/commitSchedulingSession": {
+          const body = (await request.json()) as {
+            session_id: string;
+            candidate_id: string;
+            event_id: string;
+          };
+          this.commitSchedulingSession(body.session_id, body.candidate_id, body.event_id);
+          return Response.json({ ok: true });
+        }
+
         default:
           return new Response(`Unknown action: ${pathname}`, { status: 404 });
       }
@@ -2579,6 +2639,195 @@ export class UserGraphDO {
       const message = err instanceof Error ? err.message : String(err);
       return Response.json({ error: message }, { status: 500 });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Scheduling session management (Phase 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Store a scheduling session and its candidates in the DO-local SQLite.
+   * Uses the schedule_sessions and schedule_candidates tables from the
+   * USER_GRAPH_DO_MIGRATION_V1 schema.
+   */
+  private storeSchedulingSession(data: {
+    session_id: string;
+    status: string;
+    objective_json: string;
+    candidates: Array<{
+      candidateId: string;
+      sessionId: string;
+      start: string;
+      end: string;
+      score: number;
+      explanation: string;
+    }>;
+    created_at: string;
+  }): void {
+    this.ensureMigrated();
+
+    this.sql.exec(
+      `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+       VALUES (?, ?, ?, ?)`,
+      data.session_id,
+      data.status,
+      data.objective_json,
+      data.created_at,
+    );
+
+    for (const c of data.candidates) {
+      this.sql.exec(
+        `INSERT INTO schedule_candidates (candidate_id, session_id, start_ts, end_ts, score, explanation, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        c.candidateId,
+        c.sessionId,
+        c.start,
+        c.end,
+        c.score,
+        c.explanation,
+        data.created_at,
+      );
+    }
+  }
+
+  /**
+   * Retrieve a scheduling session and its candidates.
+   * Returns the full session object with candidates array.
+   */
+  private getSchedulingSession(sessionId: string): {
+    sessionId: string;
+    status: string;
+    params: Record<string, unknown>;
+    candidates: Array<{
+      candidateId: string;
+      sessionId: string;
+      start: string;
+      end: string;
+      score: number;
+      explanation: string;
+    }>;
+    committedCandidateId?: string;
+    committedEventId?: string;
+    createdAt: string;
+  } {
+    this.ensureMigrated();
+
+    interface SessionRow {
+      [key: string]: unknown;
+      session_id: string;
+      status: string;
+      objective_json: string;
+      created_at: string;
+    }
+
+    const rows = this.sql.exec<SessionRow>(
+      `SELECT session_id, status, objective_json, created_at
+       FROM schedule_sessions WHERE session_id = ?`,
+      sessionId,
+    ).toArray();
+
+    if (rows.length === 0) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    const session = rows[0];
+
+    interface CandidateRow {
+      [key: string]: unknown;
+      candidate_id: string;
+      session_id: string;
+      start_ts: string;
+      end_ts: string;
+      score: number;
+      explanation: string;
+    }
+
+    const candidateRows = this.sql.exec<CandidateRow>(
+      `SELECT candidate_id, session_id, start_ts, end_ts, score, explanation
+       FROM schedule_candidates WHERE session_id = ? ORDER BY score DESC`,
+      sessionId,
+    ).toArray();
+
+    const candidates = candidateRows.map((r) => ({
+      candidateId: r.candidate_id,
+      sessionId: r.session_id,
+      start: r.start_ts,
+      end: r.end_ts,
+      score: r.score as number,
+      explanation: r.explanation as string,
+    }));
+
+    // Parse objective JSON to extract params and committed info
+    let params: Record<string, unknown> = {};
+    let committedCandidateId: string | undefined;
+    let committedEventId: string | undefined;
+
+    try {
+      const obj = JSON.parse(session.objective_json);
+      // Check if we stored commit info in the objective JSON
+      if (obj._committedCandidateId) {
+        committedCandidateId = obj._committedCandidateId;
+        committedEventId = obj._committedEventId;
+        // Remove internal fields from params
+        const { _committedCandidateId, _committedEventId, ...rest } = obj;
+        params = rest;
+      } else {
+        params = obj;
+      }
+    } catch {
+      // objective_json may be malformed; use empty object
+    }
+
+    return {
+      sessionId: session.session_id,
+      status: session.status,
+      params,
+      candidates,
+      committedCandidateId,
+      committedEventId,
+      createdAt: session.created_at,
+    };
+  }
+
+  /**
+   * Mark a scheduling session as committed and record which candidate
+   * was chosen and the resulting event ID.
+   */
+  private commitSchedulingSession(
+    sessionId: string,
+    candidateId: string,
+    eventId: string,
+  ): void {
+    this.ensureMigrated();
+
+    // Get current session to preserve objective_json
+    interface SessionRow {
+      [key: string]: unknown;
+      objective_json: string;
+    }
+
+    const rows = this.sql.exec<SessionRow>(
+      `SELECT objective_json FROM schedule_sessions WHERE session_id = ?`,
+      sessionId,
+    ).toArray();
+
+    if (rows.length === 0) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    // Store committed info in objective_json (augment, don't replace)
+    let obj: Record<string, unknown> = {};
+    try {
+      obj = JSON.parse(rows[0].objective_json);
+    } catch { /* empty */ }
+    obj._committedCandidateId = candidateId;
+    obj._committedEventId = eventId;
+
+    this.sql.exec(
+      `UPDATE schedule_sessions SET status = 'committed', objective_json = ? WHERE session_id = ?`,
+      JSON.stringify(obj),
+      sessionId,
+    );
   }
 
   // -------------------------------------------------------------------------

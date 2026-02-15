@@ -55,4 +55,7 @@ export const ID_PREFIXES = {
   constraint: "cst_",
   apikey: "key_",
   cert: "crt_",
+  session: "ses_",
+  candidate: "cnd_",
+  hold: "hld_",
 } as const;
