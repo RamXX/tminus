@@ -29,6 +29,7 @@ import {
   type CalendarViewType,
   type DateRange,
 } from "../lib/calendar-utils";
+import { EventDetail } from "./EventDetail";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,6 +58,15 @@ export function UnifiedCalendar({
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+
+  const handleEventClick = useCallback((event: CalendarEvent) => {
+    setSelectedEvent(event);
+  }, []);
+
+  const handleCloseDetail = useCallback(() => {
+    setSelectedEvent(null);
+  }, []);
 
   // Compute the date range for the current view
   const range = useMemo(
@@ -253,9 +263,15 @@ export function UnifiedCalendar({
               events={events}
               range={range}
               currentDate={currentDate}
+              onEventClick={handleEventClick}
             />
           )}
         </>
+      )}
+
+      {/* Event detail panel */}
+      {selectedEvent && (
+        <EventDetail event={selectedEvent} onClose={handleCloseDetail} />
       )}
     </div>
   );
@@ -270,21 +286,23 @@ function CalendarBody({
   events,
   range,
   currentDate,
+  onEventClick,
 }: {
   view: CalendarViewType;
   events: CalendarEvent[];
   range: DateRange;
   currentDate: Date;
+  onEventClick: (event: CalendarEvent) => void;
 }) {
   switch (view) {
     case "week":
-      return <WeekView events={events} range={range} />;
+      return <WeekView events={events} range={range} onEventClick={onEventClick} />;
     case "month":
       return (
-        <MonthView events={events} currentDate={currentDate} range={range} />
+        <MonthView events={events} currentDate={currentDate} range={range} onEventClick={onEventClick} />
       );
     case "day":
-      return <DayView events={events} currentDate={currentDate} />;
+      return <DayView events={events} currentDate={currentDate} onEventClick={onEventClick} />;
   }
 }
 
@@ -295,9 +313,11 @@ function CalendarBody({
 function WeekView({
   events,
   range,
+  onEventClick,
 }: {
   events: CalendarEvent[];
   range: DateRange;
+  onEventClick: (event: CalendarEvent) => void;
 }) {
   // Generate the 7 days of the week
   const days = useMemo(() => {
@@ -342,7 +362,7 @@ function WeekView({
             </div>
             <div style={styles.weekDayEvents}>
               {dayEvents.map((evt) => (
-                <EventChip key={evt.canonical_event_id} event={evt} />
+                <EventChip key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
               ))}
             </div>
           </div>
@@ -360,10 +380,12 @@ function MonthView({
   events,
   currentDate,
   range,
+  onEventClick,
 }: {
   events: CalendarEvent[];
   currentDate: Date;
   range: DateRange;
+  onEventClick: (event: CalendarEvent) => void;
 }) {
   const grouped = useMemo(() => groupEventsByDate(events), [events]);
 
@@ -441,7 +463,7 @@ function MonthView({
                 </span>
                 <div style={styles.monthCellEvents}>
                   {dayEvents.slice(0, 3).map((evt) => (
-                    <EventDot key={evt.canonical_event_id} event={evt} />
+                    <EventDot key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
                   ))}
                   {dayEvents.length > 3 && (
                     <span style={styles.moreEvents}>
@@ -465,9 +487,11 @@ function MonthView({
 function DayView({
   events,
   currentDate,
+  onEventClick,
 }: {
   events: CalendarEvent[];
   currentDate: Date;
+  onEventClick: (event: CalendarEvent) => void;
 }) {
   const grouped = useMemo(() => groupEventsByDate(events), [events]);
   const key = formatDateKey(currentDate);
@@ -485,7 +509,7 @@ function DayView({
       ) : (
         <div style={styles.dayEventList}>
           {dayEvents.map((evt) => (
-            <EventCard key={evt.canonical_event_id} event={evt} />
+            <EventCard key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
           ))}
         </div>
       )}
@@ -498,10 +522,17 @@ function DayView({
 // ---------------------------------------------------------------------------
 
 /** Compact event chip for week view. */
-function EventChip({ event }: { event: CalendarEvent }) {
+function EventChip({ event, onClick }: { event: CalendarEvent; onClick: (event: CalendarEvent) => void }) {
   const color = getAccountColor(event.origin_account_id);
   return (
-    <div style={styles.eventChip}>
+    <div
+      style={{ ...styles.eventChip, cursor: "pointer" }}
+      onClick={() => onClick(event)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      data-testid={`event-chip-${event.canonical_event_id}`}
+    >
       <span
         style={{ ...styles.colorIndicator, backgroundColor: color }}
         data-testid="event-color-indicator"
@@ -517,10 +548,17 @@ function EventChip({ event }: { event: CalendarEvent }) {
 }
 
 /** Small dot + title for month view (compact). */
-function EventDot({ event }: { event: CalendarEvent }) {
+function EventDot({ event, onClick }: { event: CalendarEvent; onClick: (event: CalendarEvent) => void }) {
   const color = getAccountColor(event.origin_account_id);
   return (
-    <div style={styles.eventDot}>
+    <div
+      style={{ ...styles.eventDot, cursor: "pointer" }}
+      onClick={() => onClick(event)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      data-testid={`event-dot-${event.canonical_event_id}`}
+    >
       <span
         style={{ ...styles.dotIndicator, backgroundColor: color }}
         data-testid="event-color-indicator"
@@ -533,10 +571,17 @@ function EventDot({ event }: { event: CalendarEvent }) {
 }
 
 /** Full event card for day view. */
-function EventCard({ event }: { event: CalendarEvent }) {
+function EventCard({ event, onClick }: { event: CalendarEvent; onClick: (event: CalendarEvent) => void }) {
   const color = getAccountColor(event.origin_account_id);
   return (
-    <div style={{ ...styles.eventCard, borderLeftColor: color } as React.CSSProperties}>
+    <div
+      style={{ ...styles.eventCard, borderLeftColor: color, cursor: "pointer" } as React.CSSProperties}
+      onClick={() => onClick(event)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      data-testid={`event-card-${event.canonical_event_id}`}
+    >
       <span
         style={{ ...styles.cardColorBar, backgroundColor: color }}
         data-testid="event-color-indicator"

@@ -24,10 +24,27 @@ const MOCK_EVENTS: CalendarEvent[] = [
   {
     canonical_event_id: "evt-1",
     summary: "Team Standup",
+    description: "Daily sync with the engineering team.",
+    location: "Zoom Room Alpha",
     start: "2026-02-14T09:00:00Z",
     end: "2026-02-14T09:30:00Z",
     origin_account_id: "account-work",
+    origin_account_email: "dev@company.com",
     status: "confirmed",
+    version: 2,
+    updated_at: "2026-02-13T20:00:00Z",
+    mirrors: [
+      {
+        target_account_id: "account-personal",
+        target_account_email: "me@gmail.com",
+        sync_status: "ACTIVE",
+      },
+      {
+        target_account_id: "account-family",
+        target_account_email: "me@family.org",
+        sync_status: "PENDING",
+      },
+    ],
   },
   {
     canonical_event_id: "evt-2",
@@ -382,6 +399,198 @@ describe("UnifiedCalendar", () => {
       const header = screen.getByTestId("calendar-date-header");
       expect(header.textContent).toBeTruthy();
       expect(header.textContent!.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("event detail view", () => {
+    it("opens detail panel when clicking an event in week view", async () => {
+      const fetchFn = createMockFetch();
+      // Use a fixed date so we know which events will be visible
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on an event chip
+      await user.click(screen.getByText("Team Standup"));
+
+      // EventDetail panel should appear
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+      // Title should appear in the detail
+      expect(screen.getByTestId("event-detail-time")).toBeInTheDocument();
+    });
+
+    it("shows event details including description and location", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Team Standup"));
+
+      // Description and location should be visible
+      expect(
+        screen.getByText(/Daily sync with the engineering team/),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Zoom Room Alpha")).toBeInTheDocument();
+    });
+
+    it("shows mirror status badges in detail view", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Team Standup"));
+
+      // Mirror badges should be visible
+      const badges = screen.getAllByTestId("mirror-status-badge");
+      expect(badges).toHaveLength(2);
+      // Mirror emails should be visible
+      expect(screen.getByText("me@gmail.com")).toBeInTheDocument();
+      expect(screen.getByText("me@family.org")).toBeInTheDocument();
+    });
+
+    it("shows origin account in detail view", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Team Standup"));
+
+      expect(screen.getByText("dev@company.com")).toBeInTheDocument();
+    });
+
+    it("closes detail panel when close button is clicked", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open detail
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+
+      // Close it
+      const closeBtn = screen.getByRole("button", { name: /close/i });
+      await user.click(closeBtn);
+
+      expect(screen.queryByTestId("event-detail-panel")).not.toBeInTheDocument();
+    });
+
+    it("closes detail panel when overlay is clicked", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open detail
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+
+      // Click overlay to dismiss
+      const overlay = screen.getByTestId("event-detail-overlay");
+      await user.click(overlay);
+
+      expect(screen.queryByTestId("event-detail-panel")).not.toBeInTheDocument();
+    });
+
+    it("opens detail panel when clicking an event in day view", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="day"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on an event card in day view
+      await user.click(screen.getByText("Team Standup"));
+
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+    });
+
+    it("handles event with no mirrors gracefully in detail view", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Lunch with Alice")).toBeInTheDocument();
+      });
+
+      // Click on an event without mirrors
+      await user.click(screen.getByText("Lunch with Alice"));
+
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+      // Should show "no mirrors" message
+      expect(screen.getByText(/no mirrors/i)).toBeInTheDocument();
     });
   });
 });
