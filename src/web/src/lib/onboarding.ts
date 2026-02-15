@@ -141,10 +141,15 @@ export const PROVIDER_ICONS: Record<AccountProvider, string> = {
  * Includes user_id and redirect_uri parameters so the OAuth worker
  * knows who is connecting and where to redirect after success.
  *
+ * AC 3: OAuth state parameter includes session ID for post-callback correlation.
+ * When sessionId is provided, it is included as a query parameter so the
+ * OAuth callback can correlate the result with the onboarding session.
+ *
  * @param provider - Calendar provider ("google", "microsoft", or "apple")
  * @param userId - The authenticated user's ID
  * @param redirectUri - Where to return after OAuth completes (onboarding page URL)
  * @param oauthBaseUrl - Base URL for the OAuth worker (injectable for testing)
+ * @param sessionId - Optional onboarding session ID for callback correlation
  * @returns Full URL to redirect the browser to
  */
 export function buildOnboardingOAuthUrl(
@@ -152,43 +157,51 @@ export function buildOnboardingOAuthUrl(
   userId: string,
   redirectUri: string,
   oauthBaseUrl: string = OAUTH_BASE_URL,
+  sessionId?: string,
 ): string {
   const url = new URL(`/oauth/${provider}/start`, oauthBaseUrl);
   url.searchParams.set("user_id", userId);
   url.searchParams.set("redirect_uri", redirectUri);
+  if (sessionId) {
+    url.searchParams.set("session_id", sessionId);
+  }
   return url.toString();
 }
 
 /**
- * Parse the OAuth callback return URL for account_id.
+ * Parse the OAuth callback return URL for account_id and session_id.
  *
  * After OAuth completes, the OAuth worker redirects back to the onboarding
  * page with account_id as a query parameter. This function extracts it.
  *
+ * AC 3: Also extracts session_id for correlating callback with onboarding session.
+ *
  * @param urlString - The current page URL (window.location.href)
- * @returns Object with account_id if present, or null
+ * @returns Object with account_id, session_id if present, or null
  */
 export function parseOAuthCallback(urlString: string): {
   accountId: string | null;
   reactivated: boolean;
+  sessionId: string | null;
 } {
   try {
     // The redirect_uri is the hash-based URL, so account_id is in the hash query
-    // e.g., https://app.tminus.ink/#/onboard?account_id=acc-123
+    // e.g., https://app.tminus.ink/#/onboard?account_id=acc-123&session_id=obs_XXX
     const url = new URL(urlString);
     const hash = url.hash; // e.g., "#/onboard?account_id=acc-123"
-    if (!hash) return { accountId: null, reactivated: false };
+    if (!hash) return { accountId: null, reactivated: false, sessionId: null };
 
     const queryStart = hash.indexOf("?");
-    if (queryStart === -1) return { accountId: null, reactivated: false };
+    if (queryStart === -1) return { accountId: null, reactivated: false, sessionId: null };
 
     const params = new URLSearchParams(hash.slice(queryStart + 1));
     return {
       accountId: params.get("account_id"),
       reactivated: params.get("reactivated") === "true",
+      sessionId: params.get("session_id"),
     };
   } catch {
-    return { accountId: null, reactivated: false };
+    return { accountId: null, reactivated: false, sessionId: null };
   }
 }
 

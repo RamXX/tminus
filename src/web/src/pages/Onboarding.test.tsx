@@ -195,6 +195,11 @@ async function renderOnboarding(overrides: Partial<OnboardingProps> = {}) {
       callbackAccountId={overrides.callbackAccountId ?? null}
       oauthBaseUrl={overrides.oauthBaseUrl ?? "https://oauth.tminus.ink"}
       submitAppleCredentials={submitAppleCredentials}
+      fetchOnboardingSession={overrides.fetchOnboardingSession}
+      createOnboardingSession={overrides.createOnboardingSession}
+      addAccountToServerSession={overrides.addAccountToServerSession}
+      completeServerSession={overrides.completeServerSession}
+      sessionId={overrides.sessionId}
     />,
   );
 
@@ -1343,6 +1348,275 @@ describe("Onboarding page", () => {
 
       const cardContainer = screen.getByTestId("provider-cards");
       expect(cardContainer).toBeInTheDocument();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Integration: Session management (TM-2o2.4)
+  // ---------------------------------------------------------------------------
+
+  describe("session management", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("AC 1: creates session on first visit when no existing session", async () => {
+      const createSession = vi.fn(async () => ({
+        session_id: "obs_TEST001",
+        user_id: "user-test-123",
+        step: "welcome" as const,
+        accounts: [],
+        session_token: "tok_abc",
+        created_at: "2026-02-15T10:00:00Z",
+        updated_at: "2026-02-15T10:00:00Z",
+      }));
+      const fetchSession = vi.fn(async () => null);
+
+      await renderOnboarding({
+        fetchOnboardingSession: fetchSession,
+        createOnboardingSession: createSession,
+      });
+
+      // Wait for the async useEffect to resolve
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      expect(fetchSession).toHaveBeenCalledTimes(1);
+      expect(createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("AC 2: resumes session with previously connected accounts", async () => {
+      const fetchSession = vi.fn(async () => ({
+        session_id: "obs_TEST001",
+        user_id: "user-test-123",
+        step: "connecting" as const,
+        accounts: [
+          {
+            account_id: "acc-google-456",
+            provider: "google" as const,
+            email: "resumed@gmail.com",
+            status: "connected" as const,
+            calendar_count: 3,
+            connected_at: "2026-02-15T10:00:00Z",
+          },
+        ],
+        session_token: "tok_abc",
+        created_at: "2026-02-15T10:00:00Z",
+        updated_at: "2026-02-15T10:00:00Z",
+      }));
+
+      await renderOnboarding({
+        fetchOnboardingSession: fetchSession,
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // The resumed account should be visible
+      expect(screen.getByText(/resumed@gmail.com/i)).toBeInTheDocument();
+    });
+
+    it("AC 3: OAuth URL includes session ID when sessionId is provided", async () => {
+      const navigateToOAuth = createMockNavigate();
+
+      await renderOnboarding({
+        navigateToOAuth,
+        sessionId: "obs_SESSION_ABC",
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      const googleButton = screen.getByRole("button", {
+        name: /connect google/i,
+      });
+      fireEvent.click(googleButton);
+
+      expect(navigateToOAuth).toHaveBeenCalledTimes(1);
+      const url = new URL(navigateToOAuth.mock.calls[0][0]);
+      expect(url.searchParams.get("session_id")).toBe("obs_SESSION_ABC");
+    });
+
+    it("AC 4: re-connecting same account notifies server (idempotent)", async () => {
+      const addAccountToServer = vi.fn(async () => {});
+      const fetchAccountStatus = createMockFetchStatus([
+        MOCK_SYNC_STATUS_COMPLETE,
+      ]);
+
+      await renderOnboarding({
+        callbackAccountId: "acc-google-456",
+        fetchAccountStatus,
+        addAccountToServerSession: addAccountToServer,
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+
+      // Server should be notified of the connected account
+      expect(addAccountToServer).toHaveBeenCalledWith(
+        "acc-google-456",
+        "google",
+        "connected@gmail.com",
+        3,
+      );
+    });
+
+    it("AC 5: cross-tab polling updates accounts from server", async () => {
+      let pollCount = 0;
+      const fetchSession = vi.fn(async () => {
+        pollCount++;
+        if (pollCount <= 1) {
+          return {
+            session_id: "obs_TEST001",
+            user_id: "user-test-123",
+            step: "connecting" as const,
+            accounts: [
+              {
+                account_id: "acc-google-456",
+                provider: "google" as const,
+                email: "user@gmail.com",
+                status: "connected" as const,
+                calendar_count: 3,
+                connected_at: "2026-02-15T10:00:00Z",
+              },
+            ],
+            session_token: "tok_abc",
+            created_at: "2026-02-15T10:00:00Z",
+            updated_at: "2026-02-15T10:00:00Z",
+          };
+        }
+        return {
+          session_id: "obs_TEST001",
+          user_id: "user-test-123",
+          step: "connecting" as const,
+          accounts: [
+            {
+              account_id: "acc-google-456",
+              provider: "google" as const,
+              email: "user@gmail.com",
+              status: "connected" as const,
+              calendar_count: 3,
+              connected_at: "2026-02-15T10:00:00Z",
+            },
+            {
+              account_id: "acc-ms-789",
+              provider: "microsoft" as const,
+              email: "user@outlook.com",
+              status: "connected" as const,
+              calendar_count: 2,
+              connected_at: "2026-02-15T10:05:00Z",
+            },
+          ],
+          session_token: "tok_abc",
+          created_at: "2026-02-15T10:00:00Z",
+          updated_at: "2026-02-15T10:05:00Z",
+        };
+      });
+
+      await renderOnboarding({
+        fetchOnboardingSession: fetchSession,
+      });
+
+      // Wait for initial session fetch
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // First account should be visible from resume
+      expect(screen.getByText(/user@gmail.com/i)).toBeInTheDocument();
+
+      // Wait for cross-tab poll (SESSION_POLL_INTERVAL_MS = 3000)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+
+      // Second account should now be visible from cross-tab poll
+      expect(screen.getByText(/user@outlook.com/i)).toBeInTheDocument();
+    });
+
+    it("AC 6: clicking Done notifies server of session completion", async () => {
+      const completeServer = vi.fn(async () => {});
+      const fetchAccountStatus = createMockFetchStatus([
+        MOCK_SYNC_STATUS_COMPLETE,
+      ]);
+
+      await renderOnboarding({
+        callbackAccountId: "acc-google-456",
+        fetchAccountStatus,
+        completeServerSession: completeServer,
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+
+      const doneButton = screen.getByRole("button", {
+        name: /done|finish|all set/i,
+      });
+      fireEvent.click(doneButton);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      expect(completeServer).toHaveBeenCalledTimes(1);
+    });
+
+    it("session management is optional (backward compatible)", async () => {
+      // Render without any session props -- should work exactly as before
+      await renderOnboarding();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(
+        screen.getByRole("heading", { level: 1 }),
+      ).toHaveTextContent(/connect your calendar/i);
+      expect(
+        screen.getByRole("button", { name: /connect google/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("resumes to finished state when session is already complete", async () => {
+      const fetchSession = vi.fn(async () => ({
+        session_id: "obs_TEST001",
+        user_id: "user-test-123",
+        step: "complete" as const,
+        accounts: [
+          {
+            account_id: "acc-google-456",
+            provider: "google" as const,
+            email: "user@gmail.com",
+            status: "connected" as const,
+            calendar_count: 3,
+            connected_at: "2026-02-15T10:00:00Z",
+          },
+        ],
+        session_token: "tok_abc",
+        created_at: "2026-02-15T10:00:00Z",
+        updated_at: "2026-02-15T10:30:00Z",
+        completed_at: "2026-02-15T10:30:00Z",
+      }));
+
+      await renderOnboarding({
+        fetchOnboardingSession: fetchSession,
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // Should redirect to completion screen
+      expect(screen.getByText(/you.?re all set/i)).toBeInTheDocument();
     });
   });
 });

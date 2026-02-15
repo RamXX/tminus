@@ -69,6 +69,7 @@ export const ID_PREFIXES = {
   proof: "prf_",
   schedHist: "shx_",
   org: "org_",
+  onboardSession: "obs_",
 } as const;
 
 // ---------------------------------------------------------------------------

@@ -633,3 +633,76 @@ export async function generateExcuse(
     { method: "POST", body: params, token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Onboarding session management
+// ---------------------------------------------------------------------------
+
+/** POST /api/v1/onboarding/session -- create a new onboarding session. */
+export async function createOnboardingSession(
+  token: string,
+): Promise<import("./onboarding-session").OnboardingSession> {
+  return apiFetch<import("./onboarding-session").OnboardingSession>(
+    "/v1/onboarding/session",
+    { method: "POST", token },
+  );
+}
+
+/** GET /api/v1/onboarding/session -- get the current onboarding session. */
+export async function getOnboardingSession(
+  token: string,
+): Promise<import("./onboarding-session").OnboardingSession | null> {
+  return apiFetch<import("./onboarding-session").OnboardingSession | null>(
+    "/v1/onboarding/session",
+    { token },
+  );
+}
+
+/** GET /api/v1/onboarding/status -- lightweight status for cross-tab polling. */
+export async function getOnboardingStatus(
+  token: string,
+): Promise<{
+  active: boolean;
+  session_id?: string;
+  step?: string;
+  account_count?: number;
+  accounts?: Array<{
+    account_id: string;
+    provider: string;
+    email: string;
+    status: string;
+    calendar_count?: number;
+    connected_at: string;
+  }>;
+  updated_at?: string;
+  completed_at?: string;
+}> {
+  return apiFetch("/v1/onboarding/status", { token });
+}
+
+/** POST /api/v1/onboarding/session/account -- add account to session. */
+export async function addOnboardingAccount(
+  token: string,
+  payload: {
+    account_id: string;
+    provider: string;
+    email: string;
+    calendar_count?: number;
+  },
+): Promise<void> {
+  await apiFetch("/v1/onboarding/session/account", {
+    method: "POST",
+    body: payload,
+    token,
+  });
+}
+
+/** POST /api/v1/onboarding/session/complete -- mark session complete. */
+export async function completeOnboardingSession(
+  token: string,
+): Promise<void> {
+  await apiFetch("/v1/onboarding/session/complete", {
+    method: "POST",
+    token,
+  });
+}

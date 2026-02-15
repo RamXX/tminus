@@ -391,6 +391,34 @@ CREATE INDEX idx_sched_hist_participant ON scheduling_history(participant_hash);
 CREATE INDEX idx_sched_hist_session ON scheduling_history(session_id);
 ` as const;
 
+/**
+ * UserGraphDO migration v6: Add onboarding_sessions table.
+ *
+ * Stores per-user onboarding session state for multi-account connection.
+ * The session survives browser close (httpOnly cookie + server state).
+ * Session is NOT auto-expired -- user may take days to add all accounts.
+ *
+ * JSON fields:
+ * - accounts_json: Array of SessionAccount objects
+ *
+ * Optional fields use NULL (not empty string or false) per retro learning.
+ */
+export const USER_GRAPH_DO_MIGRATION_V6 = `
+CREATE TABLE IF NOT EXISTS onboarding_sessions (
+  session_id     TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  step           TEXT NOT NULL DEFAULT 'welcome',
+  accounts_json  TEXT NOT NULL DEFAULT '[]',
+  session_token  TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_onboard_user ON onboarding_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_onboard_token ON onboarding_sessions(session_token);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -417,6 +445,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 5,
     sql: USER_GRAPH_DO_MIGRATION_V5,
     description: "Add scheduling_history table for fairness scoring",
+  },
+  {
+    version: 6,
+    sql: USER_GRAPH_DO_MIGRATION_V6,
+    description: "Add onboarding_sessions table for multi-account connection flow",
   },
 ] as const;
 

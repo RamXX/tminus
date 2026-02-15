@@ -64,6 +64,30 @@ describe("buildOnboardingOAuthUrl", () => {
     expect(parsed.origin).toBe("http://localhost:8787");
     expect(parsed.pathname).toBe("/oauth/google/start");
   });
+
+  it("includes session_id when provided (AC 3)", () => {
+    const url = buildOnboardingOAuthUrl(
+      "google",
+      "user-abc",
+      "https://app.tminus.ink/#/onboard",
+      OAUTH_BASE_URL,
+      "obs_SESSION123",
+    );
+
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("session_id")).toBe("obs_SESSION123");
+  });
+
+  it("omits session_id when not provided", () => {
+    const url = buildOnboardingOAuthUrl(
+      "google",
+      "user-abc",
+      "https://app.tminus.ink/#/onboard",
+    );
+
+    const parsed = new URL(url);
+    expect(parsed.searchParams.has("session_id")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -106,6 +130,22 @@ describe("parseOAuthCallback", () => {
     const result = parseOAuthCallback("https://app.tminus.ink/#/onboard");
     expect(result.accountId).toBeNull();
     expect(result.reactivated).toBe(false);
+    expect(result.sessionId).toBeNull();
+  });
+
+  it("extracts session_id from callback URL (AC 3)", () => {
+    const result = parseOAuthCallback(
+      "https://app.tminus.ink/#/onboard?account_id=acc-123&session_id=obs_ABC",
+    );
+    expect(result.accountId).toBe("acc-123");
+    expect(result.sessionId).toBe("obs_ABC");
+  });
+
+  it("returns null sessionId when not present", () => {
+    const result = parseOAuthCallback(
+      "https://app.tminus.ink/#/onboard?account_id=acc-123",
+    );
+    expect(result.sessionId).toBeNull();
   });
 });
 
