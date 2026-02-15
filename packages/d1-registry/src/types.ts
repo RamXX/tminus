@@ -92,6 +92,8 @@ export interface DeletionCertificateRow {
   readonly deleted_at: string;
   readonly proof_hash: string;
   readonly signature: string;
+  /** JSON string of DeletionSummary (counts of deleted items). NULL for legacy certificates. */
+  readonly deletion_summary: string | null;
 }
 
 /** Valid status values for the `key_rotation_log.status` column. */

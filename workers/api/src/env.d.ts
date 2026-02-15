@@ -20,6 +20,8 @@ interface Env {
   SESSIONS: KVNamespace;
   RATE_LIMITS: KVNamespace;
   JWT_SECRET: string;
+  /** MASTER_KEY secret for signing deletion certificates (HMAC-SHA-256). */
+  MASTER_KEY?: string;
   /** Deployment environment: "production", "staging", or "development" (default). */
   ENVIRONMENT?: string;
 }

@@ -1120,6 +1120,65 @@ async function handleJournal(
   }
 }
 
+// -- Deletion Certificates (Public, no auth) --------------------------------
+
+/**
+ * GET /v1/account/deletion-certificate/:certificateId
+ *
+ * Public endpoint -- no authentication required.
+ * The certificate ID itself serves as the access token.
+ * Returns the signed deletion certificate or 404.
+ */
+async function handleGetDeletionCertificate(
+  certificateId: string,
+  env: Env,
+): Promise<Response> {
+  try {
+    const row = await env.DB
+      .prepare(
+        `SELECT cert_id, entity_type, entity_id, deleted_at, proof_hash, signature, deletion_summary
+         FROM deletion_certificates
+         WHERE cert_id = ?1`,
+      )
+      .bind(certificateId)
+      .first<{
+        cert_id: string;
+        entity_type: string;
+        entity_id: string;
+        deleted_at: string;
+        proof_hash: string;
+        signature: string;
+        deletion_summary: string | null;
+      }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("Deletion certificate not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({
+        certificate_id: row.cert_id,
+        entity_type: row.entity_type,
+        entity_id: row.entity_id,
+        deleted_at: row.deleted_at,
+        proof_hash: row.proof_hash,
+        signature: row.signature,
+        deletion_summary: row.deletion_summary ? JSON.parse(row.deletion_summary) : null,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to retrieve deletion certificate", err);
+    return jsonResponse(
+      errorEnvelope("Failed to retrieve deletion certificate", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- API Keys ---------------------------------------------------------------
 
 async function handleCreateApiKey(
@@ -1306,6 +1365,12 @@ export function createHandler() {
             headers: { "Content-Type": "application/json" },
           },
         ));
+      }
+
+      // Public route: deletion certificate retrieval (no auth -- certificate ID is the access token)
+      const certMatch = matchRoute(pathname, "/v1/account/deletion-certificate/:id");
+      if (certMatch && method === "GET") {
+        return finalize(await handleGetDeletionCertificate(certMatch.params[0], env));
       }
 
       // All /v1/* routes require auth (except /v1/auth/*)

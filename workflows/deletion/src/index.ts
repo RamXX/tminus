@@ -1,7 +1,7 @@
 /**
  * DeletionWorkflow -- GDPR right-to-erasure cascading deletion.
  *
- * Executes 8-step cascading deletion across all data stores for a user:
+ * Executes 9-step cascading deletion across all data stores for a user:
  *   1. Delete canonical events from UserGraphDO SQLite
  *   2. Delete event mirrors from UserGraphDO SQLite
  *   3. Delete journal entries from UserGraphDO SQLite
@@ -9,7 +9,8 @@
  *   5. Delete D1 registry rows (users, accounts for this user_id)
  *   6. Delete R2 audit objects (all objects with prefix user_id/)
  *   7. Enqueue provider-side mirror deletions to write-queue
- *   8. Update deletion_requests.status to 'completed' in D1
+ *   8. Generate signed deletion certificate and store in D1
+ *   9. Update deletion_requests.status to 'completed' in D1
  *
  * Each step is idempotent: safe to retry on failure. DELETE on empty tables
  * is a no-op, R2 delete on missing keys is a no-op, D1 updates are
@@ -21,8 +22,10 @@
  *
  * Architecture:
  * - No soft deletes (BR-7). Tombstone structural references only.
- * - Deletion certificate generation is handled by a separate story (TM-ito).
+ * - Signed deletion certificate generated after all deletions (AC1-AC6).
  */
+
+import { generateDeletionCertificate } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Env bindings (matches wrangler.toml bindings)
@@ -33,6 +36,8 @@ export interface DeletionEnv {
   DB: D1Database;
   R2_AUDIT: R2BucketLike;
   WRITE_QUEUE: QueueLike;
+  /** MASTER_KEY secret for signing deletion certificates. */
+  MASTER_KEY: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +95,8 @@ export interface DeletionResult {
   readonly user_id: string;
   readonly steps: readonly StepResult[];
   readonly completed_at: string;
+  /** Certificate ID for the signed deletion certificate (if generated). */
+  readonly certificate_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,14 +181,19 @@ export class DeletionWorkflow {
     // Step 7: Enqueue provider-side mirror deletions (uses pre-fetched accounts)
     steps.push(await this.step7_enqueueProviderDeletions(user_id, accounts));
 
-    // Step 8: Update deletion_requests status to 'completed'
-    steps.push(await this.step8_markCompleted(request_id));
+    // Step 8: Generate signed deletion certificate and store in D1
+    const certResult = await this.step8_generateCertificate(user_id, steps);
+    steps.push(certResult.stepResult);
+
+    // Step 9: Update deletion_requests status to 'completed'
+    steps.push(await this.step9_markCompleted(request_id));
 
     return {
       request_id,
       user_id,
       steps,
       completed_at: new Date().toISOString(),
+      certificate_id: certResult.certificateId,
     };
   }
 
@@ -353,14 +365,78 @@ export class DeletionWorkflow {
   }
 
   /**
-   * Step 8: Mark the deletion request as completed in D1.
+   * Step 8: Generate a signed deletion certificate and store in D1.
+   *
+   * The certificate contains NO PII -- only the entity type, opaque entity ID,
+   * deletion timestamp, aggregate counts of deleted items, and cryptographic
+   * proof (SHA-256 hash + HMAC-SHA-256 signature).
+   *
+   * Idempotent: uses INSERT OR IGNORE so re-running with the same certificate_id
+   * is a no-op. In practice, re-runs generate a new certificate ID (ULID-based),
+   * which means multiple certificates may exist for a single deletion. This is
+   * acceptable -- all certificates are valid proofs.
+   */
+  async step8_generateCertificate(
+    userId: string,
+    previousSteps: readonly StepResult[],
+  ): Promise<{ stepResult: StepResult; certificateId: string }> {
+    // Build the deleted entities summary from previous step results.
+    // Map step names to certificate summary fields.
+    const findDeleted = (stepName: string): number =>
+      previousSteps.find((s) => s.step === stepName)?.deleted ?? 0;
+
+    const deletedEntities = {
+      events_deleted: findDeleted("delete_events"),
+      mirrors_deleted: findDeleted("delete_mirrors"),
+      journal_entries_deleted: findDeleted("delete_journal"),
+      relationship_records_deleted: findDeleted("delete_relationship_data"),
+      d1_rows_deleted: findDeleted("delete_d1_registry"),
+      r2_objects_deleted: findDeleted("delete_r2_audit"),
+      provider_deletions_enqueued: findDeleted("enqueue_provider_deletions"),
+    };
+
+    const certificate = await generateDeletionCertificate(
+      userId,
+      deletedEntities,
+      this.env.MASTER_KEY,
+    );
+
+    // Store certificate in D1
+    await this.env.DB.prepare(
+      `INSERT OR IGNORE INTO deletion_certificates
+       (cert_id, entity_type, entity_id, deleted_at, proof_hash, signature, deletion_summary)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+    )
+      .bind(
+        certificate.certificate_id,
+        certificate.entity_type,
+        certificate.entity_id,
+        certificate.deleted_at,
+        certificate.proof_hash,
+        certificate.signature,
+        JSON.stringify(certificate.deletion_summary),
+      )
+      .run();
+
+    return {
+      stepResult: {
+        step: "generate_certificate",
+        deleted: 1,
+        ok: true,
+      },
+      certificateId: certificate.certificate_id,
+    };
+  }
+
+  /**
+   * Step 9: Mark the deletion request as completed in D1.
    *
    * Updates deletion_requests.status to 'completed' and sets completed_at.
    * Only updates rows with status 'processing' to prevent double-completion.
    *
    * Idempotent: if already 'completed', the WHERE clause matches 0 rows.
    */
-  async step8_markCompleted(requestId: string): Promise<StepResult> {
+  async step9_markCompleted(requestId: string): Promise<StepResult> {
     const completedAt = new Date().toISOString();
     const result = await this.env.DB.prepare(
       `UPDATE deletion_requests

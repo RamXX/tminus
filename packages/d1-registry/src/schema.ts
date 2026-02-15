@@ -176,6 +176,17 @@ CREATE INDEX idx_key_rotation_log_status ON key_rotation_log(status);
 ` as const;
 
 /**
+ * Migration 0007: Add deletion_summary column to deletion_certificates.
+ *
+ * Stores a JSON summary of what was deleted (event counts, mirror counts,
+ * journal counts, etc.) as part of the signed deletion certificate.
+ * No PII -- only aggregate counts.
+ */
+export const MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY = `
+ALTER TABLE deletion_certificates ADD COLUMN deletion_summary TEXT;
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -186,4 +197,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0004_AUTH_FIELDS,
   MIGRATION_0005_DELETION_REQUESTS,
   MIGRATION_0006_KEY_ROTATION_LOG,
+  MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY,
 ] as const;

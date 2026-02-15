@@ -13,6 +13,7 @@ import {
   MIGRATION_0002_MS_SUBSCRIPTIONS,
   MIGRATION_0004_AUTH_FIELDS,
   MIGRATION_0005_DELETION_REQUESTS,
+  MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY,
   ALL_MIGRATIONS,
 } from "./schema";
 
@@ -266,6 +267,39 @@ describe("schema unit tests", () => {
 
   it("ALL_MIGRATIONS includes MIGRATION_0005_DELETION_REQUESTS", () => {
     expect(ALL_MIGRATIONS).toContain(MIGRATION_0005_DELETION_REQUESTS);
-    expect(ALL_MIGRATIONS.length).toBe(6);
+    expect(ALL_MIGRATIONS.length).toBe(7);
+  });
+
+  it("MIGRATION_0007 adds deletion_summary column to deletion_certificates", () => {
+    const db = new Database(":memory:");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
+    // Apply auth fields
+    const authStatements = MIGRATION_0004_AUTH_FIELDS.trim().split(";").filter(Boolean);
+    for (const stmt of authStatements) {
+      db.exec(stmt.trim() + ";");
+    }
+    db.exec(MIGRATION_0005_DELETION_REQUESTS);
+    // Apply deletion certificate summary migration
+    const summaryStatements = MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY.trim().split(";").filter(Boolean);
+    for (const stmt of summaryStatements) {
+      expect(() => db.exec(stmt.trim() + ";")).not.toThrow();
+    }
+
+    // Verify deletion_summary column exists
+    const columns = db.prepare("PRAGMA table_info(deletion_certificates)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+    }>;
+    const columnNames = columns.map((c) => c.name);
+    expect(columnNames).toContain("deletion_summary");
+
+    // deletion_summary should be nullable (TEXT)
+    const summaryCol = columns.find((c) => c.name === "deletion_summary");
+    expect(summaryCol!.type).toBe("TEXT");
+    expect(summaryCol!.notnull).toBe(0);
+
+    db.close();
   });
 });

@@ -32,6 +32,8 @@ import type {
   R2ListResult,
   QueueLike,
 } from "./index";
+import { verifyDeletionCertificate } from "@tminus/shared";
+import type { DeletionCertificate } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,6 +44,7 @@ const TEST_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000001" as AccountId;
 const OTHER_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000002" as AccountId;
 const TEST_ORG_ID = "org_01TESTORG0000000000000001";
 const TEST_REQUEST_ID = "delreq_01TESTREQUEST0000000001";
+const TEST_MASTER_KEY = "test-master-key-for-deletion-certs-2026";
 
 // ---------------------------------------------------------------------------
 // SqlStorage adapter (real SQLite for UserGraphDO)
@@ -430,6 +433,7 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
       DB: createD1Adapter(d1Db),
       R2_AUDIT: r2,
       WRITE_QUEUE: wfQueue,
+      MASTER_KEY: TEST_MASTER_KEY,
     };
   });
 
@@ -469,14 +473,14 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
   // AC1: All 8 deletion steps execute in order
   // -----------------------------------------------------------------------
 
-  it("AC1: all 8 steps execute in order and return results", async () => {
+  it("AC1: all 9 steps execute in order and return results", async () => {
     const wf = new DeletionWorkflow(env);
     const result = await wf.run({
       request_id: TEST_REQUEST_ID,
       user_id: TEST_USER_ID,
     });
 
-    expect(result.steps).toHaveLength(8);
+    expect(result.steps).toHaveLength(9);
     expect(result.steps.map((s) => s.step)).toEqual([
       "delete_events",
       "delete_mirrors",
@@ -485,6 +489,7 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
       "delete_d1_registry",
       "delete_r2_audit",
       "enqueue_provider_deletions",
+      "generate_certificate",
       "mark_completed",
     ]);
     for (const step of result.steps) {
@@ -647,10 +652,15 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
       user_id: TEST_USER_ID,
     });
 
-    expect(result2.steps).toHaveLength(8);
+    expect(result2.steps).toHaveLength(9);
     for (const step of result2.steps) {
       expect(step.ok).toBe(true);
-      expect(step.deleted).toBe(0);
+      // generate_certificate always reports 1 (it creates a new cert each run)
+      if (step.step === "generate_certificate") {
+        expect(step.deleted).toBe(1);
+      } else {
+        expect(step.deleted).toBe(0);
+      }
     }
   });
 
@@ -699,6 +709,221 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
   // Edge case: user with no data
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // AC (TM-ito): Deletion certificate generated and stored in D1
+  // -----------------------------------------------------------------------
+
+  it("TM-ito AC1: deletion certificate generated with SHA-256 proof hash", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    // Certificate ID should be present in result
+    expect(result.certificate_id).toBeDefined();
+    expect(result.certificate_id!).toMatch(/^crt_/);
+
+    // Certificate should be stored in D1
+    const certRow = d1Db
+      .prepare("SELECT * FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as {
+        cert_id: string;
+        entity_type: string;
+        entity_id: string;
+        deleted_at: string;
+        proof_hash: string;
+        signature: string;
+        deletion_summary: string;
+      };
+
+    expect(certRow).toBeDefined();
+    expect(certRow.proof_hash).toHaveLength(64);
+    expect(certRow.proof_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("TM-ito AC2: certificate signed with HMAC-SHA-256 using MASTER_KEY", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    const certRow = d1Db
+      .prepare("SELECT * FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as {
+        cert_id: string;
+        entity_type: string;
+        entity_id: string;
+        deleted_at: string;
+        proof_hash: string;
+        signature: string;
+        deletion_summary: string;
+      };
+
+    expect(certRow.signature).toHaveLength(64);
+    expect(certRow.signature).toMatch(/^[0-9a-f]{64}$/);
+
+    // Reconstruct the certificate and verify signature
+    const cert: DeletionCertificate = {
+      certificate_id: certRow.cert_id,
+      entity_type: certRow.entity_type as "user",
+      entity_id: certRow.entity_id,
+      deleted_at: certRow.deleted_at,
+      proof_hash: certRow.proof_hash,
+      signature: certRow.signature,
+      deletion_summary: JSON.parse(certRow.deletion_summary),
+    };
+
+    const valid = await verifyDeletionCertificate(cert, TEST_MASTER_KEY);
+    expect(valid).toBe(true);
+  });
+
+  it("TM-ito AC3: certificate stored in D1 deletion_certificates table", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    // Certificate should be in the deletion_certificates table
+    const count = (d1Db
+      .prepare("SELECT COUNT(*) as cnt FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as { cnt: number }).cnt;
+    expect(count).toBe(1);
+
+    // Verify all required fields are populated
+    const certRow = d1Db
+      .prepare("SELECT * FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as Record<string, unknown>;
+    expect(certRow.entity_type).toBe("user");
+    expect(certRow.entity_id).toBe(TEST_USER_ID);
+    expect(certRow.deleted_at).toBeDefined();
+    expect(certRow.proof_hash).toBeDefined();
+    expect(certRow.signature).toBeDefined();
+    expect(certRow.deletion_summary).toBeDefined();
+  });
+
+  it("TM-ito AC5: no PII in certificate (only counts and hashes)", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    const certRow = d1Db
+      .prepare("SELECT * FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as {
+        cert_id: string;
+        deletion_summary: string;
+      };
+
+    const summary = JSON.parse(certRow.deletion_summary);
+
+    // Summary should only contain numeric counts
+    expect(typeof summary.events_deleted).toBe("number");
+    expect(typeof summary.mirrors_deleted).toBe("number");
+    expect(typeof summary.journal_entries_deleted).toBe("number");
+    expect(typeof summary.relationship_records_deleted).toBe("number");
+    expect(typeof summary.d1_rows_deleted).toBe("number");
+    expect(typeof summary.r2_objects_deleted).toBe("number");
+    expect(typeof summary.provider_deletions_enqueued).toBe("number");
+
+    // No email, name, or other PII strings in the summary
+    const summaryStr = certRow.deletion_summary;
+    expect(summaryStr).not.toContain("@");
+    expect(summaryStr).not.toContain("email");
+    expect(summaryStr).not.toContain("test@example.com");
+    expect(summaryStr).not.toContain("Test User");
+  });
+
+  it("TM-ito AC6: signature independently verifiable (round-trip via D1)", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    // Retrieve certificate from D1 (simulating API endpoint)
+    const certRow = d1Db
+      .prepare("SELECT * FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as {
+        cert_id: string;
+        entity_type: string;
+        entity_id: string;
+        deleted_at: string;
+        proof_hash: string;
+        signature: string;
+        deletion_summary: string;
+      };
+
+    // Reconstruct from D1 data (as if from API response)
+    const cert: DeletionCertificate = {
+      certificate_id: certRow.cert_id,
+      entity_type: certRow.entity_type as "user",
+      entity_id: certRow.entity_id,
+      deleted_at: certRow.deleted_at,
+      proof_hash: certRow.proof_hash,
+      signature: certRow.signature,
+      deletion_summary: JSON.parse(certRow.deletion_summary),
+    };
+
+    // Verify with correct key succeeds
+    expect(await verifyDeletionCertificate(cert, TEST_MASTER_KEY)).toBe(true);
+
+    // Verify with wrong key fails
+    expect(await verifyDeletionCertificate(cert, "wrong-key")).toBe(false);
+
+    // Verify with tampered summary fails
+    const tampered: DeletionCertificate = {
+      ...cert,
+      deletion_summary: { ...cert.deletion_summary, events_deleted: 999 },
+    };
+    expect(await verifyDeletionCertificate(tampered, TEST_MASTER_KEY)).toBe(false);
+  });
+
+  it("TM-ito: certificate summary contains correct deletion counts from step results", async () => {
+    const wf = new DeletionWorkflow(env);
+    const result = await wf.run({
+      request_id: TEST_REQUEST_ID,
+      user_id: TEST_USER_ID,
+    });
+
+    const certRow = d1Db
+      .prepare("SELECT deletion_summary FROM deletion_certificates WHERE cert_id = ?")
+      .get(result.certificate_id!) as { deletion_summary: string };
+
+    const summary = JSON.parse(certRow.deletion_summary);
+
+    // Counts match step results. Note: deleteAllEvents() deletes event_mirrors
+    // as FK children before canonical_events, so mirrors_deleted=0 by the time
+    // step 2 runs. This is correct -- the certificate records what each step
+    // reported, which is the truth of execution.
+    expect(summary.events_deleted).toBe(2);  // 2 canonical events (counted by step 1)
+    expect(summary.mirrors_deleted).toBe(0);  // 0 -- mirrors were already deleted by step 1 (FK child cleanup)
+    expect(summary.journal_entries_deleted).toBe(2);  // 2 journal entries
+    expect(summary.relationship_records_deleted).toBe(8);  // 1 rel + 1 ledger + 1 milestone + 1 edge + 1 policy + 2 calendars + 1 constraint
+    expect(summary.d1_rows_deleted).toBe(4);  // 2 accounts + 1 api_key + 1 user
+    expect(summary.r2_objects_deleted).toBe(2);  // 2 R2 objects
+    expect(summary.provider_deletions_enqueued).toBe(2);  // 2 accounts
+
+    // Verify the summary matches the actual step results
+    const stepResults = result.steps;
+    expect(summary.events_deleted).toBe(
+      stepResults.find(s => s.step === "delete_events")!.deleted,
+    );
+    expect(summary.mirrors_deleted).toBe(
+      stepResults.find(s => s.step === "delete_mirrors")!.deleted,
+    );
+    expect(summary.d1_rows_deleted).toBe(
+      stepResults.find(s => s.step === "delete_d1_registry")!.deleted,
+    );
+  });
+
+  // -----------------------------------------------------------------------
+  // Edge case: user with no data
+  // -----------------------------------------------------------------------
+
   it("handles user with no data gracefully (empty state)", async () => {
     // Create a fresh DO with no seeded data
     const emptyDoDb = new Database(":memory:");
@@ -732,6 +957,7 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
       DB: createD1Adapter(emptyD1Db),
       R2_AUDIT: emptyR2,
       WRITE_QUEUE: emptyWfQueue,
+      MASTER_KEY: TEST_MASTER_KEY,
     };
 
     const wf = new DeletionWorkflow(emptyEnv);
@@ -740,7 +966,7 @@ describe("DeletionWorkflow integration tests (real SQLite, full cascade)", () =>
       user_id: "usr_empty",
     });
 
-    expect(result.steps).toHaveLength(8);
+    expect(result.steps).toHaveLength(9);
     for (const step of result.steps) {
       expect(step.ok).toBe(true);
     }

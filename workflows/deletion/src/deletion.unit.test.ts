@@ -79,6 +79,7 @@ function createMockEnv(overrides: Partial<DeletionEnv> = {}): DeletionEnv {
     DB: createMockD1(),
     R2_AUDIT: createMockR2(),
     WRITE_QUEUE: createMockQueue(),
+    MASTER_KEY: "test-master-key-unit",
     ...overrides,
   };
 }
@@ -322,7 +323,38 @@ describe("DeletionWorkflow unit tests", () => {
     });
   });
 
-  describe("step8_markCompleted", () => {
+  describe("step8_generateCertificate", () => {
+    it("generates a signed certificate and stores in D1", async () => {
+      const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+      const mockPrepare = vi.fn().mockReturnValue({
+        bind: vi.fn().mockReturnValue({ run: runMock }),
+      });
+      const db = { prepare: mockPrepare } as unknown as D1Database;
+      const env = createMockEnv({ DB: db, MASTER_KEY: "test-key" });
+      const wf = new DeletionWorkflow(env);
+
+      const previousSteps = [
+        { step: "delete_events", deleted: 5, ok: true },
+        { step: "delete_mirrors", deleted: 3, ok: true },
+        { step: "delete_journal", deleted: 10, ok: true },
+        { step: "delete_relationship_data", deleted: 7, ok: true },
+        { step: "delete_d1_registry", deleted: 4, ok: true },
+        { step: "delete_r2_audit", deleted: 2, ok: true },
+        { step: "enqueue_provider_deletions", deleted: 1, ok: true },
+      ];
+
+      const { stepResult, certificateId } = await wf.step8_generateCertificate(
+        "user_123",
+        previousSteps,
+      );
+
+      expect(stepResult).toEqual({ step: "generate_certificate", deleted: 1, ok: true });
+      expect(certificateId).toMatch(/^crt_/);
+      expect(mockPrepare.mock.calls[0][0]).toContain("INSERT OR IGNORE INTO deletion_certificates");
+    });
+  });
+
+  describe("step9_markCompleted", () => {
     it("updates deletion_requests to completed status", async () => {
       const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
       const mockPrepare = vi.fn().mockReturnValue({
@@ -332,7 +364,7 @@ describe("DeletionWorkflow unit tests", () => {
       const env = createMockEnv({ DB: db });
       const wf = new DeletionWorkflow(env);
 
-      const result = await wf.step8_markCompleted("req_123");
+      const result = await wf.step9_markCompleted("req_123");
 
       expect(result).toEqual({ step: "mark_completed", deleted: 1, ok: true });
       expect(mockPrepare.mock.calls[0][0]).toContain("UPDATE deletion_requests");
@@ -343,14 +375,14 @@ describe("DeletionWorkflow unit tests", () => {
       const env = createMockEnv();
       const wf = new DeletionWorkflow(env);
 
-      const result = await wf.step8_markCompleted("req_completed");
+      const result = await wf.step9_markCompleted("req_completed");
       expect(result.deleted).toBe(0);
       expect(result.ok).toBe(true);
     });
   });
 
   describe("run (full workflow)", () => {
-    it("executes all 8 steps in order and returns complete result", async () => {
+    it("executes all 9 steps in order and returns complete result", async () => {
       const stub = createMockDoStub({
         "/deleteAllEvents": { deleted: 5 },
         "/deleteAllMirrors": { deleted: 3 },
@@ -389,7 +421,13 @@ describe("DeletionWorkflow unit tests", () => {
             run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
           }),
         },
-        // Step 8: UPDATE deletion_requests
+        // Step 8: INSERT INTO deletion_certificates
+        {
+          bind: vi.fn().mockReturnValue({
+            run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+          }),
+        },
+        // Step 9: UPDATE deletion_requests
         {
           bind: vi.fn().mockReturnValue({
             run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
@@ -409,6 +447,7 @@ describe("DeletionWorkflow unit tests", () => {
         DB: db,
         R2_AUDIT: r2,
         WRITE_QUEUE: queue,
+        MASTER_KEY: "test-key-full-workflow",
       };
 
       const wf = new DeletionWorkflow(env);
@@ -417,11 +456,12 @@ describe("DeletionWorkflow unit tests", () => {
         user_id: "user_123",
       });
 
-      // Verify all 8 steps completed
-      expect(result.steps).toHaveLength(8);
+      // Verify all 9 steps completed
+      expect(result.steps).toHaveLength(9);
       expect(result.request_id).toBe("req_001");
       expect(result.user_id).toBe("user_123");
       expect(result.completed_at).toBeDefined();
+      expect(result.certificate_id).toMatch(/^crt_/);
 
       // Verify step names in order
       const stepNames = result.steps.map((s) => s.step);
@@ -433,6 +473,7 @@ describe("DeletionWorkflow unit tests", () => {
         "delete_d1_registry",
         "delete_r2_audit",
         "enqueue_provider_deletions",
+        "generate_certificate",
         "mark_completed",
       ]);
 
@@ -465,6 +506,7 @@ describe("DeletionWorkflow unit tests", () => {
         DB: db,
         R2_AUDIT: r2,
         WRITE_QUEUE: queue,
+        MASTER_KEY: "test-key-empty",
       };
 
       const wf = new DeletionWorkflow(env);
@@ -473,10 +515,15 @@ describe("DeletionWorkflow unit tests", () => {
         user_id: "nonexistent_user",
       });
 
-      expect(result.steps).toHaveLength(8);
+      expect(result.steps).toHaveLength(9);
       for (const step of result.steps) {
         expect(step.ok).toBe(true);
-        expect(step.deleted).toBe(0);
+        // generate_certificate always produces 1
+        if (step.step === "generate_certificate") {
+          expect(step.deleted).toBe(1);
+        } else {
+          expect(step.deleted).toBe(0);
+        }
       }
     });
   });

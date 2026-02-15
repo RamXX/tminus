@@ -170,6 +170,19 @@ export {
   HSTS_MAX_AGE,
 } from "./middleware/security";
 
+// Re-export deletion certificate utilities (GDPR compliance)
+export {
+  generateDeletionCertificate,
+  verifyDeletionCertificate,
+  computeSha256,
+  computeHmacSha256,
+} from "./privacy/deletion-certificate";
+export type {
+  DeletionCertificate,
+  DeletionSummary,
+  DeletedEntities,
+} from "./privacy/deletion-certificate";
+
 // Re-export CORS middleware
 export {
   isAllowedOrigin,

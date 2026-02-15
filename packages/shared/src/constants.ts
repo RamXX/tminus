@@ -54,4 +54,5 @@ export const ID_PREFIXES = {
   journal: "jrn_",
   constraint: "cst_",
   apikey: "key_",
+  cert: "crt_",
 } as const;
