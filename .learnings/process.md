@@ -81,3 +81,24 @@ Current gaps identified:
 **Applies to:** All future stories; orchestrator improvement
 
 **Source stories:** TM-as6.9
+
+---
+
+## [Added from Epic TM-4qw retro - 2026-02-14]
+
+### One Story, One Commit - No Scope Bundling
+
+**Priority:** Critical
+
+**Context:** TM-4qw.2 bundled event tools (meant for TM-4qw.3), TM-4qw.4 bundled policy tools (meant for TM-4qw.5). This created confusion about test coverage and what was delivered when. Both subsequent stories had rejections due to test confusion.
+
+**Recommendation:** Developer agents MUST commit only code within the current story's scope. If implementing story N discovers that story N+1's code naturally belongs in the same commit, the agent should:
+1. Note this in the delivery notes
+2. Implement only story N
+3. Flag for Sr. PM that story N+1 may be trivial/duplicate
+
+Sr. PM can then decide whether to collapse stories or keep them separate. The key is: don't bundle silently.
+
+**Applies to:** All stories (developer execution discipline)
+
+**Source stories:** TM-4qw.2, TM-4qw.3, TM-4qw.4, TM-4qw.5

@@ -194,3 +194,38 @@
 **Applies to:** All vitest tests
 
 **Source stories:** TM-as6.7
+
+---
+
+## [Added from Epic TM-4qw retro - 2026-02-14]
+
+### Wrangler Local D1 Setup is Non-Obvious
+
+**Priority:** Important
+
+**Context:** TM-4qw.7 discovered that wrangler dev --local stores D1 in .wrangler/state/v3/d1/, and schema migrations must be applied via `wrangler d1 execute` not direct sqlite3 commands.
+
+**Recommendation:** Document the local D1 setup pattern in a runbook or README:
+1. Wrangler creates database ID directories automatically
+2. Migrations must go through `wrangler d1 execute` to match the ID path
+3. Direct sqlite3 access is read-only for debugging
+
+Add a `make setup-local-d1` target that runs the setup script for consistency.
+
+**Applies to:** All local development setup documentation
+
+**Source stories:** TM-4qw.7
+
+### Local File Watcher Interference
+
+**Priority:** Nice-to-have
+
+**Context:** TM-4qw.5 noted a file watcher injecting uncommitted code from TM-4qw.6 into index.ts after git checkout. Required `git checkout HEAD --` before test runs.
+
+**Recommendation:** Investigate and disable any auto-save/auto-format watchers in the development environment that run during git operations. If using an IDE plugin, configure it to respect .gitignore or disable during test runs.
+
+This is a local environment issue, not a code issue, but it caused false test failures.
+
+**Applies to:** Local development setup
+
+**Source stories:** TM-4qw.5

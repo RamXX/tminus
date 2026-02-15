@@ -135,3 +135,41 @@ This makes key rotation practical at scale.
 **Applies to:** All state machine stories with persistent counters; Phase 4 reputation system
 
 **Source stories:** TM-as6.4
+
+---
+
+## [Added from Epic TM-4qw retro - 2026-02-14]
+
+### Schema Gaps Between D1 Registry and DO SQLite Must Be Anticipated
+
+**Priority:** Critical
+
+**Context:** TM-4qw.2 discovered that D1 registry accounts table was missing last_sync_ts and resource_id columns, which existed in AccountDO SQLite. MCP server needs these for sync health computation but can't service-bind to AccountDO (performance constraint). Required migration 0008.
+
+**Recommendation:** When D&F designs a new feature that queries data:
+1. Explicitly document which database holds the source of truth for each field
+2. If MCP/API needs denormalized data from DOs, include the denormalization strategy in the D&F
+3. For Phase 2 and beyond: assume MCP cannot service-bind to DOs for read queries (latency budget)
+
+Future D&F should include a "Data Residency" section listing which fields live where and how they're synchronized.
+
+**Applies to:** All D&F for features that query cross-cutting state (sync status, account metadata, policies)
+
+**Source stories:** TM-4qw.2, TM-4qw.4
+
+### D1 IN Clause Workaround Pattern
+
+**Priority:** Important
+
+**Context:** TM-4qw.4 discovered D1 doesn't support parameterized array bindings for IN clauses (e.g., `WHERE account_id IN (?)`). Workaround: query all rows matching user_id + time range, then filter by account_id in JavaScript.
+
+**Recommendation:** For all D1 queries that need to filter by multiple IDs:
+1. Use the primary filter (user_id, time range) in SQL
+2. Filter by ID list in JavaScript using `results.filter(row => ids.includes(row.id))`
+3. Document this pattern in code comments
+
+For the typical case (2-5 accounts, <100 events), this is negligible overhead. DO NOT try to build dynamic SQL strings with comma-separated values (SQL injection risk).
+
+**Applies to:** All D1 queries with multi-ID filters (account_id, event_id, policy_id)
+
+**Source stories:** TM-4qw.4

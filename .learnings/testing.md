@@ -193,3 +193,57 @@ Do NOT use:
 **Applies to:** All E2E test stories; Phase 2B MCP E2E tests, Phase 2C UI E2E tests
 
 **Source stories:** TM-as6.10
+
+---
+
+## [Added from Epic TM-4qw retro - 2026-02-14]
+
+### Cross-Cutting Features Require Test Fixture Updates
+
+**Priority:** Critical
+
+**Context:** TM-4qw.6 (tier enforcement) broke pre-existing integration tests because they used free-tier JWTs. All write-tool tests needed premium-tier tokens. This caused a verification failure.
+
+**Recommendation:** When implementing cross-cutting features (authentication, authorization, rate limiting, logging), the developer agent MUST:
+1. Identify all existing tests that touch affected code paths
+2. Update test fixtures to comply with new constraints
+3. Verify zero regressions in the full integration suite
+
+Do NOT assume existing tests will continue to pass unchanged. Cross-cutting features are special.
+
+**Applies to:** All stories implementing auth, tier checks, rate limits, or other horizontal concerns
+
+**Source stories:** TM-4qw.6
+
+### Hardcoded Test Assertions Are Fragile
+
+**Priority:** Important
+
+**Context:** packages/d1-registry/src/schema.unit.test.ts:270 hardcoded ALL_MIGRATIONS.length. Noted by 3 separate developer agents (TM-4qw.2, TM-4qw.4, TM-4qw.6) but never fixed. Breaks every migration.
+
+**Recommendation:** Avoid assertions that hardcode counts or lengths of dynamic arrays. Instead:
+- Use `toBeGreaterThanOrEqual(expectedMinimum)` for growing arrays
+- Or remove redundant tests (if another test already validates the structure)
+
+Specific fix: replace `expect(ALL_MIGRATIONS).toHaveLength(N)` with a test that verifies the most recent migration exists in the array.
+
+**Applies to:** All unit tests, especially schema/registry tests
+
+**Source stories:** TM-4qw.2, TM-4qw.4, TM-4qw.6
+
+### E2E Tests Should Be Self-Contained
+
+**Priority:** Important
+
+**Context:** TM-4qw.7 inlined JWT generation rather than importing from @tminus/shared. This made the E2E test file runnable with zero build-step dependencies.
+
+**Recommendation:** E2E tests should minimize external dependencies:
+- Inline utility functions (JWT generation, test data builders) if they're small
+- Use fetch/http directly, not internal client libraries
+- Avoid importing from @tminus/* packages (creates build coupling)
+
+E2E tests are the "outside-in" validation layer. They should be runnable by a QA engineer who doesn't have the full monorepo build working.
+
+**Applies to:** All E2E test files
+
+**Source stories:** TM-4qw.7
