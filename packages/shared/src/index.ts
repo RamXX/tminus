@@ -361,3 +361,17 @@ export type {
   ClusteringSuggestion,
   ContextSwitchResult,
 } from "./context-switch";
+
+// Re-export deep work window optimization (scheduling intelligence)
+export {
+  detectDeepWorkBlocks,
+  computeDeepWorkReport,
+  evaluateDeepWorkImpact,
+  suggestDeepWorkOptimizations,
+} from "./deep-work";
+export type {
+  DeepWorkBlock,
+  DeepWorkReport,
+  DeepWorkImpact,
+  DeepWorkSuggestion,
+} from "./deep-work";

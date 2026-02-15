@@ -51,10 +51,14 @@ import {
   computeDailySwitchCost,
   computeWeeklySwitchCost,
   generateClusteringSuggestions,
+  computeDeepWorkReport,
+  evaluateDeepWorkImpact,
+  suggestDeepWorkOptimizations,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
 import type { CognitiveLoadResult, ContextSwitchResult } from "@tminus/shared";
+import type { DeepWorkReport, DeepWorkImpact } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -4864,6 +4868,16 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getDeepWork": {
+          const body = (await request.json()) as {
+            date: string;
+            range: "day" | "week";
+            min_block_minutes?: number;
+          };
+          const result = this.getDeepWork(body.date, body.range, body.min_block_minutes);
+          return Response.json(result);
+        }
+
         // ---------------------------------------------------------------
         // Constraint RPC endpoints
         // ---------------------------------------------------------------
@@ -6597,6 +6611,83 @@ export class UserGraphDO {
       total_cost: Math.round(weekly.total * 100) / 100,
       daily_costs: dailyCosts,
       suggestions,
+    };
+  }
+
+  // getDeepWork -- Deep work window optimization for a day/week
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute deep work report for a day or week based on the user's
+   * canonical events. Reads events from SQLite and delegates to the pure
+   * deep work functions in @tminus/shared.
+   *
+   * For "day" range: computes deep work blocks for the single date.
+   * For "week" range: computes across 7 days starting from date.
+   *
+   * Returns blocks, total deep hours, protected hours target, and
+   * optimization suggestions.
+   */
+  getDeepWork(
+    date: string,
+    range: "day" | "week",
+    minBlockMinutes?: number,
+  ): DeepWorkReport & { suggestions: Array<{ message: string; estimated_gain_minutes: number }> } {
+    this.ensureMigrated();
+
+    // Determine query time range
+    const dayCount = range === "week" ? 7 : 1;
+    const startDate = new Date(`${date}T00:00:00Z`);
+    const endDate = new Date(startDate.getTime() + dayCount * 24 * 60 * 60 * 1000);
+
+    const startIso = startDate.toISOString();
+    const endIso = endDate.toISOString();
+
+    // Fetch canonical events for the period
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND status != 'cancelled'
+         ORDER BY start_ts ASC`,
+        startIso,
+        endIso,
+      )
+      .toArray();
+
+    const events = rows.map((row) => this.rowToCanonicalEvent(row));
+
+    // Extract working hours from constraints (if set)
+    const workingHoursConstraints = this.listConstraints("working_hours");
+    let workingHoursStart = 9;
+    let workingHoursEnd = 17;
+    if (workingHoursConstraints.length > 0) {
+      const config = workingHoursConstraints[0].config_json as {
+        start_hour?: number;
+        end_hour?: number;
+      };
+      if (typeof config.start_hour === "number") workingHoursStart = config.start_hour;
+      if (typeof config.end_hour === "number") workingHoursEnd = config.end_hour;
+    }
+
+    // Build array of day strings
+    const days: string[] = [];
+    for (let i = 0; i < dayCount; i++) {
+      const d = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      days.push(d.toISOString().slice(0, 10));
+    }
+
+    const workingHours = { workingHoursStart, workingHoursEnd };
+
+    const report = computeDeepWorkReport(events, workingHours, days, minBlockMinutes);
+    const suggestions = suggestDeepWorkOptimizations(events, workingHours, minBlockMinutes);
+
+    return {
+      ...report,
+      suggestions: suggestions.map((s) => ({
+        message: s.message,
+        estimated_gain_minutes: s.estimated_gain_minutes,
+      })),
     };
   }
 

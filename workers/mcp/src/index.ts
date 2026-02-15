@@ -882,6 +882,33 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
     },
   },
   {
+    name: "calendar.get_deep_work",
+    description:
+      "Analyze deep work windows for a day or week. Returns detected uninterrupted blocks (>= 2h by default), total deep work hours, protected hours target, and actionable suggestions to preserve or expand deep work time. Use this to assess schedule quality for focused work and recommend optimizations before adding new meetings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description:
+            "The date to analyze in YYYY-MM-DD format. For 'week' range, this is the start date.",
+        },
+        range: {
+          type: "string",
+          enum: ["day", "week"],
+          description:
+            "Whether to analyze a single day or an entire week starting from the given date. Defaults to 'day'.",
+        },
+        min_block_minutes: {
+          type: "number",
+          description:
+            "Minimum duration in minutes for a block to qualify as deep work. Default: 120 (2 hours). Set lower for more granular analysis.",
+        },
+      },
+      required: ["date"],
+    },
+  },
+  {
     name: "calendar.simulate",
     description:
       "Run a what-if simulation to assess calendar impact of accepting new commitments. 'What if I accept this board seat?' Returns projected time allocation, conflict count, constraint violations, and burnout risk. Does NOT modify any real data -- purely read-only analysis. Supports three scenario types: add_commitment (new client hours), add_recurring_event (new weekly meeting), and change_working_hours (adjust schedule boundaries).",
@@ -1053,6 +1080,7 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.generate_excuse": "enterprise",
   "calendar.get_cognitive_load": "free",
   "calendar.get_context_switches": "free",
+  "calendar.get_deep_work": "free",
   "calendar.simulate": "premium",
   "calendar.query_graph": "free",
 };
@@ -3584,6 +3612,57 @@ async function handleGetContextSwitchesMCP(
 }
 
 /**
+ * Execute calendar.get_deep_work: validate input and forward to the API
+ * worker to compute deep work windows for a day or week.
+ */
+async function handleGetDeepWorkMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.date !== "string" || args.date.trim().length === 0) {
+    throw new InvalidParamsError("date is required (YYYY-MM-DD format)");
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) {
+    throw new InvalidParamsError("date must be in YYYY-MM-DD format");
+  }
+
+  const range = args.range ?? "day";
+  if (range !== "day" && range !== "week") {
+    throw new InvalidParamsError("range must be 'day' or 'week'");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const params = new URLSearchParams({ date: args.date, range: range as string });
+
+  if (args.min_block_minutes != null) {
+    const minBlock = Number(args.min_block_minutes);
+    if (isNaN(minBlock) || minBlock < 1) {
+      throw new InvalidParamsError("min_block_minutes must be a positive number");
+    }
+    params.set("min_block_minutes", String(minBlock));
+  }
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "GET",
+    `/v1/intelligence/deep-work?${params.toString()}`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get deep work report");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.simulate: validate input and forward to the API
  * worker to run a what-if simulation on the user's calendar.
  * Read-only: does not modify any real data.
@@ -4119,6 +4198,11 @@ async function dispatch(
           case "calendar.get_context_switches": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetContextSwitchesMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_deep_work": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetDeepWorkMCP(request, env.API, toolArgs);
             break;
           }
           case "calendar.simulate": {
