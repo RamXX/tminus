@@ -27,6 +27,7 @@ import type {
   QueueLike,
   TimeCommitment,
   CommitmentStatus,
+  CommitmentProofData,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1036,316 @@ describe("UserGraphDO commitment tracking", () => {
         .prepare("SELECT COUNT(*) as cnt FROM commitment_reports WHERE commitment_id = ?")
         .get("cmt_01TESTCASCADEAAAAAAAAAA01") as { cnt: number };
       expect(reportsAfter.cnt).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getCommitmentProofData
+  // -------------------------------------------------------------------------
+
+  describe("getCommitmentProofData", () => {
+    it("returns null for non-existent commitment", () => {
+      const proof = ug.getCommitmentProofData("cmt_01NONEXISTENT00000000001");
+      expect(proof).toBeNull();
+    });
+
+    it("returns proof data with commitment details and events", async () => {
+      // Create events
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "google_evt_proof_001",
+        title: "Proof Meeting 1",
+        start: "2026-02-10T09:00:00Z",
+        end: "2026-02-10T11:00:00Z", // 2 hours
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "google_evt_proof_002",
+        title: "Proof Meeting 2",
+        start: "2026-02-11T14:00:00Z",
+        end: "2026-02-11T17:00:00Z", // 3 hours
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const events = ug.listCanonicalEvents({});
+      expect(events.items.length).toBe(2);
+
+      // Tag events with client allocations
+      for (const evt of events.items) {
+        ug.createAllocation(
+          `alc_proof_${evt.canonical_event_id.slice(-8)}`,
+          evt.canonical_event_id,
+          "BILLABLE",
+          "client_proof",
+          null,
+        );
+      }
+
+      // Create commitment
+      ug.createCommitment(
+        "cmt_01TESTPRFAAAAAAAAAAAAAAA01",
+        "client_proof",
+        8,
+        "WEEKLY",
+        "Proof Corp",
+        4,
+      );
+
+      // Get proof data
+      const proof = ug.getCommitmentProofData(
+        "cmt_01TESTPRFAAAAAAAAAAAAAAA01",
+        "2026-02-15T23:59:59Z",
+      );
+
+      expect(proof).not.toBeNull();
+      expect(proof!.commitment.commitment_id).toBe("cmt_01TESTPRFAAAAAAAAAAAAAAA01");
+      expect(proof!.commitment.client_id).toBe("client_proof");
+      expect(proof!.commitment.client_name).toBe("Proof Corp");
+      expect(proof!.commitment.target_hours).toBe(8);
+      expect(proof!.actual_hours).toBe(5); // 2 + 3
+      expect(proof!.status).toBe("under"); // 5 < 8
+      expect(proof!.events).toHaveLength(2);
+    });
+
+    it("includes event-level detail with hours and billing category", async () => {
+      // Create events
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "google_evt_detail_001",
+        title: "Detail Meeting",
+        start: "2026-02-10T09:00:00Z",
+        end: "2026-02-10T12:00:00Z", // 3 hours
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+
+      const events = ug.listCanonicalEvents({});
+      const eventId = events.items[0].canonical_event_id;
+
+      // Tag with client allocation
+      ug.createAllocation(
+        `alc_detail_001`,
+        eventId,
+        "BILLABLE",
+        "client_detail",
+        null,
+      );
+
+      // Create commitment
+      ug.createCommitment(
+        "cmt_01TESTDETAILAAAAAAAAAAAAA",
+        "client_detail",
+        5,
+      );
+
+      // Get proof data
+      const proof = ug.getCommitmentProofData(
+        "cmt_01TESTDETAILAAAAAAAAAAAAA",
+        "2026-02-15T23:59:59Z",
+      );
+
+      expect(proof).not.toBeNull();
+      expect(proof!.events).toHaveLength(1);
+
+      const proofEvent = proof!.events[0];
+      expect(proofEvent.canonical_event_id).toBe(eventId);
+      expect(proofEvent.title).toBe("Detail Meeting");
+      expect(proofEvent.hours).toBe(3);
+      expect(proofEvent.billing_category).toBe("BILLABLE");
+      expect(proofEvent.start_ts).toBeTruthy();
+      expect(proofEvent.end_ts).toBeTruthy();
+    });
+
+    it("excludes events outside the rolling window", async () => {
+      // Create an event inside window
+      const insideDelta = makeCreatedDelta({
+        origin_event_id: "google_evt_inside_001",
+        title: "Inside Window",
+        start: "2026-02-10T09:00:00Z",
+        end: "2026-02-10T11:00:00Z", // 2 hours
+      });
+
+      // Create an event OUTSIDE window (more than 1 week ago for 1-week window)
+      const outsideDelta = makeCreatedDelta({
+        origin_event_id: "google_evt_outside_001",
+        title: "Outside Window",
+        start: "2026-01-01T09:00:00Z",
+        end: "2026-01-01T11:00:00Z", // 2 hours
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [insideDelta, outsideDelta]);
+
+      const events = ug.listCanonicalEvents({});
+      for (const evt of events.items) {
+        ug.createAllocation(
+          `alc_window_${evt.canonical_event_id.slice(-8)}`,
+          evt.canonical_event_id,
+          "BILLABLE",
+          "client_window",
+          null,
+        );
+      }
+
+      // Create commitment with 1-week rolling window
+      ug.createCommitment(
+        "cmt_01TESTWINDOWAAAAAAAAAAAAA",
+        "client_window",
+        5,
+        "WEEKLY",
+        null,
+        1, // 1-week rolling window
+      );
+
+      // Get proof data -- only inside event should appear
+      const proof = ug.getCommitmentProofData(
+        "cmt_01TESTWINDOWAAAAAAAAAAAAA",
+        "2026-02-15T23:59:59Z",
+      );
+
+      expect(proof).not.toBeNull();
+      expect(proof!.events).toHaveLength(1);
+      expect(proof!.events[0].title).toBe("Inside Window");
+      expect(proof!.actual_hours).toBe(2);
+    });
+
+    it("returns empty events when no allocations match", () => {
+      // Create commitment with no matching allocations
+      ug.createCommitment(
+        "cmt_01TESTEMPTYAAAAAAAAAAAAAAA",
+        "client_no_events",
+        10,
+      );
+
+      const proof = ug.getCommitmentProofData(
+        "cmt_01TESTEMPTYAAAAAAAAAAAAAAA",
+        "2026-02-15T23:59:59Z",
+      );
+
+      expect(proof).not.toBeNull();
+      expect(proof!.events).toHaveLength(0);
+      expect(proof!.actual_hours).toBe(0);
+      expect(proof!.status).toBe("under");
+    });
+
+    it("computes correct compliance status (compliant, under, over)", async () => {
+      // Create events totaling 13 hours
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "google_evt_status_001",
+        title: "Status Event 1",
+        start: "2026-02-10T08:00:00Z",
+        end: "2026-02-10T15:00:00Z", // 7 hours
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "google_evt_status_002",
+        title: "Status Event 2",
+        start: "2026-02-11T09:00:00Z",
+        end: "2026-02-11T15:00:00Z", // 6 hours
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const events = ug.listCanonicalEvents({});
+      for (const evt of events.items) {
+        ug.createAllocation(
+          `alc_status_${evt.canonical_event_id.slice(-8)}`,
+          evt.canonical_event_id,
+          "BILLABLE",
+          "client_status",
+          null,
+        );
+      }
+
+      // Create commitment: target 10 hours
+      ug.createCommitment(
+        "cmt_01TESTSTATUSAAAAAAAAAAAAA",
+        "client_status",
+        10,
+        "WEEKLY",
+        null,
+        4,
+      );
+
+      // 13 hours vs 10 target: 13 > 10 * 1.2 = 12 -> "over"
+      const proof = ug.getCommitmentProofData(
+        "cmt_01TESTSTATUSAAAAAAAAAAAAA",
+        "2026-02-15T23:59:59Z",
+      );
+
+      expect(proof).not.toBeNull();
+      expect(proof!.actual_hours).toBe(13);
+      expect(proof!.status).toBe("over");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getCommitmentProofData RPC integration
+  // -------------------------------------------------------------------------
+
+  describe("handleFetch RPC for /getCommitmentProofData", () => {
+    it("returns proof data via RPC", async () => {
+      // Create an event
+      const delta = makeCreatedDelta({
+        origin_event_id: "google_evt_rpc_proof_001",
+        title: "RPC Proof Meeting",
+        start: "2026-02-10T09:00:00Z",
+        end: "2026-02-10T12:00:00Z", // 3 hours
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const events = ug.listCanonicalEvents({});
+      ug.createAllocation(
+        `alc_rpc_proof_001`,
+        events.items[0].canonical_event_id,
+        "BILLABLE",
+        "client_rpc_proof",
+        null,
+      );
+
+      // Create commitment
+      ug.createCommitment(
+        "cmt_01TESTRPCPRFAAAAAAAAAAAAA",
+        "client_rpc_proof",
+        5,
+        "WEEKLY",
+        "RPC Proof Corp",
+      );
+
+      // Call via RPC
+      const response = await ug.handleFetch(
+        new Request("https://do.internal/getCommitmentProofData", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            commitment_id: "cmt_01TESTRPCPRFAAAAAAAAAAAAA",
+            as_of: "2026-02-15T23:59:59Z",
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as CommitmentProofData;
+      expect(data).not.toBeNull();
+      expect(data.commitment.commitment_id).toBe("cmt_01TESTRPCPRFAAAAAAAAAAAAA");
+      expect(data.commitment.client_name).toBe("RPC Proof Corp");
+      expect(data.events).toHaveLength(1);
+      expect(data.events[0].title).toBe("RPC Proof Meeting");
+      expect(data.events[0].hours).toBe(3);
+      expect(data.actual_hours).toBe(3);
+    });
+
+    it("returns null for non-existent commitment via RPC", async () => {
+      const response = await ug.handleFetch(
+        new Request("https://do.internal/getCommitmentProofData", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            commitment_id: "cmt_01NONEXISTAAAAAAAAAAAAA01",
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data).toBeNull();
     });
   });
 });

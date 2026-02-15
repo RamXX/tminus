@@ -53,6 +53,12 @@ id = "placeholder-sessions-id"  # Replace with real ID after `wrangler kv namesp
 binding = "RATE_LIMITS"
 id = "placeholder-rate-limits-id"  # Replace with real ID after `wrangler kv namespace create tminus-rate-limits`
 
+# --- R2 buckets ---------------------------------------------------------------
+
+[[r2_buckets]]
+binding = "PROOF_BUCKET"
+bucket_name = "tminus-proof-exports"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # JWT_SECRET          -- API auth JWT signing secret
 # MASTER_KEY          -- envelope encryption master key (DEK wrapping in AccountDO)
@@ -97,6 +103,10 @@ queue = "tminus-sync-queue-staging"
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue-staging"
 
+[[env.staging.r2_buckets]]
+binding = "PROOF_BUCKET"
+bucket_name = "tminus-proof-exports-staging"
+
 # ===========================================================================
 # Production environment: tminus-api-production
 # Deploy with: wrangler deploy --env production
@@ -132,3 +142,7 @@ queue = "tminus-sync-queue"
 [[env.production.queues.producers]]
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
+
+[[env.production.r2_buckets]]
+binding = "PROOF_BUCKET"
+bucket_name = "tminus-proof-exports"

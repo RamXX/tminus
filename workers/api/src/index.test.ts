@@ -21,6 +21,9 @@ import {
   API_VERSION,
   validateConstraintKindAndConfig,
   VALID_CONSTRAINT_KINDS,
+  computeProofHash,
+  generateProofCsv,
+  generateProofDocument,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -1174,5 +1177,323 @@ describe("constraint kind validation: override schema", () => {
       reason: "   ",
     });
     expect(result).toContain("reason");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Commitment Proof Export unit tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Test fixture: minimal proof data for unit testing proof generation.
+ */
+function makeTestProofData(overrides?: {
+  events?: Array<{
+    canonical_event_id: string;
+    title: string | null;
+    start_ts: string;
+    end_ts: string;
+    hours: number;
+    billing_category: string;
+  }>;
+  actual_hours?: number;
+  status?: string;
+}) {
+  return {
+    commitment: {
+      commitment_id: "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      client_id: "client_acme",
+      client_name: "Acme Corp",
+      window_type: "WEEKLY",
+      target_hours: 10,
+      rolling_window_weeks: 4,
+      hard_minimum: false,
+      proof_required: true,
+      created_at: "2026-02-01T00:00:00.000Z",
+    },
+    window_start: "2026-01-18T00:00:00.000Z",
+    window_end: "2026-02-15T00:00:00.000Z",
+    actual_hours: overrides?.actual_hours ?? 12.5,
+    status: overrides?.status ?? "compliant",
+    events: overrides?.events ?? [
+      {
+        canonical_event_id: "evt_01TESTEVT00000000000001",
+        title: "Sprint Planning",
+        start_ts: "2026-02-10T09:00:00.000Z",
+        end_ts: "2026-02-10T11:00:00.000Z",
+        hours: 2,
+        billing_category: "BILLABLE",
+      },
+      {
+        canonical_event_id: "evt_01TESTEVT00000000000002",
+        title: "Code Review",
+        start_ts: "2026-02-11T14:00:00.000Z",
+        end_ts: "2026-02-11T16:30:00.000Z",
+        hours: 2.5,
+        billing_category: "BILLABLE",
+      },
+      {
+        canonical_event_id: "evt_01TESTEVT00000000000003",
+        title: "Client Meeting",
+        start_ts: "2026-02-12T10:00:00.000Z",
+        end_ts: "2026-02-12T18:00:00.000Z",
+        hours: 8,
+        billing_category: "BILLABLE",
+      },
+    ],
+  };
+}
+
+describe("computeProofHash", () => {
+  it("returns a 64-character hex string (SHA-256)", async () => {
+    const data = makeTestProofData();
+    const hash = await computeProofHash(data);
+
+    expect(hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("produces deterministic output for same input", async () => {
+    const data = makeTestProofData();
+    const hash1 = await computeProofHash(data);
+    const hash2 = await computeProofHash(data);
+
+    expect(hash1).toBe(hash2);
+  });
+
+  it("produces different hash for different data", async () => {
+    const data1 = makeTestProofData({ actual_hours: 10 });
+    const data2 = makeTestProofData({ actual_hours: 20 });
+
+    const hash1 = await computeProofHash(data1);
+    const hash2 = await computeProofHash(data2);
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it("produces different hash when event list differs", async () => {
+    const data1 = makeTestProofData();
+    const data2 = makeTestProofData({
+      events: [
+        {
+          canonical_event_id: "evt_different",
+          title: "Different Event",
+          start_ts: "2026-02-10T09:00:00.000Z",
+          end_ts: "2026-02-10T11:00:00.000Z",
+          hours: 2,
+          billing_category: "BILLABLE",
+        },
+      ],
+    });
+
+    const hash1 = await computeProofHash(data1);
+    const hash2 = await computeProofHash(data2);
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it("handles empty events array", async () => {
+    const data = makeTestProofData({ events: [], actual_hours: 0 });
+    const hash = await computeProofHash(data);
+
+    expect(hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
+
+describe("generateProofCsv", () => {
+  it("includes metadata header comments", () => {
+    const data = makeTestProofData();
+    const csv = generateProofCsv(data, "abc123hash");
+
+    expect(csv).toContain("# Commitment Proof Export");
+    expect(csv).toContain("# Commitment ID: cmt_01TESTAAAAAAAAAAAAAAAAAA88");
+    expect(csv).toContain("# Client: Acme Corp");
+    expect(csv).toContain("# Target Hours: 10");
+    expect(csv).toContain("# Actual Hours: 12.5");
+    expect(csv).toContain("# Status: compliant");
+    expect(csv).toContain("# Proof Hash (SHA-256): abc123hash");
+  });
+
+  it("includes CSV header row", () => {
+    const data = makeTestProofData();
+    const csv = generateProofCsv(data, "hash");
+
+    expect(csv).toContain("event_id,title,start,end,hours,billing_category");
+  });
+
+  it("includes one row per event", () => {
+    const data = makeTestProofData();
+    const csv = generateProofCsv(data, "hash");
+
+    expect(csv).toContain("evt_01TESTEVT00000000000001,Sprint Planning,");
+    expect(csv).toContain("evt_01TESTEVT00000000000002,Code Review,");
+    expect(csv).toContain("evt_01TESTEVT00000000000003,Client Meeting,");
+  });
+
+  it("includes total event count and hours summary", () => {
+    const data = makeTestProofData();
+    const csv = generateProofCsv(data, "hash");
+
+    expect(csv).toContain("# Total Events: 3");
+    expect(csv).toContain("# Total Hours: 12.5");
+  });
+
+  it("falls back to client_id when client_name is null", () => {
+    const data = makeTestProofData();
+    data.commitment.client_name = null;
+    const csv = generateProofCsv(data, "hash");
+
+    expect(csv).toContain("# Client: client_acme");
+  });
+
+  it("escapes commas in event titles", () => {
+    const data = makeTestProofData({
+      events: [
+        {
+          canonical_event_id: "evt_comma",
+          title: "Meeting, Planning, Review",
+          start_ts: "2026-02-10T09:00:00.000Z",
+          end_ts: "2026-02-10T10:00:00.000Z",
+          hours: 1,
+          billing_category: "BILLABLE",
+        },
+      ],
+      actual_hours: 1,
+    });
+
+    const csv = generateProofCsv(data, "hash");
+    // Title with commas should be quoted
+    expect(csv).toContain('"Meeting, Planning, Review"');
+  });
+
+  it("handles empty events array", () => {
+    const data = makeTestProofData({ events: [], actual_hours: 0 });
+    const csv = generateProofCsv(data, "hash");
+
+    expect(csv).toContain("# Total Events: 0");
+    expect(csv).toContain("# Total Hours: 0");
+    // Should still have header row but no data rows
+    expect(csv).toContain("event_id,title,start,end,hours,billing_category");
+  });
+});
+
+describe("generateProofDocument", () => {
+  it("includes document title", () => {
+    const data = makeTestProofData();
+    const doc = generateProofDocument(data, "abc123hash");
+
+    expect(doc).toContain("COMMITMENT PROOF DOCUMENT");
+  });
+
+  it("includes commitment details", () => {
+    const data = makeTestProofData();
+    const doc = generateProofDocument(data, "hash");
+
+    expect(doc).toContain("cmt_01TESTAAAAAAAAAAAAAAAAAA88");
+    expect(doc).toContain("Acme Corp");
+    expect(doc).toContain("WEEKLY");
+    expect(doc).toContain("4 weeks");
+  });
+
+  it("includes compliance summary", () => {
+    const data = makeTestProofData();
+    const doc = generateProofDocument(data, "hash");
+
+    expect(doc).toContain("Target Hours:     10");
+    expect(doc).toContain("Actual Hours:     12.5");
+    expect(doc).toContain("COMPLIANT");
+  });
+
+  it("includes event-level detail", () => {
+    const data = makeTestProofData();
+    const doc = generateProofDocument(data, "hash");
+
+    expect(doc).toContain("EVENT DETAIL (3 events)");
+    expect(doc).toContain("Sprint Planning");
+    expect(doc).toContain("Code Review");
+    expect(doc).toContain("Client Meeting");
+  });
+
+  it("includes proof hash in verification section", () => {
+    const data = makeTestProofData();
+    const doc = generateProofDocument(data, "my_proof_hash_value");
+
+    expect(doc).toContain("CRYPTOGRAPHIC VERIFICATION");
+    expect(doc).toContain("SHA-256 Proof Hash: my_proof_hash_value");
+  });
+
+  it("shows no events message when events array is empty", () => {
+    const data = makeTestProofData({ events: [], actual_hours: 0 });
+    const doc = generateProofDocument(data, "hash");
+
+    expect(doc).toContain("No events found in this window.");
+    expect(doc).toContain("EVENT DETAIL (0 events)");
+  });
+
+  it("shows hard minimum and proof required flags", () => {
+    const data = makeTestProofData();
+    data.commitment.hard_minimum = true;
+    const doc = generateProofDocument(data, "hash");
+
+    expect(doc).toContain("Hard Minimum:     Yes");
+    expect(doc).toContain("Proof Required:   Yes");
+  });
+});
+
+describe("commitment proof export routing", () => {
+  const handler = createHandler();
+  const env = createMinimalEnv();
+
+  it("POST /v1/commitments/:id/export requires auth", async () => {
+    const request = new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA99/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: "csv" }),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(401);
+  });
+
+  it("POST /v1/commitments/:id/export rejects invalid commitment ID", async () => {
+    const auth = await makeAuthHeader();
+    const request = new Request("https://api.test/v1/commitments/bad-id/export", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: auth,
+      },
+      body: JSON.stringify({ format: "csv" }),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(400);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid commitment ID format");
+  });
+
+  it("POST /v1/commitments/:id/export returns 500 when PROOF_BUCKET missing", async () => {
+    const auth = await makeAuthHeader();
+    const request = new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA99/export", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: auth,
+      },
+      body: JSON.stringify({ format: "csv" }),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(500);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("R2 bucket missing");
+  });
+
+  it("GET /v1/proofs/* requires auth", async () => {
+    const request = new Request("https://api.test/v1/proofs/proofs/usr_test/cmt_test/file.csv");
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(401);
   });
 });

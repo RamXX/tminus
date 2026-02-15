@@ -359,6 +359,26 @@ export interface CommitmentReport {
   readonly created_at: string;
 }
 
+/** A single event included in a commitment proof export. */
+export interface ProofEvent {
+  readonly canonical_event_id: string;
+  readonly title: string | null;
+  readonly start_ts: string;
+  readonly end_ts: string;
+  readonly hours: number;
+  readonly billing_category: string;
+}
+
+/** Data payload for generating a commitment proof document. */
+export interface CommitmentProofData {
+  readonly commitment: TimeCommitment;
+  readonly window_start: string;
+  readonly window_end: string;
+  readonly actual_hours: number;
+  readonly status: CommitmentComplianceStatus;
+  readonly events: ProofEvent[];
+}
+
 /** Result of a GDPR full-user deletion step. */
 export interface DeletionCounts {
   readonly deleted: number;
@@ -3079,6 +3099,94 @@ export class UserGraphDO {
     };
   }
 
+  /**
+   * Gather all data needed for a commitment proof export.
+   *
+   * Returns the commitment, rolling window bounds, actual hours, compliance
+   * status, and the individual events (with hours) that contribute to the
+   * actual hours total. This gives the API layer everything it needs to
+   * build a PDF or CSV proof document.
+   */
+  getCommitmentProofData(
+    commitmentId: string,
+    asOf?: string,
+  ): CommitmentProofData | null {
+    this.ensureMigrated();
+
+    const commitment = this.getCommitment(commitmentId);
+    if (!commitment) return null;
+
+    const now = asOf ? new Date(asOf) : new Date();
+    const windowDays = commitment.rolling_window_weeks * 7;
+    const windowStart = new Date(
+      now.getTime() - windowDays * 24 * 60 * 60 * 1000,
+    );
+
+    const windowStartIso = windowStart.toISOString();
+    const windowEndIso = now.toISOString();
+
+    // Get individual events with their hours for the proof document
+    const eventRows = this.sql
+      .exec<{
+        canonical_event_id: string;
+        title: string | null;
+        start_ts: string;
+        end_ts: string;
+        hours: number;
+        billing_category: string;
+      }>(
+        `SELECT
+           ce.canonical_event_id,
+           ce.title,
+           ce.start_ts,
+           ce.end_ts,
+           (julianday(ce.end_ts) - julianday(ce.start_ts)) * 24.0 as hours,
+           ta.billing_category
+         FROM time_allocations ta
+         JOIN canonical_events ce ON ta.canonical_event_id = ce.canonical_event_id
+         WHERE ta.client_id = ?
+           AND ce.start_ts >= ?
+           AND ce.start_ts < ?
+         ORDER BY ce.start_ts ASC`,
+        commitment.client_id,
+        windowStartIso,
+        windowEndIso,
+      )
+      .toArray();
+
+    const events: ProofEvent[] = eventRows.map((row) => ({
+      canonical_event_id: row.canonical_event_id,
+      title: row.title,
+      start_ts: row.start_ts,
+      end_ts: row.end_ts,
+      hours: Math.round(row.hours * 100) / 100,
+      billing_category: row.billing_category,
+    }));
+
+    const actualHours = Math.round(
+      events.reduce((sum, e) => sum + e.hours, 0) * 100,
+    ) / 100;
+
+    // Determine status (same logic as getCommitmentStatus)
+    let status: CommitmentComplianceStatus;
+    if (actualHours > commitment.target_hours * 1.2) {
+      status = "over";
+    } else if (actualHours >= commitment.target_hours) {
+      status = "compliant";
+    } else {
+      status = "under";
+    }
+
+    return {
+      commitment,
+      window_start: windowStartIso,
+      window_end: windowEndIso,
+      actual_hours: actualHours,
+      status,
+      events,
+    };
+  }
+
   // -------------------------------------------------------------------------
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
@@ -3623,6 +3731,18 @@ export class UserGraphDO {
             body.as_of,
           );
           return Response.json(status);
+        }
+
+        case "/getCommitmentProofData": {
+          const body = (await request.json()) as {
+            commitment_id: string;
+            as_of?: string;
+          };
+          const proofData = this.getCommitmentProofData(
+            body.commitment_id,
+            body.as_of,
+          );
+          return Response.json(proofData);
         }
 
         default:

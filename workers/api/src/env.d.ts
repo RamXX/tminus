@@ -30,4 +30,6 @@ interface Env {
   STRIPE_SECRET_KEY?: string;
   /** Stripe webhook endpoint signing secret (whsec_...). */
   STRIPE_WEBHOOK_SECRET?: string;
+  /** R2 bucket for storing commitment proof exports (PDF/CSV). */
+  PROOF_BUCKET?: R2Bucket;
 }
