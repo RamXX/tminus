@@ -16,7 +16,8 @@
  * - Standard API envelope format: {ok, data, error, meta}
  */
 
-import { generateId, isValidId } from "@tminus/shared";
+import { generateId, isValidId, validateOrgPolicyConfig, isValidOrgPolicyType } from "@tminus/shared";
+import type { OrgMergePolicyType } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,6 +45,20 @@ interface ApiEnvelope<T = unknown> {
 export const VALID_ORG_ROLES = ["admin", "member"] as const;
 
 export type OrgRole = (typeof VALID_ORG_ROLES)[number];
+
+// ---------------------------------------------------------------------------
+// Org policy types (re-exported from shared for convenience)
+// ---------------------------------------------------------------------------
+
+/** Valid org policy types for the org_policies table. */
+export const VALID_POLICY_TYPES = [
+  "mandatory_working_hours",
+  "minimum_vip_priority",
+  "required_projection_detail",
+  "max_account_count",
+] as const;
+
+export type PolicyType = (typeof VALID_POLICY_TYPES)[number];
 
 // ---------------------------------------------------------------------------
 // Pure validation helpers (exported for unit testing)
@@ -115,6 +130,61 @@ export function validateRoleInput(body: Record<string, unknown>): string | null 
   }
   if (!isValidOrgRole(body.role)) {
     return `role must be one of: ${VALID_ORG_ROLES.join(", ")}`;
+  }
+  return null;
+}
+
+/**
+ * Validate org policy creation/update input.
+ * Returns error string or null if valid.
+ */
+export function validatePolicyInput(body: Record<string, unknown>): string | null {
+  if (!("policy_type" in body) || body.policy_type === undefined) {
+    return "policy_type is required";
+  }
+  if (typeof body.policy_type !== "string") {
+    return "policy_type must be a string";
+  }
+  if (!isValidOrgPolicyType(body.policy_type)) {
+    return `policy_type must be one of: ${VALID_POLICY_TYPES.join(", ")}`;
+  }
+  if (!("config" in body) || body.config === undefined) {
+    return "config is required";
+  }
+  if (typeof body.config !== "object" || body.config === null || Array.isArray(body.config)) {
+    return "config must be an object";
+  }
+  // Delegate to shared validation
+  const configError = validateOrgPolicyConfig(
+    body.policy_type as OrgMergePolicyType,
+    body.config as Record<string, unknown>,
+  );
+  if (configError) {
+    return configError;
+  }
+  return null;
+}
+
+/**
+ * Validate org policy update input (config only, no policy_type change).
+ * Returns error string or null if valid.
+ */
+export function validatePolicyUpdateInput(
+  body: Record<string, unknown>,
+  existingPolicyType: string,
+): string | null {
+  if (!("config" in body) || body.config === undefined) {
+    return "config is required";
+  }
+  if (typeof body.config !== "object" || body.config === null || Array.isArray(body.config)) {
+    return "config must be an object";
+  }
+  const configError = validateOrgPolicyConfig(
+    existingPolicyType as OrgMergePolicyType,
+    body.config as Record<string, unknown>,
+  );
+  if (configError) {
+    return configError;
   }
   return null;
 }
@@ -612,5 +682,270 @@ export async function handleChangeRole(
   } catch (err) {
     console.error("Failed to change role", err);
     return jsonResponse(errorEnvelope("Failed to change role"), 500);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Org Policy Route handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /v1/orgs/:id/policies -- Create an org-level policy.
+ *
+ * Admin only. Body: { policy_type, config }.
+ * Only one policy per type per org (UNIQUE constraint on org_id + policy_type).
+ */
+export async function handleCreateOrgPolicy(
+  request: Request,
+  auth: AuthContext,
+  db: D1Database,
+  orgId: string,
+): Promise<Response> {
+  if (!isValidId(orgId, "org")) {
+    return jsonResponse(
+      errorEnvelope("Invalid organization ID format"),
+      400,
+    );
+  }
+
+  // Admin check
+  const denied = await checkOrgAdmin(auth.userId, orgId, db);
+  if (denied) return denied;
+
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON"),
+      400,
+    );
+  }
+
+  const inputError = validatePolicyInput(body);
+  if (inputError) {
+    return jsonResponse(errorEnvelope(inputError), 400);
+  }
+
+  const policyType = body.policy_type as string;
+  const configJson = JSON.stringify(body.config);
+  const policyId = generateId("policy");
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO org_policies (policy_id, org_id, policy_type, config_json, created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
+      )
+      .bind(policyId, orgId, policyType, configJson, auth.userId)
+      .run();
+
+    return jsonResponse(
+      successEnvelope({
+        policy_id: policyId,
+        org_id: orgId,
+        policy_type: policyType,
+        config_json: configJson,
+        created_by: auth.userId,
+        created_at: new Date().toISOString(),
+      }),
+      201,
+    );
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg.includes("UNIQUE") || errMsg.includes("idx_org_policies_org_type")) {
+      return jsonResponse(
+        errorEnvelope(`A policy of type '${policyType}' already exists for this organization`),
+        409,
+      );
+    }
+    console.error("Failed to create org policy", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create org policy"),
+      500,
+    );
+  }
+}
+
+/**
+ * GET /v1/orgs/:id/policies -- List org-level policies.
+ *
+ * Accessible to any org member.
+ */
+export async function handleListOrgPolicies(
+  _request: Request,
+  auth: AuthContext,
+  db: D1Database,
+  orgId: string,
+): Promise<Response> {
+  if (!isValidId(orgId, "org")) {
+    return jsonResponse(
+      errorEnvelope("Invalid organization ID format"),
+      400,
+    );
+  }
+
+  // Any member can list
+  const denied = await checkOrgMember(auth.userId, orgId, db);
+  if (denied) return denied;
+
+  try {
+    const result = await db
+      .prepare(
+        "SELECT policy_id, org_id, policy_type, config_json, created_at, created_by FROM org_policies WHERE org_id = ?1 ORDER BY created_at ASC",
+      )
+      .bind(orgId)
+      .all<{
+        policy_id: string;
+        org_id: string;
+        policy_type: string;
+        config_json: string;
+        created_at: string;
+        created_by: string;
+      }>();
+
+    return jsonResponse(successEnvelope(result.results ?? []), 200);
+  } catch (err) {
+    console.error("Failed to list org policies", err);
+    return jsonResponse(errorEnvelope("Failed to list org policies"), 500);
+  }
+}
+
+/**
+ * PUT /v1/orgs/:id/policies/:pid -- Update an org-level policy config.
+ *
+ * Admin only. Body: { config }. Policy type cannot be changed.
+ */
+export async function handleUpdateOrgPolicy(
+  request: Request,
+  auth: AuthContext,
+  db: D1Database,
+  orgId: string,
+  policyId: string,
+): Promise<Response> {
+  if (!isValidId(orgId, "org")) {
+    return jsonResponse(
+      errorEnvelope("Invalid organization ID format"),
+      400,
+    );
+  }
+
+  if (!isValidId(policyId, "policy")) {
+    return jsonResponse(
+      errorEnvelope("Invalid policy ID format"),
+      400,
+    );
+  }
+
+  // Admin check
+  const denied = await checkOrgAdmin(auth.userId, orgId, db);
+  if (denied) return denied;
+
+  // Fetch existing policy to get its type
+  const existing = await db
+    .prepare(
+      "SELECT policy_id, policy_type FROM org_policies WHERE policy_id = ?1 AND org_id = ?2",
+    )
+    .bind(policyId, orgId)
+    .first<{ policy_id: string; policy_type: string }>();
+
+  if (!existing) {
+    return jsonResponse(errorEnvelope("Policy not found"), 404);
+  }
+
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON"),
+      400,
+    );
+  }
+
+  const inputError = validatePolicyUpdateInput(body, existing.policy_type);
+  if (inputError) {
+    return jsonResponse(errorEnvelope(inputError), 400);
+  }
+
+  const configJson = JSON.stringify(body.config);
+
+  try {
+    await db
+      .prepare(
+        "UPDATE org_policies SET config_json = ?1 WHERE policy_id = ?2 AND org_id = ?3",
+      )
+      .bind(configJson, policyId, orgId)
+      .run();
+
+    return jsonResponse(
+      successEnvelope({
+        policy_id: policyId,
+        org_id: orgId,
+        policy_type: existing.policy_type,
+        config_json: configJson,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to update org policy", err);
+    return jsonResponse(
+      errorEnvelope("Failed to update org policy"),
+      500,
+    );
+  }
+}
+
+/**
+ * DELETE /v1/orgs/:id/policies/:pid -- Delete an org-level policy.
+ *
+ * Admin only.
+ */
+export async function handleDeleteOrgPolicy(
+  _request: Request,
+  auth: AuthContext,
+  db: D1Database,
+  orgId: string,
+  policyId: string,
+): Promise<Response> {
+  if (!isValidId(orgId, "org")) {
+    return jsonResponse(
+      errorEnvelope("Invalid organization ID format"),
+      400,
+    );
+  }
+
+  if (!isValidId(policyId, "policy")) {
+    return jsonResponse(
+      errorEnvelope("Invalid policy ID format"),
+      400,
+    );
+  }
+
+  // Admin check
+  const denied = await checkOrgAdmin(auth.userId, orgId, db);
+  if (denied) return denied;
+
+  try {
+    const result = await db
+      .prepare(
+        "DELETE FROM org_policies WHERE policy_id = ?1 AND org_id = ?2",
+      )
+      .bind(policyId, orgId)
+      .run();
+
+    const changes = (result as unknown as { meta?: { changes?: number } })?.meta?.changes ?? 0;
+    if (changes === 0) {
+      return jsonResponse(
+        errorEnvelope("Policy not found"),
+        404,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({ deleted: true, policy_id: policyId, org_id: orgId }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to delete org policy", err);
+    return jsonResponse(
+      errorEnvelope("Failed to delete org policy"),
+      500,
+    );
   }
 }

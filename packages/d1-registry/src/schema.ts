@@ -403,6 +403,34 @@ CREATE TABLE org_members (
 ` as const;
 
 /**
+ * Migration 0017: Organization-level policies.
+ *
+ * Stores org-level policies that apply to all members as a floor.
+ * Users can be stricter than org policy but not more lenient.
+ * Policy types: mandatory_working_hours, minimum_vip_priority,
+ * required_projection_detail, max_account_count.
+ * Unique constraint on (org_id, policy_type) ensures one policy per type per org.
+ */
+export const MIGRATION_0017_ORG_POLICIES = `
+CREATE TABLE org_policies (
+  policy_id   TEXT PRIMARY KEY,
+  org_id      TEXT NOT NULL,
+  policy_type TEXT NOT NULL CHECK(policy_type IN (
+    'mandatory_working_hours',
+    'minimum_vip_priority',
+    'required_projection_detail',
+    'max_account_count'
+  )),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by  TEXT NOT NULL
+);
+
+CREATE INDEX idx_org_policies_org ON org_policies(org_id);
+CREATE UNIQUE INDEX idx_org_policies_org_type ON org_policies(org_id, policy_type);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -423,4 +451,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0014_GROUP_SCHEDULING_SESSIONS,
   MIGRATION_0015_ORGANIZATIONS,
   MIGRATION_0016_ORG_MEMBERS,
+  MIGRATION_0017_ORG_POLICIES,
 ] as const;

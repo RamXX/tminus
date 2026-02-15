@@ -375,3 +375,45 @@ export type {
   DeepWorkImpact,
   DeepWorkSuggestion,
 } from "./deep-work";
+
+// Re-export temporal risk scoring engine (scheduling intelligence)
+export {
+  RISK_LEVELS,
+  computeBurnoutRisk,
+  computeTravelOverload,
+  computeStrategicDrift,
+  computeOverallRisk,
+  generateRiskRecommendations,
+  getRiskLevel,
+} from "./risk-scoring";
+export type {
+  RiskLevel,
+  CognitiveLoadHistoryEntry,
+  CategoryAllocation,
+  RiskScoreResult,
+} from "./risk-scoring";
+
+// Re-export org-level policy merge engine
+export {
+  mergeWorkingHours,
+  mergeVipPriority,
+  mergeAccountLimit,
+  mergeProjectionDetail,
+  mergeOrgAndUserPolicies,
+  validateOrgPolicyConfig,
+  isValidOrgPolicyType,
+  VALID_ORG_POLICY_TYPES,
+  DETAIL_LEVEL_RANK,
+} from "./policy-merge";
+export type {
+  OrgPolicyType as OrgMergePolicyType,
+  WorkingHoursPolicy,
+  VipPriorityPolicy,
+  AccountLimitPolicy,
+  ProjectionDetailPolicy,
+  VipEntry,
+  OrgPolicy,
+  UserPolicies,
+  AccountLimitResult,
+  MergedPolicies,
+} from "./policy-merge";

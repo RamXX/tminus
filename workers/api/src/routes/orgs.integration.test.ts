@@ -24,6 +24,7 @@ import {
   MIGRATION_0012_SUBSCRIPTIONS,
   MIGRATION_0015_ORGANIZATIONS,
   MIGRATION_0016_ORG_MEMBERS,
+  MIGRATION_0017_ORG_POLICIES,
 } from "@tminus/d1-registry";
 import {
   handleCreateOrg,
@@ -33,6 +34,10 @@ import {
   handleRemoveMember,
   handleChangeRole,
   checkOrgAdmin,
+  handleCreateOrgPolicy,
+  handleListOrgPolicies,
+  handleUpdateOrgPolicy,
+  handleDeleteOrgPolicy,
 } from "./orgs";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +176,7 @@ function setupTestDb(): void {
   sqliteDb.exec(MIGRATION_0012_SUBSCRIPTIONS);
   sqliteDb.exec(MIGRATION_0015_ORGANIZATIONS);
   sqliteDb.exec(MIGRATION_0016_ORG_MEMBERS);
+  sqliteDb.exec(MIGRATION_0017_ORG_POLICIES);
 
   // Insert test users
   sqliteDb.exec(`
@@ -674,6 +680,476 @@ describe("Organization routes integration", () => {
       const listResp2 = await handleListMembers(listReq2, { userId: ADMIN_USER_ID }, d1, orgId);
       const listBody2 = await parseResponse<unknown[]>(listResp2);
       expect(listBody2.data).toHaveLength(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Org Policies CRUD
+  // -------------------------------------------------------------------------
+
+  describe("Org Policy CRUD", () => {
+    let testOrgId: string;
+
+    beforeEach(async () => {
+      const request = makeRequest("POST", { name: "Policy Test Org" });
+      const response = await handleCreateOrg(request, { userId: ADMIN_USER_ID }, d1);
+      const body = await parseResponse<{ org_id: string }>(response);
+      testOrgId = body.data!.org_id;
+
+      // Add a regular member for RBAC tests
+      const addReq = makeRequest("POST", { user_id: MEMBER_USER_ID, role: "member" });
+      await handleAddMember(addReq, { userId: ADMIN_USER_ID }, d1, testOrgId);
+    });
+
+    // -----------------------------------------------------------------------
+    // POST /v1/orgs/:id/policies (create)
+    // -----------------------------------------------------------------------
+
+    describe("POST /v1/orgs/:id/policies (handleCreateOrgPolicy)", () => {
+      it("creates a working hours policy (admin, 201 with envelope)", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(201);
+        const body = await parseResponse<{
+          policy_id: string;
+          org_id: string;
+          policy_type: string;
+          config_json: string;
+          created_by: string;
+        }>(response);
+        expect(body.ok).toBe(true);
+        expect(body.data?.policy_id).toMatch(/^pol_/);
+        expect(body.data?.org_id).toBe(testOrgId);
+        expect(body.data?.policy_type).toBe("mandatory_working_hours");
+        expect(body.data?.created_by).toBe(ADMIN_USER_ID);
+        expect(body.meta).toBeDefined();
+
+        // Verify config_json is stored correctly
+        const config = JSON.parse(body.data!.config_json);
+        expect(config.start_hour).toBe(9);
+        expect(config.end_hour).toBe(17);
+      });
+
+      it("creates a VIP priority policy", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "minimum_vip_priority",
+          config: { minimum_weight: 0.5 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(201);
+        const body = await parseResponse<{ policy_type: string; config_json: string }>(response);
+        expect(body.data?.policy_type).toBe("minimum_vip_priority");
+        expect(JSON.parse(body.data!.config_json).minimum_weight).toBe(0.5);
+      });
+
+      it("creates a max account count policy", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "max_account_count",
+          config: { max_accounts: 5 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(201);
+        const body = await parseResponse<{ policy_type: string }>(response);
+        expect(body.data?.policy_type).toBe("max_account_count");
+      });
+
+      it("creates a projection detail policy", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "required_projection_detail",
+          config: { minimum_detail: "TITLE" },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(201);
+      });
+
+      it("returns 403 for non-admin", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: MEMBER_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(403);
+        const body = await parseResponse(response);
+        expect(body.ok).toBe(false);
+        expect(body.error).toContain("Admin access required");
+      });
+
+      it("returns 403 for non-member", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: OUTSIDER_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(403);
+      });
+
+      it("returns 400 for invalid policy type", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "invalid_type",
+          config: {},
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(400);
+        const body = await parseResponse(response);
+        expect(body.error).toContain("policy_type must be one of");
+      });
+
+      it("returns 400 for invalid config", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 20, end_hour: 8 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(400);
+        const body = await parseResponse(response);
+        expect(body.error).toContain("start_hour must be less than end_hour");
+      });
+
+      it("returns 409 for duplicate policy type", async () => {
+        const req1 = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        await handleCreateOrgPolicy(req1, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        const req2 = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 8, end_hour: 18 },
+        });
+        const response = await handleCreateOrgPolicy(req2, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(409);
+        const body = await parseResponse(response);
+        expect(body.error).toContain("already exists");
+      });
+
+      it("returns 400 for invalid JSON body", async () => {
+        const request = new Request("https://api.test.com/v1/orgs/policies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "not json",
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(400);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // GET /v1/orgs/:id/policies (list)
+    // -----------------------------------------------------------------------
+
+    describe("GET /v1/orgs/:id/policies (handleListOrgPolicies)", () => {
+      it("lists all policies for org member", async () => {
+        // Create two policies
+        const req1 = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        await handleCreateOrgPolicy(req1, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        const req2 = makeRequest("POST", {
+          policy_type: "max_account_count",
+          config: { max_accounts: 5 },
+        });
+        await handleCreateOrgPolicy(req2, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        // Regular member can list
+        const request = makeRequest("GET");
+        const response = await handleListOrgPolicies(request, { userId: MEMBER_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(200);
+        const body = await parseResponse<Array<{ policy_id: string; policy_type: string }>>(response);
+        expect(body.ok).toBe(true);
+        expect(body.data).toHaveLength(2);
+        expect(body.meta).toBeDefined();
+
+        const types = body.data!.map((p) => p.policy_type);
+        expect(types).toContain("mandatory_working_hours");
+        expect(types).toContain("max_account_count");
+      });
+
+      it("returns empty array when no policies exist", async () => {
+        const request = makeRequest("GET");
+        const response = await handleListOrgPolicies(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(200);
+        const body = await parseResponse<unknown[]>(response);
+        expect(body.data).toHaveLength(0);
+      });
+
+      it("returns 403 for non-member", async () => {
+        const request = makeRequest("GET");
+        const response = await handleListOrgPolicies(request, { userId: OUTSIDER_USER_ID }, d1, testOrgId);
+
+        expect(response.status).toBe(403);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // PUT /v1/orgs/:id/policies/:pid (update)
+    // -----------------------------------------------------------------------
+
+    describe("PUT /v1/orgs/:id/policies/:pid (handleUpdateOrgPolicy)", () => {
+      let testPolicyId: string;
+
+      beforeEach(async () => {
+        const req = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        const resp = await handleCreateOrgPolicy(req, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        const body = await parseResponse<{ policy_id: string }>(resp);
+        testPolicyId = body.data!.policy_id;
+      });
+
+      it("updates policy config (admin, 200 with envelope)", async () => {
+        const request = makeRequest("PUT", {
+          config: { start_hour: 8, end_hour: 18 },
+        });
+        const response = await handleUpdateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId, testPolicyId);
+
+        expect(response.status).toBe(200);
+        const body = await parseResponse<{
+          policy_id: string;
+          policy_type: string;
+          config_json: string;
+        }>(response);
+        expect(body.ok).toBe(true);
+        expect(body.data?.policy_id).toBe(testPolicyId);
+        expect(body.data?.policy_type).toBe("mandatory_working_hours");
+        expect(body.meta).toBeDefined();
+
+        const config = JSON.parse(body.data!.config_json);
+        expect(config.start_hour).toBe(8);
+        expect(config.end_hour).toBe(18);
+
+        // Verify in DB
+        const row = sqliteDb
+          .prepare("SELECT config_json FROM org_policies WHERE policy_id = ?")
+          .get(testPolicyId) as { config_json: string };
+        expect(JSON.parse(row.config_json).start_hour).toBe(8);
+      });
+
+      it("returns 403 for non-admin", async () => {
+        const request = makeRequest("PUT", {
+          config: { start_hour: 8, end_hour: 18 },
+        });
+        const response = await handleUpdateOrgPolicy(request, { userId: MEMBER_USER_ID }, d1, testOrgId, testPolicyId);
+
+        expect(response.status).toBe(403);
+      });
+
+      it("returns 404 for non-existent policy", async () => {
+        const request = makeRequest("PUT", {
+          config: { start_hour: 8, end_hour: 18 },
+        });
+        const response = await handleUpdateOrgPolicy(
+          request,
+          { userId: ADMIN_USER_ID },
+          d1,
+          testOrgId,
+          "pol_00000000000000000000000000",
+        );
+
+        expect(response.status).toBe(404);
+      });
+
+      it("returns 400 for invalid config", async () => {
+        const request = makeRequest("PUT", {
+          config: { start_hour: 20, end_hour: 8 },
+        });
+        const response = await handleUpdateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId, testPolicyId);
+
+        expect(response.status).toBe(400);
+        const body = await parseResponse(response);
+        expect(body.error).toContain("start_hour must be less than end_hour");
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // DELETE /v1/orgs/:id/policies/:pid (delete)
+    // -----------------------------------------------------------------------
+
+    describe("DELETE /v1/orgs/:id/policies/:pid (handleDeleteOrgPolicy)", () => {
+      let testPolicyId: string;
+
+      beforeEach(async () => {
+        const req = makeRequest("POST", {
+          policy_type: "max_account_count",
+          config: { max_accounts: 5 },
+        });
+        const resp = await handleCreateOrgPolicy(req, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        const body = await parseResponse<{ policy_id: string }>(resp);
+        testPolicyId = body.data!.policy_id;
+      });
+
+      it("deletes a policy (admin, 200 with envelope)", async () => {
+        const request = makeRequest("DELETE");
+        const response = await handleDeleteOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId, testPolicyId);
+
+        expect(response.status).toBe(200);
+        const body = await parseResponse<{ deleted: boolean; policy_id: string }>(response);
+        expect(body.ok).toBe(true);
+        expect(body.data?.deleted).toBe(true);
+        expect(body.data?.policy_id).toBe(testPolicyId);
+        expect(body.meta).toBeDefined();
+
+        // Verify gone from DB
+        const row = sqliteDb
+          .prepare("SELECT * FROM org_policies WHERE policy_id = ?")
+          .get(testPolicyId);
+        expect(row).toBeUndefined();
+      });
+
+      it("returns 403 for non-admin", async () => {
+        const request = makeRequest("DELETE");
+        const response = await handleDeleteOrgPolicy(request, { userId: MEMBER_USER_ID }, d1, testOrgId, testPolicyId);
+
+        expect(response.status).toBe(403);
+      });
+
+      it("returns 404 for non-existent policy", async () => {
+        const request = makeRequest("DELETE");
+        const response = await handleDeleteOrgPolicy(
+          request,
+          { userId: ADMIN_USER_ID },
+          d1,
+          testOrgId,
+          "pol_00000000000000000000000000",
+        );
+
+        expect(response.status).toBe(404);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Policy merge enforcement (via CRUD + merge engine)
+    // -----------------------------------------------------------------------
+
+    describe("Policy merge enforcement", () => {
+      it("org policy acts as floor -- user cannot be more lenient", async () => {
+        // Create working hours policy: 9-17
+        const createReq = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 9, end_hour: 17 },
+        });
+        const createResp = await handleCreateOrgPolicy(createReq, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        expect(createResp.status).toBe(201);
+
+        // Verify the policy is stored and retrievable
+        const listReq = makeRequest("GET");
+        const listResp = await handleListOrgPolicies(listReq, { userId: MEMBER_USER_ID }, d1, testOrgId);
+        const listBody = await parseResponse<Array<{ policy_type: string; config_json: string }>>(listResp);
+        expect(listBody.data).toHaveLength(1);
+
+        const whConfig = JSON.parse(listBody.data![0].config_json);
+        expect(whConfig.start_hour).toBe(9);
+        expect(whConfig.end_hour).toBe(17);
+
+        // Now test the merge engine: user tries wider hours (7-20)
+        // The merge engine (tested in shared) would clamp to 9-17
+        // Here we verify the data is stored correctly for merge to use
+      });
+
+      it("full CRUD lifecycle: create, list, update, delete", async () => {
+        // 1. Create
+        const createReq = makeRequest("POST", {
+          policy_type: "max_account_count",
+          config: { max_accounts: 3 },
+        });
+        const createResp = await handleCreateOrgPolicy(createReq, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        expect(createResp.status).toBe(201);
+        const createBody = await parseResponse<{ policy_id: string }>(createResp);
+        const policyId = createBody.data!.policy_id;
+
+        // 2. List (member can see)
+        const listReq = makeRequest("GET");
+        const listResp = await handleListOrgPolicies(listReq, { userId: MEMBER_USER_ID }, d1, testOrgId);
+        const listBody = await parseResponse<unknown[]>(listResp);
+        expect(listBody.data).toHaveLength(1);
+
+        // 3. Update (admin)
+        const updateReq = makeRequest("PUT", { config: { max_accounts: 10 } });
+        const updateResp = await handleUpdateOrgPolicy(updateReq, { userId: ADMIN_USER_ID }, d1, testOrgId, policyId);
+        expect(updateResp.status).toBe(200);
+        const updateBody = await parseResponse<{ config_json: string }>(updateResp);
+        expect(JSON.parse(updateBody.data!.config_json).max_accounts).toBe(10);
+
+        // 4. Delete (admin)
+        const deleteReq = makeRequest("DELETE");
+        const deleteResp = await handleDeleteOrgPolicy(deleteReq, { userId: ADMIN_USER_ID }, d1, testOrgId, policyId);
+        expect(deleteResp.status).toBe(200);
+
+        // 5. Verify empty list
+        const listReq2 = makeRequest("GET");
+        const listResp2 = await handleListOrgPolicies(listReq2, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        const listBody2 = await parseResponse<unknown[]>(listResp2);
+        expect(listBody2.data).toHaveLength(0);
+      });
+
+      it("user can be stricter -- policy allows narrower working hours", async () => {
+        // Org says 8-18 (wide window)
+        const createReq = makeRequest("POST", {
+          policy_type: "mandatory_working_hours",
+          config: { start_hour: 8, end_hour: 18 },
+        });
+        await handleCreateOrgPolicy(createReq, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        // Verify stored correctly
+        const listReq = makeRequest("GET");
+        const listResp = await handleListOrgPolicies(listReq, { userId: MEMBER_USER_ID }, d1, testOrgId);
+        const listBody = await parseResponse<Array<{ config_json: string }>>(listResp);
+        const config = JSON.parse(listBody.data![0].config_json);
+        expect(config.start_hour).toBe(8);
+        expect(config.end_hour).toBe(18);
+        // A user choosing 9-17 is stricter and would be allowed (merge tested in shared)
+      });
+
+      it("all four policy types can coexist", async () => {
+        const policies = [
+          { policy_type: "mandatory_working_hours", config: { start_hour: 9, end_hour: 17 } },
+          { policy_type: "minimum_vip_priority", config: { minimum_weight: 0.5 } },
+          { policy_type: "max_account_count", config: { max_accounts: 5 } },
+          { policy_type: "required_projection_detail", config: { minimum_detail: "TITLE" } },
+        ];
+
+        for (const pol of policies) {
+          const req = makeRequest("POST", pol);
+          const resp = await handleCreateOrgPolicy(req, { userId: ADMIN_USER_ID }, d1, testOrgId);
+          expect(resp.status).toBe(201);
+        }
+
+        const listReq = makeRequest("GET");
+        const listResp = await handleListOrgPolicies(listReq, { userId: ADMIN_USER_ID }, d1, testOrgId);
+        const listBody = await parseResponse<unknown[]>(listResp);
+        expect(listBody.data).toHaveLength(4);
+      });
+
+      it("envelope format compliance on all policy responses", async () => {
+        const request = makeRequest("POST", {
+          policy_type: "max_account_count",
+          config: { max_accounts: 5 },
+        });
+        const response = await handleCreateOrgPolicy(request, { userId: ADMIN_USER_ID }, d1, testOrgId);
+
+        const body = await parseResponse(response);
+        expect(body).toHaveProperty("ok", true);
+        expect(body).toHaveProperty("data");
+        expect(body).toHaveProperty("meta");
+        expect((body.meta as { request_id: string }).request_id).toMatch(/^req_/);
+      });
     });
   });
 });

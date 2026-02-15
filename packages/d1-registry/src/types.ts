@@ -223,3 +223,24 @@ export interface GroupSchedulingSessionRow {
   readonly status: GroupSessionStatus;
   readonly created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Org policies (Migration 0017)
+// ---------------------------------------------------------------------------
+
+/** Valid org policy types. */
+export type OrgPolicyType =
+  | "mandatory_working_hours"
+  | "minimum_vip_priority"
+  | "required_projection_detail"
+  | "max_account_count";
+
+/** Row shape for the `org_policies` table. */
+export interface OrgPolicyRow {
+  readonly policy_id: string;
+  readonly org_id: string;
+  readonly policy_type: OrgPolicyType;
+  readonly config_json: string;
+  readonly created_at: string;
+  readonly created_by: string;
+}

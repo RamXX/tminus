@@ -75,6 +75,10 @@ import {
   handleListMembers,
   handleRemoveMember,
   handleChangeRole,
+  handleCreateOrgPolicy,
+  handleListOrgPolicies,
+  handleUpdateOrgPolicy,
+  handleDeleteOrgPolicy,
 } from "./routes/orgs";
 
 // ---------------------------------------------------------------------------
@@ -3163,6 +3167,54 @@ async function handleGetDeepWork(
   }
 }
 
+// -- Temporal risk scoring --------------------------------------------------------
+
+async function handleGetRiskScores(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const weeksStr = url.searchParams.get("weeks") ?? "4";
+  const weeks = parseInt(weeksStr, 10);
+
+  if (isNaN(weeks) || weeks < 1 || weeks > 52) {
+    return jsonResponse(
+      errorEnvelope(
+        "weeks must be a positive integer between 1 and 52",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      burnout_risk: number;
+      travel_overload: number;
+      strategic_drift: number;
+      overall_risk: number;
+      risk_level: string;
+      recommendations: string[];
+    }>(env.USER_GRAPH, auth.userId, "/getRiskScores", { weeks });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to compute risk scores", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to compute risk scores", err);
+    return jsonResponse(
+      errorEnvelope("Failed to compute risk scores", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Temporal Graph API (TM-b3i.4) -----------------------------------------------
 
 /**
@@ -5673,6 +5725,10 @@ async function routeAuthenticatedRequest(
         return handleGetDeepWork(request, auth, env);
       }
 
+      if (method === "GET" && pathname === "/v1/intelligence/risk-scores") {
+        return handleGetRiskScores(request, auth, env);
+      }
+
       // -- Temporal Graph API routes (TM-b3i.4) --------------------------------
 
       if (method === "GET" && pathname === "/v1/graph/events") {
@@ -5716,6 +5772,35 @@ async function routeAuthenticatedRequest(
         }
         if (method === "GET") {
           return handleListMembers(request, auth, env.DB, match.params[0]);
+        }
+      }
+
+      // -- Org policy routes (Enterprise, admin for write, member for read) ----
+
+      match = matchRoute(pathname, "/v1/orgs/:id/policies/:pid");
+      if (match) {
+        const pOrgId = match.params[0];
+        const pPolicyId = match.params[1];
+        const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+        if (policyGate) return policyGate;
+        if (method === "PUT") {
+          return handleUpdateOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
+        }
+        if (method === "DELETE") {
+          return handleDeleteOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
+        }
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/policies");
+      if (match) {
+        const pOrgId = match.params[0];
+        const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+        if (policyGate) return policyGate;
+        if (method === "POST") {
+          return handleCreateOrgPolicy(request, auth, env.DB, pOrgId);
+        }
+        if (method === "GET") {
+          return handleListOrgPolicies(request, auth, env.DB, pOrgId);
         }
       }
 
