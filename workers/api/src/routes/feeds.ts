@@ -22,7 +22,12 @@ import {
   computeStaleness,
   VALID_REFRESH_INTERVALS,
   DEFAULT_REFRESH_INTERVAL_MS,
+  detectProvider,
+  planUpgrade,
+  planDowngrade,
   type FeedRefreshState,
+  type IcsEvent,
+  type ProviderEvent,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -402,6 +407,376 @@ export async function handleGetFeedHealth(
   } catch (err) {
     return jsonResp(
       { ok: false, error: `Failed to get feed health: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: POST /v1/feeds/:id/upgrade
+// ---------------------------------------------------------------------------
+
+/** Body shape for POST /v1/feeds/:id/upgrade */
+export interface UpgradeFeedBody {
+  /** The OAuth account ID to upgrade to. */
+  readonly oauth_account_id: string;
+}
+
+/**
+ * Handle POST /v1/feeds/:id/upgrade -- upgrade an ICS feed to OAuth sync.
+ *
+ * TM-d17.5: Seamless upgrade path from ICS-imported feed to fully OAuth-connected
+ * account. Existing ICS events are preserved and enriched with provider metadata.
+ *
+ * Flow:
+ * 1. Validate the feed belongs to the user
+ * 2. Detect provider from feed URL
+ * 3. Fetch current ICS events from UserGraphDO
+ * 4. Fetch provider events from the OAuth account
+ * 5. Match and merge events (iCalUID primary, composite fallback)
+ * 6. Replace ICS feed account with OAuth account
+ *
+ * Business rules:
+ * - BR-1: All existing ICS events are preserved (merged or orphaned)
+ * - BR-2: Provider version supersedes ICS version
+ * - BR-4: Event matching uses iCalUID primary, composite fallback
+ */
+export async function handleUpgradeFeed(
+  request: Request,
+  auth: { userId: string },
+  env: {
+    DB: D1Database;
+    USER_GRAPH: DurableObjectNamespace;
+  },
+  feedId: string,
+): Promise<Response> {
+  // Parse request body
+  let body: UpgradeFeedBody;
+  try {
+    body = await request.json() as UpgradeFeedBody;
+  } catch {
+    return jsonResp({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+
+  if (!body.oauth_account_id) {
+    return jsonResp({ ok: false, error: "oauth_account_id is required" }, 400);
+  }
+
+  // Validate the ICS feed belongs to the user
+  let feedRow: { account_id: string; provider_subject: string } | null;
+  try {
+    feedRow = await env.DB
+      .prepare(
+        `SELECT account_id, provider_subject FROM accounts
+         WHERE account_id = ?1 AND user_id = ?2 AND provider = 'ics_feed'`,
+      )
+      .bind(feedId, auth.userId)
+      .first<{ account_id: string; provider_subject: string }>();
+
+    if (!feedRow) {
+      return jsonResp({ ok: false, error: "ICS feed not found" }, 404);
+    }
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+
+  const feedUrl = feedRow.provider_subject;
+
+  // Detect provider
+  const detected = detectProvider(feedUrl);
+
+  // Fetch current events from UserGraphDO
+  let icsEvents: IcsEvent[];
+  let providerEvents: ProviderEvent[];
+  try {
+    const doId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(doId);
+
+    // Fetch ICS events for this feed account
+    const icsResp = await stub.fetch("https://do.internal/getAccountEvents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: feedId }),
+    });
+
+    if (!icsResp.ok) {
+      return jsonResp({ ok: false, error: "Failed to fetch ICS events" }, 500);
+    }
+
+    const icsData = await icsResp.json() as { events: IcsEvent[] };
+    icsEvents = icsData.events ?? [];
+
+    // Fetch provider events for the OAuth account
+    const providerResp = await stub.fetch("https://do.internal/getAccountEvents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: body.oauth_account_id }),
+    });
+
+    if (!providerResp.ok) {
+      return jsonResp({ ok: false, error: "Failed to fetch provider events" }, 500);
+    }
+
+    const providerData = await providerResp.json() as { events: ProviderEvent[] };
+    providerEvents = providerData.events ?? [];
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to fetch events: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+
+  // Plan the upgrade
+  const plan = planUpgrade({
+    icsAccountId: feedId,
+    oauthAccountId: body.oauth_account_id,
+    feedUrl,
+    icsEvents,
+    providerEvents,
+  });
+
+  // Execute upgrade in UserGraphDO
+  try {
+    const doId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(doId);
+
+    const upgradeResp = await stub.fetch("https://do.internal/executeUpgrade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ics_account_id: feedId,
+        oauth_account_id: body.oauth_account_id,
+        merged_events: plan.mergedEvents,
+        new_events: plan.newProviderEvents,
+        orphaned_events: plan.orphanedIcsEvents,
+      }),
+    });
+
+    if (!upgradeResp.ok) {
+      return jsonResp({ ok: false, error: "Failed to execute upgrade in UserGraphDO" }, 500);
+    }
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to execute upgrade: ${err instanceof Error ? err.message : String(err)}` },
+      500,
+    );
+  }
+
+  // Update D1: mark ICS feed as upgraded
+  try {
+    await env.DB
+      .prepare(`UPDATE accounts SET status = 'upgraded' WHERE account_id = ?1`)
+      .bind(feedId)
+      .run();
+  } catch {
+    // Best effort -- the DO is the source of truth
+  }
+
+  return jsonResp({
+    ok: true,
+    data: {
+      detected_provider: detected,
+      merged_count: plan.mergedEvents.length,
+      new_count: plan.newProviderEvents.length,
+      orphaned_count: plan.orphanedIcsEvents.length,
+      ics_account_removed: feedId,
+      oauth_account_activated: body.oauth_account_id,
+    },
+  }, 200);
+}
+
+// ---------------------------------------------------------------------------
+// Handler: POST /v1/feeds/:id/downgrade
+// ---------------------------------------------------------------------------
+
+/** Body shape for POST /v1/feeds/:id/downgrade */
+export interface DowngradeFeedBody {
+  /** The OAuth account ID that is being downgraded. */
+  readonly oauth_account_id: string;
+  /** Provider type for the account being downgraded. */
+  readonly provider: string;
+  /** Original ICS feed URL (if known). */
+  readonly feed_url?: string;
+}
+
+/**
+ * Handle POST /v1/feeds/:id/downgrade -- downgrade OAuth to ICS feed.
+ *
+ * TM-d17.5: Automatic fallback when OAuth token is revoked or expired.
+ * Re-creates an ICS feed account using the provider's public ICS URL.
+ * Events remain visible but become read-only and poll-refreshed.
+ *
+ * Per BR-3: Downgrade to ICS is automatic if OAuth fails.
+ */
+export async function handleDowngradeFeed(
+  request: Request,
+  auth: { userId: string },
+  env: {
+    DB: D1Database;
+    USER_GRAPH: DurableObjectNamespace;
+  },
+): Promise<Response> {
+  // Parse request body
+  let body: DowngradeFeedBody;
+  try {
+    body = await request.json() as DowngradeFeedBody;
+  } catch {
+    return jsonResp({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+
+  if (!body.oauth_account_id) {
+    return jsonResp({ ok: false, error: "oauth_account_id is required" }, 400);
+  }
+
+  if (!body.provider) {
+    return jsonResp({ ok: false, error: "provider is required" }, 400);
+  }
+
+  // Fetch current events from the OAuth account
+  let currentEvents: ProviderEvent[];
+  try {
+    const doId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(doId);
+
+    const resp = await stub.fetch("https://do.internal/getAccountEvents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: body.oauth_account_id }),
+    });
+
+    if (!resp.ok) {
+      currentEvents = [];
+    } else {
+      const data = await resp.json() as { events: ProviderEvent[] };
+      currentEvents = data.events ?? [];
+    }
+  } catch {
+    currentEvents = [];
+  }
+
+  // Plan the downgrade
+  const plan = planDowngrade({
+    oauthAccountId: body.oauth_account_id,
+    provider: body.provider,
+    feedUrl: body.feed_url,
+    currentEvents,
+  });
+
+  // Create new ICS feed account in D1
+  if (plan.feedUrl) {
+    const newFeedAccountId = generateId("account");
+
+    try {
+      await env.DB
+        .prepare(
+          `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        )
+        .bind(
+          newFeedAccountId,
+          auth.userId,
+          "ics_feed",
+          plan.feedUrl,
+          plan.feedUrl,
+          "active",
+        )
+        .run();
+    } catch (err) {
+      return jsonResp(
+        { ok: false, error: `Failed to create fallback feed account: ${err instanceof Error ? err.message : String(err)}` },
+        500,
+      );
+    }
+
+    // Mark the OAuth account as downgraded
+    try {
+      await env.DB
+        .prepare(`UPDATE accounts SET status = 'downgraded' WHERE account_id = ?1`)
+        .bind(body.oauth_account_id)
+        .run();
+    } catch {
+      // Best effort
+    }
+
+    return jsonResp({
+      ok: true,
+      data: {
+        new_feed_account_id: newFeedAccountId,
+        feed_url: plan.feedUrl,
+        preserved_event_count: plan.preservedEventCount,
+        mode: plan.mode,
+        oauth_account_removed: body.oauth_account_id,
+      },
+    }, 200);
+  }
+
+  // No feed URL available -- just mark as downgraded
+  try {
+    await env.DB
+      .prepare(`UPDATE accounts SET status = 'downgraded' WHERE account_id = ?1`)
+      .bind(body.oauth_account_id)
+      .run();
+  } catch {
+    // Best effort
+  }
+
+  return jsonResp({
+    ok: true,
+    data: {
+      preserved_event_count: plan.preservedEventCount,
+      mode: plan.mode,
+      oauth_account_removed: body.oauth_account_id,
+      warning: "No public ICS feed URL available for this provider. Events preserved but no automatic refresh.",
+    },
+  }, 200);
+}
+
+// ---------------------------------------------------------------------------
+// Handler: GET /v1/feeds/:id/provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle GET /v1/feeds/:id/provider -- detect the provider for an ICS feed.
+ *
+ * Returns the detected provider and confidence level based on the feed URL.
+ * Useful for the UI to determine which OAuth flow to initiate.
+ */
+export async function handleDetectFeedProvider(
+  _request: Request,
+  auth: { userId: string },
+  env: { DB: D1Database },
+  feedId: string,
+): Promise<Response> {
+  try {
+    const row = await env.DB
+      .prepare(
+        `SELECT account_id, provider_subject FROM accounts
+         WHERE account_id = ?1 AND user_id = ?2 AND provider = 'ics_feed'`,
+      )
+      .bind(feedId, auth.userId)
+      .first<{ account_id: string; provider_subject: string }>();
+
+    if (!row) {
+      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+    }
+
+    const detected = detectProvider(row.provider_subject);
+
+    return jsonResp({
+      ok: true,
+      data: {
+        account_id: row.account_id,
+        feed_url: row.provider_subject,
+        detected_provider: detected.provider,
+        confidence: detected.confidence,
+      },
+    }, 200);
+  } catch (err) {
+    return jsonResp(
+      { ok: false, error: `Failed to detect provider: ${err instanceof Error ? err.message : String(err)}` },
       500,
     );
   }

@@ -94,6 +94,9 @@ import {
   handleListFeeds,
   handleUpdateFeedConfig,
   handleGetFeedHealth,
+  handleUpgradeFeed,
+  handleDowngradeFeed,
+  handleDetectFeedProvider,
 } from "./routes/feeds";
 
 // ---------------------------------------------------------------------------
@@ -5995,6 +5998,21 @@ async function routeAuthenticatedRequest(
       const feedHealthMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/health$/);
       if (method === "GET" && feedHealthMatch) {
         return handleGetFeedHealth(request, auth, env, feedHealthMatch[1]);
+      }
+
+      // Feed upgrade/downgrade routes (TM-d17.5: OAuth Upgrade Flow)
+      const feedUpgradeMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/upgrade$/);
+      if (method === "POST" && feedUpgradeMatch) {
+        return handleUpgradeFeed(request, auth, env, feedUpgradeMatch[1]);
+      }
+
+      const feedProviderMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/provider$/);
+      if (method === "GET" && feedProviderMatch) {
+        return handleDetectFeedProvider(request, auth, env, feedProviderMatch[1]);
+      }
+
+      if (method === "POST" && pathname === "/v1/feeds/downgrade") {
+        return handleDowngradeFeed(request, auth, env);
       }
 
       // -- Event routes -----------------------------------------------------

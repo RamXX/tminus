@@ -585,3 +585,29 @@ export type {
   PromptDismissal,
   PromptSettings,
 } from "./upgrade-prompts";
+
+// Re-export ICS-to-OAuth upgrade flow (TM-d17.5: OAuth Upgrade Flow)
+export {
+  detectProvider,
+  matchEventsByICalUID,
+  matchEventsByCompositeKey,
+  matchEvents,
+  mergeIcsWithProvider,
+  planUpgrade,
+  planDowngrade,
+} from "./ics-upgrade";
+export type {
+  DetectedProvider,
+  IcsEvent,
+  ProviderAttendee,
+  ProviderOrganizer,
+  ConferenceData,
+  ProviderEvent,
+  EventMatch,
+  MatchResult,
+  MergedEvent,
+  UpgradeInput,
+  UpgradePlan,
+  DowngradeInput,
+  DowngradePlan,
+} from "./ics-upgrade";
