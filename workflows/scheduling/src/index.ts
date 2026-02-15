@@ -20,11 +20,15 @@
 import { generateId } from "@tminus/shared";
 import type { CanonicalEvent } from "@tminus/shared";
 import { greedySolver } from "./solver";
-import type { SolverInput, BusyInterval, ScoredCandidate } from "./solver";
+import type { SolverInput, BusyInterval, ScoredCandidate, SolverConstraint } from "./solver";
 
-// Re-export solver types for consumers
-export { greedySolver } from "./solver";
-export type { SolverInput, BusyInterval, ScoredCandidate } from "./solver";
+// Re-export solver types and constants for consumers
+export { greedySolver, CONSTRAINT_SCORES } from "./solver";
+export type {
+  SolverInput, BusyInterval, ScoredCandidate, SolverConstraint,
+  WorkingHoursConstraint, TripConstraint, BufferConstraint,
+  NoMeetingsAfterConstraint,
+} from "./solver";
 
 // ---------------------------------------------------------------------------
 // Env bindings
@@ -108,21 +112,25 @@ export class SchedulingWorkflow {
     const sessionId = generateId("session");
     const now = new Date().toISOString();
 
-    // Step 2: Gather availability from UserGraphDO
-    const availability = await this.gatherAvailability(
-      params.userId,
-      params.windowStart,
-      params.windowEnd,
-      params.requiredAccountIds,
-    );
+    // Step 2: Gather availability and constraints from UserGraphDO
+    const [availability, constraints] = await Promise.all([
+      this.gatherAvailability(
+        params.userId,
+        params.windowStart,
+        params.windowEnd,
+        params.requiredAccountIds,
+      ),
+      this.getActiveConstraints(params.userId, params.windowStart, params.windowEnd),
+    ]);
 
-    // Step 3: Run greedy solver
+    // Step 3: Run greedy solver with constraint-aware scoring
     const solverInput: SolverInput = {
       windowStart: params.windowStart,
       windowEnd: params.windowEnd,
       durationMinutes: params.durationMinutes,
       busyIntervals: availability.busy_intervals,
       requiredAccountIds: params.requiredAccountIds,
+      constraints,
     };
     const rawCandidates = greedySolver(solverInput, params.maxCandidates ?? 5);
 
@@ -263,6 +271,45 @@ export class SchedulingWorkflow {
     }>;
   }
 
+  /**
+   * Fetch all active constraints from UserGraphDO and convert them to
+   * SolverConstraint format. Uses the existing /listConstraints RPC and
+   * filters to constraints relevant to the scheduling window.
+   */
+  private async getActiveConstraints(
+    userId: string,
+    windowStart: string,
+    windowEnd: string,
+  ): Promise<SolverConstraint[]> {
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/listConstraints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+
+    if (!response.ok) {
+      // Non-fatal: constraints enhance scoring but are not required
+      return [];
+    }
+
+    const { items } = (await response.json()) as {
+      items: Array<{
+        constraint_id: string;
+        kind: string;
+        config_json: Record<string, unknown>;
+        active_from: string | null;
+        active_to: string | null;
+      }>;
+    };
+
+    return convertToSolverConstraints(items, windowStart, windowEnd);
+  }
+
   private async storeSession(
     userId: string,
     sessionId: string,
@@ -357,4 +404,107 @@ export class SchedulingWorkflow {
       throw new Error(`UserGraphDO.commitSchedulingSession failed (${response.status}): ${body}`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Constraint conversion helpers
+// ---------------------------------------------------------------------------
+
+/** Raw constraint shape as returned by UserGraphDO.listConstraints. */
+interface RawConstraint {
+  readonly kind: string;
+  readonly config_json: Record<string, unknown>;
+  readonly active_from: string | null;
+  readonly active_to: string | null;
+}
+
+/**
+ * Convert raw UserGraphDO constraints to typed SolverConstraint objects.
+ *
+ * Filters trip constraints to those overlapping the scheduling window.
+ * All other constraint kinds (working_hours, buffer, no_meetings_after)
+ * are included unconditionally since they are time-of-day based.
+ *
+ * Exported for testing.
+ */
+export function convertToSolverConstraints(
+  raw: readonly RawConstraint[],
+  windowStart: string,
+  windowEnd: string,
+): SolverConstraint[] {
+  const windowStartMs = new Date(windowStart).getTime();
+  const windowEndMs = new Date(windowEnd).getTime();
+
+  const results: SolverConstraint[] = [];
+
+  for (const c of raw) {
+    switch (c.kind) {
+      case "working_hours": {
+        const config = c.config_json as {
+          days: number[];
+          start_time: string;
+          end_time: string;
+          timezone: string;
+        };
+        results.push({
+          kind: "working_hours",
+          config: {
+            days: config.days,
+            start_time: config.start_time,
+            end_time: config.end_time,
+            timezone: config.timezone,
+          },
+        });
+        break;
+      }
+      case "trip": {
+        // Only include trips that overlap the scheduling window
+        if (c.active_from && c.active_to) {
+          const tripStart = new Date(c.active_from).getTime();
+          const tripEnd = new Date(c.active_to).getTime();
+          if (tripEnd > windowStartMs && tripStart < windowEndMs) {
+            results.push({
+              kind: "trip",
+              activeFrom: c.active_from,
+              activeTo: c.active_to,
+            });
+          }
+        }
+        break;
+      }
+      case "buffer": {
+        const config = c.config_json as {
+          type: "travel" | "prep" | "cooldown";
+          minutes: number;
+          applies_to: "all" | "external";
+        };
+        results.push({
+          kind: "buffer",
+          config: {
+            type: config.type,
+            minutes: config.minutes,
+            applies_to: config.applies_to,
+          },
+        });
+        break;
+      }
+      case "no_meetings_after": {
+        const config = c.config_json as {
+          time: string;
+          timezone: string;
+        };
+        results.push({
+          kind: "no_meetings_after",
+          config: {
+            time: config.time,
+            timezone: config.timezone,
+          },
+        });
+        break;
+      }
+      // Skip unknown constraint kinds silently
+    }
+  }
+
+  return results;
 }

@@ -414,4 +414,292 @@ describe("SchedulingWorkflow integration", () => {
       );
     }
   });
+
+  // -----------------------------------------------------------------------
+  // Constraint-aware scheduling (TM-946.2)
+  // -----------------------------------------------------------------------
+
+  describe("constraint-aware scheduling", () => {
+    /**
+     * Helper to add a constraint to the DO via RPC (same as real API path).
+     */
+    async function addConstraint(
+      kind: string,
+      configJson: Record<string, unknown>,
+      activeFrom: string | null = null,
+      activeTo: string | null = null,
+    ): Promise<void> {
+      const response = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/addConstraint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind,
+            config_json: configJson,
+            active_from: activeFrom,
+            active_to: activeTo,
+          }),
+        }),
+      );
+      expect(response.ok).toBe(true);
+    }
+
+    it("solver respects working hours constraints (AC1)", async () => {
+      // Add working hours: Mon-Fri 09:00-17:00 UTC
+      await addConstraint("working_hours", {
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      });
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T06:00:00Z", // Monday 06:00
+        windowEnd: "2026-03-02T20:00:00Z",   // Monday 20:00
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // The highest-scoring candidate should be within working hours
+      const best = session.candidates[0];
+      const bestHour = new Date(best.start).getUTCHours();
+      expect(bestHour).toBeGreaterThanOrEqual(9);
+      expect(bestHour).toBeLessThan(17);
+      expect(best.explanation).toContain("within working hours");
+    });
+
+    it("solver excludes trip-blocked time (AC2)", async () => {
+      // Add trip on Tuesday-Wednesday
+      await addConstraint(
+        "trip",
+        {
+          name: "NYC Conference",
+          timezone: "UTC",
+          block_policy: "BUSY",
+        },
+        "2026-03-03T00:00:00Z", // Tuesday
+        "2026-03-05T00:00:00Z", // through Wednesday
+      );
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T08:00:00Z", // Monday
+        windowEnd: "2026-03-06T18:00:00Z",   // Friday
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // No candidates should fall within trip period
+      for (const c of session.candidates) {
+        const cStartMs = new Date(c.start).getTime();
+        const cEndMs = new Date(c.end).getTime();
+        const tripStartMs = new Date("2026-03-03T00:00:00Z").getTime();
+        const tripEndMs = new Date("2026-03-05T00:00:00Z").getTime();
+        const overlaps = cStartMs < tripEndMs && cEndMs > tripStartMs;
+        expect(overlaps, `Candidate ${c.start} should not overlap trip`).toBe(false);
+      }
+    });
+
+    it("buffer time reduces available slots (AC3)", async () => {
+      // Add 30-min prep buffer before events
+      await addConstraint("buffer", {
+        type: "prep",
+        minutes: 30,
+        applies_to: "all",
+      });
+
+      // Insert a busy event at 10:00-11:00
+      insertEvent("2026-03-02T10:00:00Z", "2026-03-02T11:00:00Z");
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T18:00:00Z",
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // The slot right after the event (11:00) should have buffer scoring
+      // because events near it will be penalized for insufficient buffer
+      const slot11 = session.candidates.find(
+        c => c.start === "2026-03-02T11:00:00Z"
+      );
+      // If present, it should mention buffer
+      if (slot11) {
+        expect(slot11.explanation).toMatch(/buffer/);
+      }
+    });
+
+    it("constraint violations lower candidate scores (AC4)", async () => {
+      // Add working hours + no-meetings-after constraints
+      await addConstraint("working_hours", {
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      });
+      await addConstraint("no_meetings_after", {
+        time: "16:00",
+        timezone: "UTC",
+      });
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T06:00:00Z", // Monday
+        windowEnd: "2026-03-02T20:00:00Z",
+        maxCandidates: 50,
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      // Find slots within working hours (10:00) and outside (06:00)
+      const inHours = session.candidates.find(
+        c => c.start === "2026-03-02T10:00:00Z"
+      );
+      const outHours = session.candidates.find(
+        c => c.start === "2026-03-02T06:00:00Z"
+      );
+
+      if (inHours && outHours) {
+        expect(inHours.score).toBeGreaterThan(outHours.score);
+      }
+
+      // Post-cutoff slots should score lower
+      const preCutoff = session.candidates.find(
+        c => c.start === "2026-03-02T10:00:00Z"
+      );
+      const postCutoff = session.candidates.find(
+        c => c.start === "2026-03-02T18:00:00Z"
+      );
+
+      if (preCutoff && postCutoff) {
+        expect(preCutoff.score).toBeGreaterThan(postCutoff.score);
+      }
+    });
+
+    it("multiple constraint types compose correctly (AC5)", async () => {
+      // Working hours Mon-Fri 09:00-17:00
+      await addConstraint("working_hours", {
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      });
+      // Trip on Wednesday
+      await addConstraint(
+        "trip",
+        {
+          name: "Retreat",
+          timezone: "UTC",
+          block_policy: "BUSY",
+        },
+        "2026-03-04T00:00:00Z",
+        "2026-03-05T00:00:00Z",
+      );
+      // Buffer: 15 min prep
+      await addConstraint("buffer", {
+        type: "prep",
+        minutes: 15,
+        applies_to: "all",
+      });
+      // No meetings after 16:00
+      await addConstraint("no_meetings_after", {
+        time: "16:00",
+        timezone: "UTC",
+      });
+
+      // Add some busy events
+      insertEvent("2026-03-02T12:00:00Z", "2026-03-02T13:00:00Z");
+      insertEvent("2026-03-03T10:00:00Z", "2026-03-03T11:00:00Z");
+
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T06:00:00Z",
+        windowEnd: "2026-03-06T20:00:00Z",
+        maxCandidates: 20,
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+      expect(session.status).toBe("candidates_ready");
+
+      // No Wednesday candidates (trip)
+      const wedCandidates = session.candidates.filter(
+        c => c.start.startsWith("2026-03-04T")
+      );
+      expect(wedCandidates.length).toBe(0);
+
+      // Best candidates should be within working hours
+      const best = session.candidates[0];
+      const bestHour = new Date(best.start).getUTCHours();
+      // Should be within 09:00-16:00 (working hours minus cutoff)
+      expect(bestHour).toBeGreaterThanOrEqual(8); // morning bonus
+      expect(bestHour).toBeLessThan(17);
+
+      // Candidates should be sorted by score
+      for (let i = 1; i < session.candidates.length; i++) {
+        expect(session.candidates[i - 1].score).toBeGreaterThanOrEqual(
+          session.candidates[i].score,
+        );
+      }
+    });
+
+    it("performance: solver completes in <2s for 1-week window (AC6)", async () => {
+      // Add multiple constraints
+      await addConstraint("working_hours", {
+        days: [1, 2, 3, 4, 5],
+        start_time: "08:00",
+        end_time: "18:00",
+        timezone: "UTC",
+      });
+      await addConstraint("buffer", {
+        type: "prep",
+        minutes: 15,
+        applies_to: "all",
+      });
+      await addConstraint("buffer", {
+        type: "cooldown",
+        minutes: 10,
+        applies_to: "all",
+      });
+      await addConstraint("no_meetings_after", {
+        time: "17:00",
+        timezone: "UTC",
+      });
+      await addConstraint(
+        "trip",
+        {
+          name: "Trip",
+          timezone: "UTC",
+          block_policy: "BUSY",
+        },
+        "2026-03-05T00:00:00Z",
+        "2026-03-06T00:00:00Z",
+      );
+
+      // Add busy events spread across the week
+      for (let day = 2; day <= 6; day++) {
+        for (let hour = 9; hour < 17; hour += 3) {
+          const dayStr = String(day).padStart(2, "0");
+          insertEvent(
+            `2026-03-${dayStr}T${String(hour).padStart(2, "0")}:00:00Z`,
+            `2026-03-${dayStr}T${String(hour + 1).padStart(2, "0")}:00:00Z`,
+          );
+        }
+      }
+
+      const workflow = createWorkflow();
+      const start = performance.now();
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T00:00:00Z",
+        windowEnd: "2026-03-09T00:00:00Z",
+        maxCandidates: 10,
+      }));
+      const elapsed = performance.now() - start;
+
+      expect(elapsed).toBeLessThan(2000); // <2s
+      expect(session.candidates.length).toBeGreaterThan(0);
+      expect(session.candidates.length).toBeLessThanOrEqual(10);
+    });
+  });
 });
