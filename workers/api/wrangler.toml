@@ -8,6 +8,9 @@ name = "tminus-api"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
 
+[vars]
+ENVIRONMENT = "development"
+
 # --- Durable Object class definitions (hosted here) -----------------------
 
 [[durable_objects.bindings]]

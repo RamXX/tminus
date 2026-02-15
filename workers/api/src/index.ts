@@ -21,6 +21,9 @@ import {
   extractClientIp,
   buildRateLimitResponse,
   applyRateLimitHeaders,
+  addSecurityHeaders,
+  addCorsHeaders,
+  buildPreflightResponse,
 } from "@tminus/shared";
 import type { RateLimitKV, RateLimitTier } from "@tminus/shared";
 import { createAuthRoutes } from "./routes/auth";
@@ -1262,10 +1265,26 @@ export function createHandler() {
       const url = new URL(request.url);
       const { pathname } = url;
       const method = request.method;
+      const origin = request.headers.get("Origin");
+      const environment = env.ENVIRONMENT ?? "development";
+
+      // Helper: wrap response with security + CORS headers before returning.
+      // Every response from the API goes through this to guarantee coverage.
+      const finalize = (response: Response): Response => {
+        const secured = addSecurityHeaders(response);
+        return addCorsHeaders(secured, origin, environment);
+      };
+
+      // CORS preflight -- handled before anything else, including health check.
+      // Returns 204 with appropriate CORS + security headers.
+      if (method === "OPTIONS") {
+        const preflight = buildPreflightResponse(origin, environment);
+        return addSecurityHeaders(preflight);
+      }
 
       // Health check -- no auth required
       if (method === "GET" && pathname === "/health") {
-        return new Response(
+        return finalize(new Response(
           JSON.stringify({
             ok: true,
             data: {
@@ -1281,27 +1300,15 @@ export function createHandler() {
             status: 200,
             headers: { "Content-Type": "application/json" },
           },
-        );
-      }
-
-      // CORS preflight
-      if (method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type",
-          },
-        });
+        ));
       }
 
       // All /v1/* routes require auth (except /v1/auth/*)
       if (!pathname.startsWith("/v1/")) {
-        return jsonResponse(
+        return finalize(jsonResponse(
           errorEnvelope("Not Found", "NOT_FOUND"),
           ErrorCode.NOT_FOUND,
-        );
+        ));
       }
 
       // Auth routes (/v1/auth/*) do NOT require existing JWT -- they create tokens.
@@ -1316,7 +1323,7 @@ export function createHandler() {
             const config = selectRateLimitConfig(null, authEndpoint);
             const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
             if (!rlResult.allowed) {
-              return buildRateLimitResponse(rlResult);
+              return finalize(buildRateLimitResponse(rlResult));
             }
           }
         }
@@ -1326,7 +1333,8 @@ export function createHandler() {
         const rewrittenUrl = new URL(request.url);
         rewrittenUrl.pathname = pathname.slice("/v1/auth".length);
         const rewrittenRequest = new Request(rewrittenUrl.toString(), request);
-        return authRouter.fetch(rewrittenRequest, env);
+        const authResponse = await authRouter.fetch(rewrittenRequest, env);
+        return finalize(authResponse);
       }
 
       // Authenticate -- all other /v1/* routes require a valid JWT or API key
@@ -1339,13 +1347,13 @@ export function createHandler() {
           const config = selectRateLimitConfig(null);
           const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
           if (!rlResult.allowed) {
-            return buildRateLimitResponse(rlResult);
+            return finalize(buildRateLimitResponse(rlResult));
           }
         }
-        return jsonResponse(
+        return finalize(jsonResponse(
           errorEnvelope("Authentication required", "AUTH_REQUIRED"),
           ErrorCode.AUTH_REQUIRED,
-        );
+        ));
       }
 
       // Rate limit authenticated requests by user_id and tier
@@ -1357,20 +1365,20 @@ export function createHandler() {
         const config = selectRateLimitConfig(tier);
         rateLimitResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
         if (!rateLimitResult.allowed) {
-          return buildRateLimitResponse(rateLimitResult);
+          return finalize(buildRateLimitResponse(rateLimitResult));
         }
       }
 
       // -- Route to handler and apply rate limit headers ----------------------
 
-      const response = await routeAuthenticatedRequest(request, method, pathname, auth, env);
+      let response = await routeAuthenticatedRequest(request, method, pathname, auth, env);
 
       // Apply rate limit headers to all authenticated responses
       if (rateLimitResult) {
-        return await applyRateLimitHeaders(response, rateLimitResult);
+        response = await applyRateLimitHeaders(response, rateLimitResult);
       }
 
-      return response;
+      return finalize(response);
     },
   };
 }

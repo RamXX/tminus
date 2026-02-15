@@ -20,4 +20,6 @@ interface Env {
   SESSIONS: KVNamespace;
   RATE_LIMITS: KVNamespace;
   JWT_SECRET: string;
+  /** Deployment environment: "production", "staging", or "development" (default). */
+  ENVIRONMENT?: string;
 }

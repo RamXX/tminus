@@ -160,3 +160,24 @@ export type {
   RateLimitConfig,
   RateLimitKV,
 } from "./middleware/rate-limit";
+
+// Re-export security headers middleware
+export {
+  getSecurityHeaders,
+  addSecurityHeaders,
+  SECURITY_HEADERS,
+  HSTS_MAX_AGE,
+} from "./middleware/security";
+
+// Re-export CORS middleware
+export {
+  isAllowedOrigin,
+  buildCorsHeaders,
+  buildPreflightResponse,
+  addCorsHeaders,
+  PRODUCTION_ORIGINS,
+  CORS_ALLOWED_METHODS,
+  CORS_ALLOWED_HEADERS,
+  CORS_EXPOSED_HEADERS,
+  CORS_MAX_AGE,
+} from "./middleware/cors";

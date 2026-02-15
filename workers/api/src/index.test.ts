@@ -274,19 +274,61 @@ describe("routing: health endpoint", () => {
 // ---------------------------------------------------------------------------
 
 describe("routing: CORS preflight", () => {
-  it("OPTIONS request returns 204 with CORS headers", async () => {
+  it("OPTIONS request returns 204 with CORS headers for allowed origin", async () => {
     const handler = createHandler();
     const env = createMinimalEnv();
     const request = new Request("https://api.tminus.dev/v1/events", {
       method: "OPTIONS",
+      headers: { Origin: "https://app.tminus.ink" },
     });
 
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(204);
-    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://app.tminus.ink");
     expect(response.headers.get("Access-Control-Allow-Methods")).toContain("GET");
     expect(response.headers.get("Access-Control-Allow-Methods")).toContain("POST");
     expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+  });
+
+  it("OPTIONS request returns 204 with CORS headers for localhost in dev mode", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    // Default ENVIRONMENT is undefined which falls back to "development"
+    const request = new Request("https://api.tminus.dev/v1/events", {
+      method: "OPTIONS",
+      headers: { Origin: "http://localhost:3000" },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("http://localhost:3000");
+  });
+
+  it("OPTIONS request returns 204 without CORS headers for unauthorized origin", async () => {
+    const handler = createHandler();
+    const env = { ...createMinimalEnv(), ENVIRONMENT: "production" };
+    const request = new Request("https://api.tminus.dev/v1/events", {
+      method: "OPTIONS",
+      headers: { Origin: "http://evil.com" },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("OPTIONS preflight includes security headers", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const request = new Request("https://api.tminus.dev/v1/events", {
+      method: "OPTIONS",
+      headers: { Origin: "https://app.tminus.ink" },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(response.headers.get("Strict-Transport-Security")).toContain("max-age=31536000");
   });
 });
 

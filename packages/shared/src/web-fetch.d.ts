@@ -56,6 +56,7 @@ declare class Response {
   readonly status: number;
   readonly statusText: string;
   readonly headers: Headers;
+  readonly body: ReadableStream | null;
   json(): Promise<unknown>;
   text(): Promise<string>;
 }
