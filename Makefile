@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -25,6 +25,19 @@ test-integration-real: install
 
 test-e2e: install
 	@test -f .env && . ./.env; npx vitest run --config vitest.e2e.config.ts
+
+# ---- Phase 2A E2E validation ----
+# Real HTTP tests against a running API worker.
+# Default target runs against localhost:8787 (start wrangler dev first).
+
+test-e2e-phase2a: install
+	BASE_URL=http://localhost:8787 npx vitest run --config vitest.e2e.phase2a.config.ts
+
+test-e2e-phase2a-staging: install
+	BASE_URL=https://api-staging.tminus.ink npx vitest run --config vitest.e2e.phase2a.config.ts
+
+test-e2e-phase2a-production: install
+	BASE_URL=https://api.tminus.ink npx vitest run --config vitest.e2e.phase2a.config.ts
 
 lint: install
 	pnpm run lint
