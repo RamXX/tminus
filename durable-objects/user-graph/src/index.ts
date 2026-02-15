@@ -24,7 +24,11 @@ import {
   computeIdempotencyKey,
   BUSY_OVERLAY_CALENDAR_NAME,
   isValidBillingCategory,
+  isValidRelationshipCategory,
+  computeDrift,
+  matchEventParticipants,
 } from "@tminus/shared";
+import type { DriftReport } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -125,6 +129,21 @@ interface VipPolicyRow {
   priority_weight: number;
   conditions_json: string;
   created_at: string;
+}
+
+interface RelationshipRow {
+  [key: string]: unknown;
+  relationship_id: string;
+  participant_hash: string;
+  display_name: string | null;
+  category: string;
+  closeness_weight: number;
+  last_interaction_ts: string | null;
+  city: string | null;
+  timezone: string | null;
+  interaction_frequency_target: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface CommitmentRow {
@@ -290,6 +309,21 @@ export interface Constraint {
   readonly created_at: string;
 }
 
+/** A relationship as returned by relationship CRUD methods. */
+export interface Relationship {
+  readonly relationship_id: string;
+  readonly participant_hash: string;
+  readonly display_name: string | null;
+  readonly category: string;
+  readonly closeness_weight: number;
+  readonly last_interaction_ts: string | null;
+  readonly city: string | null;
+  readonly timezone: string | null;
+  readonly interaction_frequency_target: number | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 /** Fields that can be updated on a mirror row via RPC. */
 export interface MirrorStateUpdate {
   provider_event_id?: string;
@@ -433,7 +467,7 @@ export class UserGraphDO {
    */
   async applyProviderDelta(
     accountId: string,
-    deltas: readonly ProviderDelta[],
+    deltas: readonly (ProviderDelta & { participant_hashes?: string[] })[],
   ): Promise<ApplyResult> {
     this.ensureMigrated();
 
@@ -453,6 +487,12 @@ export class UserGraphDO {
               canonicalId,
               accountId,
             );
+            // Interaction detection: update relationships when event has
+            // participant hashes matching known relationships
+            if (delta.participant_hashes && delta.participant_hashes.length > 0 && delta.event) {
+              const eventStartTs = delta.event.start.dateTime ?? delta.event.start.date ?? new Date().toISOString();
+              this.updateInteractions(delta.participant_hashes, eventStartTs);
+            }
             break;
           }
           case "updated": {
@@ -463,6 +503,11 @@ export class UserGraphDO {
                 canonicalId,
                 accountId,
               );
+              // Interaction detection on update
+              if (delta.participant_hashes && delta.participant_hashes.length > 0 && delta.event) {
+                const eventStartTs = delta.event.start.dateTime ?? delta.event.start.date ?? new Date().toISOString();
+                this.updateInteractions(delta.participant_hashes, eventStartTs);
+              }
             }
             break;
           }
@@ -3188,6 +3233,334 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Relationship tracking (Phase 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a relationship for a participant.
+   *
+   * participant_hash = SHA-256(email + per-org salt), computed by the caller.
+   * Participant hashes are UNIQUE per user -- each person can only have one
+   * relationship record.
+   *
+   * BR-18: Relationship data is user-controlled input only (never auto-scraped).
+   */
+  createRelationship(
+    relationshipId: string,
+    participantHash: string,
+    displayName: string | null,
+    category: string,
+    closenessWeight: number = 0.5,
+    city: string | null = null,
+    timezone: string | null = null,
+    interactionFrequencyTarget: number | null = null,
+  ): Relationship {
+    this.ensureMigrated();
+
+    // Validate category
+    if (!isValidRelationshipCategory(category)) {
+      throw new Error(
+        `Invalid category: ${category}. Must be one of: FAMILY, INVESTOR, FRIEND, CLIENT, BOARD, COLLEAGUE, OTHER`,
+      );
+    }
+
+    // Validate closeness_weight
+    if (typeof closenessWeight !== "number" || closenessWeight < 0 || closenessWeight > 1) {
+      throw new Error("closeness_weight must be between 0.0 and 1.0");
+    }
+
+    // Validate interaction_frequency_target
+    if (
+      interactionFrequencyTarget !== null &&
+      (typeof interactionFrequencyTarget !== "number" ||
+        interactionFrequencyTarget <= 0 ||
+        !Number.isInteger(interactionFrequencyTarget))
+    ) {
+      throw new Error("interaction_frequency_target must be a positive integer (days)");
+    }
+
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO relationships (
+        relationship_id, participant_hash, display_name, category,
+        closeness_weight, last_interaction_ts, city, timezone,
+        interaction_frequency_target, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      relationshipId,
+      participantHash,
+      displayName,
+      category,
+      closenessWeight,
+      null,
+      city,
+      timezone,
+      interactionFrequencyTarget,
+      now,
+      now,
+    );
+
+    return {
+      relationship_id: relationshipId,
+      participant_hash: participantHash,
+      display_name: displayName,
+      category,
+      closeness_weight: closenessWeight,
+      last_interaction_ts: null,
+      city,
+      timezone,
+      interaction_frequency_target: interactionFrequencyTarget,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  /**
+   * Get a single relationship by ID.
+   * Returns null if not found.
+   */
+  getRelationship(relationshipId: string): Relationship | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<RelationshipRow>(
+        `SELECT relationship_id, participant_hash, display_name, category,
+                closeness_weight, last_interaction_ts, city, timezone,
+                interaction_frequency_target, created_at, updated_at
+         FROM relationships WHERE relationship_id = ?`,
+        relationshipId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      relationship_id: row.relationship_id,
+      participant_hash: row.participant_hash,
+      display_name: row.display_name,
+      category: row.category,
+      closeness_weight: row.closeness_weight,
+      last_interaction_ts: row.last_interaction_ts,
+      city: row.city,
+      timezone: row.timezone,
+      interaction_frequency_target: row.interaction_frequency_target,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  /**
+   * List all relationships for this user.
+   * Returns all relationships ordered by closeness_weight descending then created_at descending.
+   */
+  listRelationships(category?: string): Relationship[] {
+    this.ensureMigrated();
+
+    let sql = `SELECT relationship_id, participant_hash, display_name, category,
+                      closeness_weight, last_interaction_ts, city, timezone,
+                      interaction_frequency_target, created_at, updated_at
+               FROM relationships`;
+    const params: string[] = [];
+
+    if (category) {
+      sql += " WHERE category = ?";
+      params.push(category);
+    }
+
+    sql += " ORDER BY closeness_weight DESC, created_at DESC";
+
+    const rows = this.sql
+      .exec<RelationshipRow>(sql, ...params)
+      .toArray();
+
+    return rows.map((row) => ({
+      relationship_id: row.relationship_id,
+      participant_hash: row.participant_hash,
+      display_name: row.display_name,
+      category: row.category,
+      closeness_weight: row.closeness_weight,
+      last_interaction_ts: row.last_interaction_ts,
+      city: row.city,
+      timezone: row.timezone,
+      interaction_frequency_target: row.interaction_frequency_target,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+  }
+
+  /**
+   * Update an existing relationship.
+   * Only provided fields are updated; null/undefined fields are left unchanged.
+   * Returns the updated relationship or null if not found.
+   */
+  updateRelationship(
+    relationshipId: string,
+    updates: {
+      display_name?: string | null;
+      category?: string;
+      closeness_weight?: number;
+      city?: string | null;
+      timezone?: string | null;
+      interaction_frequency_target?: number | null;
+    },
+  ): Relationship | null {
+    this.ensureMigrated();
+
+    const existing = this.getRelationship(relationshipId);
+    if (!existing) return null;
+
+    // Validate category if provided
+    if (updates.category !== undefined && !isValidRelationshipCategory(updates.category)) {
+      throw new Error(
+        `Invalid category: ${updates.category}. Must be one of: FAMILY, INVESTOR, FRIEND, CLIENT, BOARD, COLLEAGUE, OTHER`,
+      );
+    }
+
+    // Validate closeness_weight if provided
+    if (
+      updates.closeness_weight !== undefined &&
+      (typeof updates.closeness_weight !== "number" ||
+        updates.closeness_weight < 0 ||
+        updates.closeness_weight > 1)
+    ) {
+      throw new Error("closeness_weight must be between 0.0 and 1.0");
+    }
+
+    // Validate interaction_frequency_target if provided
+    if (
+      updates.interaction_frequency_target !== undefined &&
+      updates.interaction_frequency_target !== null &&
+      (typeof updates.interaction_frequency_target !== "number" ||
+        updates.interaction_frequency_target <= 0 ||
+        !Number.isInteger(updates.interaction_frequency_target))
+    ) {
+      throw new Error("interaction_frequency_target must be a positive integer (days)");
+    }
+
+    const now = new Date().toISOString();
+    const newDisplayName = updates.display_name !== undefined ? updates.display_name : existing.display_name;
+    const newCategory = updates.category !== undefined ? updates.category : existing.category;
+    const newCloseness = updates.closeness_weight !== undefined ? updates.closeness_weight : existing.closeness_weight;
+    const newCity = updates.city !== undefined ? updates.city : existing.city;
+    const newTimezone = updates.timezone !== undefined ? updates.timezone : existing.timezone;
+    const newFrequencyTarget = updates.interaction_frequency_target !== undefined
+      ? updates.interaction_frequency_target
+      : existing.interaction_frequency_target;
+
+    this.sql.exec(
+      `UPDATE relationships SET
+        display_name = ?, category = ?, closeness_weight = ?,
+        city = ?, timezone = ?, interaction_frequency_target = ?,
+        updated_at = ?
+       WHERE relationship_id = ?`,
+      newDisplayName,
+      newCategory,
+      newCloseness,
+      newCity,
+      newTimezone,
+      newFrequencyTarget,
+      now,
+      relationshipId,
+    );
+
+    return {
+      relationship_id: relationshipId,
+      participant_hash: existing.participant_hash,
+      display_name: newDisplayName,
+      category: newCategory,
+      closeness_weight: newCloseness,
+      last_interaction_ts: existing.last_interaction_ts,
+      city: newCity,
+      timezone: newTimezone,
+      interaction_frequency_target: newFrequencyTarget,
+      created_at: existing.created_at,
+      updated_at: now,
+    };
+  }
+
+  /**
+   * Delete a relationship by ID.
+   * Returns true if a row was deleted, false if not found.
+   */
+  deleteRelationship(relationshipId: string): boolean {
+    this.ensureMigrated();
+
+    const before = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM relationships WHERE relationship_id = ?",
+        relationshipId,
+      )
+      .toArray()[0].cnt;
+
+    if (before === 0) return false;
+
+    // Delete associated interaction ledger entries first
+    this.sql.exec(
+      `DELETE FROM interaction_ledger WHERE participant_hash IN
+       (SELECT participant_hash FROM relationships WHERE relationship_id = ?)`,
+      relationshipId,
+    );
+    this.sql.exec("DELETE FROM relationships WHERE relationship_id = ?", relationshipId);
+    return true;
+  }
+
+  /**
+   * Compute drift report for all relationships.
+   *
+   * Uses the pure drift computation from @tminus/shared.
+   * Returns overdue relationships sorted by urgency.
+   */
+  getDriftReport(asOf?: string): DriftReport {
+    this.ensureMigrated();
+
+    const relationships = this.listRelationships();
+    const now = asOf ?? new Date().toISOString();
+    return computeDrift(relationships, now);
+  }
+
+  /**
+   * Update last_interaction_ts for relationships matching participant hashes.
+   *
+   * Called during event ingestion (applyProviderDelta) when an event's
+   * attendees include known relationship participant_hashes.
+   *
+   * @param participantHashes - SHA-256 hashes from event attendees
+   * @param interactionTs - Timestamp of the interaction (event start time)
+   * @returns Number of relationships updated
+   */
+  updateInteractions(
+    participantHashes: readonly string[],
+    interactionTs: string,
+  ): number {
+    this.ensureMigrated();
+
+    if (participantHashes.length === 0) return 0;
+
+    // Get all relationships
+    const allRelationships = this.sql
+      .exec<{ relationship_id: string; participant_hash: string }>(
+        "SELECT relationship_id, participant_hash FROM relationships",
+      )
+      .toArray();
+
+    const matchingIds = matchEventParticipants(participantHashes, allRelationships);
+    if (matchingIds.length === 0) return 0;
+
+    const now = new Date().toISOString();
+    for (const relId of matchingIds) {
+      this.sql.exec(
+        `UPDATE relationships SET last_interaction_ts = ?, updated_at = ?
+         WHERE relationship_id = ?`,
+        interactionTs,
+        now,
+        relId,
+      );
+    }
+
+    return matchingIds.length;
+  }
+
+  // -------------------------------------------------------------------------
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
 
@@ -3743,6 +4116,85 @@ export class UserGraphDO {
             body.as_of,
           );
           return Response.json(proofData);
+        }
+
+        // ---------------------------------------------------------------
+        // Relationship tracking RPC endpoints (Phase 4)
+        // ---------------------------------------------------------------
+
+        case "/createRelationship": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+            participant_hash: string;
+            display_name: string | null;
+            category: string;
+            closeness_weight?: number;
+            city?: string | null;
+            timezone?: string | null;
+            interaction_frequency_target?: number | null;
+          };
+          const relationship = this.createRelationship(
+            body.relationship_id,
+            body.participant_hash,
+            body.display_name,
+            body.category,
+            body.closeness_weight ?? 0.5,
+            body.city ?? null,
+            body.timezone ?? null,
+            body.interaction_frequency_target ?? null,
+          );
+          return Response.json(relationship);
+        }
+
+        case "/getRelationship": {
+          const body = (await request.json()) as { relationship_id: string };
+          const relationship = this.getRelationship(body.relationship_id);
+          return Response.json(relationship);
+        }
+
+        case "/listRelationships": {
+          const body = (await request.json()) as { category?: string };
+          const items = this.listRelationships(body.category);
+          return Response.json({ items });
+        }
+
+        case "/updateRelationship": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+            display_name?: string | null;
+            category?: string;
+            closeness_weight?: number;
+            city?: string | null;
+            timezone?: string | null;
+            interaction_frequency_target?: number | null;
+          };
+          const { relationship_id, ...updates } = body;
+          const updated = this.updateRelationship(relationship_id, updates);
+          return Response.json(updated);
+        }
+
+        case "/deleteRelationship": {
+          const body = (await request.json()) as { relationship_id: string };
+          const deleted = this.deleteRelationship(body.relationship_id);
+          return Response.json({ deleted });
+        }
+
+        case "/getDriftReport": {
+          const body = (await request.json()) as { as_of?: string };
+          const report = this.getDriftReport(body.as_of);
+          return Response.json(report);
+        }
+
+        case "/updateInteractions": {
+          const body = (await request.json()) as {
+            participant_hashes: string[];
+            interaction_ts: string;
+          };
+          const count = this.updateInteractions(
+            body.participant_hashes,
+            body.interaction_ts,
+          );
+          return Response.json({ updated: count });
         }
 
         default:

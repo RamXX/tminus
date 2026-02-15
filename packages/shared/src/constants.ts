@@ -62,6 +62,7 @@ export const ID_PREFIXES = {
   allocation: "alc_",
   commitment: "cmt_",
   report: "rpt_",
+  relationship: "rel_",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -87,4 +88,31 @@ export type BillingCategory = (typeof BILLING_CATEGORIES)[number];
  */
 export function isValidBillingCategory(value: string): value is BillingCategory {
   return BILLING_CATEGORIES.includes(value as BillingCategory);
+}
+
+// ---------------------------------------------------------------------------
+// Relationship categories (Phase 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid categories for relationship tracking.
+ * Used by the relationships table in UserGraphDO.
+ */
+export const RELATIONSHIP_CATEGORIES = [
+  "FAMILY",
+  "INVESTOR",
+  "FRIEND",
+  "CLIENT",
+  "BOARD",
+  "COLLEAGUE",
+  "OTHER",
+] as const;
+
+export type RelationshipCategory = (typeof RELATIONSHIP_CATEGORIES)[number];
+
+/**
+ * Validate that a string is a valid relationship category.
+ */
+export function isValidRelationshipCategory(value: string): value is RelationshipCategory {
+  return RELATIONSHIP_CATEGORIES.includes(value as RelationshipCategory);
 }

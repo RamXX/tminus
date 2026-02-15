@@ -1809,7 +1809,9 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.list_constraints");
     expect(toolNames).toContain("calendar.propose_times");
     expect(toolNames).toContain("calendar.commit_candidate");
-    expect(resultData.tools.length).toBe(22);
+    expect(toolNames).toContain("calendar.add_relationship");
+    expect(toolNames).toContain("calendar.get_drift_report");
+    expect(resultData.tools.length).toBe(24);
   });
 });
 

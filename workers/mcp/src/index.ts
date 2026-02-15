@@ -580,6 +580,55 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["commitment_id"],
     },
   },
+  {
+    name: "calendar.add_relationship",
+    description:
+      "Add a relationship to track interactions with a contact. Creates a relationship record with category, closeness weight, and optional interaction frequency target for drift detection. The participant is identified by their email which is hashed for privacy (BR-6: raw emails never stored). BR-18: relationships are user-controlled only, never auto-scraped.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        participant_email: {
+          type: "string",
+          description: "Email address of the contact. Will be hashed for privacy (SHA-256 + per-org salt).",
+        },
+        display_name: {
+          type: "string",
+          description: "Human-readable name for the contact (e.g., 'Sarah Chen').",
+        },
+        category: {
+          type: "string",
+          enum: ["FAMILY", "INVESTOR", "FRIEND", "CLIENT", "BOARD", "COLLEAGUE", "OTHER"],
+          description: "Relationship category. Default: 'OTHER'.",
+        },
+        closeness_weight: {
+          type: "number",
+          description: "Closeness weight between 0.0 and 1.0. Affects drift urgency ranking. Default: 0.5.",
+        },
+        city: {
+          type: "string",
+          description: "City where the contact is based (e.g., 'San Francisco').",
+        },
+        timezone: {
+          type: "string",
+          description: "IANA timezone of the contact (e.g., 'America/Los_Angeles').",
+        },
+        frequency_target: {
+          type: "number",
+          description: "Target interaction frequency in days (e.g., 7 = weekly, 30 = monthly). Used for drift detection.",
+        },
+      },
+      required: ["participant_email", "display_name", "category"],
+    },
+  },
+  {
+    name: "calendar.get_drift_report",
+    description:
+      "Get a drift report showing relationships that are overdue for interaction. Returns overdue contacts sorted by urgency (days_overdue * closeness_weight). Only includes relationships with an interaction frequency target set.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -2826,6 +2875,84 @@ async function handleExportCommitmentProof(
 }
 
 // ---------------------------------------------------------------------------
+// Relationship tracking handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Execute calendar.add_relationship: hash the participant email, then forward
+ * to the API worker to create the relationship.
+ */
+async function handleAddRelationship(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.participant_email !== "string" || args.participant_email.trim().length === 0) {
+    throw new InvalidParamsError("participant_email is required");
+  }
+  if (typeof args.display_name !== "string" || args.display_name.trim().length === 0) {
+    throw new InvalidParamsError("display_name is required");
+  }
+  if (typeof args.category !== "string" || args.category.trim().length === 0) {
+    throw new InvalidParamsError("category is required");
+  }
+
+  const validCategories = ["FAMILY", "INVESTOR", "FRIEND", "CLIENT", "BOARD", "COLLEAGUE", "OTHER"];
+  if (!validCategories.includes(args.category)) {
+    throw new InvalidParamsError(
+      `Invalid category: ${args.category}. Must be one of: ${validCategories.join(", ")}`,
+    );
+  }
+
+  const participantHash = await computeParticipantHash(args.participant_email as string);
+  const closenessWeight = typeof args.closeness_weight === "number" ? args.closeness_weight : 0.5;
+  const frequencyTarget = typeof args.frequency_target === "number" ? args.frequency_target : null;
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "POST", "/v1/relationships", {
+    participant_hash: participantHash,
+    display_name: args.display_name,
+    category: args.category,
+    closeness_weight: closenessWeight,
+    city: typeof args.city === "string" ? args.city : null,
+    timezone: typeof args.timezone === "string" ? args.timezone : null,
+    interaction_frequency_target: frequencyTarget,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create relationship");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.get_drift_report: forward to the API worker to get
+ * the drift report showing overdue relationships.
+ */
+async function handleGetDriftReport(
+  request: Request,
+  api: Fetcher,
+): Promise<unknown> {
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "GET", "/v1/drift-report");
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get drift report");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+// ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
@@ -3059,6 +3186,16 @@ async function dispatch(
           case "calendar.export_commitment_proof": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleExportCommitmentProof(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.add_relationship": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleAddRelationship(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_drift_report": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetDriftReport(request, env.API);
             break;
           }
           default:

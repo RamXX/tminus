@@ -8,6 +8,8 @@ import {
   DEFAULT_DETAIL_LEVEL,
   DEFAULT_CALENDAR_KIND,
   ID_PREFIXES,
+  RELATIONSHIP_CATEGORIES,
+  isValidRelationshipCategory,
 } from "./constants";
 
 describe("constants.ts -- extended property keys", () => {
@@ -50,7 +52,7 @@ describe("constants.ts -- ID_PREFIXES", () => {
       "user", "account", "event", "policy", "calendar",
       "journal", "constraint", "apikey", "cert",
       "session", "candidate", "hold", "vip", "allocation",
-      "commitment", "report",
+      "commitment", "report", "relationship",
     ];
     for (const key of requiredKeys) {
       expect(keys).toContain(key);
@@ -113,9 +115,39 @@ describe("constants.ts -- ID_PREFIXES", () => {
     }
   });
 
+  it("relationship prefix is 'rel_'", () => {
+    expect(ID_PREFIXES.relationship).toBe("rel_");
+  });
+
   it("all prefixes are exactly 4 characters", () => {
     for (const [, prefix] of Object.entries(ID_PREFIXES)) {
       expect(prefix).toHaveLength(4);
     }
+  });
+});
+
+describe("constants.ts -- RELATIONSHIP_CATEGORIES", () => {
+  it("contains all expected categories", () => {
+    expect(RELATIONSHIP_CATEGORIES).toEqual([
+      "FAMILY",
+      "INVESTOR",
+      "FRIEND",
+      "CLIENT",
+      "BOARD",
+      "COLLEAGUE",
+      "OTHER",
+    ]);
+  });
+
+  it("isValidRelationshipCategory accepts valid categories", () => {
+    for (const cat of RELATIONSHIP_CATEGORIES) {
+      expect(isValidRelationshipCategory(cat)).toBe(true);
+    }
+  });
+
+  it("isValidRelationshipCategory rejects invalid categories", () => {
+    expect(isValidRelationshipCategory("INVALID")).toBe(false);
+    expect(isValidRelationshipCategory("")).toBe(false);
+    expect(isValidRelationshipCategory("friend")).toBe(false);
   });
 });
