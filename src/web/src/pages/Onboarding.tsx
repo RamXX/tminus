@@ -49,6 +49,13 @@ import {
   SESSION_POLL_INTERVAL_MS,
   type OnboardingSession,
 } from "../lib/onboarding-session";
+import {
+  classifyOAuthError,
+  createErrorTelemetryEvent,
+  OnboardingError,
+  type ClassifiedError,
+  type ErrorTelemetryEvent,
+} from "../lib/onboarding-errors";
 import type { AccountProvider } from "../lib/api";
 
 // ---------------------------------------------------------------------------
@@ -131,6 +138,23 @@ export interface OnboardingProps {
    * AC 3: OAuth state parameter includes session ID.
    */
   sessionId?: string;
+  /**
+   * Error code from OAuth callback (e.g., "access_denied", "state_mismatch").
+   * When provided, the component enters error state with a classified message.
+   * TM-2o2.6: Error recovery and resilience.
+   */
+  callbackError?: string;
+  /**
+   * Provider that produced the callback error.
+   * Used to generate provider-specific error messages.
+   */
+  callbackProvider?: AccountProvider;
+  /**
+   * Callback for error telemetry events.
+   * Called with anonymized error events (no PII) for server-side logging.
+   * BR-4: Error telemetry is anonymized.
+   */
+  onErrorTelemetry?: (event: ErrorTelemetryEvent) => void;
 }
 
 /** Page-level view state (extends OnboardingState with multi-account views). */
@@ -343,10 +367,14 @@ export function Onboarding({
   addAccountToServerSession,
   completeServerSession,
   sessionId: initialSessionId,
+  callbackError,
+  callbackProvider,
+  onErrorTelemetry,
 }: OnboardingProps) {
   // View state management
+  // If returning from OAuth with an error, go straight to error state
   const [viewState, setViewState] = useState<ViewState>(
-    callbackAccountId ? "syncing" : "idle",
+    callbackError ? "error" : callbackAccountId ? "syncing" : "idle",
   );
 
   // Connected accounts list
@@ -359,8 +387,16 @@ export function Onboarding({
   );
   const [events, setEvents] = useState<OnboardingEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Classified error from error recovery system (TM-2o2.6)
+  const [classifiedError, setClassifiedError] = useState<ClassifiedError | null>(
+    callbackError && callbackProvider
+      ? classifyOAuthError(callbackError, callbackProvider)
+      : null,
+  );
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const syncCompleteRef = useRef(false);
+  // Consecutive failure counter for transient error auto-retry (TM-2o2.6 AC 4)
+  const consecutiveFailuresRef = useRef(0);
 
   // Apple modal state
   const [appleEmail, setAppleEmail] = useState("");
@@ -371,6 +407,19 @@ export function Onboarding({
   // Session management state
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
   const sessionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // -------------------------------------------------------------------------
+  // Error telemetry for callback errors (TM-2o2.6 AC 6)
+  // -------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (classifiedError && onErrorTelemetry) {
+      const telemetry = createErrorTelemetryEvent(classifiedError);
+      onErrorTelemetry(telemetry);
+    }
+  // Fire only once on mount when callback error is present
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // -------------------------------------------------------------------------
   // Session initialization and resume (AC 1, AC 2)
@@ -521,13 +570,21 @@ export function Onboarding({
       syncCompleteRef.current = false;
       setViewState("syncing");
     } catch (err) {
-      setAppleError(
-        err instanceof Error ? err.message : "Something went wrong",
-      );
+      // Use classified error message if available (OnboardingError)
+      if (err instanceof OnboardingError) {
+        setAppleError(err.classified.message);
+        if (onErrorTelemetry) {
+          onErrorTelemetry(createErrorTelemetryEvent(err.classified));
+        }
+      } else {
+        setAppleError(
+          err instanceof Error ? err.message : "Something went wrong",
+        );
+      }
     } finally {
       setAppleSubmitting(false);
     }
-  }, [appleEmail, applePassword, submitAppleCredentials, user.id]);
+  }, [appleEmail, applePassword, submitAppleCredentials, user.id, onErrorTelemetry]);
 
   // -------------------------------------------------------------------------
   // Sync status polling
@@ -537,6 +594,8 @@ export function Onboarding({
     async (accountId: string) => {
       try {
         const status = await fetchAccountStatus(accountId);
+        // Success: reset consecutive failure counter
+        consecutiveFailuresRef.current = 0;
         setSyncStatus(status);
 
         if (isSyncComplete(status)) {
@@ -589,9 +648,49 @@ export function Onboarding({
           }
         }
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Something went wrong",
-        );
+        consecutiveFailuresRef.current += 1;
+
+        // TM-2o2.6 AC 4: Transient errors auto-retry silently up to 3 times.
+        // Only OnboardingError with transient severity triggers silent retry.
+        // Plain errors surface immediately for backward compatibility.
+        const isTransient = err instanceof OnboardingError
+          && err.classified.severity === "transient";
+
+        if (isTransient && consecutiveFailuresRef.current <= 3) {
+          // Silent retry: let the polling interval handle the next attempt
+          return;
+        }
+
+        // All retries exhausted or persistent/unclassified error: surface to user
+        if (err instanceof OnboardingError) {
+          setClassifiedError(err.classified);
+          setError(err.classified.message);
+          if (onErrorTelemetry) {
+            onErrorTelemetry(createErrorTelemetryEvent(err.classified, {
+              retry_count: consecutiveFailuresRef.current - 1,
+              recovered: false,
+            }));
+          }
+        } else {
+          const errorMessage = err instanceof Error ? err.message : "Something went wrong";
+          setError(errorMessage);
+          if (onErrorTelemetry) {
+            onErrorTelemetry(createErrorTelemetryEvent(
+              {
+                code: "sync_polling_failure",
+                message: errorMessage,
+                severity: "persistent",
+                recovery_action: "try_again",
+                recovery_label: "Try again",
+                provider: "google",
+              },
+              {
+                retry_count: consecutiveFailuresRef.current - 1,
+                recovered: false,
+              },
+            ));
+          }
+        }
         setViewState("error");
 
         // Stop polling on error
@@ -601,7 +700,7 @@ export function Onboarding({
         }
       }
     },
-    [fetchAccountStatus, fetchEvents],
+    [fetchAccountStatus, fetchEvents, onErrorTelemetry],
   );
 
   // Start polling when we have an account to sync
@@ -655,9 +754,11 @@ export function Onboarding({
 
   const handleRetry = useCallback(() => {
     setError(null);
+    setClassifiedError(null);
     setSyncStatus(null);
     setCurrentAccountId(null);
     syncCompleteRef.current = false;
+    consecutiveFailuresRef.current = 0;
     setViewState("idle");
   }, []);
 
@@ -937,6 +1038,14 @@ export function Onboarding({
   }
 
   function renderError() {
+    // Use classified error if available, otherwise fall back to generic
+    const displayMessage = classifiedError
+      ? classifiedError.message
+      : error ?? "Something went wrong";
+    const recoveryLabel = classifiedError
+      ? classifiedError.recovery_label
+      : "Try Again";
+
     return (
       <div style={styles.errorBanner}>
         <div
@@ -946,17 +1055,17 @@ export function Onboarding({
             marginBottom: "0.5rem",
           }}
         >
-          Something went wrong
+          {classifiedError ? displayMessage : "Something went wrong"}
         </div>
-        {error && (
+        {!classifiedError && error && (
           <div style={{ color: "#64748b", marginBottom: "1rem" }}>{error}</div>
         )}
         <button
           onClick={handleRetry}
           style={styles.secondaryButton}
-          aria-label="Try again"
+          aria-label={recoveryLabel}
         >
-          Try Again
+          {recoveryLabel}
         </button>
       </div>
     );
