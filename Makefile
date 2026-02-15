@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -41,6 +41,20 @@ test-e2e-phase2a-staging: install
 
 test-e2e-phase2a-production: install
 	BASE_URL=https://api.tminus.ink npx vitest run --config vitest.e2e.phase2a.config.ts
+
+# ---- Phase 2B E2E validation ----
+# Real HTTP tests against a running MCP worker.
+# Default target runs against localhost:8976 (start MCP wrangler dev first).
+# Setup: ./scripts/e2e-mcp-setup.sh
+
+test-e2e-phase2b: install
+	MCP_BASE_URL=http://localhost:8976 npx vitest run --config vitest.e2e.phase2b.config.ts
+
+test-e2e-phase2b-staging: install
+	MCP_BASE_URL=https://mcp-staging.tminus.ink npx vitest run --config vitest.e2e.phase2b.config.ts
+
+test-e2e-phase2b-production: install
+	MCP_BASE_URL=https://mcp.tminus.ink npx vitest run --config vitest.e2e.phase2b.config.ts
 
 lint: install
 	pnpm run lint
