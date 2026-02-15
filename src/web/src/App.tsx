@@ -6,6 +6,7 @@
  *   #/login       -> Login page
  *   #/calendar    -> Calendar page (requires auth)
  *   #/sync-status -> Sync Status Dashboard (requires auth)
+ *   #/policies    -> Policy Management (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -14,7 +15,9 @@ import { AuthProvider, useAuth } from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Calendar } from "./pages/Calendar";
 import { SyncStatus } from "./pages/SyncStatus";
+import { Policies } from "./pages/Policies";
 import { fetchSyncStatus } from "./lib/api";
+import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
 function Router() {
   const { token } = useAuth();
@@ -31,6 +34,27 @@ function Router() {
     if (!token) throw new Error("Not authenticated");
     return fetchSyncStatus(token);
   }, [token]);
+
+  // Bound fetch/update for policies -- injects current token
+  const boundFetchPolicies = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchPolicies(token);
+  }, [token]);
+
+  const boundUpdatePolicyEdge = useCallback(
+    async (
+      policyId: string,
+      edge: {
+        from_account_id: string;
+        to_account_id: string;
+        detail_level: "BUSY" | "TITLE" | "FULL";
+      },
+    ) => {
+      if (!token) throw new Error("Not authenticated");
+      return updatePolicyEdge(token, policyId, edge);
+    },
+    [token],
+  );
 
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
@@ -50,6 +74,13 @@ function Router() {
       return <Calendar />;
     case "#/sync-status":
       return <SyncStatus fetchSyncStatus={boundFetchSyncStatus} />;
+    case "#/policies":
+      return (
+        <Policies
+          fetchPolicies={boundFetchPolicies}
+          updatePolicyEdge={boundUpdatePolicyEdge}
+        />
+      );
     default:
       // Unknown route -- redirect to calendar if authenticated, login otherwise
       window.location.hash = token ? "#/calendar" : "#/login";

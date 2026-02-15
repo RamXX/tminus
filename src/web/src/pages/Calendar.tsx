@@ -48,6 +48,9 @@ export function Calendar() {
           <p style={styles.subtitle}>{user?.email ?? "Unknown user"}</p>
         </div>
         <div style={styles.headerActions}>
+          <a href="#/policies" style={styles.navLink}>
+            Policies
+          </a>
           <a href="#/sync-status" style={styles.navLink}>
             Sync Status
           </a>
