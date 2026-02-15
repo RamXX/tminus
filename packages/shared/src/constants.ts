@@ -53,4 +53,5 @@ export const ID_PREFIXES = {
   calendar: "cal_",
   journal: "jrn_",
   constraint: "cst_",
+  apikey: "key_",
 } as const;

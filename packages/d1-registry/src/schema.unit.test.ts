@@ -11,6 +11,7 @@ import Database from "better-sqlite3";
 import {
   MIGRATION_0001_INITIAL_SCHEMA,
   MIGRATION_0002_MS_SUBSCRIPTIONS,
+  MIGRATION_0004_AUTH_FIELDS,
   ALL_MIGRATIONS,
 } from "./schema";
 
@@ -28,7 +29,7 @@ describe("schema unit tests", () => {
     for (const migration of ALL_MIGRATIONS) {
       expect(typeof migration).toBe("string");
       expect(migration.trim().length).toBeGreaterThan(0);
-      expect(migration).toMatch(/CREATE\s+(TABLE|INDEX)/i);
+      expect(migration).toMatch(/(CREATE|ALTER)\s+(TABLE|INDEX)/i);
     }
   });
 
@@ -145,5 +146,50 @@ describe("schema unit tests", () => {
     expect(normalize(MIGRATION_0001_INITIAL_SCHEMA)).toBe(
       normalize(fileContent),
     );
+  });
+
+  it("MIGRATION_0004 adds auth fields to users table", () => {
+    const db = new Database(":memory:");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
+
+    // Apply auth fields migration statement by statement (SQLite requires this for ALTER TABLE)
+    const statements = MIGRATION_0004_AUTH_FIELDS.trim().split(";").filter(Boolean);
+    for (const stmt of statements) {
+      expect(() => db.exec(stmt.trim() + ";")).not.toThrow();
+    }
+
+    // Verify new columns exist
+    const columns = db.prepare("PRAGMA table_info(users)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const columnNames = columns.map((c) => c.name);
+
+    expect(columnNames).toContain("password_hash");
+    expect(columnNames).toContain("password_version");
+    expect(columnNames).toContain("failed_login_attempts");
+    expect(columnNames).toContain("locked_until");
+
+    // Verify defaults
+    const pwVerCol = columns.find((c) => c.name === "password_version");
+    expect(pwVerCol!.dflt_value).toBe("1");
+    expect(pwVerCol!.notnull).toBe(1);
+
+    const failedCol = columns.find((c) => c.name === "failed_login_attempts");
+    expect(failedCol!.dflt_value).toBe("0");
+    expect(failedCol!.notnull).toBe(1);
+
+    // password_hash is nullable (for legacy OAuth-only users)
+    const pwHashCol = columns.find((c) => c.name === "password_hash");
+    expect(pwHashCol!.notnull).toBe(0);
+
+    // locked_until is nullable
+    const lockedCol = columns.find((c) => c.name === "locked_until");
+    expect(lockedCol!.notnull).toBe(0);
+
+    db.close();
   });
 });

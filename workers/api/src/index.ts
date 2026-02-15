@@ -12,7 +12,9 @@
  * - D1 for account lookups (cross-user registry)
  */
 
-import { isValidId } from "@tminus/shared";
+import { isValidId, generateId } from "@tminus/shared";
+import { createAuthRoutes } from "./routes/auth";
+import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
 
 // ---------------------------------------------------------------------------
 // Durable Object class re-exports (required by wrangler for DO hosting)
@@ -219,6 +221,7 @@ interface AuthContext {
 async function extractAuth(
   request: Request,
   jwtSecret: string,
+  db?: D1Database,
 ): Promise<AuthContext | null> {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader) return null;
@@ -226,7 +229,49 @@ async function extractAuth(
   const parts = authHeader.split(" ");
   if (parts.length !== 2 || parts[0] !== "Bearer") return null;
 
-  const payload = await verifyJwt(parts[1], jwtSecret);
+  const token = parts[1];
+
+  // API key path: if token starts with tmk_, validate as API key
+  if (token.startsWith("tmk_")) {
+    if (!db) return null;
+    if (!isApiKeyFormat(token)) return null;
+
+    const prefix = extractPrefix(token);
+    if (!prefix) return null;
+
+    try {
+      const row = await db
+        .prepare(
+          `SELECT k.key_id, k.key_hash, k.user_id
+           FROM api_keys k
+           WHERE k.prefix = ?1 AND k.revoked_at IS NULL`,
+        )
+        .bind(prefix)
+        .first<{
+          key_id: string;
+          key_hash: string;
+          user_id: string;
+        }>();
+
+      if (!row) return null;
+
+      const presentedHash = await hashApiKey(token);
+      if (presentedHash !== row.key_hash) return null;
+
+      // Update last_used_at (best-effort, non-blocking)
+      db.prepare("UPDATE api_keys SET last_used_at = ?1 WHERE key_id = ?2")
+        .bind(new Date().toISOString(), row.key_id)
+        .run()
+        .catch(() => {});
+
+      return { userId: row.user_id };
+    } catch {
+      return null;
+    }
+  }
+
+  // JWT path
+  const payload = await verifyJwt(token, jwtSecret);
   if (!payload) return null;
 
   return { userId: payload.sub };
@@ -1051,6 +1096,138 @@ async function handleJournal(
   }
 }
 
+// -- API Keys ---------------------------------------------------------------
+
+async function handleCreateApiKey(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<{ name?: string }>(request);
+  if (!body || !body.name || typeof body.name !== "string" || body.name.trim().length === 0) {
+    return jsonResponse(
+      errorEnvelope("API key must have a name", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const keyId = generateId("apikey");
+    const { rawKey, prefix, keyHash } = await generateApiKey();
+
+    await env.DB
+      .prepare(
+        `INSERT INTO api_keys (key_id, user_id, name, prefix, key_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)`,
+      )
+      .bind(keyId, auth.userId, body.name.trim(), prefix, keyHash)
+      .run();
+
+    // Return the full raw key ONLY at creation time
+    return jsonResponse(
+      successEnvelope({
+        key_id: keyId,
+        name: body.name.trim(),
+        prefix,
+        key: rawKey,
+        created_at: new Date().toISOString(),
+      }),
+      201,
+    );
+  } catch (err) {
+    console.error("Failed to create API key", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create API key", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleListApiKeys(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await env.DB
+      .prepare(
+        `SELECT key_id, name, prefix, created_at, last_used_at, revoked_at
+         FROM api_keys
+         WHERE user_id = ?1
+         ORDER BY created_at DESC`,
+      )
+      .bind(auth.userId)
+      .all<{
+        key_id: string;
+        name: string;
+        prefix: string;
+        created_at: string;
+        last_used_at: string | null;
+        revoked_at: string | null;
+      }>();
+
+    const keys = result.results ?? [];
+    return jsonResponse(successEnvelope(keys), 200);
+  } catch (err) {
+    console.error("Failed to list API keys", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list API keys", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleRevokeApiKey(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  keyId: string,
+): Promise<Response> {
+  if (!isValidId(keyId, "apikey")) {
+    return jsonResponse(
+      errorEnvelope("Invalid API key ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    // Verify ownership and that key exists
+    const row = await env.DB
+      .prepare(
+        "SELECT key_id, revoked_at FROM api_keys WHERE key_id = ?1 AND user_id = ?2",
+      )
+      .bind(keyId, auth.userId)
+      .first<{ key_id: string; revoked_at: string | null }>();
+
+    if (!row) {
+      return jsonResponse(
+        errorEnvelope("API key not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    if (row.revoked_at) {
+      return jsonResponse(
+        errorEnvelope("API key already revoked", "CONFLICT"),
+        ErrorCode.CONFLICT,
+      );
+    }
+
+    await env.DB
+      .prepare("UPDATE api_keys SET revoked_at = ?1 WHERE key_id = ?2")
+      .bind(new Date().toISOString(), keyId)
+      .run();
+
+    return jsonResponse(successEnvelope({ revoked: true }), 200);
+  } catch (err) {
+    console.error("Failed to revoke API key", err);
+    return jsonResponse(
+      errorEnvelope("Failed to revoke API key", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -1087,7 +1264,7 @@ export function createHandler() {
         });
       }
 
-      // All /v1/* routes require auth
+      // All /v1/* routes require auth (except /v1/auth/*)
       if (!pathname.startsWith("/v1/")) {
         return jsonResponse(
           errorEnvelope("Not Found", "NOT_FOUND"),
@@ -1095,13 +1272,39 @@ export function createHandler() {
         );
       }
 
-      // Authenticate
-      const auth = await extractAuth(request, env.JWT_SECRET);
+      // Auth routes (/v1/auth/*) do NOT require existing JWT -- they create tokens.
+      // Delegate to the Hono auth router.
+      if (pathname.startsWith("/v1/auth/")) {
+        const authRouter = createAuthRoutes();
+        // Rewrite path: strip /v1/auth prefix so Hono routes match at /register, /login, etc.
+        const rewrittenUrl = new URL(request.url);
+        rewrittenUrl.pathname = pathname.slice("/v1/auth".length);
+        const rewrittenRequest = new Request(rewrittenUrl.toString(), request);
+        return authRouter.fetch(rewrittenRequest, env);
+      }
+
+      // Authenticate -- all other /v1/* routes require a valid JWT or API key
+      const auth = await extractAuth(request, env.JWT_SECRET, env.DB);
       if (!auth) {
         return jsonResponse(
           errorEnvelope("Authentication required", "AUTH_REQUIRED"),
           ErrorCode.AUTH_REQUIRED,
         );
+      }
+
+      // -- API key routes ---------------------------------------------------
+
+      if (method === "POST" && pathname === "/v1/api-keys") {
+        return handleCreateApiKey(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/api-keys") {
+        return handleListApiKeys(request, auth, env);
+      }
+
+      let match = matchRoute(pathname, "/v1/api-keys/:id");
+      if (match && method === "DELETE") {
+        return handleRevokeApiKey(request, auth, env, match.params[0]);
       }
 
       // -- Account routes ---------------------------------------------------
@@ -1114,7 +1317,7 @@ export function createHandler() {
         return handleListAccounts(request, auth, env);
       }
 
-      let match = matchRoute(pathname, "/v1/accounts/:id");
+      match = matchRoute(pathname, "/v1/accounts/:id");
       if (match) {
         if (method === "GET") {
           return handleGetAccount(request, auth, env, match.params[0]);

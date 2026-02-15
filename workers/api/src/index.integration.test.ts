@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0004_AUTH_FIELDS } from "@tminus/d1-registry";
 import { createHandler, createJwt } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -267,10 +267,42 @@ function insertAccount(
 // Helper: build mock env
 // ---------------------------------------------------------------------------
 
+function createMockKV(): KVNamespace & { store: Map<string, { value: string; expiration?: number }> } {
+  const store = new Map<string, { value: string; expiration?: number }>();
+  return {
+    store,
+    async get(key: string): Promise<string | null> {
+      const entry = store.get(key);
+      if (!entry) return null;
+      if (entry.expiration && Date.now() / 1000 > entry.expiration) {
+        store.delete(key);
+        return null;
+      }
+      return entry.value;
+    },
+    async put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
+      const expiration = opts?.expirationTtl
+        ? Math.floor(Date.now() / 1000) + opts.expirationTtl
+        : undefined;
+      store.set(key, { value, expiration });
+    },
+    async delete(key: string): Promise<void> {
+      store.delete(key);
+    },
+    async list(): Promise<{ keys: Array<{ name: string }>; list_complete: boolean; cursor?: string }> {
+      return { keys: Array.from(store.keys()).map((name) => ({ name })), list_complete: true };
+    },
+    async getWithMetadata(): Promise<{ value: string | null; metadata: unknown }> {
+      return { value: null, metadata: null };
+    },
+  } as unknown as KVNamespace & { store: Map<string, { value: string; expiration?: number }> };
+}
+
 function buildEnv(
   d1: D1Database,
   userGraphDO?: DurableObjectNamespace,
   accountDO?: DurableObjectNamespace,
+  sessions?: KVNamespace,
 ): Env {
   return {
     DB: d1,
@@ -278,6 +310,7 @@ function buildEnv(
     ACCOUNT: accountDO ?? createMockDONamespace(),
     SYNC_QUEUE: createMockQueue(),
     WRITE_QUEUE: createMockQueue(),
+    SESSIONS: sessions ?? createMockKV(),
     JWT_SECRET,
   };
 }

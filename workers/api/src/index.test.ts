@@ -60,6 +60,7 @@ function createMinimalEnv(): Env {
     ACCOUNT: {} as DurableObjectNamespace,
     SYNC_QUEUE: {} as Queue,
     WRITE_QUEUE: {} as Queue,
+    SESSIONS: {} as KVNamespace,
   };
 }
 

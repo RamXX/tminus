@@ -84,10 +84,56 @@ CREATE INDEX idx_ms_subscriptions_account ON ms_subscriptions(account_id);
 ` as const;
 
 /**
+ * Migration 0003: API keys table for programmatic access.
+ *
+ * Stores hashed API keys (SHA-256) for token-based auth as an
+ * alternative to JWT Bearer tokens. Keys use the format:
+ *   tmk_live_<8-char-prefix><32-char-random>
+ *
+ * The prefix is stored in plaintext for lookup; the full key is
+ * hashed with SHA-256 (via Web Crypto) and stored as key_hash.
+ * The raw key is never stored -- only shown once at creation time.
+ */
+export const MIGRATION_0003_API_KEYS = `
+-- API keys for programmatic access
+CREATE TABLE api_keys (
+  key_id       TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(user_id),
+  name         TEXT NOT NULL,
+  prefix       TEXT NOT NULL,
+  key_hash     TEXT NOT NULL UNIQUE,
+  last_used_at TEXT,
+  revoked_at   TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_api_keys_user ON api_keys(user_id);
+CREATE INDEX idx_api_keys_prefix ON api_keys(prefix);
+` as const;
+
+/**
+ * Migration 0004: Auth fields on the users table.
+ *
+ * Adds password-based authentication support:
+ * - password_hash: PBKDF2 derived key (nullable for legacy/OAuth-only users)
+ * - password_version: enables JWT session invalidation on password change
+ * - failed_login_attempts: progressive lockout counter
+ * - locked_until: ISO8601 timestamp when lockout expires
+ */
+export const MIGRATION_0004_AUTH_FIELDS = `
+ALTER TABLE users ADD COLUMN password_hash TEXT;
+ALTER TABLE users ADD COLUMN password_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN locked_until TEXT;
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
 export const ALL_MIGRATIONS = [
   MIGRATION_0001_INITIAL_SCHEMA,
   MIGRATION_0002_MS_SUBSCRIPTIONS,
+  MIGRATION_0003_API_KEYS,
+  MIGRATION_0004_AUTH_FIELDS,
 ] as const;

@@ -14,13 +14,21 @@ export interface OrgRow {
   readonly updated_at: string;
 }
 
-/** Row shape for the `users` table. */
+/** Row shape for the `users` table (includes auth fields from migration 0003). */
 export interface UserRow {
   readonly user_id: string;
   readonly org_id: string;
   readonly email: string;
   readonly display_name: string | null;
   readonly created_at: string;
+  /** PBKDF2 hash in "<hex-salt>:<hex-key>" format. NULL for legacy/OAuth-only users. */
+  readonly password_hash: string | null;
+  /** Password version for JWT session invalidation on password change. */
+  readonly password_version: number;
+  /** Count of consecutive failed login attempts. */
+  readonly failed_login_attempts: number;
+  /** ISO8601 timestamp when lockout expires. NULL if not locked. */
+  readonly locked_until: string | null;
 }
 
 /** Valid status values for the `accounts.status` column. */
@@ -44,6 +52,18 @@ export interface AccountRow {
 export interface MsSubscriptionRow {
   readonly subscription_id: string;
   readonly account_id: string;
+  readonly created_at: string;
+}
+
+/** Row shape for the `api_keys` table. */
+export interface ApiKeyRow {
+  readonly key_id: string;
+  readonly user_id: string;
+  readonly name: string;
+  readonly prefix: string;
+  readonly key_hash: string;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
   readonly created_at: string;
 }
 

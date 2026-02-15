@@ -7,13 +7,19 @@
  * - Invalid/expired JWT returns 401
  * - Valid JWT attaches user context
  * - Error response matches envelope format {ok, error: {code, message}}
+ * - API key routing: tmk_ tokens route to API key validation
+ * - API key without DB configured returns 401
+ * - Invalid API key format returns 401
+ * - Valid API key attaches user context
+ * - Revoked API key returns 401
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { generateJWT } from "@tminus/shared";
 import { authMiddleware } from "./auth";
-import type { AuthEnv } from "./auth";
+import type { AuthEnv, AuthDB } from "./auth";
+import { generateApiKey, hashApiKey } from "../api-keys";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -275,5 +281,194 @@ describe("authMiddleware: error envelope format", () => {
     expect(body.error).toHaveProperty("message");
     expect(typeof body.error.code).toBe("string");
     expect(typeof body.error.message).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mock DB helper for API key tests
+// ---------------------------------------------------------------------------
+
+function createMockDB(config?: {
+  keyRow?: {
+    key_id: string;
+    key_hash: string;
+    user_id: string;
+    email: string;
+  } | null;
+}): AuthDB & { updateCalls: Array<{ sql: string; params: unknown[] }> } {
+  const updateCalls: Array<{ sql: string; params: unknown[] }> = [];
+
+  return {
+    updateCalls,
+    prepare(sql: string) {
+      return {
+        bind(...params: unknown[]) {
+          return {
+            first<T>(): Promise<T | null> {
+              return Promise.resolve((config?.keyRow ?? null) as T | null);
+            },
+            run(): Promise<unknown> {
+              updateCalls.push({ sql, params });
+              return Promise.resolve({});
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+/** Create a Hono app with API key support via the auth middleware. */
+function createApiKeyTestApp(db: AuthDB) {
+  const app = new Hono<{ Bindings: { JWT_SECRET: string } } & AuthEnv>();
+
+  app.use(
+    "/protected/*",
+    authMiddleware(
+      (c) => c.env.JWT_SECRET,
+      () => db,
+    ),
+  );
+
+  app.get("/protected/me", (c) => {
+    const user = c.get("user");
+    return c.json({ ok: true, data: user });
+  });
+
+  return app;
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware: API key routing
+// ---------------------------------------------------------------------------
+
+describe("authMiddleware: API key routing", () => {
+  it("routes tmk_ tokens to API key validation path", async () => {
+    const { rawKey, keyHash } = await generateApiKey();
+    const db = createMockDB({
+      keyRow: {
+        key_id: "key_01TEST",
+        key_hash: keyHash,
+        user_id: "usr_01HXYZ000000000000000001",
+        email: "apikey-user@example.com",
+      },
+    });
+
+    const app = createApiKeyTestApp(db);
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${rawKey}` },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.user_id).toBe("usr_01HXYZ000000000000000001");
+    expect(body.data.email).toBe("apikey-user@example.com");
+  });
+
+  it("returns 401 for tmk_ token when DB is not configured", async () => {
+    // Use the JWT-only app (no getDB provided)
+    const app = createTestApp();
+    const { rawKey } = await generateApiKey();
+
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${rawKey}` },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.message).toContain("not configured");
+  });
+
+  it("returns 401 for tmk_ token with bad format", async () => {
+    const db = createMockDB();
+    const app = createApiKeyTestApp(db);
+
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: "Bearer tmk_bad_format" },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.message).toContain("Invalid API key format");
+  });
+
+  it("returns 401 when API key is not found in DB", async () => {
+    const db = createMockDB({ keyRow: null });
+    const app = createApiKeyTestApp(db);
+    const { rawKey } = await generateApiKey();
+
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${rawKey}` },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.message).toContain("Invalid or revoked");
+  });
+
+  it("returns 401 when API key hash does not match", async () => {
+    const { rawKey } = await generateApiKey();
+    // Use a different hash than what the key produces
+    const db = createMockDB({
+      keyRow: {
+        key_id: "key_01TEST",
+        key_hash: "0000000000000000000000000000000000000000000000000000000000000000",
+        user_id: "usr_01HXYZ000000000000000001",
+        email: "user@example.com",
+      },
+    });
+
+    const app = createApiKeyTestApp(db);
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${rawKey}` },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  it("JWT auth still works when API key support is enabled", async () => {
+    const db = createMockDB();
+    const app = createApiKeyTestApp(db);
+    const authHeader = await makeAuthHeader();
+
+    const res = await app.request(
+      "/protected/me",
+      {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.user_id).toBe(TEST_USER.sub);
   });
 });

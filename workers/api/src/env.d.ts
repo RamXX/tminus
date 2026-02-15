@@ -7,6 +7,7 @@
  * - ACCOUNT: DurableObject namespace for AccountDO
  * - SYNC_QUEUE: Queue producer for sync messages
  * - WRITE_QUEUE: Queue producer for write messages
+ * - SESSIONS: KV namespace for refresh token sessions
  * - JWT_SECRET: Secret for API auth JWT signing
  */
 interface Env {
@@ -15,5 +16,6 @@ interface Env {
   ACCOUNT: DurableObjectNamespace;
   SYNC_QUEUE: Queue;
   WRITE_QUEUE: Queue;
+  SESSIONS: KVNamespace;
   JWT_SECRET: string;
 }

@@ -40,6 +40,12 @@ queue = "tminus-sync-queue"
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
 
+# --- KV namespaces -----------------------------------------------------------
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "placeholder-sessions-id"  # Replace with real ID after `wrangler kv namespace create tminus-sessions`
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
