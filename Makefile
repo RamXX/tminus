@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
 
 # ---- Core targets ----
 
@@ -62,6 +62,13 @@ test-e2e-phase2b-production: install
 
 test-e2e-phase3a: install
 	npx vitest run --config vitest.e2e.phase3a.config.ts
+
+# ---- Phase 4B E2E validation ----
+# Geo-aware intelligence pipeline: relationships + trips + reconnections + milestones.
+# Uses real SQLite + real UserGraphDO + real SchedulingWorkflow (no HTTP server).
+
+test-e2e-phase4b: install
+	npx vitest run --config vitest.e2e.phase4b.config.ts
 
 lint: install
 	pnpm run lint
