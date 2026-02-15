@@ -4,6 +4,7 @@
  * Simple hash-based router (no dependency needed for walking skeleton).
  * Routes:
  *   #/login       -> Login page
+ *   #/onboard     -> Onboarding page (requires auth)
  *   #/calendar    -> Calendar page (requires auth)
  *   #/accounts    -> Account Management (requires auth)
  *   #/sync-status -> Sync Status Dashboard (requires auth)
@@ -32,9 +33,14 @@ import { Governance } from "./pages/Governance";
 import { Relationships } from "./pages/Relationships";
 import { Reconnections } from "./pages/Reconnections";
 import { Admin } from "./pages/Admin";
+import { Onboarding } from "./pages/Onboarding";
+import { parseOAuthCallback } from "./lib/onboarding";
+import type { OnboardingSyncStatus } from "./lib/onboarding";
 import {
   fetchSyncStatus,
   fetchAccounts,
+  fetchAccountDetail,
+  fetchEvents,
   unlinkAccount,
   fetchErrorMirrors,
   retryMirror,
@@ -416,6 +422,36 @@ function Router() {
     [token],
   );
 
+  // Bound onboarding functions -- injects current token
+  const boundFetchAccountStatus = useCallback(
+    async (accountId: string): Promise<OnboardingSyncStatus> => {
+      if (!token) throw new Error("Not authenticated");
+      const detail = await fetchAccountDetail(token, accountId);
+      return {
+        account_id: detail.account_id,
+        email: detail.email,
+        provider: detail.provider,
+        status: detail.status,
+        health: detail.health,
+      };
+    },
+    [token],
+  );
+
+  const boundFetchEventsForOnboarding = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchEvents(token);
+  }, [token]);
+
+  // Parse OAuth callback params from hash URL (e.g., #/onboard?account_id=acc-123)
+  const onboardCallbackAccountId = (() => {
+    if (!route.startsWith("#/onboard")) return null;
+    const { accountId } = parseOAuthCallback(
+      `${window.location.origin}${window.location.pathname}${route}`,
+    );
+    return accountId;
+  })();
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -434,6 +470,15 @@ function Router() {
   switch (routePath) {
     case "#/login":
       return <Login />;
+    case "#/onboard":
+      return user ? (
+        <Onboarding
+          user={user}
+          fetchAccountStatus={boundFetchAccountStatus}
+          fetchEvents={boundFetchEventsForOnboarding}
+          callbackAccountId={onboardCallbackAccountId}
+        />
+      ) : null;
     case "#/calendar":
       return <Calendar />;
     case "#/accounts":

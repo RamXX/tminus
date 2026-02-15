@@ -242,6 +242,32 @@ export async function fetchAccounts(
   return apiFetch<LinkedAccount[]>("/v1/accounts", { token });
 }
 
+/** Account detail with health info (from GET /v1/accounts/:id). */
+export interface AccountDetail {
+  account_id: string;
+  user_id: string;
+  provider: AccountProvider;
+  email: string;
+  status: AccountStatus;
+  created_at: string;
+  health: {
+    lastSyncTs: string | null;
+    lastSuccessTs: string | null;
+    fullSyncNeeded: boolean;
+  } | null;
+}
+
+/** GET /api/v1/accounts/:id -- get a single account with health info. */
+export async function fetchAccountDetail(
+  token: string,
+  accountId: string,
+): Promise<AccountDetail> {
+  return apiFetch<AccountDetail>(
+    `/v1/accounts/${encodeURIComponent(accountId)}`,
+    { token },
+  );
+}
+
 /** DELETE /api/v1/accounts/:id -- unlink a calendar account. */
 export async function unlinkAccount(
   token: string,
