@@ -252,3 +252,24 @@ export async function unlinkAccount(
     token,
   });
 }
+
+/** GET /api/v1/sync/journal?change_type=error -- fetch mirrors in ERROR state. */
+export async function fetchErrorMirrors(
+  token: string,
+): Promise<import("./error-recovery").ErrorMirror[]> {
+  return apiFetch<import("./error-recovery").ErrorMirror[]>(
+    "/v1/sync/journal?change_type=error",
+    { token },
+  );
+}
+
+/** POST /api/v1/sync/retry/:mirror_id -- retry a single failed mirror. */
+export async function retryMirror(
+  token: string,
+  mirrorId: string,
+): Promise<import("./error-recovery").RetryResult> {
+  return apiFetch<import("./error-recovery").RetryResult>(
+    `/v1/sync/retry/${encodeURIComponent(mirrorId)}`,
+    { method: "POST", token },
+  );
+}

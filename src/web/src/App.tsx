@@ -8,6 +8,7 @@
  *   #/accounts    -> Account Management (requires auth)
  *   #/sync-status -> Sync Status Dashboard (requires auth)
  *   #/policies    -> Policy Management (requires auth)
+ *   #/errors      -> Error Recovery (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -18,7 +19,14 @@ import { Calendar } from "./pages/Calendar";
 import { Accounts } from "./pages/Accounts";
 import { SyncStatus } from "./pages/SyncStatus";
 import { Policies } from "./pages/Policies";
-import { fetchSyncStatus, fetchAccounts, unlinkAccount } from "./lib/api";
+import { ErrorRecovery } from "./pages/ErrorRecovery";
+import {
+  fetchSyncStatus,
+  fetchAccounts,
+  unlinkAccount,
+  fetchErrorMirrors,
+  retryMirror,
+} from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
 function Router() {
@@ -72,6 +80,20 @@ function Router() {
     [token],
   );
 
+  // Bound fetch/retry for error recovery -- injects current token
+  const boundFetchErrors = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchErrorMirrors(token);
+  }, [token]);
+
+  const boundRetryMirror = useCallback(
+    async (mirrorId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return retryMirror(token, mirrorId);
+    },
+    [token],
+  );
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -106,6 +128,13 @@ function Router() {
         <Policies
           fetchPolicies={boundFetchPolicies}
           updatePolicyEdge={boundUpdatePolicyEdge}
+        />
+      );
+    case "#/errors":
+      return (
+        <ErrorRecovery
+          fetchErrors={boundFetchErrors}
+          retryMirror={boundRetryMirror}
         />
       );
     default:
