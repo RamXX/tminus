@@ -247,10 +247,7 @@ function createMockD1(): D1Database {
 function buildEnv(doNamespace: DurableObjectNamespace) {
   return {
     DB: createMockD1(),
-    // USER_GRAPH is used by non-onboarding routes; point it at the same DO
     USER_GRAPH: doNamespace,
-    // USER_GRAPH_DO is used by onboarding route handlers
-    USER_GRAPH_DO: doNamespace,
     ACCOUNT: doNamespace,
     SYNC_QUEUE: createMockQueue(),
     WRITE_QUEUE: createMockQueue(),

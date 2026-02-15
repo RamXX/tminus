@@ -466,7 +466,7 @@ async function handleCreateOnboardingSession(
       updated_at: string;
       completed_at: string | null;
     }>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/createOnboardingSession",
       {
@@ -520,7 +520,7 @@ async function handleGetOnboardingSession(
       updated_at: string;
       completed_at: string | null;
     } | null>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/getOnboardingSession",
       { user_id: auth.userId },
@@ -571,7 +571,7 @@ async function handleGetOnboardingStatus(
       updated_at: string;
       completed_at: string | null;
     } | null>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/getOnboardingSession",
       { user_id: auth.userId },
@@ -635,7 +635,7 @@ async function handleAddOnboardingAccount(
       updated_at: string;
       completed_at: string | null;
     } | null>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/addOnboardingAccount",
       {
@@ -704,7 +704,7 @@ async function handleUpdateOnboardingAccountStatus(
       updated_at: string;
       completed_at: string | null;
     } | null>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/updateOnboardingAccountStatus",
       {
@@ -745,7 +745,7 @@ async function handleCompleteOnboardingSession(
       updated_at: string;
       completed_at: string | null;
     } | null>(
-      env.USER_GRAPH_DO,
+      env.USER_GRAPH,
       auth.userId,
       "/completeOnboardingSession",
       { user_id: auth.userId },
