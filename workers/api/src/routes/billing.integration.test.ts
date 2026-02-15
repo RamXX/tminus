@@ -1,11 +1,14 @@
 /**
- * Integration tests for billing routes.
+ * Integration tests for billing routes -- subscription lifecycle management.
  *
  * Tests the FULL Stripe billing flow against real D1 (via better-sqlite3):
  * 1. Create checkout session -> verify session URL returned
  * 2. Simulate webhook checkout.session.completed -> verify tier updated in D1
  * 3. Verify feature gate blocks free user and allows premium user
- * 4. Subscription lifecycle: create, update, cancel
+ * 4. Subscription lifecycle: upgrade, downgrade, cancel, renew, payment failure
+ * 5. Grace period on payment failure
+ * 6. All events logged to billing_events audit table
+ * 7. Billing status endpoint includes lifecycle fields
  *
  * External Stripe API calls are mocked at the fetch level.
  */
@@ -17,9 +20,10 @@ import {
   MIGRATION_0001_INITIAL_SCHEMA,
   MIGRATION_0004_AUTH_FIELDS,
   MIGRATION_0012_SUBSCRIPTIONS,
+  MIGRATION_0013_SUBSCRIPTION_LIFECYCLE,
 } from "@tminus/d1-registry";
 import { createHandler, createJwt } from "../index";
-import { getUserTier } from "./billing";
+import { getUserTier, GRACE_PERIOD_DAYS } from "./billing";
 import { checkFeatureGate, isTierSufficient } from "../middleware/feature-gate";
 
 // ---------------------------------------------------------------------------
@@ -239,6 +243,30 @@ async function createTestUser(db: DatabaseType): Promise<{ userId: string; token
   return { userId, token };
 }
 
+// ---------------------------------------------------------------------------
+// Helper: send webhook
+// ---------------------------------------------------------------------------
+
+async function sendWebhook(
+  handler: ReturnType<typeof createHandler>,
+  env: ReturnType<typeof buildEnv>,
+  payload: string,
+): Promise<Response> {
+  const sig = await generateStripeSignature(payload, STRIPE_WEBHOOK_SECRET);
+  return handler.fetch(
+    new Request("https://api.tminus.ink/v1/billing/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Stripe-Signature": sig,
+      },
+      body: payload,
+    }),
+    env,
+    mockCtx,
+  );
+}
+
 // ===========================================================================
 // Integration tests
 // ===========================================================================
@@ -254,6 +282,7 @@ describe("Integration: Billing routes", () => {
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0004_AUTH_FIELDS);
     db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     d1 = createRealD1(db);
 
     // Save original fetch for Stripe API mock
@@ -374,18 +403,7 @@ describe("Integration: Billing routes", () => {
       },
     });
 
-    const signature = await generateStripeSignature(webhookPayload, STRIPE_WEBHOOK_SECRET);
-
-    const request = new Request("https://api.tminus.ink/v1/billing/webhook", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Stripe-Signature": signature,
-      },
-      body: webhookPayload,
-    });
-
-    const response = await handler.fetch(request, env, mockCtx);
+    const response = await sendWebhook(handler, env, webhookPayload);
     expect(response.status).toBe(200);
 
     const body = await response.json() as { ok: boolean; data: { received: boolean } };
@@ -395,6 +413,11 @@ describe("Integration: Billing routes", () => {
     // Verify tier was upgraded to premium in D1
     const tierAfter = await getUserTier(d1, userId);
     expect(tierAfter).toBe("premium");
+
+    // Verify billing event was logged
+    const events = db.prepare("SELECT * FROM billing_events WHERE user_id = ?").all(userId) as Array<{ event_type: string }>;
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events.some(e => e.event_type === "checkout_completed")).toBe(true);
   });
 
   it("POST /v1/billing/webhook rejects invalid signature", async () => {
@@ -439,7 +462,446 @@ describe("Integration: Billing routes", () => {
   });
 
   // -----------------------------------------------------------------------
-  // Subscription lifecycle: update and cancel
+  // AC#1: Upgrade -> immediate tier change
+  // -----------------------------------------------------------------------
+
+  it("upgrade via customer.subscription.updated immediately changes tier (AC#1)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Step 1: Checkout -> premium
+    const checkoutPayload = JSON.stringify({
+      id: "evt_checkout_upgrade",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_upgrade_test",
+          customer: "cus_upgrade_456",
+          subscription: "sub_upgrade_789",
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    let response = await sendWebhook(handler, env, checkoutPayload);
+    expect(response.status).toBe(200);
+
+    let tier = await getUserTier(d1, userId);
+    expect(tier).toBe("premium");
+
+    // Step 2: Upgrade to enterprise (immediate)
+    const upgradePayload = JSON.stringify({
+      id: "evt_upgrade_to_enterprise",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_upgrade_789",
+          customer: "cus_upgrade_456",
+          status: "active",
+          current_period_end: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+          metadata: { user_id: userId },
+          items: { data: [{ price: { id: "price_enterprise_monthly" } }] },
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, upgradePayload);
+    expect(response.status).toBe(200);
+
+    // Verify tier changed immediately to enterprise
+    tier = await getUserTier(d1, userId);
+    expect(tier).toBe("enterprise");
+
+    // Verify billing event logged as upgrade
+    const events = db.prepare(
+      "SELECT event_type FROM billing_events WHERE user_id = ? ORDER BY created_at",
+    ).all(userId) as Array<{ event_type: string }>;
+    expect(events.some(e => e.event_type === "subscription_upgraded")).toBe(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // AC#2: Downgrade -> end of billing period
+  // -----------------------------------------------------------------------
+
+  it("downgrade via customer.subscription.updated keeps old tier with cancel_at_period_end (AC#2)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Step 1: Checkout -> premium
+    const checkoutPayload = JSON.stringify({
+      id: "evt_checkout_downgrade",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_downgrade_test",
+          customer: "cus_downgrade_456",
+          subscription: "sub_downgrade_789",
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    let response = await sendWebhook(handler, env, checkoutPayload);
+    expect(response.status).toBe(200);
+
+    // Step 2: Upgrade to enterprise so we can test downgrade
+    const upgradePayload = JSON.stringify({
+      id: "evt_upgrade_for_downgrade",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_downgrade_789",
+          customer: "cus_downgrade_456",
+          status: "active",
+          current_period_end: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+          metadata: { user_id: userId },
+          items: { data: [{ price: { id: "price_enterprise_monthly" } }] },
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, upgradePayload);
+    expect(response.status).toBe(200);
+
+    let tier = await getUserTier(d1, userId);
+    expect(tier).toBe("enterprise");
+
+    // Step 3: Downgrade to premium (should keep enterprise until period end)
+    const downgradePayload = JSON.stringify({
+      id: "evt_downgrade_to_premium",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_downgrade_789",
+          customer: "cus_downgrade_456",
+          status: "active",
+          current_period_end: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+          metadata: { user_id: userId },
+          items: { data: [{ price: { id: "price_premium_monthly" } }] },
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, downgradePayload);
+    expect(response.status).toBe(200);
+
+    // Tier should STILL be enterprise (keeps access until period end)
+    tier = await getUserTier(d1, userId);
+    expect(tier).toBe("enterprise");
+
+    // Verify cancel_at_period_end flag is set
+    const sub = db.prepare(
+      "SELECT cancel_at_period_end, previous_tier FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_downgrade_789") as { cancel_at_period_end: number; previous_tier: string | null };
+    expect(sub.cancel_at_period_end).toBe(1);
+
+    // Verify billing event logged as downgrade
+    const events = db.prepare(
+      "SELECT event_type, metadata FROM billing_events WHERE user_id = ? AND event_type = 'subscription_downgraded'",
+    ).all(userId) as Array<{ event_type: string; metadata: string | null }>;
+    expect(events.length).toBeGreaterThanOrEqual(1);
+
+    // Verify metadata includes scheduled new tier
+    if (events[0].metadata) {
+      const meta = JSON.parse(events[0].metadata);
+      expect(meta.scheduled_new_tier).toBe("premium");
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // AC#3: Cancellation -> revert to free at period end
+  // -----------------------------------------------------------------------
+
+  it("customer.subscription.deleted reverts to free (AC#3)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Step 1: Checkout -> premium
+    const checkoutPayload = JSON.stringify({
+      id: "evt_checkout_cancel",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_cancel_test",
+          customer: "cus_cancel_456",
+          subscription: "sub_cancel_789",
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    let response = await sendWebhook(handler, env, checkoutPayload);
+    expect(response.status).toBe(200);
+
+    let tier = await getUserTier(d1, userId);
+    expect(tier).toBe("premium");
+
+    // Step 2: Subscription deleted (cancelled at period end by Stripe)
+    const deletePayload = JSON.stringify({
+      id: "evt_sub_deleted_cancel",
+      type: "customer.subscription.deleted",
+      data: {
+        object: {
+          id: "sub_cancel_789",
+          customer: "cus_cancel_456",
+          status: "canceled",
+          current_period_end: Math.floor(Date.now() / 1000),
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, deletePayload);
+    expect(response.status).toBe(200);
+
+    // Verify reverted to free
+    tier = await getUserTier(d1, userId);
+    expect(tier).toBe("free");
+
+    // Verify status is cancelled
+    const sub = db.prepare(
+      "SELECT status, previous_tier FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_cancel_789") as { status: string; previous_tier: string | null };
+    expect(sub.status).toBe("cancelled");
+    expect(sub.previous_tier).toBe("premium");
+
+    // Verify billing event logged
+    const events = db.prepare(
+      "SELECT event_type FROM billing_events WHERE user_id = ? AND event_type = 'subscription_deleted'",
+    ).all(userId) as Array<{ event_type: string }>;
+    expect(events.length).toBe(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // AC#4: Payment failure -> grace period then downgrade
+  // -----------------------------------------------------------------------
+
+  it("invoice.payment_failed sets grace period (AC#4)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Step 1: Checkout -> premium
+    const checkoutPayload = JSON.stringify({
+      id: "evt_checkout_for_fail",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_fail_test",
+          customer: "cus_fail_456",
+          subscription: "sub_fail_789",
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    let response = await sendWebhook(handler, env, checkoutPayload);
+    expect(response.status).toBe(200);
+
+    // Step 2: Payment failure
+    const failPayload = JSON.stringify({
+      id: "evt_payment_failed",
+      type: "invoice.payment_failed",
+      data: {
+        object: {
+          id: "in_fail_123",
+          subscription: "sub_fail_789",
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, failPayload);
+    expect(response.status).toBe(200);
+
+    // Verify subscription status is past_due
+    const sub = db.prepare(
+      "SELECT status, grace_period_end FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_fail_789") as { status: string; grace_period_end: string | null };
+    expect(sub.status).toBe("past_due");
+
+    // Verify grace period is set
+    expect(sub.grace_period_end).not.toBeNull();
+    const gracePeriodEnd = new Date(sub.grace_period_end!);
+    const now = new Date();
+    const expectedMinEnd = new Date(now.getTime() + (GRACE_PERIOD_DAYS - 1) * 24 * 60 * 60 * 1000);
+    expect(gracePeriodEnd.getTime()).toBeGreaterThan(expectedMinEnd.getTime());
+
+    // Verify billing events logged (payment_failed + grace_period_started)
+    const events = db.prepare(
+      "SELECT event_type FROM billing_events WHERE user_id = ? ORDER BY created_at",
+    ).all(userId) as Array<{ event_type: string }>;
+    expect(events.some(e => e.event_type === "payment_failed")).toBe(true);
+    expect(events.some(e => e.event_type === "grace_period_started")).toBe(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // AC#5: Renewal -> extend current_period_end
+  // -----------------------------------------------------------------------
+
+  it("subscription renewal extends current_period_end (AC#5)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Step 1: Checkout -> premium
+    const checkoutPayload = JSON.stringify({
+      id: "evt_checkout_renew",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_renew_test",
+          customer: "cus_renew_456",
+          subscription: "sub_renew_789",
+          metadata: { user_id: userId },
+        },
+      },
+    });
+
+    let response = await sendWebhook(handler, env, checkoutPayload);
+    expect(response.status).toBe(200);
+
+    // Get initial period end
+    const initialSub = db.prepare(
+      "SELECT current_period_end FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_renew_789") as { current_period_end: string };
+    const initialPeriodEnd = initialSub.current_period_end;
+
+    // Step 2: Subscription renewed (extended period end, same tier)
+    const newPeriodEnd = Math.floor(Date.now() / 1000) + 60 * 24 * 3600; // 60 days from now
+    const renewPayload = JSON.stringify({
+      id: "evt_renewal",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_renew_789",
+          customer: "cus_renew_456",
+          status: "active",
+          current_period_end: newPeriodEnd,
+          metadata: { user_id: userId },
+          items: { data: [{ price: { id: "price_premium_monthly" } }] },
+        },
+      },
+    });
+
+    response = await sendWebhook(handler, env, renewPayload);
+    expect(response.status).toBe(200);
+
+    // Verify period end was extended
+    const renewedSub = db.prepare(
+      "SELECT current_period_end FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_renew_789") as { current_period_end: string };
+    const renewedPeriodEnd = renewedSub.current_period_end;
+
+    expect(new Date(renewedPeriodEnd).getTime()).toBeGreaterThan(
+      new Date(initialPeriodEnd).getTime(),
+    );
+
+    // Tier should still be premium
+    const tier = await getUserTier(d1, userId);
+    expect(tier).toBe("premium");
+
+    // Verify billing event logged as renewal
+    const events = db.prepare(
+      "SELECT event_type FROM billing_events WHERE user_id = ? AND event_type = 'subscription_renewed'",
+    ).all(userId) as Array<{ event_type: string }>;
+    expect(events.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // AC#6: All events logged
+  // -----------------------------------------------------------------------
+
+  it("all lifecycle events are logged to billing_events (AC#6)", async () => {
+    const { userId } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // 1. Checkout -> premium
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_lifecycle_checkout",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_lifecycle_test",
+          customer: "cus_lifecycle_456",
+          subscription: "sub_lifecycle_789",
+          metadata: { user_id: userId },
+        },
+      },
+    }));
+
+    // 2. Subscription update (renewal, same tier)
+    const periodEnd1 = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_lifecycle_update",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_lifecycle_789",
+          customer: "cus_lifecycle_456",
+          status: "active",
+          current_period_end: periodEnd1,
+          metadata: { user_id: userId },
+          items: { data: [{ price: { id: "price_premium_monthly" } }] },
+        },
+      },
+    }));
+
+    // 3. Payment failed
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_lifecycle_fail",
+      type: "invoice.payment_failed",
+      data: {
+        object: {
+          id: "in_lifecycle_123",
+          subscription: "sub_lifecycle_789",
+        },
+      },
+    }));
+
+    // 4. Subscription deleted (cancelled)
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_lifecycle_delete",
+      type: "customer.subscription.deleted",
+      data: {
+        object: {
+          id: "sub_lifecycle_789",
+          customer: "cus_lifecycle_456",
+          status: "canceled",
+          current_period_end: Math.floor(Date.now() / 1000),
+          metadata: { user_id: userId },
+        },
+      },
+    }));
+
+    // Verify ALL events were logged
+    const events = db.prepare(
+      "SELECT event_type, stripe_event_id, old_tier, new_tier FROM billing_events WHERE user_id = ? ORDER BY created_at",
+    ).all(userId) as Array<{
+      event_type: string;
+      stripe_event_id: string;
+      old_tier: string | null;
+      new_tier: string | null;
+    }>;
+
+    // Should have at least: checkout_completed, subscription_renewed, payment_failed, grace_period_started, subscription_deleted
+    expect(events.length).toBeGreaterThanOrEqual(5);
+
+    const eventTypes = events.map(e => e.event_type);
+    expect(eventTypes).toContain("checkout_completed");
+    expect(eventTypes).toContain("payment_failed");
+    expect(eventTypes).toContain("grace_period_started");
+    expect(eventTypes).toContain("subscription_deleted");
+
+    // All events should have stripe_event_id set
+    expect(events.every(e => e.stripe_event_id !== null)).toBe(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // Full lifecycle: checkout -> update -> cancel -> verify data preserved
   // -----------------------------------------------------------------------
 
   it("handles subscription updated -> subscription deleted (full lifecycle)", async () => {
@@ -461,19 +923,7 @@ describe("Integration: Billing routes", () => {
       },
     });
 
-    let sig = await generateStripeSignature(checkoutPayload, STRIPE_WEBHOOK_SECRET);
-    let response = await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: checkoutPayload,
-      }),
-      env,
-      mockCtx,
-    );
+    let response = await sendWebhook(handler, env, checkoutPayload);
     expect(response.status).toBe(200);
 
     let tier = await getUserTier(d1, userId);
@@ -495,19 +945,7 @@ describe("Integration: Billing routes", () => {
       },
     });
 
-    sig = await generateStripeSignature(updatePayload, STRIPE_WEBHOOK_SECRET);
-    response = await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: updatePayload,
-      }),
-      env,
-      mockCtx,
-    );
+    response = await sendWebhook(handler, env, updatePayload);
     expect(response.status).toBe(200);
 
     tier = await getUserTier(d1, userId);
@@ -528,23 +966,17 @@ describe("Integration: Billing routes", () => {
       },
     });
 
-    sig = await generateStripeSignature(deletePayload, STRIPE_WEBHOOK_SECRET);
-    response = await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: deletePayload,
-      }),
-      env,
-      mockCtx,
-    );
+    response = await sendWebhook(handler, env, deletePayload);
     expect(response.status).toBe(200);
 
     tier = await getUserTier(d1, userId);
     expect(tier).toBe("free");
+
+    // Verify subscription record still exists (data preserved -- AC#3)
+    const sub = db.prepare(
+      "SELECT * FROM subscriptions WHERE stripe_subscription_id = ?",
+    ).get("sub_lifecycle_789");
+    expect(sub).not.toBeNull();
   });
 
   // -----------------------------------------------------------------------
@@ -578,20 +1010,7 @@ describe("Integration: Billing routes", () => {
 
     const handler = createHandler();
     const env = buildEnv(d1);
-    const sig = await generateStripeSignature(checkoutPayload, STRIPE_WEBHOOK_SECRET);
-
-    await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: checkoutPayload,
-      }),
-      env,
-      mockCtx,
-    );
+    await sendWebhook(handler, env, checkoutPayload);
 
     // Now the user should be premium
     const allowed = await checkFeatureGate(userId, "premium", d1);
@@ -652,19 +1071,7 @@ describe("Integration: Billing routes", () => {
       },
     });
 
-    const sig = await generateStripeSignature(webhookPayload, STRIPE_WEBHOOK_SECRET);
-    await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: webhookPayload,
-      }),
-      env,
-      mockCtx,
-    );
+    await sendWebhook(handler, env, webhookPayload);
 
     // Now check billing status
     const request = new Request("https://api.tminus.ink/v1/billing/status", {
@@ -684,6 +1091,8 @@ describe("Integration: Billing routes", () => {
           subscription_id: string;
           stripe_customer_id: string;
           stripe_subscription_id: string;
+          cancel_at_period_end: boolean;
+          grace_period_end: string | null;
         };
       };
     };
@@ -694,6 +1103,63 @@ describe("Integration: Billing routes", () => {
     expect(body.data.subscription).not.toBeNull();
     expect(body.data.subscription.stripe_customer_id).toBe("cus_status_456");
     expect(body.data.subscription.stripe_subscription_id).toBe("sub_status_789");
+    expect(body.data.subscription.cancel_at_period_end).toBe(false);
+    expect(body.data.subscription.grace_period_end).toBeNull();
+  });
+
+  it("GET /v1/billing/status includes grace_period_end after payment failure", async () => {
+    const { userId, token } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    // Checkout
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_status_checkout",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_status_grace",
+          customer: "cus_status_grace_456",
+          subscription: "sub_status_grace_789",
+          metadata: { user_id: userId },
+        },
+      },
+    }));
+
+    // Payment failure
+    await sendWebhook(handler, env, JSON.stringify({
+      id: "evt_status_fail",
+      type: "invoice.payment_failed",
+      data: {
+        object: {
+          id: "in_status_fail_123",
+          subscription: "sub_status_grace_789",
+        },
+      },
+    }));
+
+    // Check status
+    const request = new Request("https://api.tminus.ink/v1/billing/status", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: {
+        tier: string;
+        status: string;
+        subscription: {
+          grace_period_end: string | null;
+        };
+      };
+    };
+
+    expect(body.data.status).toBe("past_due");
+    expect(body.data.subscription.grace_period_end).not.toBeNull();
   });
 
   // -----------------------------------------------------------------------
@@ -710,97 +1176,11 @@ describe("Integration: Billing routes", () => {
       data: { object: { id: "ch_test_123" } },
     });
 
-    const sig = await generateStripeSignature(webhookPayload, STRIPE_WEBHOOK_SECRET);
-
-    const response = await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: webhookPayload,
-      }),
-      env,
-      mockCtx,
-    );
-
+    const response = await sendWebhook(handler, env, webhookPayload);
     expect(response.status).toBe(200);
+
     const body = await response.json() as { ok: boolean; data: { received: boolean } };
     expect(body.ok).toBe(true);
     expect(body.data.received).toBe(true);
-  });
-
-  // -----------------------------------------------------------------------
-  // Payment failed -> past_due
-  // -----------------------------------------------------------------------
-
-  it("POST /v1/billing/webhook handles invoice.payment_failed", async () => {
-    const { userId } = await createTestUser(db);
-    const handler = createHandler();
-    const env = buildEnv(d1);
-
-    // First create a subscription via checkout
-    const checkoutPayload = JSON.stringify({
-      id: "evt_checkout_for_fail",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_fail_test",
-          customer: "cus_fail_456",
-          subscription: "sub_fail_789",
-          metadata: { user_id: userId },
-        },
-      },
-    });
-
-    let sig = await generateStripeSignature(checkoutPayload, STRIPE_WEBHOOK_SECRET);
-    await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: checkoutPayload,
-      }),
-      env,
-      mockCtx,
-    );
-
-    // Now simulate payment failure
-    const failPayload = JSON.stringify({
-      id: "evt_payment_failed",
-      type: "invoice.payment_failed",
-      data: {
-        object: {
-          id: "in_fail_123",
-          subscription: "sub_fail_789",
-        },
-      },
-    });
-
-    sig = await generateStripeSignature(failPayload, STRIPE_WEBHOOK_SECRET);
-    const response = await handler.fetch(
-      new Request("https://api.tminus.ink/v1/billing/webhook", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Stripe-Signature": sig,
-        },
-        body: failPayload,
-      }),
-      env,
-      mockCtx,
-    );
-
-    expect(response.status).toBe(200);
-
-    // Verify subscription status is past_due
-    const row = db
-      .prepare("SELECT status FROM subscriptions WHERE stripe_subscription_id = ?")
-      .get("sub_fail_789") as { status: string } | undefined;
-    expect(row).toBeDefined();
-    expect(row!.status).toBe("past_due");
   });
 });

@@ -308,6 +308,48 @@ CREATE INDEX idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_i
 ` as const;
 
 /**
+ * Migration 0013: Subscription lifecycle columns and billing events audit log.
+ *
+ * Extends the subscriptions table with columns for lifecycle management:
+ * - grace_period_end: ISO 8601 timestamp. Set on payment failure. After this
+ *   date, user is downgraded if payment is not recovered.
+ * - cancel_at_period_end: boolean flag. When true, the subscription will
+ *   revert to free at current_period_end (used for downgrades and cancellations).
+ * - previous_tier: stores the tier before a downgrade/cancellation so we can
+ *   audit what the user had. NULL means no previous tier change.
+ *
+ * Creates billing_events table for AC#6 (all events logged):
+ * - Every webhook event, state transition, and lifecycle change is recorded.
+ * - Immutable audit trail -- no UPDATE or DELETE on this table.
+ */
+export const MIGRATION_0013_SUBSCRIPTION_LIFECYCLE = `
+-- Subscription lifecycle columns
+ALTER TABLE subscriptions ADD COLUMN grace_period_end TEXT;
+ALTER TABLE subscriptions ADD COLUMN cancel_at_period_end INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN previous_tier TEXT;
+
+-- Billing events audit log (immutable)
+CREATE TABLE billing_events (
+  event_id       TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  subscription_id TEXT,
+  event_type     TEXT NOT NULL,
+  stripe_event_id TEXT,
+  old_tier       TEXT,
+  new_tier       TEXT,
+  old_status     TEXT,
+  new_status     TEXT,
+  metadata       TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_billing_events_user ON billing_events(user_id);
+CREATE INDEX idx_billing_events_sub ON billing_events(subscription_id);
+CREATE INDEX idx_billing_events_type ON billing_events(event_type);
+CREATE INDEX idx_billing_events_created ON billing_events(created_at);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -324,4 +366,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0010_MCP_EVENTS_STATUS,
   MIGRATION_0011_MCP_POLICIES,
   MIGRATION_0012_SUBSCRIPTIONS,
+  MIGRATION_0013_SUBSCRIPTION_LIFECYCLE,
 ] as const;

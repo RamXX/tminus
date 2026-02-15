@@ -1,14 +1,22 @@
 /**
  * Billing routes for the T-Minus API.
  *
- * Provides Stripe Checkout session creation and webhook handling.
- * The checkout endpoint requires authentication; the webhook endpoint
- * is called by Stripe and authenticated via HMAC signature verification.
+ * Provides Stripe Checkout session creation, webhook handling, and full
+ * subscription lifecycle management (upgrade, downgrade, cancellation,
+ * renewal, payment failure with grace period).
  *
  * Routes:
  *   POST /v1/billing/checkout  - Create Stripe Checkout session (authed)
  *   POST /v1/billing/webhook   - Handle Stripe webhook events (Stripe-signed)
  *   GET  /v1/billing/status    - Get current subscription status (authed)
+ *
+ * Lifecycle rules:
+ *   - Upgrade: immediate tier change
+ *   - Downgrade: scheduled for end of billing period (cancel_at_period_end)
+ *   - Cancellation: revert to free at period end
+ *   - Payment failure: 7-day grace period, then downgrade
+ *   - Renewal: extend current_period_end
+ *   - All events logged to billing_events table
  *
  * All responses use the standard envelope format:
  *   { ok, data, error, meta: { request_id, timestamp } }
@@ -69,6 +77,16 @@ export interface BillingEnv {
 const STRIPE_API_BASE = "https://api.stripe.com/v1";
 const APP_BASE_URL = "https://app.tminus.ink";
 
+/** Grace period duration in days after a payment failure. */
+export const GRACE_PERIOD_DAYS = 7;
+
+/** Tier numeric levels for comparison (higher = more access). */
+export const TIER_LEVELS: Record<string, number> = {
+  free: 0,
+  premium: 1,
+  enterprise: 2,
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -109,6 +127,37 @@ export function billingErrorResponse(code: string, message: string, status: numb
     }),
     { status, headers: { "Content-Type": "application/json" } },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Tier comparison
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare two tiers. Returns:
+ *   positive if newTier > oldTier (upgrade)
+ *   negative if newTier < oldTier (downgrade)
+ *   zero if equal
+ */
+export function compareTiers(
+  oldTier: string,
+  newTier: string,
+): number {
+  return (TIER_LEVELS[newTier] ?? 0) - (TIER_LEVELS[oldTier] ?? 0);
+}
+
+/**
+ * Determine if a tier change is an upgrade.
+ */
+export function isUpgrade(oldTier: string, newTier: string): boolean {
+  return compareTiers(oldTier, newTier) > 0;
+}
+
+/**
+ * Determine if a tier change is a downgrade.
+ */
+export function isDowngrade(oldTier: string, newTier: string): boolean {
+  return compareTiers(oldTier, newTier) < 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +333,9 @@ export async function upsertSubscription(
     stripe_subscription_id: string;
     current_period_end: string;
     status: string;
+    grace_period_end?: string | null;
+    cancel_at_period_end?: boolean;
+    previous_tier?: string | null;
   },
 ): Promise<void> {
   // Check if subscription already exists by stripe_subscription_id
@@ -297,14 +349,18 @@ export async function upsertSubscription(
     await db
       .prepare(
         `UPDATE subscriptions
-         SET tier = ?1, current_period_end = ?2, status = ?3, updated_at = ?4
-         WHERE stripe_subscription_id = ?5`,
+         SET tier = ?1, current_period_end = ?2, status = ?3, updated_at = ?4,
+             grace_period_end = ?5, cancel_at_period_end = ?6, previous_tier = ?7
+         WHERE stripe_subscription_id = ?8`,
       )
       .bind(
         params.tier,
         params.current_period_end,
         params.status,
         new Date().toISOString(),
+        params.grace_period_end ?? null,
+        params.cancel_at_period_end ? 1 : 0,
+        params.previous_tier ?? null,
         params.stripe_subscription_id,
       )
       .run();
@@ -314,8 +370,9 @@ export async function upsertSubscription(
     await db
       .prepare(
         `INSERT INTO subscriptions
-         (subscription_id, user_id, tier, stripe_customer_id, stripe_subscription_id, current_period_end, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+         (subscription_id, user_id, tier, stripe_customer_id, stripe_subscription_id,
+          current_period_end, status, grace_period_end, cancel_at_period_end, previous_tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
       )
       .bind(
         subscriptionId,
@@ -325,6 +382,9 @@ export async function upsertSubscription(
         params.stripe_subscription_id,
         params.current_period_end,
         params.status,
+        params.grace_period_end ?? null,
+        params.cancel_at_period_end ? 1 : 0,
+        params.previous_tier ?? null,
       )
       .run();
   }
@@ -352,6 +412,91 @@ export async function getUserTier(
   return row.tier as "free" | "premium" | "enterprise";
 }
 
+/**
+ * Get the current subscription record for a user by stripe_subscription_id.
+ * Returns null if no subscription exists.
+ */
+export async function getSubscriptionByStripeId(
+  db: D1Database,
+  stripeSubscriptionId: string,
+): Promise<{
+  subscription_id: string;
+  user_id: string;
+  tier: string;
+  status: string;
+  current_period_end: string | null;
+  grace_period_end: string | null;
+  cancel_at_period_end: number;
+  previous_tier: string | null;
+} | null> {
+  return db
+    .prepare(
+      `SELECT subscription_id, user_id, tier, status, current_period_end,
+              grace_period_end, cancel_at_period_end, previous_tier
+       FROM subscriptions
+       WHERE stripe_subscription_id = ?1`,
+    )
+    .bind(stripeSubscriptionId)
+    .first();
+}
+
+// ---------------------------------------------------------------------------
+// Billing event logging (AC#6: All events logged)
+// ---------------------------------------------------------------------------
+
+/**
+ * Log a billing event to the immutable billing_events audit table.
+ *
+ * Every webhook event, state transition, and lifecycle change is recorded
+ * for auditability. This table is append-only -- no UPDATE or DELETE.
+ */
+export async function logBillingEvent(
+  db: D1Database,
+  params: {
+    user_id: string;
+    subscription_id?: string | null;
+    event_type: string;
+    stripe_event_id?: string | null;
+    old_tier?: string | null;
+    new_tier?: string | null;
+    old_status?: string | null;
+    new_status?: string | null;
+    metadata?: Record<string, unknown> | null;
+  },
+): Promise<void> {
+  const eventId = generateId("user").replace("usr_", "evt_");
+  await db
+    .prepare(
+      `INSERT INTO billing_events
+       (event_id, user_id, subscription_id, event_type, stripe_event_id,
+        old_tier, new_tier, old_status, new_status, metadata)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+    )
+    .bind(
+      eventId,
+      params.user_id,
+      params.subscription_id ?? null,
+      params.event_type,
+      params.stripe_event_id ?? null,
+      params.old_tier ?? null,
+      params.new_tier ?? null,
+      params.old_status ?? null,
+      params.new_status ?? null,
+      params.metadata ? JSON.stringify(params.metadata) : null,
+    )
+    .run();
+}
+
+/**
+ * Calculate grace period end date from now.
+ * Returns an ISO 8601 string GRACE_PERIOD_DAYS from now.
+ */
+export function calculateGracePeriodEnd(fromDate?: Date): string {
+  const from = fromDate ?? new Date();
+  const end = new Date(from.getTime() + GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  return end.toISOString();
+}
+
 // ---------------------------------------------------------------------------
 // Webhook event handlers
 // ---------------------------------------------------------------------------
@@ -360,10 +505,12 @@ export async function getUserTier(
  * Handle checkout.session.completed event.
  *
  * Creates/updates the subscription in D1, upgrading the user's tier.
+ * Logs the event for audit.
  */
 export async function handleCheckoutCompleted(
   db: D1Database,
   session: Record<string, unknown>,
+  stripeEventId?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const metadata = session.metadata as Record<string, string> | undefined;
   const userId = metadata?.user_id;
@@ -379,6 +526,9 @@ export async function handleCheckoutCompleted(
     return { success: false, error: "Missing subscription or customer ID" };
   }
 
+  // Get old tier before upsert for logging
+  const oldTier = await getUserTier(db, userId);
+
   // Default to premium for checkout -- the subscription update webhook will
   // refine the tier if needed based on the price ID.
   await upsertSubscription(db, {
@@ -390,28 +540,45 @@ export async function handleCheckoutCompleted(
     status: "active",
   });
 
+  // Log the checkout event
+  await logBillingEvent(db, {
+    user_id: userId,
+    subscription_id: subscriptionId,
+    event_type: "checkout_completed",
+    stripe_event_id: stripeEventId,
+    old_tier: oldTier,
+    new_tier: "premium",
+    old_status: null,
+    new_status: "active",
+  });
+
   return { success: true };
 }
 
 /**
  * Handle customer.subscription.updated event.
  *
- * Updates the subscription status and period end in D1.
+ * Handles the full lifecycle:
+ * - Upgrade: immediate tier change (AC#1)
+ * - Downgrade: scheduled for end of billing period (AC#2)
+ * - Renewal: extend current_period_end (AC#5)
+ * - Status changes: active, past_due, etc.
  */
 export async function handleSubscriptionUpdated(
   db: D1Database,
   subscription: StripeSubscription,
+  stripeEventId?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const userId = subscription.metadata?.user_id;
   if (!userId) {
     return { success: false, error: "Missing user_id in subscription metadata" };
   }
 
-  // Determine tier from subscription items
-  let tier: "free" | "premium" | "enterprise" = "premium";
+  // Determine new tier from subscription items
+  let newTier: "free" | "premium" | "enterprise" = "premium";
   const priceId = subscription.items?.data?.[0]?.price?.id;
   if (priceId) {
-    tier = resolveTierFromPrice(priceId);
+    newTier = resolveTierFromPrice(priceId);
   }
 
   // Map Stripe status to our status
@@ -422,15 +589,89 @@ export async function handleSubscriptionUpdated(
     unpaid: "unpaid",
     trialing: "trialing",
   };
-  const status = statusMap[subscription.status] ?? "active";
+  const newStatus = statusMap[subscription.status] ?? "active";
+
+  // If Stripe says canceled, the tier is free
+  if (subscription.status === "canceled") {
+    newTier = "free";
+  }
+
+  // Get the current subscription state for comparison
+  const existing = await getSubscriptionByStripeId(db, subscription.id);
+  const oldTier = existing?.tier ?? "free";
+  const oldStatus = existing?.status ?? null;
+  const currentPeriodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+
+  // Determine lifecycle event type
+  let eventType: string;
+  let effectiveTier = newTier;
+  let cancelAtPeriodEnd = false;
+  let previousTier: string | null = null;
+  let gracePeriodEnd: string | null = existing?.grace_period_end ?? null;
+
+  if (subscription.status === "canceled") {
+    // Cancellation handled by deleted event; this is a status update
+    eventType = "subscription_cancelled";
+  } else if (newStatus === "active" && oldStatus === "past_due") {
+    // Payment recovered -- clear grace period
+    eventType = "payment_recovered";
+    gracePeriodEnd = null;
+  } else if (
+    existing &&
+    existing.current_period_end &&
+    currentPeriodEnd > existing.current_period_end &&
+    oldTier === newTier &&
+    newStatus === "active"
+  ) {
+    // Renewal: same tier, extended period end
+    eventType = "subscription_renewed";
+    // Clear any pending downgrade on renewal
+    cancelAtPeriodEnd = false;
+    gracePeriodEnd = null;
+  } else if (isUpgrade(oldTier, newTier)) {
+    // Upgrade: immediate tier change (AC#1)
+    eventType = "subscription_upgraded";
+    effectiveTier = newTier;
+    // Clear any pending downgrade
+    cancelAtPeriodEnd = false;
+    gracePeriodEnd = null;
+  } else if (isDowngrade(oldTier, newTier)) {
+    // Downgrade: schedule for end of billing period (AC#2)
+    eventType = "subscription_downgraded";
+    // Keep the old tier active until period end
+    effectiveTier = oldTier as "free" | "premium" | "enterprise";
+    cancelAtPeriodEnd = true;
+    previousTier = oldTier;
+  } else {
+    // Same tier, status change or other update
+    eventType = "subscription_renewed";
+  }
 
   await upsertSubscription(db, {
     user_id: userId,
-    tier: subscription.status === "canceled" ? "free" : tier,
+    tier: effectiveTier,
     stripe_customer_id: subscription.customer,
     stripe_subscription_id: subscription.id,
-    current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
-    status,
+    current_period_end: currentPeriodEnd,
+    status: newStatus,
+    grace_period_end: gracePeriodEnd,
+    cancel_at_period_end: cancelAtPeriodEnd,
+    previous_tier: cancelAtPeriodEnd ? previousTier : (existing?.previous_tier ?? null),
+  });
+
+  // Log the event
+  await logBillingEvent(db, {
+    user_id: userId,
+    subscription_id: subscription.id,
+    event_type: eventType,
+    stripe_event_id: stripeEventId,
+    old_tier: oldTier,
+    new_tier: effectiveTier,
+    old_status: oldStatus,
+    new_status: newStatus,
+    metadata: cancelAtPeriodEnd
+      ? { scheduled_new_tier: newTier, effective_at: currentPeriodEnd }
+      : null,
   });
 
   return { success: true };
@@ -439,16 +680,25 @@ export async function handleSubscriptionUpdated(
 /**
  * Handle customer.subscription.deleted event.
  *
- * Downgrades the user to the free tier.
+ * Reverts the user to the free tier (AC#3: cancellation reverts to free at period end).
+ * Stripe sends this event at the end of the billing period if cancel_at_period_end
+ * was set, or immediately if the subscription was canceled immediately.
+ * Data is preserved (downgrade removes access, keeps data).
  */
 export async function handleSubscriptionDeleted(
   db: D1Database,
   subscription: StripeSubscription,
+  stripeEventId?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const userId = subscription.metadata?.user_id;
   if (!userId) {
     return { success: false, error: "Missing user_id in subscription metadata" };
   }
+
+  // Get current state for logging
+  const existing = await getSubscriptionByStripeId(db, subscription.id);
+  const oldTier = existing?.tier ?? "premium";
+  const oldStatus = existing?.status ?? "active";
 
   await upsertSubscription(db, {
     user_id: userId,
@@ -457,6 +707,21 @@ export async function handleSubscriptionDeleted(
     stripe_subscription_id: subscription.id,
     current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
     status: "cancelled",
+    grace_period_end: null,
+    cancel_at_period_end: false,
+    previous_tier: oldTier,
+  });
+
+  // Log the deletion event
+  await logBillingEvent(db, {
+    user_id: userId,
+    subscription_id: subscription.id,
+    event_type: "subscription_deleted",
+    stripe_event_id: stripeEventId,
+    old_tier: oldTier,
+    new_tier: "free",
+    old_status: oldStatus,
+    new_status: "cancelled",
   });
 
   return { success: true };
@@ -465,26 +730,66 @@ export async function handleSubscriptionDeleted(
 /**
  * Handle invoice.payment_failed event.
  *
- * Marks the subscription as past_due but does not downgrade tier yet
- * (Stripe will retry payment and eventually cancel).
+ * Sets the subscription to past_due and starts a grace period (AC#4).
+ * After the grace period expires (GRACE_PERIOD_DAYS), the user should be
+ * downgraded. The grace period check can be done by a cron job or the
+ * next webhook event. Stripe will also eventually cancel the subscription.
  */
 export async function handlePaymentFailed(
   db: D1Database,
   invoice: Record<string, unknown>,
+  stripeEventId?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const subscriptionId = invoice.subscription as string | undefined;
   if (!subscriptionId) {
     return { success: false, error: "Missing subscription ID in invoice" };
   }
 
-  // Update subscription status to past_due
+  // Get current subscription state
+  const existing = await getSubscriptionByStripeId(db, subscriptionId);
+  const oldStatus = existing?.status ?? "active";
+  const userId = existing?.user_id;
+
+  // Calculate grace period end
+  const gracePeriodEnd = calculateGracePeriodEnd();
+
+  // Update subscription status to past_due with grace period
   await db
     .prepare(
-      `UPDATE subscriptions SET status = 'past_due', updated_at = ?1
-       WHERE stripe_subscription_id = ?2`,
+      `UPDATE subscriptions
+       SET status = 'past_due', grace_period_end = ?1, updated_at = ?2
+       WHERE stripe_subscription_id = ?3`,
     )
-    .bind(new Date().toISOString(), subscriptionId)
+    .bind(gracePeriodEnd, new Date().toISOString(), subscriptionId)
     .run();
+
+  // Log the payment failure event
+  if (userId) {
+    await logBillingEvent(db, {
+      user_id: userId,
+      subscription_id: subscriptionId,
+      event_type: "payment_failed",
+      stripe_event_id: stripeEventId,
+      old_tier: existing?.tier ?? null,
+      new_tier: existing?.tier ?? null,
+      old_status: oldStatus,
+      new_status: "past_due",
+      metadata: { grace_period_end: gracePeriodEnd },
+    });
+
+    await logBillingEvent(db, {
+      user_id: userId,
+      subscription_id: subscriptionId,
+      event_type: "grace_period_started",
+      stripe_event_id: stripeEventId,
+      old_status: oldStatus,
+      new_status: "past_due",
+      metadata: {
+        grace_period_end: gracePeriodEnd,
+        grace_period_days: GRACE_PERIOD_DAYS,
+      },
+    });
+  }
 
   return { success: true };
 }
@@ -574,16 +879,16 @@ export async function handleStripeWebhook(
 
   switch (event.type) {
     case "checkout.session.completed":
-      result = await handleCheckoutCompleted(env.DB, event.data.object);
+      result = await handleCheckoutCompleted(env.DB, event.data.object, event.id);
       break;
     case "customer.subscription.updated":
-      result = await handleSubscriptionUpdated(env.DB, event.data.object as unknown as StripeSubscription);
+      result = await handleSubscriptionUpdated(env.DB, event.data.object as unknown as StripeSubscription, event.id);
       break;
     case "customer.subscription.deleted":
-      result = await handleSubscriptionDeleted(env.DB, event.data.object as unknown as StripeSubscription);
+      result = await handleSubscriptionDeleted(env.DB, event.data.object as unknown as StripeSubscription, event.id);
       break;
     case "invoice.payment_failed":
-      result = await handlePaymentFailed(env.DB, event.data.object);
+      result = await handlePaymentFailed(env.DB, event.data.object, event.id);
       break;
     default:
       // Acknowledge unknown events without error (Stripe best practice)
@@ -602,6 +907,7 @@ export async function handleStripeWebhook(
  * GET /v1/billing/status
  *
  * Get the current subscription status for the authenticated user.
+ * Includes grace period and pending downgrade information.
  */
 export async function handleGetBillingStatus(
   userId: string,
@@ -611,7 +917,8 @@ export async function handleGetBillingStatus(
     const row = await env.DB
       .prepare(
         `SELECT subscription_id, tier, stripe_customer_id, stripe_subscription_id,
-                current_period_end, status, created_at, updated_at
+                current_period_end, status, grace_period_end, cancel_at_period_end,
+                previous_tier, created_at, updated_at
          FROM subscriptions
          WHERE user_id = ?1
          ORDER BY created_at DESC
@@ -625,6 +932,9 @@ export async function handleGetBillingStatus(
         stripe_subscription_id: string | null;
         current_period_end: string | null;
         status: string;
+        grace_period_end: string | null;
+        cancel_at_period_end: number;
+        previous_tier: string | null;
         created_at: string;
         updated_at: string;
       }>();
@@ -645,6 +955,9 @@ export async function handleGetBillingStatus(
         stripe_customer_id: row.stripe_customer_id,
         stripe_subscription_id: row.stripe_subscription_id,
         current_period_end: row.current_period_end,
+        grace_period_end: row.grace_period_end,
+        cancel_at_period_end: row.cancel_at_period_end === 1,
+        previous_tier: row.previous_tier,
         created_at: row.created_at,
         updated_at: row.updated_at,
       },

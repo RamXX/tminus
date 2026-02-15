@@ -55,10 +55,32 @@ async function makeAuthHeader(
 // Minimal mock Env
 // ---------------------------------------------------------------------------
 
+/**
+ * Create a minimal mock D1Database that supports prepare().bind().first().
+ * The feature-gate middleware queries the subscriptions table to resolve
+ * the user tier; this mock returns { tier: "premium" } so that
+ * premium-gated routes (e.g. constraints) pass the feature gate.
+ */
+function createMockD1(): D1Database {
+  const mockStatement = {
+    bind: (..._args: unknown[]) => mockStatement,
+    first: async () => ({ tier: "premium" }),
+    run: async () => ({ results: [], success: true, meta: {} }),
+    all: async () => ({ results: [], success: true, meta: {} }),
+    raw: async () => [],
+  };
+  return {
+    prepare: (_sql: string) => mockStatement,
+    dump: async () => new ArrayBuffer(0),
+    batch: async () => [],
+    exec: async () => ({ count: 0, duration: 0 }),
+  } as unknown as D1Database;
+}
+
 function createMinimalEnv(): Env {
   return {
     JWT_SECRET,
-    DB: {} as D1Database,
+    DB: createMockD1(),
     USER_GRAPH: {} as DurableObjectNamespace,
     ACCOUNT: {} as DurableObjectNamespace,
     SYNC_QUEUE: {} as Queue,

@@ -148,8 +148,39 @@ export interface SubscriptionRow {
   readonly stripe_subscription_id: string | null;
   readonly current_period_end: string | null;
   readonly status: BillingSubscriptionStatus;
+  readonly grace_period_end: string | null;
+  readonly cancel_at_period_end: number;
+  readonly previous_tier: SubscriptionTier | null;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+/** Valid event types for the billing_events audit log. */
+export type BillingEventType =
+  | "checkout_completed"
+  | "subscription_upgraded"
+  | "subscription_downgraded"
+  | "subscription_renewed"
+  | "subscription_cancelled"
+  | "subscription_deleted"
+  | "payment_failed"
+  | "payment_recovered"
+  | "grace_period_started"
+  | "grace_period_expired";
+
+/** Row shape for the `billing_events` table. */
+export interface BillingEventRow {
+  readonly event_id: string;
+  readonly user_id: string;
+  readonly subscription_id: string | null;
+  readonly event_type: BillingEventType;
+  readonly stripe_event_id: string | null;
+  readonly old_tier: SubscriptionTier | null;
+  readonly new_tier: SubscriptionTier | null;
+  readonly old_status: BillingSubscriptionStatus | null;
+  readonly new_status: BillingSubscriptionStatus | null;
+  readonly metadata: string | null;
+  readonly created_at: string;
 }
 
 /** Valid source values for MCP events. */

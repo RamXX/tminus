@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0004_AUTH_FIELDS } from "@tminus/d1-registry";
+import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0004_AUTH_FIELDS, MIGRATION_0012_SUBSCRIPTIONS, MIGRATION_0013_SUBSCRIPTION_LIFECYCLE } from "@tminus/d1-registry";
 import { createHandler, createJwt } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -347,6 +347,8 @@ describe("Integration: Account endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -641,6 +643,8 @@ describe("Integration: Event endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -952,6 +956,8 @@ describe("Integration: Policy endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1169,6 +1175,8 @@ describe("Integration: Sync status endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1409,6 +1417,8 @@ describe("Integration: Auth enforcement full flow", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1495,6 +1505,8 @@ describe("Integration: Constraint endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     // Auth fields migration
     db.exec(MIGRATION_0004_AUTH_FIELDS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
@@ -1504,6 +1516,11 @@ describe("Integration: Constraint endpoints", () => {
     db.prepare(
       "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
     ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    // Insert a premium subscription so the feature gate allows constraint access
+    db.prepare(
+      `INSERT INTO subscriptions (subscription_id, user_id, tier, status)
+       VALUES (?, ?, 'premium', 'active')`,
+    ).run("sub_test_constraints", TEST_USER.user_id);
     d1 = createRealD1(db);
   });
 
