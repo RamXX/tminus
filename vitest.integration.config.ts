@@ -37,6 +37,18 @@ export default defineConfig({
               __dirname,
               "packages/d1-registry/src",
             ),
+            "@tminus/do-user-graph": path.resolve(
+              __dirname,
+              "durable-objects/user-graph/src",
+            ),
+            "@tminus/do-group-schedule": path.resolve(
+              __dirname,
+              "durable-objects/group-schedule/src",
+            ),
+            "@tminus/workflow-scheduling": path.resolve(
+              __dirname,
+              "workflows/scheduling/src",
+            ),
           },
         },
       },

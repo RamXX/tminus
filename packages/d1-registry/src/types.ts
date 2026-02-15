@@ -205,3 +205,21 @@ export interface McpEventRow {
   readonly created_at: string;
   readonly updated_at: string;
 }
+
+/** Valid status values for group scheduling sessions. */
+export type GroupSessionStatus =
+  | "gathering"
+  | "candidates_ready"
+  | "committed"
+  | "cancelled"
+  | "expired";
+
+/** Row shape for the `group_scheduling_sessions` table (Phase 4D). */
+export interface GroupSchedulingSessionRow {
+  readonly session_id: string;
+  readonly creator_user_id: string;
+  readonly participant_ids_json: string;
+  readonly title: string;
+  readonly status: GroupSessionStatus;
+  readonly created_at: string;
+}

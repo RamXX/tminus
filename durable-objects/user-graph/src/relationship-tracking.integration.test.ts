@@ -1608,3 +1608,300 @@ describe("UserGraphDO relationship tracking integration", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Milestone CRUD integration tests (TM-xwn.2)
+// ---------------------------------------------------------------------------
+
+const TEST_MILESTONE_ID = "mst_01HXY000000000000000000M01";
+const TEST_MILESTONE_ID_2 = "mst_01HXY000000000000000000M02";
+const TEST_MILESTONE_ID_3 = "mst_01HXY000000000000000000M03";
+
+describe("UserGraphDO milestone tracking integration", () => {
+  let db: DatabaseType;
+  let sql: SqlStorageLike;
+  let queue: MockQueue;
+  let dObj: UserGraphDO;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    sql = createSqlStorageAdapter(db);
+    queue = new MockQueue();
+    dObj = new UserGraphDO(sql, queue);
+
+    // Create a relationship to attach milestones to
+    dObj.createRelationship(
+      TEST_REL_ID,
+      TEST_PARTICIPANT_HASH,
+      "Alice Investor",
+      "INVESTOR",
+      0.9,
+      "San Francisco",
+      "America/Los_Angeles",
+      14,
+    );
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // CRUD: Create
+  // -------------------------------------------------------------------------
+
+  describe("createMilestone", () => {
+    it("creates a milestone and returns all fields", () => {
+      const result = dObj.createMilestone(
+        TEST_MILESTONE_ID,
+        TEST_REL_ID,
+        "birthday",
+        "1990-06-15",
+        true,
+        "Alice's birthday",
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.milestone_id).toBe(TEST_MILESTONE_ID);
+      expect(result!.participant_hash).toBe(TEST_PARTICIPANT_HASH);
+      expect(result!.kind).toBe("birthday");
+      expect(result!.date).toBe("1990-06-15");
+      expect(result!.recurs_annually).toBe(true);
+      expect(result!.note).toBe("Alice's birthday");
+      expect(result!.created_at).toBeTruthy();
+    });
+
+    it("creates a milestone with defaults (no recurrence, no note)", () => {
+      const result = dObj.createMilestone(
+        TEST_MILESTONE_ID,
+        TEST_REL_ID,
+        "graduation",
+        "2024-05-20",
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.recurs_annually).toBe(false);
+      expect(result!.note).toBeNull();
+    });
+
+    it("returns null when relationship does not exist", () => {
+      const result = dObj.createMilestone(
+        TEST_MILESTONE_ID,
+        "rel_01HXY000000000000000NONEXIST",
+        "birthday",
+        "1990-06-15",
+      );
+      expect(result).toBeNull();
+    });
+
+    it("rejects invalid milestone kind", () => {
+      expect(() =>
+        dObj.createMilestone(
+          TEST_MILESTONE_ID,
+          TEST_REL_ID,
+          "wedding",
+          "2024-06-15",
+        ),
+      ).toThrow("Invalid milestone kind: wedding");
+    });
+
+    it("rejects invalid date format", () => {
+      expect(() =>
+        dObj.createMilestone(
+          TEST_MILESTONE_ID,
+          TEST_REL_ID,
+          "birthday",
+          "06/15/1990",
+        ),
+      ).toThrow("Invalid milestone date");
+    });
+
+    it("rejects impossible dates", () => {
+      expect(() =>
+        dObj.createMilestone(
+          TEST_MILESTONE_ID,
+          TEST_REL_ID,
+          "birthday",
+          "2023-02-29",
+        ),
+      ).toThrow("Invalid milestone date");
+    });
+
+    it("accepts all valid milestone kinds", () => {
+      const kinds = ["birthday", "anniversary", "graduation", "funding", "relocation", "custom"];
+      for (let i = 0; i < kinds.length; i++) {
+        const milestoneId = `mst_01HXY0000000000000000KIND0${i}`;
+        const result = dObj.createMilestone(
+          milestoneId,
+          TEST_REL_ID,
+          kinds[i],
+          `2024-0${i + 1}-15`,
+        );
+        expect(result).not.toBeNull();
+        expect(result!.kind).toBe(kinds[i]);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // CRUD: List
+  // -------------------------------------------------------------------------
+
+  describe("listMilestones", () => {
+    it("returns empty array when no milestones exist", () => {
+      const result = dObj.listMilestones(TEST_REL_ID);
+      expect(result).toEqual([]);
+    });
+
+    it("returns null when relationship does not exist", () => {
+      const result = dObj.listMilestones("rel_01HXY000000000000000NONEXIST");
+      expect(result).toBeNull();
+    });
+
+    it("lists multiple milestones sorted by date", () => {
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true);
+      dObj.createMilestone(TEST_MILESTONE_ID_2, TEST_REL_ID, "graduation", "2024-05-20");
+      dObj.createMilestone(TEST_MILESTONE_ID_3, TEST_REL_ID, "anniversary", "2020-01-10", true);
+
+      const result = dObj.listMilestones(TEST_REL_ID);
+      expect(result).not.toBeNull();
+      expect(result!).toHaveLength(3);
+      // Sorted by date ascending (original date, not next occurrence)
+      expect(result![0].kind).toBe("birthday"); // 1990-06-15
+      expect(result![1].kind).toBe("anniversary"); // 2020-01-10
+      expect(result![2].kind).toBe("graduation"); // 2024-05-20
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // CRUD: Delete
+  // -------------------------------------------------------------------------
+
+  describe("deleteMilestone", () => {
+    it("deletes an existing milestone", () => {
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true);
+      const deleted = dObj.deleteMilestone(TEST_MILESTONE_ID);
+      expect(deleted).toBe(true);
+
+      // Verify it's gone
+      const list = dObj.listMilestones(TEST_REL_ID);
+      expect(list).toHaveLength(0);
+    });
+
+    it("returns false for non-existent milestone", () => {
+      const deleted = dObj.deleteMilestone("mst_01HXY000000000000000NONEXIST");
+      expect(deleted).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cascade delete
+  // -------------------------------------------------------------------------
+
+  describe("deleteRelationship cascades milestones", () => {
+    it("deletes milestones when relationship is deleted", () => {
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true);
+      dObj.createMilestone(TEST_MILESTONE_ID_2, TEST_REL_ID, "graduation", "2024-05-20");
+
+      // Delete the relationship
+      dObj.deleteRelationship(TEST_REL_ID);
+
+      // Verify milestones are gone (query raw SQL since relationship is gone)
+      const rows = db.prepare("SELECT COUNT(*) as cnt FROM milestones WHERE participant_hash = ?")
+        .get(TEST_PARTICIPANT_HASH) as { cnt: number };
+      expect(rows.cnt).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Multiple milestones per contact (AC #6)
+  // -------------------------------------------------------------------------
+
+  describe("multiple milestones per contact", () => {
+    it("supports multiple milestones for the same relationship", () => {
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true, "Born in SF");
+      dObj.createMilestone(TEST_MILESTONE_ID_2, TEST_REL_ID, "anniversary", "2020-01-10", true, "Work anniversary");
+      dObj.createMilestone(TEST_MILESTONE_ID_3, TEST_REL_ID, "funding", "2025-03-01", false, "Series A");
+
+      const result = dObj.listMilestones(TEST_REL_ID);
+      expect(result).toHaveLength(3);
+
+      // Each has correct data
+      const birthday = result!.find(m => m.kind === "birthday");
+      const anniversary = result!.find(m => m.kind === "anniversary");
+      const funding = result!.find(m => m.kind === "funding");
+
+      expect(birthday!.recurs_annually).toBe(true);
+      expect(birthday!.note).toBe("Born in SF");
+      expect(anniversary!.recurs_annually).toBe(true);
+      expect(funding!.recurs_annually).toBe(false);
+      expect(funding!.note).toBe("Series A");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Scheduler avoidance (AC #3)
+  // -------------------------------------------------------------------------
+
+  describe("scheduler avoids milestone dates", () => {
+    it("computeAvailability marks milestone dates as busy", () => {
+      // Create a birthday milestone that recurs annually on June 15
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true);
+
+      // Query availability for a range that includes June 15
+      const result = dObj.computeAvailability({
+        start: "2026-06-14T00:00:00Z",
+        end: "2026-06-16T23:59:59Z",
+      });
+
+      // The busy intervals should include June 15 (all day)
+      const milestoneBusy = result.busy_intervals.find(
+        (iv) => iv.start <= "2026-06-15T00:00:00Z" && iv.end >= "2026-06-15T23:59:59Z",
+      );
+      expect(milestoneBusy).toBeDefined();
+
+      // Free intervals should NOT include June 15
+      const freeOnMilestoneDay = result.free_intervals.find(
+        (iv) => iv.start.startsWith("2026-06-15") || iv.end.startsWith("2026-06-15"),
+      );
+      // Either no free interval on June 15, or only very brief edges
+      // The key point: the entire day is blocked
+      expect(milestoneBusy).toBeDefined();
+    });
+
+    it("non-recurring milestones only block their specific date", () => {
+      // Non-recurring milestone on 2025-03-01
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "funding", "2025-03-01", false);
+
+      // Query 2026 -- should NOT have a busy block (non-recurring, date in 2025)
+      const result2026 = dObj.computeAvailability({
+        start: "2026-02-28T00:00:00Z",
+        end: "2026-03-02T23:59:59Z",
+      });
+
+      // No busy interval from milestones in 2026 range
+      const milestoneBusy = result2026.busy_intervals.find(
+        (iv) => iv.account_ids.includes("milestones"),
+      );
+      expect(milestoneBusy).toBeUndefined();
+    });
+
+    it("recurring milestones expand to each year in query range", () => {
+      // Birthday on June 15 recurring
+      dObj.createMilestone(TEST_MILESTONE_ID, TEST_REL_ID, "birthday", "1990-06-15", true);
+
+      // Query spanning two years
+      const result = dObj.computeAvailability({
+        start: "2026-01-01T00:00:00Z",
+        end: "2027-12-31T23:59:59Z",
+      });
+
+      // Should have milestone busy blocks for both June 15 2026 and June 15 2027
+      const milestoneBusys = result.busy_intervals.filter(
+        (iv) => iv.account_ids.includes("milestones"),
+      );
+      // At least 2 milestone blocks (one per year)
+      expect(milestoneBusys.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+});

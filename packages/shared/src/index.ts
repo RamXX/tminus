@@ -235,6 +235,21 @@ export type {
   EventBriefing,
 } from "./briefing";
 
+// Re-export milestone tracking (Phase 4B)
+export {
+  MILESTONE_KINDS,
+  isValidMilestoneKind,
+  isValidMilestoneDate,
+  computeNextOccurrence,
+  daysBetween,
+  expandMilestonesToBusy,
+} from "./milestones";
+export type {
+  MilestoneKind,
+  Milestone,
+  UpcomingMilestone,
+} from "./milestones";
+
 // Re-export CORS middleware
 export {
   isAllowedOrigin,

@@ -706,6 +706,111 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["event_id"],
     },
   },
+  {
+    name: "calendar.add_milestone",
+    description:
+      "Add a life event milestone to a relationship contact. Milestones track birthdays, anniversaries, graduations, funding rounds, and relocations. Milestones with annual recurrence create implicit busy blocks that prevent scheduling on those dates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        relationship_id: {
+          type: "string",
+          description: "The relationship ID to add the milestone to. Use IDs from calendar.add_relationship.",
+        },
+        kind: {
+          type: "string",
+          enum: ["birthday", "anniversary", "graduation", "funding", "relocation", "custom"],
+          description: "The type of milestone.",
+        },
+        date: {
+          type: "string",
+          description: "The milestone date in YYYY-MM-DD format (e.g., '1990-06-15').",
+        },
+        recurs_annually: {
+          type: "boolean",
+          description: "Whether the milestone recurs annually. Default: false. Set to true for birthdays, anniversaries, etc.",
+        },
+        note: {
+          type: "string",
+          description: "Optional note about the milestone.",
+        },
+      },
+      required: ["relationship_id", "kind", "date"],
+    },
+  },
+  {
+    name: "calendar.list_milestones",
+    description:
+      "List all milestones for a relationship contact. Returns milestone details including kind, date, recurrence status, and notes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        relationship_id: {
+          type: "string",
+          description: "The relationship ID to list milestones for.",
+        },
+      },
+      required: ["relationship_id"],
+    },
+  },
+  {
+    name: "calendar.upcoming_milestones",
+    description:
+      "Get upcoming milestones across all relationships within a specified number of days. Returns milestones with computed next occurrence dates and days until the event. Useful for proactive relationship management.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "number",
+          description: "Number of days to look ahead. Default: 30. Maximum: 365.",
+        },
+      },
+    },
+  },
+  {
+    name: "calendar.propose_group_times",
+    description:
+      "Propose candidate meeting times for multiple T-Minus users. Unlike propose_times (which works with account IDs within a single user), this coordinates across multiple T-Minus user accounts. Creates a group scheduling session that gathers availability from all participants, computes intersection, and returns mutually available time slots. Privacy-preserving: no event details are shared between users. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        participant_user_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "List of T-Minus user IDs to coordinate scheduling across. Must include at least 2 participants.",
+        },
+        title: {
+          type: "string",
+          description: "Meeting title visible to all participants.",
+        },
+        window: {
+          type: "object",
+          description: "Time window to search for mutually available slots.",
+          properties: {
+            start: {
+              type: "string",
+              description: "Window start (ISO 8601 datetime, e.g. '2026-03-15T09:00:00Z').",
+            },
+            end: {
+              type: "string",
+              description: "Window end (ISO 8601 datetime, e.g. '2026-03-15T17:00:00Z').",
+            },
+          },
+          required: ["start", "end"],
+        },
+        duration_minutes: {
+          type: "number",
+          description: "Desired meeting duration in minutes (15-480).",
+        },
+        max_candidates: {
+          type: "number",
+          description: "Maximum number of candidate time slots to return. Default: 5.",
+        },
+      },
+      required: ["participant_user_ids", "title", "window", "duration_minutes"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -770,6 +875,10 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.mark_outcome": "enterprise",
   "calendar.get_reconnection_suggestions": "enterprise",
   "calendar.get_event_briefing": "enterprise",
+  "calendar.add_milestone": "enterprise",
+  "calendar.list_milestones": "enterprise",
+  "calendar.upcoming_milestones": "enterprise",
+  "calendar.propose_group_times": "premium",
 };
 
 /**
@@ -3166,6 +3275,148 @@ async function handleGetEventBriefing(
   return envelope.data;
 }
 
+/**
+ * Execute calendar.add_milestone: validate input and forward to the API
+ * worker to create a milestone for a relationship contact.
+ */
+async function handleAddMilestone(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.relationship_id !== "string" || args.relationship_id.trim().length === 0) {
+    throw new InvalidParamsError("relationship_id is required");
+  }
+  if (typeof args.kind !== "string" || args.kind.trim().length === 0) {
+    throw new InvalidParamsError("kind is required");
+  }
+  if (typeof args.date !== "string" || args.date.trim().length === 0) {
+    throw new InvalidParamsError("date is required (YYYY-MM-DD format)");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const relId = encodeURIComponent(args.relationship_id);
+  const result = await callConstraintApi(api, jwt, "POST", `/v1/relationships/${relId}/milestones`, {
+    kind: args.kind,
+    date: args.date,
+    recurs_annually: typeof args.recurs_annually === "boolean" ? args.recurs_annually : false,
+    note: typeof args.note === "string" ? args.note : null,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create milestone");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.list_milestones: forward to the API worker to list
+ * milestones for a relationship contact.
+ */
+async function handleListMilestonesMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.relationship_id !== "string" || args.relationship_id.trim().length === 0) {
+    throw new InvalidParamsError("relationship_id is required");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const relId = encodeURIComponent(args.relationship_id);
+  const result = await callConstraintApi(api, jwt, "GET", `/v1/relationships/${relId}/milestones`);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to list milestones");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.upcoming_milestones: forward to the API worker to get
+ * upcoming milestones across all relationships.
+ */
+async function handleUpcomingMilestonesMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const days = args && typeof args.days === "number" ? args.days : 30;
+  const result = await callConstraintApi(api, jwt, "GET", `/v1/milestones/upcoming?days=${days}`);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get upcoming milestones");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.propose_group_times: forward to the API worker to create
+ * a multi-user group scheduling session.
+ */
+async function handleProposeGroupTimes(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  if (!args) throw new InvalidParamsError("Arguments required");
+
+  const participantUserIds = args.participant_user_ids;
+  const title = args.title;
+  const window = args.window as { start?: string; end?: string } | undefined;
+  const durationMinutes = args.duration_minutes;
+  const maxCandidates = args.max_candidates;
+
+  if (!participantUserIds || !Array.isArray(participantUserIds) || participantUserIds.length < 2) {
+    throw new InvalidParamsError("participant_user_ids must be an array with at least 2 user IDs");
+  }
+  if (!title || typeof title !== "string") {
+    throw new InvalidParamsError("title is required");
+  }
+  if (!window || !window.start || !window.end) {
+    throw new InvalidParamsError("window with start and end is required");
+  }
+  if (!durationMinutes || typeof durationMinutes !== "number") {
+    throw new InvalidParamsError("duration_minutes is required");
+  }
+
+  const result = await callConstraintApi(api, jwt, "POST", "/v1/scheduling/group-sessions", {
+    participant_user_ids: participantUserIds,
+    title,
+    window_start: window.start,
+    window_end: window.end,
+    duration_minutes: durationMinutes,
+    max_candidates: maxCandidates,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create group scheduling session");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -3425,6 +3676,26 @@ async function dispatch(
           case "calendar.get_event_briefing": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetEventBriefing(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.add_milestone": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleAddMilestone(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.list_milestones": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleListMilestonesMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.upcoming_milestones": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleUpcomingMilestonesMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.propose_group_times": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleProposeGroupTimes(request, env.API, toolArgs);
             break;
           }
           default:

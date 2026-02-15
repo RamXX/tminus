@@ -65,6 +65,7 @@ export const ID_PREFIXES = {
   relationship: "rel_",
   ledger: "ldg_",
   alert: "alt_",
+  milestone: "mst_",
 } as const;
 
 // ---------------------------------------------------------------------------

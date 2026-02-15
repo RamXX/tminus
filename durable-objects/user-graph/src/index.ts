@@ -35,8 +35,14 @@ import {
   assembleBriefing,
   extractTopics,
   summarizeLastInteraction,
+  isValidMilestoneKind,
+  isValidMilestoneDate,
+  MILESTONE_KINDS,
+  computeNextOccurrence,
+  daysBetween,
+  expandMilestonesToBusy,
 } from "@tminus/shared";
-import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput } from "@tminus/shared";
+import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -3557,7 +3563,12 @@ export class UserGraphDO {
 
     if (before === 0) return false;
 
-    // Delete associated interaction ledger entries first
+    // Delete associated milestones and interaction ledger entries first
+    this.sql.exec(
+      `DELETE FROM milestones WHERE participant_hash IN
+       (SELECT participant_hash FROM relationships WHERE relationship_id = ?)`,
+      relationshipId,
+    );
     this.sql.exec(
       `DELETE FROM interaction_ledger WHERE participant_hash IN
        (SELECT participant_hash FROM relationships WHERE relationship_id = ?)`,
@@ -3860,6 +3871,219 @@ export class UserGraphDO {
       total_overdue_in_city: driftReport.total_overdue,
       computed_at: driftReport.computed_at,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Milestone CRUD (Phase 4B)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a milestone for a relationship contact.
+   *
+   * The milestone is linked to the relationship via participant_hash.
+   * Kind must be one of MILESTONE_KINDS. Date must be YYYY-MM-DD.
+   *
+   * @param milestoneId - Pre-generated milestone ID (mst_ prefix)
+   * @param relationshipId - The relationship to associate with
+   * @param kind - One of MILESTONE_KINDS
+   * @param date - ISO date string (YYYY-MM-DD)
+   * @param recursAnnually - Whether the milestone recurs each year
+   * @param note - Optional free-text note
+   * @returns The created milestone, or null if relationship not found
+   */
+  createMilestone(
+    milestoneId: string,
+    relationshipId: string,
+    kind: string,
+    date: string,
+    recursAnnually: boolean = false,
+    note: string | null = null,
+  ): Milestone | null {
+    this.ensureMigrated();
+
+    // Validate kind
+    if (!isValidMilestoneKind(kind)) {
+      throw new Error(
+        `Invalid milestone kind: ${kind}. Must be one of: ${MILESTONE_KINDS.join(", ")}`,
+      );
+    }
+
+    // Validate date
+    if (!isValidMilestoneDate(date)) {
+      throw new Error(
+        `Invalid milestone date: ${date}. Must be YYYY-MM-DD format with a valid date.`,
+      );
+    }
+
+    // Lookup relationship to get participant_hash
+    const relationship = this.getRelationship(relationshipId);
+    if (!relationship) return null;
+
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO milestones (
+        milestone_id, participant_hash, kind, date, recurs_annually, note, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      milestoneId,
+      relationship.participant_hash,
+      kind,
+      date,
+      recursAnnually ? 1 : 0,
+      note,
+      now,
+    );
+
+    return {
+      milestone_id: milestoneId,
+      participant_hash: relationship.participant_hash,
+      kind: kind as MilestoneKind,
+      date,
+      recurs_annually: recursAnnually,
+      note,
+      created_at: now,
+    };
+  }
+
+  /**
+   * List milestones for a specific relationship.
+   *
+   * @param relationshipId - The relationship whose milestones to list
+   * @returns Array of milestones, or null if relationship not found
+   */
+  listMilestones(relationshipId: string): Milestone[] | null {
+    this.ensureMigrated();
+
+    const relationship = this.getRelationship(relationshipId);
+    if (!relationship) return null;
+
+    const rows = this.sql
+      .exec<{
+        milestone_id: string;
+        participant_hash: string;
+        kind: string;
+        date: string;
+        recurs_annually: number;
+        note: string | null;
+        created_at: string;
+      }>(
+        `SELECT milestone_id, participant_hash, kind, date, recurs_annually, note, created_at
+         FROM milestones WHERE participant_hash = ? ORDER BY date ASC`,
+        relationship.participant_hash,
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      milestone_id: row.milestone_id,
+      participant_hash: row.participant_hash,
+      kind: row.kind as MilestoneKind,
+      date: row.date,
+      recurs_annually: row.recurs_annually === 1,
+      note: row.note,
+      created_at: row.created_at,
+    }));
+  }
+
+  /**
+   * Delete a milestone by ID.
+   *
+   * @param milestoneId - The milestone to delete
+   * @returns true if deleted, false if not found
+   */
+  deleteMilestone(milestoneId: string): boolean {
+    this.ensureMigrated();
+
+    const before = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM milestones WHERE milestone_id = ?",
+        milestoneId,
+      )
+      .toArray()[0].cnt;
+
+    if (before === 0) return false;
+
+    this.sql.exec("DELETE FROM milestones WHERE milestone_id = ?", milestoneId);
+    return true;
+  }
+
+  /**
+   * List upcoming milestones across all relationships within a given number of days.
+   *
+   * Computes next occurrences for recurring milestones and filters by
+   * days_until <= maxDays. Results are sorted by next occurrence date.
+   *
+   * @param maxDays - Maximum number of days into the future (default 30)
+   * @returns Array of upcoming milestones with next_occurrence and days_until
+   */
+  listUpcomingMilestones(maxDays: number = 30): UpcomingMilestone[] {
+    this.ensureMigrated();
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Get all milestones with relationship display names
+    const rows = this.sql
+      .exec<{
+        milestone_id: string;
+        participant_hash: string;
+        kind: string;
+        date: string;
+        recurs_annually: number;
+        note: string | null;
+        created_at: string;
+        display_name: string | null;
+      }>(
+        `SELECT m.milestone_id, m.participant_hash, m.kind, m.date,
+                m.recurs_annually, m.note, m.created_at,
+                r.display_name
+         FROM milestones m
+         LEFT JOIN relationships r ON m.participant_hash = r.participant_hash
+         ORDER BY m.date ASC`,
+      )
+      .toArray();
+
+    const results: UpcomingMilestone[] = [];
+
+    for (const row of rows) {
+      const recurs = row.recurs_annually === 1;
+      const nextOccurrence = computeNextOccurrence(row.date, today, recurs);
+      const daysUntil = daysBetween(today, nextOccurrence);
+
+      if (daysUntil >= 0 && daysUntil <= maxDays) {
+        results.push({
+          milestone_id: row.milestone_id,
+          participant_hash: row.participant_hash,
+          kind: row.kind as MilestoneKind,
+          date: row.date,
+          recurs_annually: recurs,
+          note: row.note,
+          created_at: row.created_at,
+          next_occurrence: nextOccurrence,
+          days_until: daysUntil,
+          display_name: row.display_name,
+        });
+      }
+    }
+
+    // Sort by next occurrence (soonest first)
+    results.sort((a, b) => a.next_occurrence.localeCompare(b.next_occurrence));
+
+    return results;
+  }
+
+  /**
+   * Get all milestones for scheduler integration.
+   *
+   * Returns all milestones (for expanding into busy blocks in computeAvailability).
+   * This is a lightweight internal method, not exposed as a public RPC.
+   */
+  private getAllMilestones(): Array<{
+    date: string;
+    recurs_annually: number;
+  }> {
+    return this.sql
+      .exec<{ date: string; recurs_annually: number }>(
+        "SELECT date, recurs_annually FROM milestones",
+      )
+      .toArray();
   }
 
   /**
@@ -4829,6 +5053,56 @@ export class UserGraphDO {
           return Response.json(suggestions);
         }
 
+        // ---------------------------------------------------------------
+        // Milestone CRUD RPC endpoints (Phase 4B)
+        // ---------------------------------------------------------------
+
+        case "/createMilestone": {
+          const body = (await request.json()) as {
+            milestone_id: string;
+            relationship_id: string;
+            kind: string;
+            date: string;
+            recurs_annually?: boolean;
+            note?: string | null;
+          };
+          const milestone = this.createMilestone(
+            body.milestone_id,
+            body.relationship_id,
+            body.kind,
+            body.date,
+            body.recurs_annually ?? false,
+            body.note ?? null,
+          );
+          return Response.json(milestone);
+        }
+
+        case "/listMilestones": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+          };
+          const milestones = this.listMilestones(body.relationship_id);
+          if (milestones === null) {
+            return Response.json(
+              { error: "Relationship not found" },
+              { status: 404 },
+            );
+          }
+          return Response.json({ items: milestones });
+        }
+
+        case "/deleteMilestone": {
+          const body = (await request.json()) as { milestone_id: string };
+          const deleted = this.deleteMilestone(body.milestone_id);
+          return Response.json({ deleted });
+        }
+
+        case "/listUpcomingMilestones": {
+          const body = (await request.json()) as { max_days?: number };
+          const upcoming = this.listUpcomingMilestones(body.max_days ?? 30);
+          return Response.json({ items: upcoming });
+        }
+
         case "/updateInteractions": {
           const body = (await request.json()) as {
             participant_hashes: string[];
@@ -5599,7 +5873,7 @@ export class UserGraphDO {
    * for a given time range. Evaluates ALL active constraints in a defined
    * order to produce a complete availability picture.
    *
-   * Constraint evaluation order (story TM-gj5.4):
+   * Constraint evaluation order (story TM-gj5.4, TM-xwn.2):
    *   1. Raw free/busy from canonical events (including trip-derived events)
    *   2. Working hours -- times outside any active working_hours constraint
    *      are treated as busy. Multiple working_hours are unioned.
@@ -5608,6 +5882,8 @@ export class UserGraphDO {
    *      regardless of the account filter (trips are cross-account blocks).
    *   4. No-meetings-after -- daily cutoff times after which all time is busy.
    *   5. Buffers -- travel/prep/cooldown time around events reduces availability.
+   *   5.5. Milestones -- life event milestones (birthdays, anniversaries, etc.)
+   *        create all-day busy blocks. Recurring milestones expand for each year.
    *   6. Merge all intervals and compute free gaps.
    *
    * Performance target (NFR-16): under 500ms for 1-week range with 10+ constraints.
@@ -5696,6 +5972,23 @@ export class UserGraphDO {
     if (bufferConstraints.length > 0) {
       const bufferIntervals = expandBuffersToBusy(bufferConstraints, rows);
       rawIntervals.push(...bufferIntervals);
+    }
+
+    // ----- Step 5.5: Milestone busy blocks (avoid scheduling on milestone dates) -----
+    const allMilestones = this.getAllMilestones();
+    if (allMilestones.length > 0) {
+      const milestoneIntervals = expandMilestonesToBusy(
+        allMilestones,
+        query.start,
+        query.end,
+      );
+      rawIntervals.push(
+        ...milestoneIntervals.map((iv: { start: string; end: string }) => ({
+          start: iv.start,
+          end: iv.end,
+          account_ids: ["milestones"],
+        })),
+      );
     }
 
     // ----- Step 6: Merge and compute free intervals -----

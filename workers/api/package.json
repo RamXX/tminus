@@ -17,6 +17,7 @@
     "@tminus/shared": "workspace:*",
     "@tminus/do-user-graph": "workspace:*",
     "@tminus/do-account": "workspace:*",
+    "@tminus/do-group-schedule": "workspace:*",
     "@tminus/workflow-scheduling": "workspace:*",
     "hono": "^4.0.0"
   },

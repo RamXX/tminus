@@ -350,6 +350,28 @@ CREATE INDEX idx_billing_events_created ON billing_events(created_at);
 ` as const;
 
 /**
+ * Migration 0014: Group scheduling sessions table (Phase 4D).
+ *
+ * Cross-user session registry for multi-user scheduling coordination.
+ * Each row represents a group scheduling session with its participants.
+ * The actual session data (candidates, holds) lives in each participant's
+ * UserGraphDO -- this table is for cross-user discovery only.
+ */
+export const MIGRATION_0014_GROUP_SCHEDULING_SESSIONS = `
+CREATE TABLE group_scheduling_sessions (
+  session_id           TEXT PRIMARY KEY,
+  creator_user_id      TEXT NOT NULL,
+  participant_ids_json TEXT NOT NULL,
+  title                TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'gathering',
+  created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_group_sessions_creator ON group_scheduling_sessions(creator_user_id);
+CREATE INDEX idx_group_sessions_status ON group_scheduling_sessions(status);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -367,4 +389,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0011_MCP_POLICIES,
   MIGRATION_0012_SUBSCRIPTIONS,
   MIGRATION_0013_SUBSCRIPTION_LIFECYCLE,
+  MIGRATION_0014_GROUP_SCHEDULING_SESSIONS,
 ] as const;
