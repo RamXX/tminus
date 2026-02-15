@@ -25,6 +25,9 @@ export const CRON_DELETION_CHECK = "0 * * * *";
 /** Hold expiry cleanup: every hour, checks for expired tentative holds. */
 export const CRON_HOLD_EXPIRY = "30 * * * *";
 
+/** Social drift computation: daily at 04:00 UTC (after reconciliation at 03:00). */
+export const CRON_DRIFT_COMPUTATION = "0 4 * * *";
+
 // ---------------------------------------------------------------------------
 // Renewal thresholds
 // ---------------------------------------------------------------------------

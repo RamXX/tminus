@@ -51,8 +51,12 @@ export {
   isValidBillingCategory,
   RELATIONSHIP_CATEGORIES,
   isValidRelationshipCategory,
+  INTERACTION_OUTCOMES,
+  OUTCOME_WEIGHTS,
+  isValidOutcome,
+  getOutcomeWeight,
 } from "./constants";
-export type { BillingCategory, RelationshipCategory } from "./constants";
+export type { BillingCategory, RelationshipCategory, InteractionOutcome } from "./constants";
 
 // Re-export ID utilities
 export { generateId, parseId, isValidId } from "./id";
@@ -190,8 +194,8 @@ export type {
 } from "./privacy/deletion-certificate";
 
 // Re-export drift computation (relationship tracking, Phase 4)
-export { computeDrift, matchEventParticipants } from "./drift";
-export type { DriftInput, DriftEntry, DriftReport } from "./drift";
+export { computeDrift, matchEventParticipants, computeDriftBadge, driftEntryBadge } from "./drift";
+export type { DriftInput, DriftEntry, DriftReport, DriftBadge, DriftAlert } from "./drift";
 
 // Re-export CORS middleware
 export {

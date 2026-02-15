@@ -327,6 +327,30 @@ ALTER TABLE canonical_events ADD COLUMN constraint_id TEXT REFERENCES constraint
 CREATE INDEX idx_events_constraint ON canonical_events(constraint_id);
 ` as const;
 
+/**
+ * UserGraphDO migration v3: Add drift_alerts table.
+ *
+ * Stores snapshots of drift alerts computed by the daily cron job.
+ * Each run replaces the previous alerts (DELETE + INSERT pattern).
+ * Allows retrieval of the most recent drift alert set independently
+ * from the live drift report.
+ */
+export const USER_GRAPH_DO_MIGRATION_V3 = `
+CREATE TABLE drift_alerts (
+  alert_id        TEXT PRIMARY KEY,
+  relationship_id TEXT NOT NULL REFERENCES relationships(relationship_id) ON DELETE CASCADE,
+  display_name    TEXT,
+  category        TEXT NOT NULL,
+  drift_ratio     REAL NOT NULL,
+  days_overdue    INTEGER NOT NULL,
+  urgency         REAL NOT NULL,
+  computed_at     TEXT NOT NULL
+);
+
+CREATE INDEX idx_drift_alerts_computed ON drift_alerts(computed_at);
+CREATE INDEX idx_drift_alerts_urgency ON drift_alerts(urgency DESC);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -338,6 +362,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 2,
     sql: USER_GRAPH_DO_MIGRATION_V2,
     description: "Add constraint_id column to canonical_events for trip/constraint linking",
+  },
+  {
+    version: 3,
+    sql: USER_GRAPH_DO_MIGRATION_V3,
+    description: "Add drift_alerts table for persisted drift alert snapshots",
   },
 ] as const;
 

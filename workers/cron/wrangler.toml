@@ -15,6 +15,7 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
 ]
 
 # --- Durable Object references (hosted on tminus-api) ----------------------
@@ -22,6 +23,11 @@ crons = [
 [[durable_objects.bindings]]
 name = "ACCOUNT"
 class_name = "AccountDO"
+script_name = "tminus-api"
+
+[[durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
 script_name = "tminus-api"
 
 # --- D1 registry database --------------------------------------------------
@@ -70,6 +76,7 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
 ]
 
 [[env.staging.d1_databases]]
@@ -80,6 +87,11 @@ database_id = "STAGING_DB_ID_PLACEHOLDER"
 [[env.staging.durable_objects.bindings]]
 name = "ACCOUNT"
 class_name = "AccountDO"
+script_name = "tminus-api-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
 script_name = "tminus-api-staging"
 
 [[env.staging.queues.producers]]
@@ -111,6 +123,7 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
+  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
 ]
 
 [[env.production.d1_databases]]
@@ -121,6 +134,11 @@ database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
 [[env.production.durable_objects.bindings]]
 name = "ACCOUNT"
 class_name = "AccountDO"
+script_name = "tminus-api-production"
+
+[[env.production.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
 script_name = "tminus-api-production"
 
 [[env.production.queues.producers]]

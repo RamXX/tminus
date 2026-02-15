@@ -12,7 +12,7 @@
  * - D1 for account lookups (cross-user registry)
  */
 
-import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES } from "@tminus/shared";
+import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES } from "@tminus/shared";
 import {
   checkRateLimit as checkRL,
   selectRateLimitConfig,
@@ -2279,6 +2279,150 @@ async function handleDeleteRelationship(
   }
 }
 
+// -- Interaction Ledger (outcomes) -------------------------------------------
+
+async function handleMarkOutcome(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  relationshipId: string,
+): Promise<Response> {
+  if (!isValidId(relationshipId, "relationship")) {
+    return jsonResponse(
+      errorEnvelope("Invalid relationship ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const body = await parseJsonBody<{
+    outcome?: string;
+    canonical_event_id?: string | null;
+    note?: string | null;
+  }>(request);
+
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.outcome || typeof body.outcome !== "string") {
+    return jsonResponse(
+      errorEnvelope("outcome is required", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!isValidOutcome(body.outcome)) {
+    return jsonResponse(
+      errorEnvelope(
+        `Invalid outcome: ${body.outcome}. Must be one of: ${INTERACTION_OUTCOMES.join(", ")}`,
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      ledger_id: string;
+      participant_hash: string;
+      canonical_event_id: string | null;
+      outcome: string;
+      weight: number;
+      note: string | null;
+      ts: string;
+    } | null>(env.USER_GRAPH, auth.userId, "/markOutcome", {
+      relationship_id: relationshipId,
+      outcome: body.outcome,
+      canonical_event_id: body.canonical_event_id ?? null,
+      note: body.note ?? null,
+    });
+
+    if (!result.ok) {
+      const errorData = result.data as unknown as { error?: string };
+      return jsonResponse(
+        errorEnvelope(errorData.error ?? "Failed to mark outcome", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data) {
+      return jsonResponse(
+        errorEnvelope("Relationship not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 201);
+  } catch (err) {
+    console.error("Failed to mark outcome", err);
+    return jsonResponse(
+      errorEnvelope("Failed to mark outcome", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleListOutcomes(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  relationshipId: string,
+): Promise<Response> {
+  if (!isValidId(relationshipId, "relationship")) {
+    return jsonResponse(
+      errorEnvelope("Invalid relationship ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const url = new URL(request.url);
+  const outcomeFilter = url.searchParams.get("outcome") ?? undefined;
+
+  if (outcomeFilter && !isValidOutcome(outcomeFilter)) {
+    return jsonResponse(
+      errorEnvelope(
+        `Invalid outcome filter: ${outcomeFilter}. Must be one of: ${INTERACTION_OUTCOMES.join(", ")}`,
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      items: unknown[] | null;
+    }>(env.USER_GRAPH, auth.userId, "/listOutcomes", {
+      relationship_id: relationshipId,
+      outcome: outcomeFilter,
+    });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to list outcomes", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (result.data.items === null) {
+      return jsonResponse(
+        errorEnvelope("Relationship not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data.items), 200);
+  } catch (err) {
+    console.error("Failed to list outcomes", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list outcomes", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 async function handleGetDriftReport(
   _request: Request,
   auth: AuthContext,
@@ -2304,6 +2448,36 @@ async function handleGetDriftReport(
     console.error("Failed to get drift report", err);
     return jsonResponse(
       errorEnvelope("Failed to get drift report", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetDriftAlerts(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getDriftAlerts",
+      {},
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to get drift alerts", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get drift alerts", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get drift alerts", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -3636,6 +3810,24 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/drift-report") {
         return handleGetDriftReport(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/drift-alerts") {
+        return handleGetDriftAlerts(request, auth, env);
+      }
+
+      // -- Interaction ledger (outcomes) routes ---------------------------------
+      // Must match before /v1/relationships/:id since it has more segments
+
+      match = matchRoute(pathname, "/v1/relationships/:id/outcomes");
+      if (match) {
+        const relId = match.params[0];
+        if (method === "POST") {
+          return handleMarkOutcome(request, auth, env, relId);
+        }
+        if (method === "GET") {
+          return handleListOutcomes(request, auth, env, relId);
+        }
       }
 
       match = matchRoute(pathname, "/v1/relationships/:id");

@@ -63,6 +63,8 @@ export const ID_PREFIXES = {
   commitment: "cmt_",
   report: "rpt_",
   relationship: "rel_",
+  ledger: "ldg_",
+  alert: "alt_",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -115,4 +117,62 @@ export type RelationshipCategory = (typeof RELATIONSHIP_CATEGORIES)[number];
  */
 export function isValidRelationshipCategory(value: string): value is RelationshipCategory {
   return RELATIONSHIP_CATEGORIES.includes(value as RelationshipCategory);
+}
+
+// ---------------------------------------------------------------------------
+// Interaction outcome types (Phase 4 -- interaction ledger)
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid outcomes for interaction ledger entries.
+ * Used by the interaction_ledger table in UserGraphDO.
+ *
+ * "_ME" suffixed outcomes indicate user's own action.
+ * "_THEM" suffixed outcomes indicate the other party's action.
+ */
+export const INTERACTION_OUTCOMES = [
+  "ATTENDED",
+  "CANCELED_BY_ME",
+  "CANCELED_BY_THEM",
+  "NO_SHOW_THEM",
+  "NO_SHOW_ME",
+  "MOVED_LAST_MINUTE_THEM",
+  "MOVED_LAST_MINUTE_ME",
+] as const;
+
+export type InteractionOutcome = (typeof INTERACTION_OUTCOMES)[number];
+
+/**
+ * Weight map for interaction outcomes. Positive = good, negative = bad.
+ * Used for reputation scoring in the relationship graph.
+ *
+ * ATTENDED: full positive credit
+ * CANCELED_BY_THEM: moderate negative (they cancelled)
+ * NO_SHOW_THEM: severe negative (they didn't show)
+ * MOVED_LAST_MINUTE_THEM: mild negative (they rescheduled late)
+ * *_ME variants: neutral weight (user's own actions don't affect other's reputation)
+ */
+export const OUTCOME_WEIGHTS: Record<InteractionOutcome, number> = {
+  ATTENDED: 1.0,
+  CANCELED_BY_ME: 0.0,
+  CANCELED_BY_THEM: -0.5,
+  NO_SHOW_THEM: -1.0,
+  NO_SHOW_ME: 0.0,
+  MOVED_LAST_MINUTE_THEM: -0.3,
+  MOVED_LAST_MINUTE_ME: 0.0,
+};
+
+/**
+ * Validate that a string is a valid interaction outcome.
+ */
+export function isValidOutcome(value: string): value is InteractionOutcome {
+  return INTERACTION_OUTCOMES.includes(value as InteractionOutcome);
+}
+
+/**
+ * Get the weight for an interaction outcome.
+ * Returns the predefined weight from OUTCOME_WEIGHTS.
+ */
+export function getOutcomeWeight(outcome: InteractionOutcome): number {
+  return OUTCOME_WEIGHTS[outcome];
 }

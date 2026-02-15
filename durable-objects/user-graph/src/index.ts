@@ -25,10 +25,12 @@ import {
   BUSY_OVERLAY_CALENDAR_NAME,
   isValidBillingCategory,
   isValidRelationshipCategory,
+  isValidOutcome,
+  getOutcomeWeight,
   computeDrift,
   matchEventParticipants,
 } from "@tminus/shared";
-import type { DriftReport } from "@tminus/shared";
+import type { DriftReport, DriftAlert, InteractionOutcome } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -144,6 +146,29 @@ interface RelationshipRow {
   interaction_frequency_target: number | null;
   created_at: string;
   updated_at: string;
+}
+
+interface LedgerRow {
+  [key: string]: unknown;
+  ledger_id: string;
+  participant_hash: string;
+  canonical_event_id: string | null;
+  outcome: string;
+  weight: number;
+  note: string | null;
+  ts: string;
+}
+
+interface DriftAlertRow {
+  [key: string]: unknown;
+  alert_id: string;
+  relationship_id: string;
+  display_name: string | null;
+  category: string;
+  drift_ratio: number;
+  days_overdue: number;
+  urgency: number;
+  computed_at: string;
 }
 
 interface CommitmentRow {
@@ -322,6 +347,17 @@ export interface Relationship {
   readonly interaction_frequency_target: number | null;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+/** An interaction ledger entry as returned by outcome methods. */
+export interface LedgerEntry {
+  readonly ledger_id: string;
+  readonly participant_hash: string;
+  readonly canonical_event_id: string | null;
+  readonly outcome: string;
+  readonly weight: number;
+  readonly note: string | null;
+  readonly ts: string;
 }
 
 /** Fields that can be updated on a mirror row via RPC. */
@@ -3504,6 +3540,135 @@ export class UserGraphDO {
     return true;
   }
 
+  // -------------------------------------------------------------------------
+  // Interaction Ledger (Phase 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mark an interaction outcome for a relationship.
+   *
+   * Looks up the relationship by ID to get the participant_hash,
+   * then appends a ledger entry. Ledger is append-only -- entries
+   * are never updated or deleted (except when the relationship itself
+   * is deleted via deleteRelationship).
+   *
+   * Also updates the relationship's last_interaction_ts if the outcome
+   * is ATTENDED (positive interaction occurred).
+   *
+   * @param relationshipId - The relationship to mark the outcome for
+   * @param outcome - One of INTERACTION_OUTCOMES
+   * @param canonicalEventId - Optional canonical event ID
+   * @param note - Optional free-text note
+   * @returns The created ledger entry, or null if relationship not found
+   */
+  markOutcome(
+    relationshipId: string,
+    outcome: string,
+    canonicalEventId: string | null = null,
+    note: string | null = null,
+  ): LedgerEntry | null {
+    this.ensureMigrated();
+
+    // Validate outcome
+    if (!isValidOutcome(outcome)) {
+      throw new Error(
+        `Invalid outcome: ${outcome}. Must be one of: ATTENDED, CANCELED_BY_ME, CANCELED_BY_THEM, NO_SHOW_THEM, NO_SHOW_ME, MOVED_LAST_MINUTE_THEM, MOVED_LAST_MINUTE_ME`,
+      );
+    }
+
+    // Look up relationship to get participant_hash
+    const relationship = this.getRelationship(relationshipId);
+    if (!relationship) return null;
+
+    const ledgerId = generateId("ledger");
+    const weight = getOutcomeWeight(outcome as InteractionOutcome);
+    const now = new Date().toISOString();
+
+    this.sql.exec(
+      `INSERT INTO interaction_ledger (
+        ledger_id, participant_hash, canonical_event_id, outcome, weight, note, ts
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ledgerId,
+      relationship.participant_hash,
+      canonicalEventId,
+      outcome,
+      weight,
+      note,
+      now,
+    );
+
+    // Update last_interaction_ts on ATTENDED outcomes
+    if (outcome === "ATTENDED") {
+      this.sql.exec(
+        "UPDATE relationships SET last_interaction_ts = ?, updated_at = ? WHERE relationship_id = ?",
+        now,
+        now,
+        relationshipId,
+      );
+    }
+
+    return {
+      ledger_id: ledgerId,
+      participant_hash: relationship.participant_hash,
+      canonical_event_id: canonicalEventId,
+      outcome,
+      weight,
+      note,
+      ts: now,
+    };
+  }
+
+  /**
+   * List interaction ledger entries for a relationship.
+   *
+   * Returns entries ordered by timestamp descending (most recent first).
+   * Optionally filter by outcome type.
+   *
+   * @param relationshipId - The relationship to list outcomes for
+   * @param outcomeFilter - Optional outcome type to filter by
+   * @returns Array of ledger entries, or null if relationship not found
+   */
+  listOutcomes(
+    relationshipId: string,
+    outcomeFilter?: string,
+  ): LedgerEntry[] | null {
+    this.ensureMigrated();
+
+    // Look up relationship to get participant_hash
+    const relationship = this.getRelationship(relationshipId);
+    if (!relationship) return null;
+
+    let query = `SELECT ledger_id, participant_hash, canonical_event_id, outcome, weight, note, ts
+                 FROM interaction_ledger WHERE participant_hash = ?`;
+    const params: unknown[] = [relationship.participant_hash];
+
+    if (outcomeFilter) {
+      if (!isValidOutcome(outcomeFilter)) {
+        throw new Error(
+          `Invalid outcome filter: ${outcomeFilter}. Must be one of: ATTENDED, CANCELED_BY_ME, CANCELED_BY_THEM, NO_SHOW_THEM, NO_SHOW_ME, MOVED_LAST_MINUTE_THEM, MOVED_LAST_MINUTE_ME`,
+        );
+      }
+      query += " AND outcome = ?";
+      params.push(outcomeFilter);
+    }
+
+    query += " ORDER BY ts DESC, ledger_id DESC";
+
+    const rows = this.sql
+      .exec<LedgerRow>(query, ...params)
+      .toArray();
+
+    return rows.map((row) => ({
+      ledger_id: row.ledger_id,
+      participant_hash: row.participant_hash,
+      canonical_event_id: row.canonical_event_id,
+      outcome: row.outcome,
+      weight: row.weight,
+      note: row.note,
+      ts: row.ts,
+    }));
+  }
+
   /**
    * Compute drift report for all relationships.
    *
@@ -3558,6 +3723,66 @@ export class UserGraphDO {
     }
 
     return matchingIds.length;
+  }
+
+  // -------------------------------------------------------------------------
+  // Drift alert storage (persisted snapshots from daily cron)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Store a new set of drift alerts, replacing any previous set.
+   *
+   * Called by the daily cron job after computing drift for all relationships.
+   * Uses DELETE + INSERT pattern (full replacement) to ensure the stored
+   * alerts always reflect the most recent computation.
+   *
+   * @param report - The drift report to persist as alerts
+   * @returns Number of alerts stored
+   */
+  storeDriftAlerts(report: DriftReport): number {
+    this.ensureMigrated();
+
+    // Clear previous alerts
+    this.sql.exec("DELETE FROM drift_alerts");
+
+    // Insert new alerts from the overdue entries
+    for (const entry of report.overdue) {
+      const alertId = generateId("alert");
+      this.sql.exec(
+        `INSERT INTO drift_alerts
+         (alert_id, relationship_id, display_name, category, drift_ratio, days_overdue, urgency, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        alertId,
+        entry.relationship_id,
+        entry.display_name,
+        entry.category,
+        entry.drift_ratio,
+        entry.days_overdue,
+        entry.urgency,
+        report.computed_at,
+      );
+    }
+
+    return report.overdue.length;
+  }
+
+  /**
+   * Retrieve the most recently stored drift alerts.
+   *
+   * Returns the persisted alert snapshot from the last cron run,
+   * sorted by urgency descending (most urgent first).
+   */
+  getDriftAlerts(): DriftAlert[] {
+    this.ensureMigrated();
+
+    return this.sql
+      .exec<DriftAlertRow>(
+        `SELECT alert_id, relationship_id, display_name, category,
+                drift_ratio, days_overdue, urgency, computed_at
+         FROM drift_alerts
+         ORDER BY urgency DESC`,
+      )
+      .toArray();
   }
 
   // -------------------------------------------------------------------------
@@ -4179,6 +4404,34 @@ export class UserGraphDO {
           return Response.json({ deleted });
         }
 
+        case "/markOutcome": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+            outcome: string;
+            canonical_event_id?: string | null;
+            note?: string | null;
+          };
+          const entry = this.markOutcome(
+            body.relationship_id,
+            body.outcome,
+            body.canonical_event_id ?? null,
+            body.note ?? null,
+          );
+          return Response.json(entry);
+        }
+
+        case "/listOutcomes": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+            outcome?: string;
+          };
+          const entries = this.listOutcomes(
+            body.relationship_id,
+            body.outcome,
+          );
+          return Response.json({ items: entries });
+        }
+
         case "/getDriftReport": {
           const body = (await request.json()) as { as_of?: string };
           const report = this.getDriftReport(body.as_of);
@@ -4195,6 +4448,17 @@ export class UserGraphDO {
             body.interaction_ts,
           );
           return Response.json({ updated: count });
+        }
+
+        case "/storeDriftAlerts": {
+          const body = (await request.json()) as { report: DriftReport };
+          const count = this.storeDriftAlerts(body.report);
+          return Response.json({ stored: count });
+        }
+
+        case "/getDriftAlerts": {
+          const alerts = this.getDriftAlerts();
+          return Response.json({ alerts });
         }
 
         default:

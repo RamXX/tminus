@@ -726,4 +726,476 @@ describe("UserGraphDO relationship tracking integration", () => {
       expect(driftAfter.total_overdue).toBe(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Interaction Ledger: markOutcome
+  // -------------------------------------------------------------------------
+
+  describe("markOutcome", () => {
+    it("marks ATTENDED outcome and returns ledger entry with correct weight", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const entry = dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+
+      expect(entry).not.toBeNull();
+      expect(entry!.ledger_id).toMatch(/^ldg_/);
+      expect(entry!.participant_hash).toBe(TEST_PARTICIPANT_HASH);
+      expect(entry!.outcome).toBe("ATTENDED");
+      expect(entry!.weight).toBe(1.0);
+      expect(entry!.canonical_event_id).toBeNull();
+      expect(entry!.note).toBeNull();
+      expect(entry!.ts).toBeTruthy();
+    });
+
+    it("marks CANCELED_BY_THEM outcome with weight -0.5", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const entry = dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_THEM");
+
+      expect(entry).not.toBeNull();
+      expect(entry!.outcome).toBe("CANCELED_BY_THEM");
+      expect(entry!.weight).toBe(-0.5);
+    });
+
+    it("marks NO_SHOW_THEM outcome with weight -1.0", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const entry = dObj.markOutcome(TEST_REL_ID, "NO_SHOW_THEM");
+
+      expect(entry).not.toBeNull();
+      expect(entry!.outcome).toBe("NO_SHOW_THEM");
+      expect(entry!.weight).toBe(-1.0);
+    });
+
+    it("marks MOVED_LAST_MINUTE_THEM outcome with weight -0.3", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const entry = dObj.markOutcome(TEST_REL_ID, "MOVED_LAST_MINUTE_THEM");
+
+      expect(entry).not.toBeNull();
+      expect(entry!.outcome).toBe("MOVED_LAST_MINUTE_THEM");
+      expect(entry!.weight).toBe(-0.3);
+    });
+
+    it("marks _ME outcomes with weight 0.0 (neutral)", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const cancelMe = dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_ME");
+      expect(cancelMe!.weight).toBe(0.0);
+
+      const noShowMe = dObj.markOutcome(TEST_REL_ID, "NO_SHOW_ME");
+      expect(noShowMe!.weight).toBe(0.0);
+
+      const movedMe = dObj.markOutcome(TEST_REL_ID, "MOVED_LAST_MINUTE_ME");
+      expect(movedMe!.weight).toBe(0.0);
+    });
+
+    it("stores optional canonical_event_id and note", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const entry = dObj.markOutcome(
+        TEST_REL_ID,
+        "ATTENDED",
+        "evt_01HXY0000000000000000EVT01",
+        "Great meeting about Series A",
+      );
+
+      expect(entry).not.toBeNull();
+      expect(entry!.canonical_event_id).toBe("evt_01HXY0000000000000000EVT01");
+      expect(entry!.note).toBe("Great meeting about Series A");
+    });
+
+    it("updates last_interaction_ts on ATTENDED outcome", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      // Before: no interaction
+      const before = dObj.getRelationship(TEST_REL_ID);
+      expect(before!.last_interaction_ts).toBeNull();
+
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+
+      // After: last_interaction_ts updated
+      const after = dObj.getRelationship(TEST_REL_ID);
+      expect(after!.last_interaction_ts).toBeTruthy();
+    });
+
+    it("does NOT update last_interaction_ts on non-ATTENDED outcomes", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_THEM");
+
+      const rel = dObj.getRelationship(TEST_REL_ID);
+      expect(rel!.last_interaction_ts).toBeNull();
+    });
+
+    it("returns null for non-existent relationship", () => {
+      const entry = dObj.markOutcome(
+        "rel_01HXY0000000000000000NOTFN",
+        "ATTENDED",
+      );
+      expect(entry).toBeNull();
+    });
+
+    it("rejects invalid outcome", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      expect(() => {
+        dObj.markOutcome(TEST_REL_ID, "INVALID_OUTCOME");
+      }).toThrow("Invalid outcome");
+    });
+
+    it("is append-only -- multiple outcomes for same relationship accumulate", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const e1 = dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+      const e2 = dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_THEM");
+      const e3 = dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+
+      // Each gets a unique ledger_id
+      expect(e1!.ledger_id).not.toBe(e2!.ledger_id);
+      expect(e2!.ledger_id).not.toBe(e3!.ledger_id);
+
+      // All three exist in the ledger
+      const outcomes = dObj.listOutcomes(TEST_REL_ID);
+      expect(outcomes).not.toBeNull();
+      expect(outcomes!.length).toBe(3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Interaction Ledger: listOutcomes
+  // -------------------------------------------------------------------------
+
+  describe("listOutcomes", () => {
+    it("returns empty array when no outcomes exist", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      const outcomes = dObj.listOutcomes(TEST_REL_ID);
+      expect(outcomes).not.toBeNull();
+      expect(outcomes!.length).toBe(0);
+    });
+
+    it("returns outcomes ordered by timestamp descending (most recent first)", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED", null, "first");
+      dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_THEM", null, "second");
+      dObj.markOutcome(TEST_REL_ID, "NO_SHOW_THEM", null, "third");
+
+      const outcomes = dObj.listOutcomes(TEST_REL_ID);
+      expect(outcomes!.length).toBe(3);
+      // Most recent first (all should have same or increasing ts)
+      expect(outcomes![0].note).toBe("third");
+      expect(outcomes![1].note).toBe("second");
+      expect(outcomes![2].note).toBe("first");
+    });
+
+    it("filters by outcome type", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+      dObj.markOutcome(TEST_REL_ID, "CANCELED_BY_THEM");
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+
+      const attended = dObj.listOutcomes(TEST_REL_ID, "ATTENDED");
+      expect(attended!.length).toBe(2);
+      expect(attended![0].outcome).toBe("ATTENDED");
+      expect(attended![1].outcome).toBe("ATTENDED");
+
+      const cancelled = dObj.listOutcomes(TEST_REL_ID, "CANCELED_BY_THEM");
+      expect(cancelled!.length).toBe(1);
+    });
+
+    it("returns null for non-existent relationship", () => {
+      const outcomes = dObj.listOutcomes("rel_01HXY0000000000000000NOTFN");
+      expect(outcomes).toBeNull();
+    });
+
+    it("rejects invalid outcome filter", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      expect(() => {
+        dObj.listOutcomes(TEST_REL_ID, "INVALID_FILTER");
+      }).toThrow("Invalid outcome filter");
+    });
+
+    it("outcomes are scoped to the relationship's participant_hash", () => {
+      // Create two relationships with different participant hashes
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob",
+        "FRIEND",
+      );
+
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+      dObj.markOutcome(TEST_REL_ID, "NO_SHOW_THEM");
+      dObj.markOutcome(TEST_REL_ID_2, "CANCELED_BY_THEM");
+
+      const aliceOutcomes = dObj.listOutcomes(TEST_REL_ID);
+      expect(aliceOutcomes!.length).toBe(2);
+
+      const bobOutcomes = dObj.listOutcomes(TEST_REL_ID_2);
+      expect(bobOutcomes!.length).toBe(1);
+      expect(bobOutcomes![0].outcome).toBe("CANCELED_BY_THEM");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Interaction Ledger: deleteRelationship cascades
+  // -------------------------------------------------------------------------
+
+  describe("deleteRelationship cascades ledger entries", () => {
+    it("deleting a relationship removes its ledger entries", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "INVESTOR",
+      );
+
+      dObj.markOutcome(TEST_REL_ID, "ATTENDED");
+      dObj.markOutcome(TEST_REL_ID, "NO_SHOW_THEM");
+
+      // Verify entries exist
+      const before = dObj.listOutcomes(TEST_REL_ID);
+      expect(before!.length).toBe(2);
+
+      // Delete relationship
+      const deleted = dObj.deleteRelationship(TEST_REL_ID);
+      expect(deleted).toBe(true);
+
+      // Entries should be gone (relationship gone, so null)
+      const after = dObj.listOutcomes(TEST_REL_ID);
+      expect(after).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Drift ratio in report (TM-4wb.4)
+  // -------------------------------------------------------------------------
+
+  describe("drift_ratio in drift report", () => {
+    it("includes drift_ratio for overdue relationships", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "FRIEND",
+        0.8,
+        null,
+        null,
+        7,
+      );
+
+      // Set last interaction to 21 days ago
+      dObj.updateInteractions(
+        [TEST_PARTICIPANT_HASH],
+        new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString(),
+      );
+
+      const report = dObj.getDriftReport();
+      expect(report.overdue).toHaveLength(1);
+      // 21 days / 7 target = 3.0
+      expect(report.overdue[0].drift_ratio).toBe(3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Drift alert storage (TM-4wb.4)
+  // -------------------------------------------------------------------------
+
+  describe("storeDriftAlerts / getDriftAlerts", () => {
+    it("stores drift alerts from a report and retrieves them", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice Investor",
+        "INVESTOR",
+        1.0,
+        null,
+        null,
+        7,
+      );
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob Colleague",
+        "COLLEAGUE",
+        0.3,
+        null,
+        null,
+        14,
+      );
+
+      // Set Alice to 10 days ago
+      dObj.updateInteractions(
+        [TEST_PARTICIPANT_HASH],
+        new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      );
+
+      // Get report (both should be overdue)
+      const report = dObj.getDriftReport();
+      expect(report.total_overdue).toBe(2);
+
+      // Store alerts
+      const stored = dObj.storeDriftAlerts(report);
+      expect(stored).toBe(2);
+
+      // Retrieve alerts
+      const alerts = dObj.getDriftAlerts();
+      expect(alerts).toHaveLength(2);
+
+      // Sorted by urgency descending
+      expect(alerts[0].urgency).toBeGreaterThanOrEqual(alerts[1].urgency);
+
+      // Fields populated correctly
+      for (const alert of alerts) {
+        expect(alert.alert_id).toBeTruthy();
+        expect(alert.relationship_id).toBeTruthy();
+        expect(alert.category).toBeTruthy();
+        expect(alert.drift_ratio).toBeGreaterThan(0);
+        expect(alert.days_overdue).toBeGreaterThan(0);
+        expect(alert.urgency).toBeGreaterThan(0);
+        expect(alert.computed_at).toBeTruthy();
+      }
+    });
+
+    it("replaces previous alerts on subsequent store calls", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "FRIEND",
+        0.8,
+        null,
+        null,
+        7,
+      );
+
+      // First computation - overdue (never interacted)
+      const report1 = dObj.getDriftReport();
+      dObj.storeDriftAlerts(report1);
+      expect(dObj.getDriftAlerts()).toHaveLength(1);
+
+      // Interact (clears drift)
+      dObj.updateInteractions(
+        [TEST_PARTICIPANT_HASH],
+        new Date().toISOString(),
+      );
+
+      // Second computation - no longer overdue
+      const report2 = dObj.getDriftReport();
+      expect(report2.total_overdue).toBe(0);
+      dObj.storeDriftAlerts(report2);
+
+      // Alerts should now be empty (replaced)
+      expect(dObj.getDriftAlerts()).toHaveLength(0);
+    });
+
+    it("returns empty array when no alerts have been stored", () => {
+      const alerts = dObj.getDriftAlerts();
+      expect(alerts).toHaveLength(0);
+    });
+
+    it("cascades deletion when relationship is deleted", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "FRIEND",
+        0.8,
+        null,
+        null,
+        7,
+      );
+
+      // Store an alert (overdue because never interacted)
+      const report = dObj.getDriftReport();
+      dObj.storeDriftAlerts(report);
+      expect(dObj.getDriftAlerts()).toHaveLength(1);
+
+      // Delete the relationship
+      dObj.deleteRelationship(TEST_REL_ID);
+
+      // Alert should be cascade-deleted
+      expect(dObj.getDriftAlerts()).toHaveLength(0);
+    });
+  });
 });

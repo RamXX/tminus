@@ -117,6 +117,7 @@ describe("UserGraphDO schema via migration runner", () => {
       "canonical_events",
       "commitment_reports",
       "constraints",
+      "drift_alerts",
       "event_journal",
       "event_mirrors",
       "interaction_ledger",

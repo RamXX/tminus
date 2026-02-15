@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { computeDrift, matchEventParticipants } from "./drift";
-import type { DriftInput } from "./drift";
+import { computeDrift, matchEventParticipants, computeDriftBadge, driftEntryBadge } from "./drift";
+import type { DriftInput, DriftEntry } from "./drift";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,9 +55,48 @@ describe("computeDrift", () => {
     expect(report.overdue[0].relationship_id).toBe("rel_01HXY000000000000000000E01");
     expect(report.overdue[0].days_since_interaction).toBe(10);
     expect(report.overdue[0].days_overdue).toBe(3);
+    expect(report.overdue[0].drift_ratio).toBeCloseTo(10 / 7, 1);
     expect(report.overdue[0].urgency).toBeCloseTo(3 * 0.8);
     expect(report.total_tracked).toBe(1);
     expect(report.total_overdue).toBe(1);
+  });
+
+  it("computes drift_ratio as days_since_interaction / interaction_frequency_target", () => {
+    const relationships: DriftInput[] = [
+      {
+        relationship_id: "rel_01HXY000000000000000000E01",
+        participant_hash: "abc123",
+        display_name: "Alice",
+        category: "FRIEND",
+        closeness_weight: 0.5,
+        last_interaction_ts: daysAgo(21, new Date(NOW)),
+        interaction_frequency_target: 7,
+      },
+    ];
+
+    const report = computeDrift(relationships, NOW);
+    expect(report.overdue).toHaveLength(1);
+    // 21 days / 7 day target = 3.0
+    expect(report.overdue[0].drift_ratio).toBe(3.0);
+  });
+
+  it("rounds drift_ratio to two decimal places", () => {
+    const relationships: DriftInput[] = [
+      {
+        relationship_id: "rel_01HXY000000000000000000E01",
+        participant_hash: "abc123",
+        display_name: "Test",
+        category: "FRIEND",
+        closeness_weight: 0.5,
+        last_interaction_ts: daysAgo(10, new Date(NOW)),
+        interaction_frequency_target: 3,
+      },
+    ];
+
+    const report = computeDrift(relationships, NOW);
+    expect(report.overdue).toHaveLength(1);
+    // 10 / 3 = 3.333... -> rounds to 3.33
+    expect(report.overdue[0].drift_ratio).toBe(3.33);
   });
 
   it("does not flag relationships that are within their frequency target", () => {
@@ -218,5 +257,95 @@ describe("matchEventParticipants", () => {
   it("returns empty array for empty relationships", () => {
     const matches = matchEventParticipants(["hash_a"], []);
     expect(matches).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeDriftBadge
+// ---------------------------------------------------------------------------
+
+describe("computeDriftBadge", () => {
+  it("returns 'none' when frequency target is null", () => {
+    expect(computeDriftBadge(5, null)).toBe("none");
+  });
+
+  it("returns 'none' when frequency target is zero", () => {
+    expect(computeDriftBadge(5, 0)).toBe("none");
+  });
+
+  it("returns 'none' when frequency target is negative", () => {
+    expect(computeDriftBadge(5, -1)).toBe("none");
+  });
+
+  it("returns 'red' when days since interaction is null (never interacted)", () => {
+    expect(computeDriftBadge(null, 7)).toBe("red");
+  });
+
+  it("returns 'green' when within frequency target (ratio <= 1.0)", () => {
+    // 3 days / 7 day target = 0.43
+    expect(computeDriftBadge(3, 7)).toBe("green");
+  });
+
+  it("returns 'green' at exact frequency target boundary (ratio = 1.0)", () => {
+    expect(computeDriftBadge(7, 7)).toBe("green");
+  });
+
+  it("returns 'yellow' when slightly overdue (1.0 < ratio <= 2.0)", () => {
+    // 10 days / 7 day target = 1.43
+    expect(computeDriftBadge(10, 7)).toBe("yellow");
+  });
+
+  it("returns 'yellow' at double the target (ratio = 2.0)", () => {
+    expect(computeDriftBadge(14, 7)).toBe("yellow");
+  });
+
+  it("returns 'red' when significantly overdue (ratio > 2.0)", () => {
+    // 21 days / 7 day target = 3.0
+    expect(computeDriftBadge(21, 7)).toBe("red");
+  });
+
+  it("returns 'green' for zero days since interaction", () => {
+    expect(computeDriftBadge(0, 7)).toBe("green");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// driftEntryBadge
+// ---------------------------------------------------------------------------
+
+describe("driftEntryBadge", () => {
+  it("returns badge from a DriftEntry", () => {
+    const entry: DriftEntry = {
+      relationship_id: "rel_01HXY000000000000000000E01",
+      participant_hash: "abc",
+      display_name: "Test",
+      category: "FRIEND",
+      closeness_weight: 0.5,
+      last_interaction_ts: "2026-02-01T12:00:00Z",
+      interaction_frequency_target: 7,
+      days_since_interaction: 14,
+      days_overdue: 7,
+      drift_ratio: 2.0,
+      urgency: 3.5,
+    };
+    // 14 days / 7 target = 2.0 -> yellow (at boundary)
+    expect(driftEntryBadge(entry)).toBe("yellow");
+  });
+
+  it("returns red for highly overdue entry", () => {
+    const entry: DriftEntry = {
+      relationship_id: "rel_01HXY000000000000000000E01",
+      participant_hash: "abc",
+      display_name: "Test",
+      category: "FRIEND",
+      closeness_weight: 0.5,
+      last_interaction_ts: "2026-01-01T12:00:00Z",
+      interaction_frequency_target: 7,
+      days_since_interaction: 45,
+      days_overdue: 38,
+      drift_ratio: 6.43,
+      urgency: 19.0,
+    };
+    expect(driftEntryBadge(entry)).toBe("red");
   });
 });

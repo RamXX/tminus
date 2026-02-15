@@ -629,6 +629,43 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       properties: {},
     },
   },
+  {
+    name: "calendar.mark_outcome",
+    description:
+      "Mark the outcome of a meeting or interaction with a relationship contact. Records whether the meeting was attended, cancelled, or resulted in a no-show. Outcomes are append-only and affect the contact's reputation score. Use relationship_id from calendar.add_relationship.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        relationship_id: {
+          type: "string",
+          description: "The relationship ID to mark the outcome for.",
+        },
+        outcome: {
+          type: "string",
+          enum: [
+            "ATTENDED",
+            "CANCELED_BY_ME",
+            "CANCELED_BY_THEM",
+            "NO_SHOW_THEM",
+            "NO_SHOW_ME",
+            "MOVED_LAST_MINUTE_THEM",
+            "MOVED_LAST_MINUTE_ME",
+          ],
+          description:
+            "The outcome of the interaction. ATTENDED=positive, CANCELED_BY_THEM/NO_SHOW_THEM/MOVED_LAST_MINUTE_THEM=negative reputation impact.",
+        },
+        event_id: {
+          type: "string",
+          description: "Optional canonical event ID to link this outcome to a specific calendar event.",
+        },
+        note: {
+          type: "string",
+          description: "Optional free-text note about the interaction.",
+        },
+      },
+      required: ["relationship_id", "outcome"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -688,6 +725,7 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.tag_billable": "premium",
   "calendar.get_commitment_status": "premium",
   "calendar.export_commitment_proof": "premium",
+  "calendar.mark_outcome": "premium",
 };
 
 /**
@@ -2952,6 +2990,57 @@ async function handleGetDriftReport(
   return envelope.data;
 }
 
+/**
+ * Execute calendar.mark_outcome: validate input and forward to the API worker
+ * to record an interaction outcome for a relationship.
+ */
+async function handleMarkOutcome(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.relationship_id !== "string" || args.relationship_id.trim().length === 0) {
+    throw new InvalidParamsError("relationship_id is required");
+  }
+  if (typeof args.outcome !== "string" || args.outcome.trim().length === 0) {
+    throw new InvalidParamsError("outcome is required");
+  }
+
+  const validOutcomes = [
+    "ATTENDED", "CANCELED_BY_ME", "CANCELED_BY_THEM",
+    "NO_SHOW_THEM", "NO_SHOW_ME",
+    "MOVED_LAST_MINUTE_THEM", "MOVED_LAST_MINUTE_ME",
+  ];
+  if (!validOutcomes.includes(args.outcome)) {
+    throw new InvalidParamsError(
+      `Invalid outcome: ${args.outcome}. Must be one of: ${validOutcomes.join(", ")}`,
+    );
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "POST",
+    `/v1/relationships/${encodeURIComponent(args.relationship_id)}/outcomes`,
+    {
+      outcome: args.outcome,
+      canonical_event_id: typeof args.event_id === "string" ? args.event_id : null,
+      note: typeof args.note === "string" ? args.note : null,
+    },
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to mark outcome");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -3196,6 +3285,11 @@ async function dispatch(
           case "calendar.get_drift_report": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetDriftReport(request, env.API);
+            break;
+          }
+          case "calendar.mark_outcome": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleMarkOutcome(request, env.API, toolArgs);
             break;
           }
           default:

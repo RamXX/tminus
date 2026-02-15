@@ -1,11 +1,12 @@
 /**
  * tminus-cron -- Scheduled maintenance worker.
  *
- * Four cron responsibilities:
+ * Five cron responsibilities:
  * 1. Google channel renewal (every 6h): renew Google watch channels expiring within 24h
  * 2. Microsoft subscription renewal (every 6h): renew MS subscriptions at 75% lifetime
  * 3. Token health check (every 12h): verify account tokens, mark errors
  * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT messages
+ * 5. Social drift computation (daily 04:00 UTC): compute drift for all users, store alerts
  *
  * Design decisions:
  * - Each responsibility is a separate function for testability
@@ -22,6 +23,7 @@ import {
   CRON_RECONCILIATION,
   CRON_DELETION_CHECK,
   CRON_HOLD_EXPIRY,
+  CRON_DRIFT_COMPUTATION,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
@@ -499,6 +501,102 @@ async function handleHoldExpiry(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Social Drift Computation (daily 04:00 UTC)
+// ---------------------------------------------------------------------------
+
+/**
+ * For each active user, compute drift report via UserGraphDO.getDriftReport(),
+ * then store the resulting alerts via UserGraphDO.storeDriftAlerts().
+ *
+ * Runs after reconciliation (03:00 UTC) so that event data is fresh.
+ * Errors in one user do not block processing of others.
+ */
+async function handleDriftComputation(env: Env): Promise<void> {
+  // Get all distinct active users
+  const { results } = await env.DB
+    .prepare(
+      `SELECT DISTINCT user_id FROM accounts WHERE status = ?1`,
+    )
+    .bind("active")
+    .all<{ user_id: string }>();
+
+  console.log(
+    `Social drift computation: processing ${results.length} active users`,
+  );
+
+  let totalAlerts = 0;
+
+  for (const row of results) {
+    try {
+      const doId = env.USER_GRAPH.idFromName(row.user_id);
+      const stub = env.USER_GRAPH.get(doId);
+
+      // Step 1: Get drift report
+      const reportResponse = await stub.fetch(
+        new Request("https://user-graph.internal/getDriftReport", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      if (!reportResponse.ok) {
+        console.error(
+          `Drift computation: failed to get drift report for user ${row.user_id}: ${reportResponse.status}`,
+        );
+        continue;
+      }
+
+      const report = (await reportResponse.json()) as {
+        overdue: Array<{
+          relationship_id: string;
+          display_name: string | null;
+          category: string;
+          drift_ratio: number;
+          days_overdue: number;
+          urgency: number;
+        }>;
+        total_tracked: number;
+        total_overdue: number;
+        computed_at: string;
+      };
+
+      // Step 2: Store alerts
+      const storeResponse = await stub.fetch(
+        new Request("https://user-graph.internal/storeDriftAlerts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ report }),
+        }),
+      );
+
+      if (!storeResponse.ok) {
+        console.error(
+          `Drift computation: failed to store alerts for user ${row.user_id}: ${storeResponse.status}`,
+        );
+        continue;
+      }
+
+      const storeResult = (await storeResponse.json()) as { stored: number };
+      totalAlerts += storeResult.stored;
+
+      console.log(
+        `Drift computation: user ${row.user_id}: ${report.total_overdue} overdue out of ${report.total_tracked} tracked`,
+      );
+    } catch (err) {
+      console.error(
+        `Drift computation error for user ${row.user_id}:`,
+        err,
+      );
+    }
+  }
+
+  console.log(
+    `Social drift computation: stored ${totalAlerts} total alerts across ${results.length} users`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled handler dispatch
 // ---------------------------------------------------------------------------
 
@@ -532,6 +630,10 @@ async function handleScheduled(
 
     case CRON_HOLD_EXPIRY:
       await handleHoldExpiry(env);
+      break;
+
+    case CRON_DRIFT_COMPUTATION:
+      await handleDriftComputation(env);
       break;
 
     default:
