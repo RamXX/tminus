@@ -13,6 +13,7 @@ Accumulated insights from epic retrospectives. Organized by category.
 | TM-nyj | Phase 2C: Web Calendar UI | 2026-02-14 | [TM-nyj-retro.md](TM-nyj-retro.md) |
 | TM-gj5 | Phase 2D: Trip & Constraint System | 2026-02-14 | [TM-gj5-retro.md](TM-gj5-retro.md) |
 | TM-9ue | Phase 3C: Billing | 2026-02-15 | [TM-9ue-retro.md](TM-9ue-retro.md) |
+| TM-946 | Phase 3A: Scheduling Engine | 2026-02-15 | [TM-946-retro.md](TM-946-retro.md) |
 
 ## Categories
 
@@ -30,3 +31,4 @@ Accumulated insights from epic retrospectives. Organized by category.
 - [Epic TM-nyj Retro](TM-nyj-retro.md) - Phase 2C: Web Calendar UI (2026-02-14)
 - [Epic TM-gj5 Retro](TM-gj5-retro.md) - Phase 2D: Trip & Constraint System (2026-02-14)
 - [Epic TM-9ue Retro](TM-9ue-retro.md) - Phase 3C: Billing (2026-02-15)
+- [Epic TM-946 Retro](TM-946-retro.md) - Phase 3A: Scheduling Engine (2026-02-15)

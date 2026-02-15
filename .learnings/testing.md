@@ -154,3 +154,87 @@ Insights related to test coverage, test types, and testing methodology.
 **Applies to:** All stories where developers observe pre-existing issues
 
 **Source stories:** TM-jfs.2, TM-jfs.3
+
+---
+
+## [Added from Epic TM-946 retro - 2026-02-15]
+
+### Test Expectations Should Be Dynamic, Not Hardcoded Counts
+
+**Priority:** Important
+
+**Context:** TM-946.1 constants test hardcoded expected prefix count (9), which broke when scheduling added 3 new prefixes (session/candidate/hold). The test failure was a false negative - the code was correct, the test was brittle.
+
+**Recommendation:**
+1. Avoid hardcoded count expectations in tests: `expect(prefixes.length).toBe(9)` is brittle
+2. Use dynamic expectations: `expect(prefixes).toContain('session_')` or `expect(prefixes.length).toBeGreaterThanOrEqual(9)`
+3. If exact count is critical to test, document WHY in a comment and update when schema legitimately grows
+4. Apply this pattern to all tests that verify collections of constants, migrations, or schema elements
+
+**Applies to:** All tests that assert on collection sizes (constants, migrations, schema tables)
+
+**Source stories:** TM-946.1
+
+### Root-Level Test Dependencies Must Include Workspace Package Dependencies
+
+**Priority:** Critical
+
+**Context:** TM-946.7 E2E tests failed because better-sqlite3 was only in workspace package dependencies (workflows/scheduling, durable-objects), not root devDependencies. Root-level tests in tests/e2e/ couldn't import it.
+
+**Recommendation:**
+1. When adding dependencies to workspace packages, check if root-level tests (tests/e2e/, tests/integration/) import from those packages
+2. If yes, add the dependency to root package.json devDependencies as well
+3. Run root-level tests (`make test-e2e`) before delivering to catch this
+4. Consider documenting this pattern in CONTRIBUTING.md or testing guidelines
+
+**Applies to:** All stories that add dependencies to workspace packages and have root-level E2E tests
+
+**Source stories:** TM-946.7
+
+### FakeDOStub Must Match Actual DO Method Names
+
+**Priority:** Important
+
+**Context:** TM-946.1 discovered that FakeDOStub must call handleFetch() not fetch(). UserGraphDO implements handleFetch() as its request handler, not the standard DurableObject fetch() method.
+
+**Recommendation:**
+1. When creating DO test stubs, verify method names match the actual DO implementation
+2. Document in DO test helper: "UserGraphDO uses handleFetch(), not fetch()"
+3. Consider standardizing: either all DOs use fetch() (standard) or all use handleFetch() (custom)
+4. Add a test that verifies DO stub method signature matches actual DO class
+
+**Applies to:** All DO test infrastructure, particularly UserGraphDO and future GroupScheduleDO
+
+**Source stories:** TM-946.1
+
+### Lazy Migration in DOs Requires Trigger Before Test DB Access
+
+**Priority:** Important
+
+**Context:** TM-946.1 discovered that UserGraphDO's lazy migration requires a trigger (any valid RPC like /getSyncHealth) before direct DB access in tests. Without this, tests that query the database directly fail because tables don't exist yet.
+
+**Recommendation:**
+1. In DO integration tests, always trigger lazy migration before direct DB queries: `await stub.handleFetch('/getSyncHealth')`
+2. Document this pattern in DO testing guidelines
+3. Consider creating a test helper: `await triggerDOMigration(stub)` that encapsulates this
+4. Add this to the DO test setup template for future DO implementations
+
+**Applies to:** All DO integration tests that use lazy migration pattern
+
+**Source stories:** TM-946.1
+
+### E2E Vitest Configs Must Match Test File Naming Conventions
+
+**Priority:** Important
+
+**Context:** TM-946.7 observed that vitest.e2e.config.ts only includes *.integration.test.ts patterns, but phase-2a.test.ts and phase-2b.test.ts don't match that pattern. They have their own configs, which works, but creates inconsistency.
+
+**Recommendation:**
+1. Standardize E2E test file naming: either all use *.integration.test.ts or all use *-e2e.test.ts
+2. Update vitest.e2e.config.ts to match the chosen convention
+3. Migrate phase-2a.test.ts and phase-2b.test.ts to follow the standard naming
+4. Document the E2E test naming convention in testing guidelines
+
+**Applies to:** All E2E tests in tests/e2e/ directory
+
+**Source stories:** TM-946.7

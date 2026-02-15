@@ -141,3 +141,30 @@ Sr. PM can then decide whether to collapse stories or keep them separate. The ke
 
 **Source stories:** TM-jfs.2, TM-jfs.3
 
+
+---
+
+## [Added from Epic TM-946 retro - 2026-02-15]
+
+### Zero-Rejection Epics Signal Strong Story Design
+
+**Priority:** Nice-to-have
+
+**Context:** Epic TM-946 had 7 stories, all accepted on first try (0 rejections). This is a strong quality signal compared to previous epics with 10-30% rejection rates.
+
+**Pattern analysis:**
+- Stories were designed incrementally: walking skeleton first, then add constraints, then holds, then session management, then MCP, then UI, then E2E validation
+- Each story had clear acceptance criteria with specific test counts and performance targets
+- Stories built on solid Phase 2 foundation (constraints, trips, working hours already existed)
+- TDD approach with unit + integration tests for each story
+- E2E validation story at the end proved integration
+
+**Recommendation:**
+1. When designing future epics, use TM-946 as a template: walking skeleton -> incremental features -> E2E validation
+2. Ensure foundation features (Phase 2) are solid before building dependent features (Phase 3)
+3. Include specific test count expectations in ACs to drive TDD
+4. Always include an E2E validation story at the end of milestone epics
+
+**Applies to:** All future epic planning (Phase 3B, Phase 4)
+
+**Source stories:** All TM-946 stories

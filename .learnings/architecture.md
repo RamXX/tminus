@@ -69,3 +69,23 @@ Insights related to system design, patterns, and technical decisions.
 **Applies to:** All feature implementations that might use Node.js built-in APIs, particularly for date/time, crypto, URL parsing, and international formatting
 
 **Source stories:** TM-gj5.2
+
+---
+
+## [Added from Epic TM-946 retro - 2026-02-15]
+
+### Missing DO RPC Routes Must Be Detected Early
+
+**Priority:** Critical
+
+**Context:** TM-946.1 discovered that /upsertCanonicalEvent and /deleteCanonicalEvent routes were missing from UserGraphDO despite being called by the API worker. The 100+ case handleFetch switch statement has no systematic route registry, making gaps easy to miss.
+
+**Recommendation:**
+1. Create a route registry test for UserGraphDO: iterate through all callDO() invocations in workers/api and verify each route exists in UserGraphDO's handleFetch switch
+2. Consider refactoring handleFetch to use a route map pattern instead of a 100+ case switch statement
+3. Add this test to the UserGraphDO test suite: `describe('Route registry completeness')`
+4. Run this test in CI to catch missing routes before integration testing
+
+**Applies to:** All DO RPC implementations, particularly UserGraphDO and future GroupScheduleDO
+
+**Source stories:** TM-946.1
