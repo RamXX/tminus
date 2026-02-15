@@ -1,8 +1,9 @@
 /**
- * UnifiedCalendar -- read-only unified calendar view.
+ * UnifiedCalendar -- unified calendar view with event creation.
  *
  * Shows events from all accounts in a single calendar with week, month,
  * and day views. Events are color-coded by origin account.
+ * Click empty time slots to create new events.
  *
  * This is a custom CSS grid calendar. No FullCalendar dependency.
  *
@@ -10,10 +11,14 @@
  *   fetchEvents(start, end) -> Promise<CalendarEvent[]>
  *     The caller provides the fetch function, making this component testable
  *     without mocking global fetch or the API module.
+ *   onCreateEvent(payload) -> Promise<CalendarEvent>
+ *     Optional. Called when the user submits the event creation form.
+ *     Returns the created CalendarEvent from the API. When provided,
+ *     clicking empty time slots opens the creation form.
  */
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import type { CalendarEvent } from "../lib/api";
+import type { CalendarEvent, CreateEventPayload } from "../lib/api";
 import {
   getAccountColor,
   getDateRangeForView,
@@ -29,7 +34,14 @@ import {
   type CalendarViewType,
   type DateRange,
 } from "../lib/calendar-utils";
+import {
+  createOptimisticEvent,
+  addOptimisticEvent,
+  replaceOptimisticEvent,
+  removeOptimisticEvent,
+} from "../lib/event-form";
 import { EventDetail } from "./EventDetail";
+import { EventCreateForm } from "./EventCreateForm";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +50,8 @@ import { EventDetail } from "./EventDetail";
 export interface UnifiedCalendarProps {
   /** Fetch events for a date range. Returns CalendarEvent[]. */
   fetchEvents: (start: string, end: string) => Promise<CalendarEvent[]>;
+  /** Optional. Create a new event. Returns the created CalendarEvent. */
+  onCreateEvent?: (payload: CreateEventPayload) => Promise<CalendarEvent>;
   /** Initial date to display. Defaults to today. */
   initialDate?: Date;
   /** Initial view. Defaults to "week". */
@@ -50,6 +64,7 @@ export interface UnifiedCalendarProps {
 
 export function UnifiedCalendar({
   fetchEvents,
+  onCreateEvent,
   initialDate,
   initialView = "week",
 }: UnifiedCalendarProps) {
@@ -60,6 +75,11 @@ export function UnifiedCalendar({
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
 
+  // Event creation state
+  const [createDate, setCreateDate] = useState<Date | null>(null);
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
   const handleEventClick = useCallback((event: CalendarEvent) => {
     setSelectedEvent(event);
   }, []);
@@ -67,6 +87,61 @@ export function UnifiedCalendar({
   const handleCloseDetail = useCallback(() => {
     setSelectedEvent(null);
   }, []);
+
+  // Time slot click handler -- opens creation form
+  const handleTimeSlotClick = useCallback(
+    (date: Date) => {
+      if (!onCreateEvent) return;
+      setCreateDate(date);
+      setCreateError(null);
+    },
+    [onCreateEvent],
+  );
+
+  // Cancel creation form
+  const handleCancelCreate = useCallback(() => {
+    setCreateDate(null);
+    setCreateError(null);
+    setCreateSubmitting(false);
+  }, []);
+
+  // Submit creation form with optimistic update
+  const handleSubmitCreate = useCallback(
+    async (payload: CreateEventPayload) => {
+      if (!onCreateEvent) return;
+
+      setCreateSubmitting(true);
+      setCreateError(null);
+
+      // Optimistic: add a temp event immediately
+      const optimistic = createOptimisticEvent(payload);
+      setEvents((prev) => addOptimisticEvent(prev, optimistic));
+
+      // Close form immediately (optimistic)
+      setCreateDate(null);
+
+      try {
+        const real = await onCreateEvent(payload);
+        // Replace temp with real event
+        setEvents((prev) =>
+          replaceOptimisticEvent(prev, optimistic.canonical_event_id, real),
+        );
+      } catch (err) {
+        // Rollback: remove optimistic event
+        setEvents((prev) =>
+          removeOptimisticEvent(prev, optimistic.canonical_event_id),
+        );
+        // Re-open form with error
+        setCreateDate(new Date(`${payload.start}`));
+        setCreateError(
+          err instanceof Error ? err.message : "Failed to create event",
+        );
+      } finally {
+        setCreateSubmitting(false);
+      }
+    },
+    [onCreateEvent],
+  );
 
   // Compute the date range for the current view
   const range = useMemo(
@@ -250,7 +325,7 @@ export function UnifiedCalendar({
       {/* Calendar content */}
       {!loading && !error && (
         <>
-          {events.length === 0 ? (
+          {events.length === 0 && !onCreateEvent ? (
             <div style={styles.emptyState}>
               <p style={styles.emptyTitle}>No events in this period</p>
               <p style={styles.emptySubtitle}>
@@ -264,7 +339,11 @@ export function UnifiedCalendar({
               range={range}
               currentDate={currentDate}
               onEventClick={handleEventClick}
+              onTimeSlotClick={onCreateEvent ? handleTimeSlotClick : undefined}
             />
+          )}
+          {events.length === 0 && onCreateEvent && (
+            <p style={styles.emptyHint}>Click a time slot to create an event.</p>
           )}
         </>
       )}
@@ -272,6 +351,17 @@ export function UnifiedCalendar({
       {/* Event detail panel */}
       {selectedEvent && (
         <EventDetail event={selectedEvent} onClose={handleCloseDetail} />
+      )}
+
+      {/* Event creation form */}
+      {createDate && (
+        <EventCreateForm
+          initialDate={createDate}
+          onSubmit={handleSubmitCreate}
+          onCancel={handleCancelCreate}
+          submitting={createSubmitting}
+          error={createError}
+        />
       )}
     </div>
   );
@@ -287,22 +377,24 @@ function CalendarBody({
   range,
   currentDate,
   onEventClick,
+  onTimeSlotClick,
 }: {
   view: CalendarViewType;
   events: CalendarEvent[];
   range: DateRange;
   currentDate: Date;
   onEventClick: (event: CalendarEvent) => void;
+  onTimeSlotClick?: (date: Date) => void;
 }) {
   switch (view) {
     case "week":
-      return <WeekView events={events} range={range} onEventClick={onEventClick} />;
+      return <WeekView events={events} range={range} onEventClick={onEventClick} onTimeSlotClick={onTimeSlotClick} />;
     case "month":
       return (
-        <MonthView events={events} currentDate={currentDate} range={range} onEventClick={onEventClick} />
+        <MonthView events={events} currentDate={currentDate} range={range} onEventClick={onEventClick} onTimeSlotClick={onTimeSlotClick} />
       );
     case "day":
-      return <DayView events={events} currentDate={currentDate} onEventClick={onEventClick} />;
+      return <DayView events={events} currentDate={currentDate} onEventClick={onEventClick} onTimeSlotClick={onTimeSlotClick} />;
   }
 }
 
@@ -314,10 +406,12 @@ function WeekView({
   events,
   range,
   onEventClick,
+  onTimeSlotClick,
 }: {
   events: CalendarEvent[];
   range: DateRange;
   onEventClick: (event: CalendarEvent) => void;
+  onTimeSlotClick?: (date: Date) => void;
 }) {
   // Generate the 7 days of the week
   const days = useMemo(() => {
@@ -340,8 +434,32 @@ function WeekView({
         const dayEvents = grouped[key] ?? [];
         const today = isToday(day);
 
+        const handleSlotClick = onTimeSlotClick
+          ? () => {
+              // Default to 9 AM on the clicked day
+              const slotDate = new Date(day);
+              slotDate.setHours(9, 0, 0, 0);
+              onTimeSlotClick(slotDate);
+            }
+          : undefined;
+
         return (
-          <div key={i} style={styles.weekDay}>
+          <div
+            key={i}
+            style={{
+              ...styles.weekDay,
+              ...(onTimeSlotClick ? styles.clickableSlot : {}),
+            }}
+            onClick={handleSlotClick}
+            data-testid={`week-day-slot-${formatDateKey(day)}`}
+            role={onTimeSlotClick ? "button" : undefined}
+            tabIndex={onTimeSlotClick ? 0 : undefined}
+            onKeyDown={
+              onTimeSlotClick
+                ? (e) => { if (e.key === "Enter" || e.key === " ") handleSlotClick?.(); }
+                : undefined
+            }
+          >
             <div
               style={{
                 ...styles.weekDayHeader,
@@ -381,11 +499,13 @@ function MonthView({
   currentDate,
   range,
   onEventClick,
+  onTimeSlotClick,
 }: {
   events: CalendarEvent[];
   currentDate: Date;
   range: DateRange;
   onEventClick: (event: CalendarEvent) => void;
+  onTimeSlotClick?: (date: Date) => void;
 }) {
   const grouped = useMemo(() => groupEventsByDate(events), [events]);
 
@@ -445,13 +565,31 @@ function MonthView({
             const inMonth = day.getMonth() === currentDate.getMonth();
             const today = isToday(day);
 
+            const handleMonthSlotClick = onTimeSlotClick
+              ? () => {
+                  const slotDate = new Date(day);
+                  slotDate.setHours(9, 0, 0, 0);
+                  onTimeSlotClick(slotDate);
+                }
+              : undefined;
+
             return (
               <div
                 key={di}
                 style={{
                   ...styles.monthCell,
                   ...(inMonth ? {} : styles.monthCellOutside),
+                  ...(onTimeSlotClick ? styles.clickableSlot : {}),
                 }}
+                onClick={handleMonthSlotClick}
+                data-testid={`month-day-slot-${formatDateKey(day)}`}
+                role={onTimeSlotClick ? "button" : undefined}
+                tabIndex={onTimeSlotClick ? 0 : undefined}
+                onKeyDown={
+                  onTimeSlotClick
+                    ? (e) => { if (e.key === "Enter" || e.key === " ") handleMonthSlotClick?.(); }
+                    : undefined
+                }
               >
                 <span
                   style={{
@@ -488,17 +626,41 @@ function DayView({
   events,
   currentDate,
   onEventClick,
+  onTimeSlotClick,
 }: {
   events: CalendarEvent[];
   currentDate: Date;
   onEventClick: (event: CalendarEvent) => void;
+  onTimeSlotClick?: (date: Date) => void;
 }) {
   const grouped = useMemo(() => groupEventsByDate(events), [events]);
   const key = formatDateKey(currentDate);
   const dayEvents = grouped[key] ?? [];
 
+  const handleDaySlotClick = onTimeSlotClick
+    ? () => {
+        const slotDate = new Date(currentDate);
+        slotDate.setHours(9, 0, 0, 0);
+        onTimeSlotClick(slotDate);
+      }
+    : undefined;
+
   return (
-    <div style={styles.dayContainer}>
+    <div
+      style={{
+        ...styles.dayContainer,
+        ...(onTimeSlotClick ? styles.clickableSlot : {}),
+      }}
+      onClick={handleDaySlotClick}
+      data-testid={`day-slot-${formatDateKey(currentDate)}`}
+      role={onTimeSlotClick ? "button" : undefined}
+      tabIndex={onTimeSlotClick ? 0 : undefined}
+      onKeyDown={
+        onTimeSlotClick
+          ? (e) => { if (e.key === "Enter" || e.key === " ") handleDaySlotClick?.(); }
+          : undefined
+      }
+    >
       <div style={styles.dayHeader}>
         <span style={styles.dayHeaderDate}>
           {formatDateHeader(currentDate)}
@@ -527,10 +689,10 @@ function EventChip({ event, onClick }: { event: CalendarEvent; onClick: (event: 
   return (
     <div
       style={{ ...styles.eventChip, cursor: "pointer" }}
-      onClick={() => onClick(event)}
+      onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onClick(event); } }}
       data-testid={`event-chip-${event.canonical_event_id}`}
     >
       <span
@@ -553,10 +715,10 @@ function EventDot({ event, onClick }: { event: CalendarEvent; onClick: (event: C
   return (
     <div
       style={{ ...styles.eventDot, cursor: "pointer" }}
-      onClick={() => onClick(event)}
+      onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onClick(event); } }}
       data-testid={`event-dot-${event.canonical_event_id}`}
     >
       <span
@@ -576,10 +738,10 @@ function EventCard({ event, onClick }: { event: CalendarEvent; onClick: (event: 
   return (
     <div
       style={{ ...styles.eventCard, borderLeftColor: color, cursor: "pointer" } as React.CSSProperties}
-      onClick={() => onClick(event)}
+      onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(event); }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onClick(event); } }}
       data-testid={`event-card-${event.canonical_event_id}`}
     >
       <span
@@ -735,6 +897,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "0.875rem",
     color: "#64748b",
   },
+  emptyHint: {
+    textAlign: "center",
+    padding: "1rem",
+    fontSize: "0.8125rem",
+    color: "#64748b",
+  },
 
   // Week view
   weekGrid: {
@@ -748,6 +916,9 @@ const styles: Record<string, React.CSSProperties> = {
   weekDay: {
     background: "#0f172a",
     minHeight: "120px",
+  },
+  clickableSlot: {
+    cursor: "pointer",
   },
   weekDayHeader: {
     padding: "0.5rem",

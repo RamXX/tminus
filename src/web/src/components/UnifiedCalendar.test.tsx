@@ -9,12 +9,13 @@
  * - Error state with retry
  * - Color coding per account
  * - Responsive structure
+ * - Event creation: click time slot -> form -> submit -> optimistic update
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UnifiedCalendar } from "./UnifiedCalendar";
-import type { CalendarEvent } from "../lib/api";
+import type { CalendarEvent, CreateEventPayload } from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -591,6 +592,484 @@ describe("UnifiedCalendar", () => {
       expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
       // Should show "no mirrors" message
       expect(screen.getByText(/no mirrors/i)).toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Event creation
+  // =========================================================================
+
+  describe("event creation", () => {
+    /** Mock onCreateEvent that resolves with a real event. */
+    function createMockCreate(
+      overrides: Partial<CalendarEvent> = {},
+      delay = 0,
+    ) {
+      return vi.fn(async (payload: CreateEventPayload): Promise<CalendarEvent> => {
+        if (delay > 0) {
+          await new Promise((r) => setTimeout(r, delay));
+        }
+        return {
+          canonical_event_id: "evt-new-1",
+          summary: payload.summary,
+          description: payload.description,
+          location: payload.location,
+          start: payload.start,
+          end: payload.end,
+          status: "confirmed",
+          version: 1,
+          ...overrides,
+        };
+      });
+    }
+
+    /** Mock onCreateEvent that rejects. */
+    function createFailingCreate(errorMessage = "Server error") {
+      return vi.fn(async (): Promise<CalendarEvent> => {
+        throw new Error(errorMessage);
+      });
+    }
+
+    it("opens creation form when clicking a time slot in week view", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on an empty area (the day cell for Feb 14)
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Creation form should appear
+      expect(screen.getByTestId("event-create-panel")).toBeInTheDocument();
+      expect(screen.getByText("New Event")).toBeInTheDocument();
+    });
+
+    it("does NOT open creation form when onCreateEvent is not provided", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on a day cell -- should NOT open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      expect(screen.queryByTestId("event-create-panel")).not.toBeInTheDocument();
+    });
+
+    it("has all expected form fields", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // All fields should be present
+      expect(screen.getByTestId("event-title-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-start-date-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-start-time-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-end-date-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-end-time-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-timezone-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-description-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-location-input")).toBeInTheDocument();
+      expect(screen.getByTestId("event-create-submit")).toBeInTheDocument();
+    });
+
+    it("validates required title before submit", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Submit without entering a title
+      const submitBtn = screen.getByTestId("event-create-submit");
+      await user.click(submitBtn);
+
+      // Should show validation error
+      expect(screen.getByTestId("title-error")).toBeInTheDocument();
+      expect(screen.getByText("Title is required")).toBeInTheDocument();
+
+      // onCreateEvent should NOT have been called
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    it("validates end time must be after start time", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Fill in title
+      const titleInput = screen.getByTestId("event-title-input");
+      await user.clear(titleInput);
+      await user.type(titleInput, "Bad Event");
+
+      // Set end time before start time
+      const endTimeInput = screen.getByTestId("event-end-time-input");
+      await user.clear(endTimeInput);
+      await user.type(endTimeInput, "08:00");
+
+      // Submit
+      const submitBtn = screen.getByTestId("event-create-submit");
+      await user.click(submitBtn);
+
+      // Should show validation error about end time
+      expect(screen.getByTestId("end-time-error")).toBeInTheDocument();
+      expect(screen.getByText("End time must be after start time")).toBeInTheDocument();
+
+      // onCreateEvent should NOT have been called
+      expect(createFn).not.toHaveBeenCalled();
+    });
+
+    it("submits form and calls onCreateEvent with correct payload", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Fill in the form
+      const titleInput = screen.getByTestId("event-title-input");
+      await user.type(titleInput, "New Team Meeting");
+
+      const descInput = screen.getByTestId("event-description-input");
+      await user.type(descInput, "Weekly planning session");
+
+      const locInput = screen.getByTestId("event-location-input");
+      await user.type(locInput, "Room 42");
+
+      // Submit
+      const submitBtn = screen.getByTestId("event-create-submit");
+      await user.click(submitBtn);
+
+      // onCreateEvent should have been called
+      await waitFor(() => {
+        expect(createFn).toHaveBeenCalledTimes(1);
+      });
+
+      // Verify payload
+      const payload = createFn.mock.calls[0][0] as CreateEventPayload;
+      expect(payload.summary).toBe("New Team Meeting");
+      expect(payload.description).toBe("Weekly planning session");
+      expect(payload.location).toBe("Room 42");
+      expect(payload.source).toBe("ui");
+      expect(payload.start).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(payload.end).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("shows new event on calendar immediately after submission (optimistic update)", async () => {
+      const fetchFn = createMockFetch();
+      // Slow create to observe the optimistic event before the real one resolves
+      const createFn = createMockCreate({}, 200);
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Fill title
+      const titleInput = screen.getByTestId("event-title-input");
+      await user.type(titleInput, "Optimistic Event");
+
+      // Submit
+      const submitBtn = screen.getByTestId("event-create-submit");
+      await user.click(submitBtn);
+
+      // Form should close immediately
+      await waitFor(() => {
+        expect(screen.queryByTestId("event-create-panel")).not.toBeInTheDocument();
+      });
+
+      // Event should appear on the calendar immediately (optimistic)
+      expect(screen.getByText("Optimistic Event")).toBeInTheDocument();
+
+      // Wait for the real event to replace the optimistic one
+      await waitFor(() => {
+        expect(createFn).toHaveBeenCalled();
+      });
+
+      // Event should still be visible (now with real ID)
+      expect(screen.getByText("Optimistic Event")).toBeInTheDocument();
+    });
+
+    it("rolls back optimistic update on API failure", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createFailingCreate("Creation failed");
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      // Fill title
+      const titleInput = screen.getByTestId("event-title-input");
+      await user.type(titleInput, "Doomed Event");
+
+      // Submit
+      const submitBtn = screen.getByTestId("event-create-submit");
+      await user.click(submitBtn);
+
+      // Wait for the API call to fail and form to re-open with error
+      await waitFor(() => {
+        expect(screen.getByTestId("event-create-error")).toBeInTheDocument();
+      });
+
+      expect(screen.getByText("Creation failed")).toBeInTheDocument();
+
+      // The optimistic event should be rolled back (removed)
+      expect(screen.queryByText("Doomed Event")).not.toBeInTheDocument();
+    });
+
+    it("closes creation form when cancel is clicked", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open creation form
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      await user.click(daySlot);
+      expect(screen.getByTestId("event-create-panel")).toBeInTheDocument();
+
+      // Click the "Cancel" text button (not the X close button which also has aria-label="Cancel")
+      const cancelBtns = screen.getAllByRole("button", { name: /cancel/i });
+      // The text "Cancel" button is the one with visible text
+      const cancelBtn = cancelBtns.find((btn) => btn.textContent === "Cancel")!;
+      expect(cancelBtn).toBeTruthy();
+      await user.click(cancelBtn);
+
+      expect(screen.queryByTestId("event-create-panel")).not.toBeInTheDocument();
+    });
+
+    it("opens creation form from day view", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="day"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on the day slot
+      const daySlot = screen.getByTestId("day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      expect(screen.getByTestId("event-create-panel")).toBeInTheDocument();
+    });
+
+    it("opens creation form from month view", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="month"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on a month day cell for Feb 14
+      const daySlot = screen.getByTestId("month-day-slot-2026-02-14");
+      await user.click(daySlot);
+
+      expect(screen.getByTestId("event-create-panel")).toBeInTheDocument();
+    });
+
+    it("clicking an event still opens event detail (not creation form)", async () => {
+      const fetchFn = createMockFetch();
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on an existing event (not empty space)
+      await user.click(screen.getByText("Team Standup"));
+
+      // Should open EventDetail, NOT creation form
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+      expect(screen.queryByTestId("event-create-panel")).not.toBeInTheDocument();
+    });
+
+    it("shows calendar grid even with no events when onCreateEvent is provided", async () => {
+      const fetchFn = createMockFetch([]);
+      const createFn = createMockCreate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onCreateEvent={createFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(fetchFn).toHaveBeenCalled();
+      });
+
+      // Wait for loading to finish
+      await waitFor(() => {
+        expect(screen.queryByTestId("calendar-loading")).not.toBeInTheDocument();
+      });
+
+      // Should show the calendar grid (not the "No events" empty state)
+      const daySlot = screen.getByTestId("week-day-slot-2026-02-14");
+      expect(daySlot).toBeInTheDocument();
+
+      // Should show a hint to click
+      expect(screen.getByText(/click a time slot/i)).toBeInTheDocument();
     });
   });
 });

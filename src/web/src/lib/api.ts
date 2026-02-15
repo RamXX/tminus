@@ -55,6 +55,17 @@ export interface CalendarEvent {
   mirrors?: EventMirror[];
 }
 
+/** Payload for creating a new event via the API. */
+export interface CreateEventPayload {
+  summary: string;
+  start: string;
+  end: string;
+  timezone?: string;
+  description?: string;
+  location?: string;
+  source: "ui";
+}
+
 // ---------------------------------------------------------------------------
 // Error class
 // ---------------------------------------------------------------------------
@@ -152,6 +163,18 @@ export async function fetchEvents(
   const qs = search.toString();
   const path = `/v1/events${qs ? `?${qs}` : ""}`;
   return apiFetch<CalendarEvent[]>(path, { token });
+}
+
+/** POST /api/v1/events -- create a new canonical event. */
+export async function createEvent(
+  token: string,
+  payload: CreateEventPayload,
+): Promise<CalendarEvent> {
+  return apiFetch<CalendarEvent>("/v1/events", {
+    method: "POST",
+    body: payload,
+    token,
+  });
 }
 
 /** GET /api/v1/sync/status -- per-account sync health dashboard data. */
