@@ -69,6 +69,7 @@ import type { CognitiveLoadResult, ContextSwitchResult } from "@tminus/shared";
 import type { DeepWorkReport, DeepWorkImpact } from "@tminus/shared";
 import type { RiskScoreResult, CognitiveLoadHistoryEntry, CategoryAllocation } from "@tminus/shared";
 import type { ProbabilisticEvent, ProbabilisticAvailabilityResult, CancellationHistory } from "@tminus/shared";
+import type { MergedEvent, ProviderEvent as UpgradeProviderEvent, IcsEvent as UpgradeIcsEvent } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -2422,6 +2423,216 @@ export class UserGraphDO {
       policy_edges_removed: policyEdgesRemoved,
       calendars_removed: calendarsRemoved,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // ICS Upgrade Flow (TM-1rs / TM-d17.5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Get all canonical events belonging to a specific account.
+   *
+   * Used by the upgrade/downgrade flow to fetch current events from
+   * an ICS feed account or OAuth account before planning the migration.
+   *
+   * Returns CanonicalEvent[] which satisfies both IcsEvent and ProviderEvent
+   * shape expectations (the callers cast as needed).
+   */
+  private getAccountEvents(accountId: string): CanonicalEvent[] {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events WHERE origin_account_id = ? ORDER BY start_ts ASC`,
+        accountId,
+      )
+      .toArray();
+
+    return rows.map((r) => this.rowToCanonicalEvent(r));
+  }
+
+  /**
+   * Execute an ICS-to-OAuth upgrade plan within a single DO transaction.
+   *
+   * Steps:
+   * 1. Delete all canonical events for the ICS account (they are being replaced)
+   * 2. Upsert merged events (ICS events enriched with provider metadata)
+   * 3. Upsert new provider events (events not in the ICS feed)
+   * 4. Journal the upgrade operation
+   *
+   * Orphaned ICS events (in ICS but not matched to provider) are preserved
+   * per BR-1 by re-inserting them under the OAuth account ID so they are
+   * not lost during upgrade.
+   *
+   * Per ADR-5: every mutation produces a journal entry.
+   */
+  private async executeUpgradePlan(params: {
+    ics_account_id: string;
+    oauth_account_id: string;
+    merged_events: MergedEvent[];
+    new_events: UpgradeProviderEvent[];
+    orphaned_events: UpgradeIcsEvent[];
+  }): Promise<void> {
+    this.ensureMigrated();
+
+    // Step 1: Delete all canonical events for the ICS account
+    const icsEvents = this.sql
+      .exec<{ canonical_event_id: string }>(
+        `SELECT canonical_event_id FROM canonical_events WHERE origin_account_id = ?`,
+        params.ics_account_id,
+      )
+      .toArray();
+
+    for (const evt of icsEvents) {
+      // Clean up mirrors first (FK constraint)
+      this.sql.exec(
+        `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+        evt.canonical_event_id,
+      );
+
+      this.writeJournal(
+        evt.canonical_event_id,
+        "deleted",
+        "upgrade",
+        {
+          reason: "ics_upgrade",
+          ics_account_id: params.ics_account_id,
+          oauth_account_id: params.oauth_account_id,
+        },
+        "ics_upgrade",
+      );
+    }
+
+    this.sql.exec(
+      `DELETE FROM canonical_events WHERE origin_account_id = ?`,
+      params.ics_account_id,
+    );
+
+    // Step 2: Upsert merged events under the OAuth account
+    for (const merged of params.merged_events) {
+      const eventId = generateId("event");
+      const startTs = merged.start.dateTime ?? merged.start.date ?? "";
+      const endTs = merged.end.dateTime ?? merged.end.date ?? "";
+
+      this.sql.exec(
+        `INSERT INTO canonical_events (
+          canonical_event_id, origin_account_id, origin_event_id,
+          title, description, location, start_ts, end_ts, timezone,
+          all_day, status, visibility, transparency, recurrence_rule,
+          source, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
+        eventId,
+        merged.origin_account_id,
+        merged.origin_event_id,
+        merged.title ?? null,
+        merged.description ?? null,
+        merged.location ?? null,
+        startTs,
+        endTs,
+        merged.start.timeZone ?? null,
+        merged.all_day ? 1 : 0,
+        merged.status ?? "confirmed",
+        merged.visibility ?? "default",
+        merged.transparency ?? "opaque",
+        merged.recurrence_rule ?? null,
+        merged.source,
+      );
+
+      this.writeJournal(
+        eventId,
+        "created",
+        "upgrade",
+        {
+          reason: "ics_upgrade_merged",
+          matched_by: merged.matched_by,
+          confidence: merged.confidence,
+          enriched_fields: merged.enriched_fields,
+        },
+        "ics_upgrade",
+      );
+    }
+
+    // Step 3: Upsert new provider events (not in ICS feed)
+    for (const newEvt of params.new_events) {
+      const eventId = generateId("event");
+      const startTs = newEvt.start.dateTime ?? newEvt.start.date ?? "";
+      const endTs = newEvt.end.dateTime ?? newEvt.end.date ?? "";
+
+      this.sql.exec(
+        `INSERT INTO canonical_events (
+          canonical_event_id, origin_account_id, origin_event_id,
+          title, description, location, start_ts, end_ts, timezone,
+          all_day, status, visibility, transparency, recurrence_rule,
+          source, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
+        eventId,
+        newEvt.origin_account_id,
+        newEvt.origin_event_id,
+        newEvt.title ?? null,
+        newEvt.description ?? null,
+        newEvt.location ?? null,
+        startTs,
+        endTs,
+        newEvt.start.timeZone ?? null,
+        newEvt.all_day ? 1 : 0,
+        newEvt.status ?? "confirmed",
+        newEvt.visibility ?? "default",
+        newEvt.transparency ?? "opaque",
+        newEvt.recurrence_rule ?? null,
+        newEvt.source,
+      );
+
+      this.writeJournal(
+        eventId,
+        "created",
+        "upgrade",
+        { reason: "ics_upgrade_new_provider_event" },
+        "ics_upgrade",
+      );
+    }
+
+    // Step 4: Preserve orphaned ICS events under the OAuth account
+    // Per BR-1: all existing event data is preserved during upgrade
+    for (const orphan of params.orphaned_events) {
+      const eventId = generateId("event");
+      const startTs = orphan.start.dateTime ?? orphan.start.date ?? "";
+      const endTs = orphan.end.dateTime ?? orphan.end.date ?? "";
+
+      this.sql.exec(
+        `INSERT INTO canonical_events (
+          canonical_event_id, origin_account_id, origin_event_id,
+          title, description, location, start_ts, end_ts, timezone,
+          all_day, status, visibility, transparency, recurrence_rule,
+          source, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
+        eventId,
+        params.oauth_account_id,
+        orphan.origin_event_id,
+        orphan.title ?? null,
+        orphan.description ?? null,
+        orphan.location ?? null,
+        startTs,
+        endTs,
+        orphan.start.timeZone ?? null,
+        orphan.all_day ? 1 : 0,
+        orphan.status ?? "confirmed",
+        orphan.visibility ?? "default",
+        orphan.transparency ?? "opaque",
+        orphan.recurrence_rule ?? null,
+        "ics_feed",
+      );
+
+      this.writeJournal(
+        eventId,
+        "created",
+        "upgrade",
+        {
+          reason: "ics_upgrade_orphaned_preserved",
+          original_account_id: orphan.origin_account_id,
+        },
+        "ics_upgrade",
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -5654,6 +5865,28 @@ export class UserGraphDO {
           };
           const session = this.completeOnboardingSession(body.user_id);
           return Response.json(session);
+        }
+
+        // ---------------------------------------------------------------
+        // ICS Upgrade Flow RPC endpoints (TM-1rs / TM-d17.5)
+        // ---------------------------------------------------------------
+
+        case "/getAccountEvents": {
+          const body = (await request.json()) as { account_id: string };
+          const events = this.getAccountEvents(body.account_id);
+          return Response.json({ events });
+        }
+
+        case "/executeUpgrade": {
+          const body = (await request.json()) as {
+            ics_account_id: string;
+            oauth_account_id: string;
+            merged_events: MergedEvent[];
+            new_events: UpgradeProviderEvent[];
+            orphaned_events: UpgradeIcsEvent[];
+          };
+          await this.executeUpgradePlan(body);
+          return Response.json({ ok: true });
         }
 
         default:
