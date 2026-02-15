@@ -22,8 +22,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } from "@tminus/shared";
-import { UserGraphDO, mergeIntervals, computeFreeIntervals } from "./index";
-import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult, Constraint } from "./index";
+import { UserGraphDO, mergeIntervals, computeFreeIntervals, expandWorkingHoursToOutsideBusy } from "./index";
+import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult, Constraint, WorkingHoursConfig } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -2973,5 +2973,731 @@ describe("UserGraphDO constraint CRUD", () => {
       expect(result.free_intervals[1].start).toBe("2026-03-10T17:00:00Z");
       expect(result.free_intervals[1].end).toBe("2026-03-10T18:00:00Z");
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // addConstraint -- working_hours constraint creation and validation
+  // -------------------------------------------------------------------------
+
+  describe("addConstraint with kind=working_hours", () => {
+    it("creates a working_hours constraint with valid config", () => {
+      const constraint = ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "America/New_York",
+        },
+        null,
+        null,
+      );
+
+      expect(constraint.constraint_id).toMatch(/^cst_/);
+      expect(constraint.kind).toBe("working_hours");
+      expect(constraint.config_json).toEqual({
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "America/New_York",
+      });
+      // working_hours constraints do not require active_from/active_to
+      expect(constraint.active_from).toBeNull();
+      expect(constraint.active_to).toBeNull();
+    });
+
+    it("does NOT create derived canonical events (unlike trip)", () => {
+      const constraint = ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // No derived events should exist
+      const events = db
+        .prepare("SELECT * FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<Record<string, unknown>>;
+      expect(events).toHaveLength(0);
+    });
+
+    it("supports weekend working hours (e.g. Saturday=6, Sunday=0)", () => {
+      const constraint = ug.addConstraint(
+        "working_hours",
+        {
+          days: [0, 6],
+          start_time: "10:00",
+          end_time: "14:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      expect(constraint.kind).toBe("working_hours");
+      expect(constraint.config_json.days).toEqual([0, 6]);
+    });
+
+    it("supports single-day working hours", () => {
+      const constraint = ug.addConstraint(
+        "working_hours",
+        {
+          days: [3],
+          start_time: "08:00",
+          end_time: "12:00",
+          timezone: "Europe/London",
+        },
+        null,
+        null,
+      );
+
+      expect(constraint.config_json.days).toEqual([3]);
+    });
+  });
+
+  describe("addConstraint working_hours validation", () => {
+    it("rejects missing days array", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("non-empty 'days' array");
+    });
+
+    it("rejects empty days array", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("non-empty 'days' array");
+    });
+
+    it("rejects day value less than 0", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [-1], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("integers 0-6");
+    });
+
+    it("rejects day value greater than 6", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [7], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("integers 0-6");
+    });
+
+    it("rejects non-integer day values", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1.5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("integers 0-6");
+    });
+
+    it("rejects duplicate day values", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1, 2, 1], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("must not contain duplicates");
+    });
+
+    it("rejects missing start_time", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'start_time' in HH:MM");
+    });
+
+    it("rejects invalid start_time format", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "9am", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'start_time' in HH:MM");
+    });
+
+    it("rejects start_time with invalid hour (25:00)", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "25:00", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'start_time' in HH:MM");
+    });
+
+    it("rejects start_time with invalid minutes (09:60)", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:60", end_time: "17:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'start_time' in HH:MM");
+    });
+
+    it("rejects missing end_time", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'end_time' in HH:MM");
+    });
+
+    it("rejects invalid end_time format", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", end_time: "5pm", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("'end_time' in HH:MM");
+    });
+
+    it("rejects end_time equal to start_time", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", end_time: "09:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("end_time must be after start_time");
+    });
+
+    it("rejects end_time before start_time", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "17:00", end_time: "09:00", timezone: "UTC" },
+          null,
+          null,
+        ),
+      ).toThrow("end_time must be after start_time");
+    });
+
+    it("rejects missing timezone", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", end_time: "17:00" },
+          null,
+          null,
+        ),
+      ).toThrow("must include a 'timezone' string");
+    });
+
+    it("rejects empty timezone string", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", end_time: "17:00", timezone: "" },
+          null,
+          null,
+        ),
+      ).toThrow("must include a 'timezone' string");
+    });
+
+    it("rejects invalid IANA timezone", () => {
+      expect(() =>
+        ug.addConstraint(
+          "working_hours",
+          { days: [1], start_time: "09:00", end_time: "17:00", timezone: "Not/A/Timezone" },
+          null,
+          null,
+        ),
+      ).toThrow("not a valid IANA timezone");
+    });
+  });
+
+  describe("listConstraints with working_hours", () => {
+    it("filters by kind=working_hours", () => {
+      ug.addConstraint(
+        "trip",
+        { name: "Trip A", timezone: "UTC", block_policy: "BUSY" },
+        "2026-03-01T00:00:00Z",
+        "2026-03-05T00:00:00Z",
+      );
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      const trips = ug.listConstraints("trip");
+      expect(trips).toHaveLength(1);
+      expect(trips[0].kind).toBe("trip");
+
+      const wh = ug.listConstraints("working_hours");
+      expect(wh).toHaveLength(1);
+      expect(wh[0].kind).toBe("working_hours");
+
+      const all = ug.listConstraints();
+      expect(all).toHaveLength(2);
+    });
+  });
+
+  describe("deleteConstraint working_hours", () => {
+    it("deletes a working_hours constraint (no derived events to cascade)", async () => {
+      const constraint = ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      const deleted = await ug.deleteConstraint(constraint.constraint_id);
+      expect(deleted).toBe(true);
+
+      const found = ug.getConstraint(constraint.constraint_id);
+      expect(found).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Working hours influence on availability computation
+  // -------------------------------------------------------------------------
+
+  describe("working hours in availability computation", () => {
+    it("marks time outside working hours as busy (UTC, single weekday)", () => {
+      // Wednesday Feb 18, 2026 is a Wednesday (day 3)
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [3], // Wednesday only
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Query: Wednesday 2026-02-18 00:00 to 23:59:59 UTC
+      const result = ug.computeAvailability({
+        start: "2026-02-18T00:00:00Z",
+        end: "2026-02-18T23:59:59Z",
+      });
+
+      // Should have busy intervals before 09:00 and after 17:00
+      expect(result.busy_intervals.length).toBeGreaterThanOrEqual(2);
+
+      // Free interval should be 09:00-17:00 (the working hours)
+      expect(result.free_intervals).toHaveLength(1);
+      expect(result.free_intervals[0].start).toBe("2026-02-18T09:00:00.000Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-18T17:00:00.000Z");
+    });
+
+    it("entire day is busy when it is not a working day", () => {
+      // Saturday Feb 21, 2026 is a Saturday (day 6)
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5], // Mon-Fri only
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Query: Saturday 2026-02-21
+      const result = ug.computeAvailability({
+        start: "2026-02-21T00:00:00Z",
+        end: "2026-02-21T23:59:59Z",
+      });
+
+      // Entire day should be busy (one big busy interval)
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-21T00:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-21T23:59:59Z");
+
+      // No free intervals
+      expect(result.free_intervals).toHaveLength(0);
+    });
+
+    it("merges working hours busy with event busy correctly", async () => {
+      // Monday Feb 16, 2026 is a Monday (day 1)
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1], // Monday only
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Add a meeting during working hours: 10:00-11:00
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_wh_meeting",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_wh_meeting",
+          title: "Team Standup",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+      });
+
+      // Outside working hours: 08:00-09:00 and 17:00-18:00 are busy
+      // Meeting: 10:00-11:00 is busy
+      // Free: 09:00-10:00 and 11:00-17:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00.000Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T10:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T11:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T17:00:00.000Z");
+    });
+
+    it("multiple working_hours constraints union their working periods", () => {
+      // Two constraints for the same day but different hours
+      // Constraint 1: Mon-Fri 09:00-12:00
+      // Constraint 2: Mon-Fri 14:00-18:00
+      // Combined working hours: 09:00-12:00 and 14:00-18:00
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "12:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "14:00",
+          end_time: "18:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Monday Feb 16, 2026
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T19:00:00Z",
+      });
+
+      // Outside working hours: 08:00-09:00, 12:00-14:00, 18:00-19:00
+      // Free (working hours): 09:00-12:00 and 14:00-18:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00.000Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T12:00:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-16T14:00:00.000Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-16T18:00:00.000Z");
+    });
+
+    it("no working_hours constraints means no restriction on availability", async () => {
+      // No working hours constraints -- just event-based availability
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_no_wh",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_no_wh",
+          title: "Meeting",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+      });
+
+      // Only the meeting should be busy
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-02-16T10:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-02-16T11:00:00Z");
+
+      // Free before and after
+      expect(result.free_intervals).toHaveLength(2);
+    });
+
+    it("multi-day range applies working hours to each day correctly", () => {
+      // Mon-Fri 09:00-17:00 UTC
+      ug.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      // Monday Feb 16 to Tuesday Feb 17, 2026
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-17T18:00:00Z",
+      });
+
+      // Free intervals should be the working hours of each day:
+      // Mon 09:00-17:00 and Tue 09:00-17:00
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-02-16T09:00:00.000Z");
+      expect(result.free_intervals[0].end).toBe("2026-02-16T17:00:00.000Z");
+      expect(result.free_intervals[1].start).toBe("2026-02-17T09:00:00.000Z");
+      expect(result.free_intervals[1].end).toBe("2026-02-17T17:00:00.000Z");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure function tests: expandWorkingHoursToOutsideBusy
+// ---------------------------------------------------------------------------
+
+describe("expandWorkingHoursToOutsideBusy (pure function)", () => {
+  it("returns empty array when no constraints provided", () => {
+    const result = expandWorkingHoursToOutsideBusy(
+      [],
+      "2026-02-16T08:00:00Z",
+      "2026-02-16T18:00:00Z",
+    );
+    expect(result).toEqual([]);
+  });
+
+  it("marks entire range as busy when day is not a working day", () => {
+    // Saturday Feb 21, 2026 -- constraint only covers Mon-Fri
+    const result = expandWorkingHoursToOutsideBusy(
+      [{
+        config_json: {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+      }],
+      "2026-02-21T10:00:00Z",
+      "2026-02-21T14:00:00Z",
+    );
+
+    // Entire range is outside working hours
+    expect(result).toHaveLength(1);
+    expect(result[0].start).toBe("2026-02-21T10:00:00Z");
+    expect(result[0].end).toBe("2026-02-21T14:00:00Z");
+    expect(result[0].account_ids).toContain("working_hours");
+  });
+
+  it("produces correct busy intervals for UTC working day", () => {
+    // Monday Feb 16, 2026 in UTC
+    const result = expandWorkingHoursToOutsideBusy(
+      [{
+        config_json: {
+          days: [1], // Monday
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+      }],
+      "2026-02-16T00:00:00Z",
+      "2026-02-16T23:59:59Z",
+    );
+
+    // Should have 2 busy intervals: before 09:00 and after 17:00
+    expect(result).toHaveLength(2);
+    expect(result[0].end).toBe("2026-02-16T09:00:00.000Z");
+    expect(result[1].start).toBe("2026-02-16T17:00:00.000Z");
+  });
+
+  it("handles multiple constraints by unioning working periods", () => {
+    // Monday Feb 16, 2026
+    // Constraint 1: morning shift 06:00-12:00
+    // Constraint 2: afternoon shift 14:00-20:00
+    const result = expandWorkingHoursToOutsideBusy(
+      [
+        {
+          config_json: {
+            days: [1],
+            start_time: "06:00",
+            end_time: "12:00",
+            timezone: "UTC",
+          },
+        },
+        {
+          config_json: {
+            days: [1],
+            start_time: "14:00",
+            end_time: "20:00",
+            timezone: "UTC",
+          },
+        },
+      ],
+      "2026-02-16T00:00:00Z",
+      "2026-02-16T23:59:59Z",
+    );
+
+    // Busy periods: 00:00-06:00, 12:00-14:00, 20:00-23:59:59
+    expect(result).toHaveLength(3);
+    expect(result[0].end).toBe("2026-02-16T06:00:00.000Z");
+    expect(result[1].start).toBe("2026-02-16T12:00:00.000Z");
+    expect(result[1].end).toBe("2026-02-16T14:00:00.000Z");
+    expect(result[2].start).toBe("2026-02-16T20:00:00.000Z");
+  });
+
+  it("handles overlapping constraint periods by merging", () => {
+    // Monday Feb 16, 2026
+    // Constraint 1: 08:00-13:00
+    // Constraint 2: 11:00-17:00
+    // Union: 08:00-17:00
+    const result = expandWorkingHoursToOutsideBusy(
+      [
+        {
+          config_json: {
+            days: [1],
+            start_time: "08:00",
+            end_time: "13:00",
+            timezone: "UTC",
+          },
+        },
+        {
+          config_json: {
+            days: [1],
+            start_time: "11:00",
+            end_time: "17:00",
+            timezone: "UTC",
+          },
+        },
+      ],
+      "2026-02-16T06:00:00Z",
+      "2026-02-16T20:00:00Z",
+    );
+
+    // Busy periods: 06:00-08:00 and 17:00-20:00
+    expect(result).toHaveLength(2);
+    expect(result[0].start).toBe("2026-02-16T06:00:00.000Z");
+    expect(result[0].end).toBe("2026-02-16T08:00:00.000Z");
+    expect(result[1].start).toBe("2026-02-16T17:00:00.000Z");
+    expect(result[1].end).toBe("2026-02-16T20:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Static validation method tests
+// ---------------------------------------------------------------------------
+
+describe("UserGraphDO.validateWorkingHoursConfig (static)", () => {
+  it("accepts a valid config", () => {
+    expect(() =>
+      UserGraphDO.validateWorkingHoursConfig({
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "America/New_York",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts edge case times (00:00, 23:59)", () => {
+    expect(() =>
+      UserGraphDO.validateWorkingHoursConfig({
+        days: [0],
+        start_time: "00:00",
+        end_time: "23:59",
+        timezone: "UTC",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts all valid IANA timezones", () => {
+    const validTimezones = [
+      "UTC",
+      "America/New_York",
+      "America/Los_Angeles",
+      "Europe/London",
+      "Europe/Paris",
+      "Asia/Tokyo",
+      "Australia/Sydney",
+    ];
+    for (const tz of validTimezones) {
+      expect(() =>
+        UserGraphDO.validateWorkingHoursConfig({
+          days: [1],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: tz,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects string day values", () => {
+    expect(() =>
+      UserGraphDO.validateWorkingHoursConfig({
+        days: ["Monday"],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      }),
+    ).toThrow("integers 0-6");
+  });
+
+  it("rejects null days", () => {
+    expect(() =>
+      UserGraphDO.validateWorkingHoursConfig({
+        days: null,
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      }),
+    ).toThrow("non-empty 'days' array");
   });
 });

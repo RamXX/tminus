@@ -1292,11 +1292,82 @@ export class UserGraphDO {
   ]);
 
   /**
+   * Validate a working_hours config_json object.
+   *
+   * Required fields:
+   * - days: number[] with values 0-6 (Sunday=0 through Saturday=6), non-empty
+   * - start_time: string in HH:MM 24-hour format
+   * - end_time: string in HH:MM 24-hour format, must be after start_time
+   * - timezone: string, must be a valid IANA timezone
+   *
+   * Throws on validation failure.
+   */
+  static validateWorkingHoursConfig(configJson: Record<string, unknown>): void {
+    // days validation
+    if (!Array.isArray(configJson.days) || configJson.days.length === 0) {
+      throw new Error(
+        "Working hours config_json must include a non-empty 'days' array",
+      );
+    }
+    for (const day of configJson.days) {
+      if (typeof day !== "number" || !Number.isInteger(day) || day < 0 || day > 6) {
+        throw new Error(
+          `Working hours config_json.days values must be integers 0-6 (Sunday=0 through Saturday=6), got ${JSON.stringify(day)}`,
+        );
+      }
+    }
+    // Check for duplicates
+    const uniqueDays = new Set(configJson.days as number[]);
+    if (uniqueDays.size !== (configJson.days as number[]).length) {
+      throw new Error("Working hours config_json.days must not contain duplicates");
+    }
+
+    // start_time validation
+    const timeRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (typeof configJson.start_time !== "string" || !timeRegex.test(configJson.start_time)) {
+      throw new Error(
+        "Working hours config_json must include 'start_time' in HH:MM 24-hour format",
+      );
+    }
+
+    // end_time validation
+    if (typeof configJson.end_time !== "string" || !timeRegex.test(configJson.end_time)) {
+      throw new Error(
+        "Working hours config_json must include 'end_time' in HH:MM 24-hour format",
+      );
+    }
+
+    // end_time must be after start_time
+    if (configJson.end_time <= configJson.start_time) {
+      throw new Error(
+        "Working hours config_json.end_time must be after start_time",
+      );
+    }
+
+    // timezone validation
+    if (typeof configJson.timezone !== "string" || configJson.timezone.length === 0) {
+      throw new Error(
+        "Working hours config_json must include a 'timezone' string",
+      );
+    }
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: configJson.timezone });
+    } catch {
+      throw new Error(
+        `Working hours config_json.timezone "${configJson.timezone}" is not a valid IANA timezone`,
+      );
+    }
+  }
+
+  /**
    * Add a new constraint and generate any derived canonical events.
    *
    * For kind="trip": creates a single continuous busy block event
    * spanning active_from to active_to, with source="system" and
    * origin_account_id="internal".
+   *
+   * For kind="working_hours": stores the constraint for use by
+   * computeAvailability. No derived events are generated.
    *
    * Returns the created constraint.
    */
@@ -1316,6 +1387,10 @@ export class UserGraphDO {
     }
 
     // Kind-specific validation
+    if (kind === "working_hours") {
+      UserGraphDO.validateWorkingHoursConfig(configJson);
+    }
+
     if (kind === "trip") {
       if (!configJson.name || typeof configJson.name !== "string") {
         throw new Error("Trip constraint config_json must include a 'name' string");
@@ -2318,6 +2393,11 @@ export class UserGraphDO {
    * for a given time range. Queries canonical_events from DO SQLite,
    * merges overlapping busy intervals, and computes free gaps.
    *
+   * Also applies working_hours constraints: times outside any active
+   * working_hours constraint are treated as busy (unavailable).
+   * When multiple working_hours constraints exist, their working periods
+   * are unioned (a time is available if ANY constraint says it's working time).
+   *
    * Performance target (NFR-16): under 500ms, served entirely from DO SQLite.
    */
   computeAvailability(query: AvailabilityQuery): AvailabilityResult {
@@ -2358,6 +2438,16 @@ export class UserGraphDO {
       end: row.end_ts,
       account_ids: [row.origin_account_id],
     }));
+
+    // Add busy intervals from working_hours constraints
+    // (times outside working hours are busy)
+    const workingHoursConstraints = this.listConstraints("working_hours");
+    const outsideWorkingHours = expandWorkingHoursToOutsideBusy(
+      workingHoursConstraints,
+      query.start,
+      query.end,
+    );
+    rawIntervals.push(...outsideWorkingHours);
 
     // Merge overlapping intervals
     const busyIntervals = mergeIntervals(rawIntervals);
@@ -2555,4 +2645,295 @@ export function computeFreeIntervals(
   }
 
   return free;
+}
+
+// ---------------------------------------------------------------------------
+// Working hours constraint helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Working hours config shape as stored in config_json.
+ */
+export interface WorkingHoursConfig {
+  /** Days of the week this applies to (0=Sunday through 6=Saturday). */
+  readonly days: number[];
+  /** Start time in HH:MM 24-hour format. */
+  readonly start_time: string;
+  /** End time in HH:MM 24-hour format. */
+  readonly end_time: string;
+  /** IANA timezone string (e.g. "America/New_York"). */
+  readonly timezone: string;
+}
+
+/**
+ * Expand working_hours constraints into "outside working hours" busy intervals.
+ *
+ * For a given time range, this function determines which periods fall OUTSIDE
+ * working hours and returns them as busy intervals. When multiple working_hours
+ * constraints exist, their working periods are unioned: a time slot is
+ * considered "working time" if ANY constraint covers it. Only time slots
+ * not covered by any constraint become busy.
+ *
+ * Algorithm:
+ * 1. For each day in the range, compute working periods from all constraints
+ * 2. Union (merge) all working periods
+ * 3. The gaps between working periods (and before/after them) are "outside
+ *    working hours" and thus busy
+ *
+ * Returns empty array when no working_hours constraints exist.
+ */
+export function expandWorkingHoursToOutsideBusy(
+  constraints: readonly { config_json: Record<string, unknown> }[],
+  rangeStart: string,
+  rangeEnd: string,
+): BusyInterval[] {
+  if (constraints.length === 0) return [];
+
+  const configs: WorkingHoursConfig[] = constraints.map(
+    (c) => c.config_json as unknown as WorkingHoursConfig,
+  );
+
+  const rangeStartMs = new Date(rangeStart).getTime();
+  const rangeEndMs = new Date(rangeEnd).getTime();
+
+  if (rangeStartMs >= rangeEndMs) return [];
+
+  // Collect all working intervals across all constraints for the range
+  const workingIntervals: { start: number; end: number }[] = [];
+
+  // Iterate day by day across the range. We expand slightly to cover
+  // timezone edge cases (a working day in e.g. Pacific could start on the
+  // "previous" UTC day).
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  // Start one day before range start to handle timezone offsets
+  const scanStart = rangeStartMs - oneDayMs;
+  const scanEnd = rangeEndMs + oneDayMs;
+
+  for (const config of configs) {
+    // For each day in the scan window, check if this config applies
+    let dayStart = scanStart;
+    while (dayStart < scanEnd) {
+      const dayDate = new Date(dayStart);
+      // Get day-of-week in the constraint's timezone
+      const dayOfWeek = getDayOfWeekInTimezone(dayDate, config.timezone);
+
+      if (config.days.includes(dayOfWeek)) {
+        // This constraint applies to this day
+        const workStart = getTimestampForTimeInTimezone(
+          dayDate,
+          config.start_time,
+          config.timezone,
+        );
+        const workEnd = getTimestampForTimeInTimezone(
+          dayDate,
+          config.end_time,
+          config.timezone,
+        );
+
+        // Only include if it overlaps with the query range
+        if (workEnd > rangeStartMs && workStart < rangeEndMs) {
+          workingIntervals.push({
+            start: Math.max(workStart, rangeStartMs),
+            end: Math.min(workEnd, rangeEndMs),
+          });
+        }
+      }
+
+      dayStart += oneDayMs;
+    }
+  }
+
+  if (workingIntervals.length === 0) {
+    // No working hours at all in this range -- entire range is outside working hours
+    return [{
+      start: rangeStart,
+      end: rangeEnd,
+      account_ids: ["working_hours"],
+    }];
+  }
+
+  // Merge overlapping working intervals
+  workingIntervals.sort((a, b) => a.start - b.start);
+  const mergedWorking: { start: number; end: number }[] = [];
+  let current = { ...workingIntervals[0] };
+
+  for (let i = 1; i < workingIntervals.length; i++) {
+    const next = workingIntervals[i];
+    if (next.start <= current.end) {
+      current.end = Math.max(current.end, next.end);
+    } else {
+      mergedWorking.push(current);
+      current = { ...next };
+    }
+  }
+  mergedWorking.push(current);
+
+  // Compute gaps (outside working hours) between working intervals
+  const outsideBusy: BusyInterval[] = [];
+  let cursor = rangeStartMs;
+
+  for (const work of mergedWorking) {
+    if (work.start > cursor) {
+      outsideBusy.push({
+        start: new Date(cursor).toISOString(),
+        end: new Date(work.start).toISOString(),
+        account_ids: ["working_hours"],
+      });
+    }
+    if (work.end > cursor) {
+      cursor = work.end;
+    }
+  }
+
+  // Gap after the last working interval
+  if (cursor < rangeEndMs) {
+    outsideBusy.push({
+      start: new Date(cursor).toISOString(),
+      end: rangeEnd,
+      account_ids: ["working_hours"],
+    });
+  }
+
+  return outsideBusy;
+}
+
+/**
+ * Get the day of week (0=Sunday through 6=Saturday) for a Date
+ * in a specific timezone.
+ */
+function getDayOfWeekInTimezone(date: Date, timezone: string): number {
+  // Format the date in the target timezone and extract the weekday
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+  });
+  const weekdayStr = formatter.format(date);
+
+  const dayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+
+  return dayMap[weekdayStr] ?? 0;
+}
+
+/**
+ * Get the UTC timestamp (ms) for a specific HH:MM time on a given date
+ * in a specific timezone.
+ *
+ * For example, getTimestampForTimeInTimezone(date, "09:00", "America/New_York")
+ * returns the UTC ms timestamp for 9:00 AM Eastern on that date.
+ */
+function getTimestampForTimeInTimezone(
+  baseDate: Date,
+  time: string,
+  timezone: string,
+): number {
+  // Get the date components in the target timezone
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const dateParts = formatter.format(baseDate); // "YYYY-MM-DD"
+
+  const [hours, minutes] = time.split(":").map(Number);
+
+  // Construct an ISO string in the target timezone, then find the UTC equivalent.
+  // We use a binary search approach: create a Date for the target local time
+  // by formatting and comparing.
+  //
+  // Simpler approach: use the date parts and known offset.
+  // Get the timezone offset at this approximate time.
+  const approxDate = new Date(`${dateParts}T${time}:00Z`);
+
+  // Find offset: format the approxDate in the timezone and compare
+  const tzFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  // Use an iterative approach: guess UTC, check local, adjust
+  // Start with naive UTC guess
+  let utcGuess = new Date(`${dateParts}T${time}:00Z`).getTime();
+
+  // Get what local time this UTC timestamp maps to in the timezone
+  const localParts = getLocalTimeParts(new Date(utcGuess), timezone);
+  const targetMinutes = hours * 60 + minutes;
+  const actualMinutes = localParts.hours * 60 + localParts.minutes;
+
+  // Adjust by the difference
+  const diffMs = (targetMinutes - actualMinutes) * 60 * 1000;
+
+  // Also check if the date rolled over
+  if (localParts.dateStr !== dateParts) {
+    // Date mismatch -- more complex timezone handling needed
+    // Re-derive: if local date is day+1, subtract 24h; if day-1, add 24h
+    const localDate = new Date(localParts.dateStr).getTime();
+    const targetDate = new Date(dateParts).getTime();
+    const dateDiffMs = targetDate - localDate;
+    return utcGuess + diffMs + dateDiffMs;
+  }
+
+  return utcGuess + diffMs;
+}
+
+/**
+ * Extract local time parts (hours, minutes, date string) for a UTC timestamp
+ * in a specific timezone.
+ */
+function getLocalTimeParts(
+  date: Date,
+  timezone: string,
+): { hours: number; minutes: number; dateStr: string } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  let hours = 0;
+  let minutes = 0;
+  let year = "";
+  let month = "";
+  let day = "";
+
+  for (const part of parts) {
+    switch (part.type) {
+      case "hour":
+        hours = parseInt(part.value, 10);
+        // Handle midnight: Intl formats 24 as "24" in hour24 mode
+        if (hours === 24) hours = 0;
+        break;
+      case "minute":
+        minutes = parseInt(part.value, 10);
+        break;
+      case "year":
+        year = part.value;
+        break;
+      case "month":
+        month = part.value.padStart(2, "0");
+        break;
+      case "day":
+        day = part.value.padStart(2, "0");
+        break;
+    }
+  }
+
+  return { hours, minutes, dateStr: `${year}-${month}-${day}` };
 }
