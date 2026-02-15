@@ -197,6 +197,29 @@ export type {
   NormalizedFeedEvent,
 } from "./ics-feed";
 
+// Re-export full ICS feed parser (TM-d17.2: RFC 5545 full parsing)
+export {
+  parseIcsFeed,
+  expandRecurrence,
+  extractMeetingUrl,
+  NormalizedFeedEventSchema,
+  ParsedAttendeeSchema,
+} from "./ics-feed-parser";
+export type {
+  ExtendedFeedEvent,
+  ParsedComponent,
+  ParsedAttendee,
+  ParsedOrganizer,
+  ParsedTodo,
+  ParsedFreeBusy,
+  FreeBusyPeriod,
+  ParsedTimezone,
+  TimezoneComponent,
+  ParsedFeed,
+  RecurrenceExpansionOptions,
+  RecurrenceInstance,
+} from "./ics-feed-parser";
+
 // Re-export authentication utilities (JWT, password hashing)
 export {
   generateJWT,
