@@ -904,6 +904,98 @@ export async function handleStripeWebhook(
 }
 
 /**
+ * POST /v1/billing/portal
+ *
+ * Create a Stripe Customer Portal session for the authenticated user.
+ * The portal allows users to manage their subscription, update payment
+ * methods, view invoices, and cancel.
+ */
+export async function handleCreatePortalSession(
+  userId: string,
+  env: BillingEnv,
+): Promise<Response> {
+  try {
+    // Look up the user's Stripe customer ID
+    const row = await env.DB
+      .prepare(
+        `SELECT stripe_customer_id FROM subscriptions
+         WHERE user_id = ?1 AND stripe_customer_id IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(userId)
+      .first<{ stripe_customer_id: string }>();
+
+    if (!row) {
+      return billingErrorResponse("NOT_FOUND", "No active subscription found", 404);
+    }
+
+    // Create a Stripe Billing Portal session
+    const body = new URLSearchParams();
+    body.append("customer", row.stripe_customer_id);
+    body.append("return_url", `${APP_BASE_URL}/#/billing`);
+
+    const response = await fetch(`${STRIPE_API_BASE}/billing_portal/sessions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      throw new Error(`Stripe API error: ${response.status} ${errorData}`);
+    }
+
+    const session = await response.json() as { id: string; url: string };
+    return billingSuccessResponse({ portal_url: session.url }, 201);
+  } catch (err) {
+    console.error("Failed to create portal session", err);
+    return billingErrorResponse("STRIPE_ERROR", "Failed to create portal session", 502);
+  }
+}
+
+/**
+ * GET /v1/billing/events
+ *
+ * Get billing event history for the authenticated user.
+ * Returns the most recent 50 events, ordered by creation date descending.
+ */
+export async function handleGetBillingEvents(
+  userId: string,
+  env: BillingEnv,
+): Promise<Response> {
+  try {
+    const rows = await env.DB
+      .prepare(
+        `SELECT event_id, event_type, old_tier, new_tier,
+                old_status, new_status, created_at
+         FROM billing_events
+         WHERE user_id = ?1
+         ORDER BY created_at DESC
+         LIMIT 50`,
+      )
+      .bind(userId)
+      .all<{
+        event_id: string;
+        event_type: string;
+        old_tier: string | null;
+        new_tier: string | null;
+        old_status: string | null;
+        new_status: string | null;
+        created_at: string;
+      }>();
+
+    return billingSuccessResponse(rows.results ?? []);
+  } catch (err) {
+    console.error("Failed to get billing events", err);
+    return billingErrorResponse("INTERNAL_ERROR", "Failed to get billing events", 500);
+  }
+}
+
+/**
  * GET /v1/billing/status
  *
  * Get the current subscription status for the authenticated user.

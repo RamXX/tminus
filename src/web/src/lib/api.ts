@@ -273,3 +273,44 @@ export async function retryMirror(
     { method: "POST", token },
   );
 }
+
+/** GET /api/v1/billing/status -- current subscription and plan info. */
+export async function fetchBillingStatus(
+  token: string,
+): Promise<import("./billing").BillingStatusResponse> {
+  return apiFetch<import("./billing").BillingStatusResponse>(
+    "/v1/billing/status",
+    { token },
+  );
+}
+
+/** POST /api/v1/billing/checkout -- create a Stripe Checkout session. */
+export async function createCheckoutSession(
+  token: string,
+  priceId: string,
+): Promise<import("./billing").CheckoutResponse> {
+  return apiFetch<import("./billing").CheckoutResponse>(
+    "/v1/billing/checkout",
+    { method: "POST", body: { price_id: priceId }, token },
+  );
+}
+
+/** POST /api/v1/billing/portal -- create a Stripe Customer Portal session. */
+export async function createPortalSession(
+  token: string,
+): Promise<import("./billing").PortalResponse> {
+  return apiFetch<import("./billing").PortalResponse>(
+    "/v1/billing/portal",
+    { method: "POST", token },
+  );
+}
+
+/** GET /api/v1/billing/events -- fetch billing event history. */
+export async function fetchBillingHistory(
+  token: string,
+): Promise<import("./billing").BillingEvent[]> {
+  return apiFetch<import("./billing").BillingEvent[]>(
+    "/v1/billing/events",
+    { token },
+  );
+}

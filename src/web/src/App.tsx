@@ -9,6 +9,7 @@
  *   #/sync-status -> Sync Status Dashboard (requires auth)
  *   #/policies    -> Policy Management (requires auth)
  *   #/errors      -> Error Recovery (requires auth)
+ *   #/billing     -> Billing & Subscription (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -20,18 +21,24 @@ import { Accounts } from "./pages/Accounts";
 import { SyncStatus } from "./pages/SyncStatus";
 import { Policies } from "./pages/Policies";
 import { ErrorRecovery } from "./pages/ErrorRecovery";
+import { Billing } from "./pages/Billing";
 import {
   fetchSyncStatus,
   fetchAccounts,
   unlinkAccount,
   fetchErrorMirrors,
   retryMirror,
+  fetchBillingStatus,
+  createCheckoutSession,
+  createPortalSession,
+  fetchBillingHistory,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
 function Router() {
   const { token } = useAuth();
   const [route, setRoute] = useState(window.location.hash || "#/");
+  const [accountsCount, setAccountsCount] = useState(0);
 
   useEffect(() => {
     const handler = () => setRoute(window.location.hash || "#/");
@@ -94,6 +101,42 @@ function Router() {
     [token],
   );
 
+  // Fetch accounts count for billing page usage display
+  useEffect(() => {
+    if (!token) return;
+    const routePath = (window.location.hash || "#/").split("?")[0];
+    if (routePath === "#/billing") {
+      fetchAccounts(token).then(
+        (accounts) => setAccountsCount(accounts.length),
+        () => { /* non-critical */ },
+      );
+    }
+  }, [token, route]);
+
+  // Bound billing functions -- injects current token
+  const boundFetchBillingStatus = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchBillingStatus(token);
+  }, [token]);
+
+  const boundCreateCheckoutSession = useCallback(
+    async (priceId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return createCheckoutSession(token, priceId);
+    },
+    [token],
+  );
+
+  const boundCreatePortalSession = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return createPortalSession(token);
+  }, [token]);
+
+  const boundFetchBillingHistory = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchBillingHistory(token);
+  }, [token]);
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -135,6 +178,16 @@ function Router() {
         <ErrorRecovery
           fetchErrors={boundFetchErrors}
           retryMirror={boundRetryMirror}
+        />
+      );
+    case "#/billing":
+      return (
+        <Billing
+          fetchBillingStatus={boundFetchBillingStatus}
+          createCheckoutSession={boundCreateCheckoutSession}
+          createPortalSession={boundCreatePortalSession}
+          fetchBillingHistory={boundFetchBillingHistory}
+          accountsUsed={accountsCount}
         />
       );
     default:

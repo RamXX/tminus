@@ -36,8 +36,15 @@ import {
   handleCreateCheckoutSession,
   handleStripeWebhook,
   handleGetBillingStatus,
+  handleCreatePortalSession,
+  handleGetBillingEvents,
 } from "./routes/billing";
 import type { BillingEnv } from "./routes/billing";
+import {
+  handleCreateSchedulingSession,
+  handleGetSchedulingCandidates,
+  handleCommitSchedulingCandidate,
+} from "./routes/scheduling";
 import { enforceFeatureGate, enforceAccountLimit } from "./middleware/feature-gate";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
 
@@ -2021,6 +2028,22 @@ async function routeAuthenticatedRequest(
         return handleJournal(request, auth, env);
       }
 
+      // -- Scheduling routes ------------------------------------------------
+
+      if (method === "POST" && pathname === "/v1/scheduling/sessions") {
+        return handleCreateSchedulingSession(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/candidates");
+      if (match && method === "GET") {
+        return handleGetSchedulingCandidates(request, auth, env, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/commit");
+      if (match && method === "POST") {
+        return handleCommitSchedulingCandidate(request, auth, env, match.params[0]);
+      }
+
       // -- Billing routes ---------------------------------------------------
 
       if (method === "POST" && pathname === "/v1/billing/checkout") {
@@ -2035,6 +2058,20 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/billing/status") {
         return handleGetBillingStatus(auth.userId, env as unknown as BillingEnv);
+      }
+
+      if (method === "POST" && pathname === "/v1/billing/portal") {
+        if (!env.STRIPE_SECRET_KEY) {
+          return jsonResponse(
+            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+            ErrorCode.INTERNAL_ERROR,
+          );
+        }
+        return handleCreatePortalSession(auth.userId, env as unknown as BillingEnv);
+      }
+
+      if (method === "GET" && pathname === "/v1/billing/events") {
+        return handleGetBillingEvents(auth.userId, env as unknown as BillingEnv);
       }
 
       // -- Fallback ---------------------------------------------------------
