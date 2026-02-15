@@ -15,7 +15,7 @@ test-unit: install
 	pnpm run test:unit
 
 test-integration: install
-	pnpm run test:integration
+	npx vitest run --config vitest.integration.config.ts
 
 test-scripts: install
 	npx vitest run --config scripts/vitest.config.mjs

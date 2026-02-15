@@ -14,8 +14,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
-    "test:unit": "vitest run --testPathPattern='\\.(test|unit\\.test)\\.ts$' --testPathIgnorePatterns='integration'",
-    "test:integration": "vitest run --testPathPattern='integration'",
+    "test:unit": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --root ../.. --config vitest.integration.config.ts --passWithNoTests 'durable-objects/user-graph'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },

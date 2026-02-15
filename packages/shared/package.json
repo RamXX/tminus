@@ -14,8 +14,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:unit": "vitest run --testPathPattern='unit'",
-    "test:integration": "vitest run --testPathPattern='integration'",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --root ../.. --config vitest.integration.config.ts --passWithNoTests 'packages/shared'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },

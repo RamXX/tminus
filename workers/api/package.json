@@ -7,7 +7,7 @@
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
     "test:unit": "vitest run --passWithNoTests",
-    "test:integration": "vitest run --testPathPattern='integration'",
+    "test:integration": "vitest run --root ../.. --config vitest.integration.config.ts --passWithNoTests 'workers/api'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "dev": "wrangler dev",

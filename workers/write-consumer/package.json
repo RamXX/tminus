@@ -6,8 +6,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:unit": "vitest run --testPathPattern='unit\\.test'",
-    "test:integration": "vitest run --testPathPattern='integration\\.test'",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --root ../.. --config vitest.integration.config.ts --passWithNoTests 'workers/write-consumer'",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "dev": "wrangler dev",
