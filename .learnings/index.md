@@ -24,3 +24,6 @@ Accumulated insights from epic retrospectives. Organized by category.
 
 ## Epic Retrospectives
 - [Epic TM-nyj Retro](TM-nyj-retro.md) - Phase 2C: Web Calendar UI (2026-02-14)
+
+## Epic Retrospectives
+- [Epic TM-gj5 Retro](TM-gj5-retro.md) - Phase 2D Trip & Constraint System - 2026-02-14
