@@ -137,3 +137,26 @@ export {
   verifyPassword,
 } from "./auth";
 export type { JWTPayload, SubscriptionTier } from "./auth";
+
+// Re-export rate limiting middleware
+export {
+  checkRateLimit,
+  computeWindowKey,
+  computeWindowReset,
+  selectRateLimitConfig,
+  getRateLimitIdentity,
+  buildRateLimitHeaders,
+  buildRateLimitResponse,
+  detectAuthEndpoint,
+  extractClientIp,
+  applyRateLimitHeaders,
+  TIER_LIMITS,
+  AUTH_ENDPOINT_LIMITS,
+  RATE_LIMIT_KEY_PREFIX,
+} from "./middleware/rate-limit";
+export type {
+  RateLimitTier,
+  RateLimitResult,
+  RateLimitConfig,
+  RateLimitKV,
+} from "./middleware/rate-limit";

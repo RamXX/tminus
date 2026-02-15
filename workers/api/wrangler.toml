@@ -46,8 +46,84 @@ queue = "tminus-write-queue"
 binding = "SESSIONS"
 id = "placeholder-sessions-id"  # Replace with real ID after `wrangler kv namespace create tminus-sessions`
 
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "placeholder-rate-limits-id"  # Replace with real ID after `wrangler kv namespace create tminus-rate-limits`
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
 # MASTER_KEY          -- envelope encryption master key
 # JWT_SECRET          -- API auth JWT signing secret
+
+# ===========================================================================
+# Staging environment: tminus-api-staging
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-api-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.routes]]
+pattern = "api-staging.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry-staging"
+database_id = "placeholder-staging-d1-id"
+
+[[env.staging.kv_namespaces]]
+binding = "SESSIONS"
+id = "placeholder-staging-sessions-id"
+
+[[env.staging.kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "placeholder-staging-rate-limits-id"
+
+[[env.staging.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue-staging"
+
+[[env.staging.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue-staging"
+
+# ===========================================================================
+# Production environment: tminus-api-production
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-api-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[[env.production.routes]]
+pattern = "api.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tminus-registry"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
+
+[[env.production.kv_namespaces]]
+binding = "SESSIONS"
+id = "placeholder-production-sessions-id"  # Replace with real KV namespace ID
+
+[[env.production.kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "placeholder-production-rate-limits-id"  # Replace with real KV namespace ID
+
+[[env.production.queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "tminus-sync-queue"
+
+[[env.production.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"

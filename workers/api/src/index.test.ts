@@ -18,6 +18,7 @@ import {
   successEnvelope,
   errorEnvelope,
   ErrorCode,
+  API_VERSION,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -229,7 +230,7 @@ describe("response envelope", () => {
 // ---------------------------------------------------------------------------
 
 describe("routing: health endpoint", () => {
-  it("GET /health returns 200 OK without auth", async () => {
+  it("GET /health returns 200 with JSON envelope without auth", async () => {
     const handler = createHandler();
     const env = createMinimalEnv();
     const request = new Request("https://api.tminus.dev/health", {
@@ -238,7 +239,33 @@ describe("routing: health endpoint", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe("OK");
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { status: string; version: string };
+      error: null;
+      meta: { timestamp: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("healthy");
+    expect(body.data.version).toBe(API_VERSION);
+    expect(body.error).toBeNull();
+    expect(body.meta.timestamp).toBeTruthy();
+    // Timestamp should be valid ISO
+    expect(new Date(body.meta.timestamp).getTime()).not.toBeNaN();
+  });
+
+  it("GET /health version matches API_VERSION constant", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const request = new Request("https://api.tminus.dev/health", {
+      method: "GET",
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    const body = await response.json() as { data: { version: string } };
+    expect(body.data.version).toBe("0.0.1");
   });
 });
 

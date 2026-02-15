@@ -8,6 +8,7 @@
  * - SYNC_QUEUE: Queue producer for sync messages
  * - WRITE_QUEUE: Queue producer for write messages
  * - SESSIONS: KV namespace for refresh token sessions
+ * - RATE_LIMITS: KV namespace for rate limit counters
  * - JWT_SECRET: Secret for API auth JWT signing
  */
 interface Env {
@@ -17,5 +18,6 @@ interface Env {
   SYNC_QUEUE: Queue;
   WRITE_QUEUE: Queue;
   SESSIONS: KVNamespace;
+  RATE_LIMITS: KVNamespace;
   JWT_SECRET: string;
 }

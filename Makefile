@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate install clean typecheck
+.PHONY: build test test-unit test-integration test-integration-real test-e2e test-scripts lint deploy deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns smoke-test install clean typecheck
 
 # ---- Core targets ----
 
@@ -56,3 +56,29 @@ deploy-secrets:
 deploy-d1-migrate:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
 	. ./.env && npx wrangler d1 migrations apply tminus-registry --remote --config wrangler-d1.toml
+
+# ---- Production deployment targets ----
+# Deploy api-worker to api.tminus.ink with DNS, secrets, and smoke tests.
+
+deploy-production: build
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/deploy-production.mjs --env production
+
+deploy-staging: build
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/deploy-production.mjs --env staging
+
+deploy-production-dry-run:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/deploy-production.mjs --env production --dry-run
+
+deploy-dns:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	. ./.env && node scripts/dns-setup.mjs --env production
+
+smoke-test:
+	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
+	node scripts/smoke-test.mjs --env production
+
+smoke-test-staging:
+	node scripts/smoke-test.mjs --env staging

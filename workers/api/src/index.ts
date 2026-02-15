@@ -13,8 +13,24 @@
  */
 
 import { isValidId, generateId } from "@tminus/shared";
+import {
+  checkRateLimit as checkRL,
+  selectRateLimitConfig,
+  getRateLimitIdentity,
+  detectAuthEndpoint,
+  extractClientIp,
+  buildRateLimitResponse,
+  applyRateLimitHeaders,
+} from "@tminus/shared";
+import type { RateLimitKV, RateLimitTier } from "@tminus/shared";
 import { createAuthRoutes } from "./routes/auth";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
+
+// ---------------------------------------------------------------------------
+// Version -- read from package.json at build time or fallback
+// ---------------------------------------------------------------------------
+
+export const API_VERSION = "0.0.1";
 
 // ---------------------------------------------------------------------------
 // Durable Object class re-exports (required by wrangler for DO hosting)
@@ -1249,7 +1265,23 @@ export function createHandler() {
 
       // Health check -- no auth required
       if (method === "GET" && pathname === "/health") {
-        return new Response("OK", { status: 200 });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              status: "healthy",
+              version: API_VERSION,
+            },
+            error: null,
+            meta: {
+              timestamp: new Date().toISOString(),
+            },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
 
       // CORS preflight
@@ -1275,6 +1307,20 @@ export function createHandler() {
       // Auth routes (/v1/auth/*) do NOT require existing JWT -- they create tokens.
       // Delegate to the Hono auth router.
       if (pathname.startsWith("/v1/auth/")) {
+        // Rate limit auth endpoints (register/login have stricter limits)
+        if (env.RATE_LIMITS) {
+          const authEndpoint = detectAuthEndpoint(pathname);
+          if (authEndpoint) {
+            const clientIp = extractClientIp(request);
+            const identity = getRateLimitIdentity(null, clientIp, authEndpoint);
+            const config = selectRateLimitConfig(null, authEndpoint);
+            const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
+            if (!rlResult.allowed) {
+              return buildRateLimitResponse(rlResult);
+            }
+          }
+        }
+
         const authRouter = createAuthRoutes();
         // Rewrite path: strip /v1/auth prefix so Hono routes match at /register, /login, etc.
         const rewrittenUrl = new URL(request.url);
@@ -1286,12 +1332,60 @@ export function createHandler() {
       // Authenticate -- all other /v1/* routes require a valid JWT or API key
       const auth = await extractAuth(request, env.JWT_SECRET, env.DB);
       if (!auth) {
+        // Rate limit unauthenticated requests hitting protected endpoints by IP
+        if (env.RATE_LIMITS) {
+          const clientIp = extractClientIp(request);
+          const identity = getRateLimitIdentity(null, clientIp);
+          const config = selectRateLimitConfig(null);
+          const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
+          if (!rlResult.allowed) {
+            return buildRateLimitResponse(rlResult);
+          }
+        }
         return jsonResponse(
           errorEnvelope("Authentication required", "AUTH_REQUIRED"),
           ErrorCode.AUTH_REQUIRED,
         );
       }
 
+      // Rate limit authenticated requests by user_id and tier
+      // Default tier to "free" -- future: look up actual tier from auth context
+      let rateLimitResult: import("@tminus/shared").RateLimitResult | null = null;
+      if (env.RATE_LIMITS) {
+        const tier: RateLimitTier = "free"; // TODO: extract from JWT payload when tier system is fully wired
+        const identity = getRateLimitIdentity(auth.userId, extractClientIp(request));
+        const config = selectRateLimitConfig(tier);
+        rateLimitResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
+        if (!rateLimitResult.allowed) {
+          return buildRateLimitResponse(rateLimitResult);
+        }
+      }
+
+      // -- Route to handler and apply rate limit headers ----------------------
+
+      const response = await routeAuthenticatedRequest(request, method, pathname, auth, env);
+
+      // Apply rate limit headers to all authenticated responses
+      if (rateLimitResult) {
+        return applyRateLimitHeaders(response, rateLimitResult);
+      }
+
+      return response;
+    },
+  };
+}
+
+/**
+ * Route an authenticated request to the appropriate handler.
+ * Extracted to allow the fetch handler to wrap responses with rate limit headers.
+ */
+async function routeAuthenticatedRequest(
+  request: Request,
+  method: string,
+  pathname: string,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
       // -- API key routes ---------------------------------------------------
 
       if (method === "POST" && pathname === "/v1/api-keys") {
@@ -1391,8 +1485,6 @@ export function createHandler() {
         errorEnvelope("Not Found", "NOT_FOUND"),
         ErrorCode.NOT_FOUND,
       );
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
