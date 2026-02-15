@@ -48,6 +48,9 @@ export function Calendar() {
           <p style={styles.subtitle}>{user?.email ?? "Unknown user"}</p>
         </div>
         <div style={styles.headerActions}>
+          <a href="#/accounts" style={styles.navLink}>
+            Accounts
+          </a>
           <a href="#/policies" style={styles.navLink}>
             Policies
           </a>

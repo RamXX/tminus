@@ -5,6 +5,7 @@
  * Routes:
  *   #/login       -> Login page
  *   #/calendar    -> Calendar page (requires auth)
+ *   #/accounts    -> Account Management (requires auth)
  *   #/sync-status -> Sync Status Dashboard (requires auth)
  *   #/policies    -> Policy Management (requires auth)
  *   default       -> redirects to login or calendar based on auth state
@@ -14,9 +15,10 @@ import { useState, useEffect, useCallback } from "react";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Calendar } from "./pages/Calendar";
+import { Accounts } from "./pages/Accounts";
 import { SyncStatus } from "./pages/SyncStatus";
 import { Policies } from "./pages/Policies";
-import { fetchSyncStatus } from "./lib/api";
+import { fetchSyncStatus, fetchAccounts, unlinkAccount } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
 function Router() {
@@ -56,6 +58,20 @@ function Router() {
     [token],
   );
 
+  // Bound fetch/unlink for accounts -- injects current token
+  const boundFetchAccounts = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchAccounts(token);
+  }, [token]);
+
+  const boundUnlinkAccount = useCallback(
+    async (accountId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return unlinkAccount(token, accountId);
+    },
+    [token],
+  );
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -67,11 +83,22 @@ function Router() {
     return null;
   }
 
-  switch (route) {
+  // Route matching: strip query params for switch but keep them in hash
+  // for OAuth callback handling (e.g., #/accounts?linked=true)
+  const routePath = route.split("?")[0];
+
+  switch (routePath) {
     case "#/login":
       return <Login />;
     case "#/calendar":
       return <Calendar />;
+    case "#/accounts":
+      return (
+        <Accounts
+          fetchAccounts={boundFetchAccounts}
+          unlinkAccount={boundUnlinkAccount}
+        />
+      );
     case "#/sync-status":
       return <SyncStatus fetchSyncStatus={boundFetchSyncStatus} />;
     case "#/policies":

@@ -66,6 +66,30 @@ export interface CreateEventPayload {
   source: "ui";
 }
 
+/** Payload for updating an existing event via the API. */
+export interface UpdateEventPayload {
+  summary?: string;
+  start?: string;
+  end?: string;
+  timezone?: string;
+  description?: string;
+  location?: string;
+}
+
+/** Provider type for linked calendar accounts. */
+export type AccountProvider = "google" | "microsoft";
+
+/** Status of a linked calendar account. */
+export type AccountStatus = "active" | "error" | "revoked" | "pending";
+
+/** Linked calendar account shape from the API. */
+export interface LinkedAccount {
+  account_id: string;
+  email: string;
+  provider: AccountProvider;
+  status: AccountStatus;
+}
+
 // ---------------------------------------------------------------------------
 // Error class
 // ---------------------------------------------------------------------------
@@ -177,6 +201,30 @@ export async function createEvent(
   });
 }
 
+/** PATCH /api/v1/events/:id -- update an existing canonical event. */
+export async function updateEvent(
+  token: string,
+  eventId: string,
+  payload: UpdateEventPayload,
+): Promise<CalendarEvent> {
+  return apiFetch<CalendarEvent>(`/v1/events/${encodeURIComponent(eventId)}`, {
+    method: "PATCH",
+    body: payload,
+    token,
+  });
+}
+
+/** DELETE /api/v1/events/:id -- delete a canonical event. */
+export async function deleteEvent(
+  token: string,
+  eventId: string,
+): Promise<void> {
+  return apiFetch<void>(`/v1/events/${encodeURIComponent(eventId)}`, {
+    method: "DELETE",
+    token,
+  });
+}
+
 /** GET /api/v1/sync/status -- per-account sync health dashboard data. */
 export async function fetchSyncStatus(
   token: string,
@@ -185,4 +233,22 @@ export async function fetchSyncStatus(
     "/v1/sync/status",
     { token },
   );
+}
+
+/** GET /api/v1/accounts -- list linked calendar accounts. */
+export async function fetchAccounts(
+  token: string,
+): Promise<LinkedAccount[]> {
+  return apiFetch<LinkedAccount[]>("/v1/accounts", { token });
+}
+
+/** DELETE /api/v1/accounts/:id -- unlink a calendar account. */
+export async function unlinkAccount(
+  token: string,
+  accountId: string,
+): Promise<void> {
+  return apiFetch<void>(`/v1/accounts/${encodeURIComponent(accountId)}`, {
+    method: "DELETE",
+    token,
+  });
 }
