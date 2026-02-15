@@ -39,6 +39,7 @@ import {
   MS_CALLBACK_PATH,
 } from "./microsoft";
 import { handleMarketplaceInstall } from "./marketplace";
+import { handlePrivacyPolicy, handleTermsOfService } from "./legal";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -569,6 +570,10 @@ export function createHandler(fetchFn?: FetchFn) {
           return handleMicrosoftCallback(request, env, fetchFn);
         case "/marketplace/install":
           return handleMarketplaceInstall(request, env, fetchFn);
+        case "/legal/privacy":
+          return handlePrivacyPolicy();
+        case "/legal/terms":
+          return handleTermsOfService();
         default:
           return errorResponse("Not found", 404);
       }
