@@ -10,6 +10,7 @@
  * - Token exchange request format
  */
 
+import { generateKeyPairSync } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import {
   buildJwtAssertion,
@@ -21,12 +22,14 @@ import {
 import type { ServiceAccountKey } from "./jwt-assertion";
 
 // ---------------------------------------------------------------------------
-// Test RSA key pair (2048-bit, generated for testing only)
+// Test RSA key pair (2048-bit, generated fresh at test runtime)
 // ---------------------------------------------------------------------------
 
-// This is a test-only PKCS#8 PEM key. NEVER use in production.
-// Generated via: node -e "const {generateKeyPairSync} = require('crypto'); ..."
-const TEST_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nSCRUBBED_TEST_KEY_REPLACED_WITH_RUNTIME_GENERATION\n-----END PRIVATE KEY-----\n";
+const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+});
 
 const TEST_SERVICE_ACCOUNT_KEY: ServiceAccountKey = {
   type: "service_account",

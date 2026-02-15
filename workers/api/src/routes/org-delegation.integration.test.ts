@@ -14,6 +14,7 @@
  * Google API calls are mocked via injectable fetchFn.
  */
 
+import { generateKeyPairSync } from "node:crypto";
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
@@ -34,8 +35,12 @@ import {
 const ADMIN_USER_ID = "usr_01HXYZ000000000000000001";
 const TEST_MASTER_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-// A test-only RSA private key (PKCS#8 PEM, 2048-bit). NEVER use in production.
-const TEST_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nSCRUBBED_TEST_KEY_REPLACED_WITH_RUNTIME_GENERATION\n-----END PRIVATE KEY-----\n";
+// Generate a fresh RSA key pair at test runtime (no hardcoded PEM in source).
+const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+});
 
 const TEST_SERVICE_ACCOUNT_KEY = {
   type: "service_account" as const,
