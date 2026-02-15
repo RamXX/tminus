@@ -19,6 +19,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
+import type { EventBriefing, ExcuseOutput, ExcuseTone, TruthLevel } from "../lib/briefing";
 import {
   getAccountColor,
   getDateRangeForView,
@@ -58,6 +59,13 @@ export interface UnifiedCalendarProps {
   onUpdateEvent?: (eventId: string, payload: UpdateEventPayload) => Promise<CalendarEvent>;
   /** Optional. Delete an event by ID. */
   onDeleteEvent?: (eventId: string) => Promise<void>;
+  /** Optional. Fetch pre-meeting context briefing for an event. */
+  fetchBriefing?: (eventId: string) => Promise<EventBriefing>;
+  /** Optional. Generate an excuse draft for an event. */
+  generateExcuse?: (
+    eventId: string,
+    params: { tone: ExcuseTone; truth_level: TruthLevel },
+  ) => Promise<ExcuseOutput>;
   /** Initial date to display. Defaults to today. */
   initialDate?: Date;
   /** Initial view. Defaults to "week". */
@@ -73,6 +81,8 @@ export function UnifiedCalendar({
   onCreateEvent,
   onUpdateEvent,
   onDeleteEvent,
+  fetchBriefing,
+  generateExcuse,
   initialDate,
   initialView = "week",
 }: UnifiedCalendarProps) {
@@ -452,6 +462,8 @@ export function UnifiedCalendar({
           saving={editSaving}
           deleting={editDeleting}
           error={editError}
+          fetchBriefing={fetchBriefing}
+          generateExcuse={generateExcuse}
         />
       )}
 

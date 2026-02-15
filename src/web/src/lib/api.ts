@@ -580,3 +580,30 @@ export async function fetchUpcomingMilestones(
     { token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Briefing & Excuse
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/events/:id/briefing -- fetch pre-meeting context briefing. */
+export async function fetchEventBriefing(
+  token: string,
+  eventId: string,
+): Promise<import("./briefing").EventBriefing> {
+  return apiFetch<import("./briefing").EventBriefing>(
+    `/v1/events/${encodeURIComponent(eventId)}/briefing`,
+    { token },
+  );
+}
+
+/** POST /api/v1/events/:id/excuse -- generate an excuse draft. */
+export async function generateExcuse(
+  token: string,
+  eventId: string,
+  params: { tone: import("./briefing").ExcuseTone; truth_level: import("./briefing").TruthLevel },
+): Promise<import("./briefing").ExcuseOutput> {
+  return apiFetch<import("./briefing").ExcuseOutput>(
+    `/v1/events/${encodeURIComponent(eventId)}/excuse`,
+    { method: "POST", body: params, token },
+  );
+}

@@ -12,8 +12,9 @@
 
 import { useCallback } from "react";
 import { useAuth } from "../lib/auth";
-import { fetchEvents, createEvent, updateEvent, deleteEvent, ApiError } from "../lib/api";
+import { fetchEvents, createEvent, updateEvent, deleteEvent, fetchEventBriefing, generateExcuse, ApiError } from "../lib/api";
 import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
+import type { ExcuseTone, TruthLevel } from "../lib/briefing";
 import { UnifiedCalendar } from "../components/UnifiedCalendar";
 
 export function Calendar() {
@@ -87,6 +88,41 @@ export function Calendar() {
     [token, logout],
   );
 
+  /** Fetch pre-meeting context briefing for an event. */
+  const handleFetchBriefing = useCallback(
+    async (eventId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      try {
+        return await fetchEventBriefing(token, eventId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout();
+        }
+        throw err;
+      }
+    },
+    [token, logout],
+  );
+
+  /** Generate an excuse draft for an event. */
+  const handleGenerateExcuse = useCallback(
+    async (
+      eventId: string,
+      params: { tone: ExcuseTone; truth_level: TruthLevel },
+    ) => {
+      if (!token) throw new Error("Not authenticated");
+      try {
+        return await generateExcuse(token, eventId, params);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout();
+        }
+        throw err;
+      }
+    },
+    [token, logout],
+  );
+
   return (
     <div style={styles.container}>
       {/* Header */}
@@ -118,6 +154,8 @@ export function Calendar() {
           onCreateEvent={handleCreateEvent}
           onUpdateEvent={handleUpdateEvent}
           onDeleteEvent={handleDeleteEvent}
+          fetchBriefing={handleFetchBriefing}
+          generateExcuse={handleGenerateExcuse}
         />
       </main>
     </div>

@@ -34,6 +34,8 @@ import {
   type EventFormValues,
   type EventFormErrors,
 } from "../lib/event-form";
+import { BriefingPanel } from "./BriefingPanel";
+import type { EventBriefing, ExcuseOutput, ExcuseTone, TruthLevel } from "../lib/briefing";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit testing)
@@ -147,6 +149,13 @@ export interface EventDetailProps {
   deleting?: boolean;
   /** Error message to display (from failed save/delete). */
   error?: string | null;
+  /** Optional: fetch briefing data for context panel. When provided, shows BriefingPanel. */
+  fetchBriefing?: (eventId: string) => Promise<EventBriefing>;
+  /** Optional: generate excuse draft. Required with fetchBriefing. */
+  generateExcuse?: (
+    eventId: string,
+    params: { tone: ExcuseTone; truth_level: TruthLevel },
+  ) => Promise<ExcuseOutput>;
 }
 
 /** Full event detail panel (modal/slide-over) with edit and delete support. */
@@ -158,6 +167,8 @@ export function EventDetail({
   saving = false,
   deleting = false,
   error = null,
+  fetchBriefing,
+  generateExcuse,
 }: EventDetailProps) {
   const [editing, setEditing] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -517,6 +528,15 @@ export function EventDetail({
             <span style={styles.metaItem}>No version info</span>
           )}
         </div>
+
+        {/* Context briefing panel */}
+        {fetchBriefing && generateExcuse && !editing && (
+          <BriefingPanel
+            eventId={event.canonical_event_id}
+            fetchBriefing={fetchBriefing}
+            generateExcuse={generateExcuse}
+          />
+        )}
 
         {/* Delete button + confirmation dialog */}
         {canDelete && !editing && (
