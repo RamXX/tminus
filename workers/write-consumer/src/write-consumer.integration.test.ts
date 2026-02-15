@@ -16,6 +16,7 @@ import {
   TokenExpiredError,
   RateLimitError,
   ResourceNotFoundError,
+  SyncTokenExpiredError,
   MicrosoftApiError,
   MicrosoftTokenExpiredError,
   MicrosoftRateLimitError,
@@ -546,6 +547,182 @@ describe("WriteConsumer integration", () => {
         TARGET_ACCOUNT_ID,
       );
       expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("handles 410 Gone gracefully on delete (Google returns 410 for recently-deleted events)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      // Google Calendar API returns 410 Gone for recently-deleted events.
+      // GoogleCalendarClient.request() maps 410 -> SyncTokenExpiredError.
+      calendarProvider.deleteEventError = new SyncTokenExpiredError(
+        "Resource has been deleted",
+      );
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_410",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      // 410 Gone on delete means the event is gone -- that's success
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("handles generic GoogleApiError with 404 on delete (defense in depth)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      // Defense in depth: if error classification somehow produces a generic
+      // GoogleApiError with 404 instead of ResourceNotFoundError
+      calendarProvider.deleteEventError = new GoogleApiError(
+        "Not Found",
+        404,
+      );
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_generic_404",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("handles generic GoogleApiError with 410 on delete (defense in depth)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      calendarProvider.deleteEventError = new GoogleApiError(
+        "Gone",
+        410,
+      );
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_generic_410",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("handles generic MicrosoftApiError with 404 on delete (defense in depth)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      calendarProvider.deleteEventError = new MicrosoftApiError(
+        "Not Found",
+        404,
+      );
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_ms_generic_404",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("still throws non-404/410 errors on delete (e.g. 403 Forbidden)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      calendarProvider.deleteEventError = new GoogleApiError(
+        "Forbidden",
+        403,
+      );
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_403_error",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      // 403 on delete should NOT be treated as success
+      expect(result.success).toBe(false);
+      expect(result.action).toBe("error");
+      expect(result.retry).toBe(false);
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("ERROR");
     });
   });
 

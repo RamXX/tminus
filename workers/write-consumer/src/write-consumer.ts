@@ -24,6 +24,7 @@ import {
   TokenExpiredError,
   RateLimitError,
   ResourceNotFoundError,
+  SyncTokenExpiredError,
   MicrosoftApiError,
   MicrosoftTokenExpiredError,
   MicrosoftRateLimitError,
@@ -368,15 +369,29 @@ export class WriteConsumer {
       try {
         await client.deleteEvent(calendarId, msg.provider_event_id);
       } catch (err) {
-        // 404 on delete is fine -- event already gone (both Google and Microsoft)
-        if (
+        // For DELETE operations, 404 and 410 mean the event is already gone.
+        // That's success -- the desired end state (event removed) is achieved.
+        //
+        // Google Calendar API returns:
+        //   404 -> ResourceNotFoundError (event never existed or long-deleted)
+        //   410 -> SyncTokenExpiredError (event recently deleted, "Gone")
+        //
+        // Microsoft Graph API returns:
+        //   404 -> MicrosoftResourceNotFoundError
+        //
+        // Defense in depth: also check generic GoogleApiError/MicrosoftApiError
+        // with statusCode 404 or 410, in case the error is not the specific subclass.
+        const isAlreadyGone =
           err instanceof ResourceNotFoundError ||
-          err instanceof MicrosoftResourceNotFoundError
-        ) {
-          // Event already deleted, proceed to update state
-        } else {
+          err instanceof SyncTokenExpiredError ||
+          err instanceof MicrosoftResourceNotFoundError ||
+          (err instanceof GoogleApiError &&
+            (err.statusCode === 404 || err.statusCode === 410)) ||
+          (err instanceof MicrosoftApiError && err.statusCode === 404);
+        if (!isAlreadyGone) {
           throw err;
         }
+        // Event already deleted, proceed to update mirror state
       }
 
       this.mirrorStore.updateMirrorState(
