@@ -48,6 +48,9 @@ export function Calendar() {
           <p style={styles.subtitle}>{user?.email ?? "Unknown user"}</p>
         </div>
         <div style={styles.headerActions}>
+          <a href="#/sync-status" style={styles.navLink}>
+            Sync Status
+          </a>
           <button onClick={logout} style={styles.logoutBtn}>
             Sign Out
           </button>
@@ -93,6 +96,16 @@ const styles: Record<string, React.CSSProperties> = {
   headerActions: {
     display: "flex",
     gap: "0.5rem",
+  },
+  navLink: {
+    padding: "0.5rem 1rem",
+    borderRadius: "6px",
+    border: "1px solid #334155",
+    background: "transparent",
+    color: "#94a3b8",
+    cursor: "pointer",
+    fontSize: "0.875rem",
+    textDecoration: "none",
   },
   logoutBtn: {
     padding: "0.5rem 1rem",

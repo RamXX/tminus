@@ -28,14 +28,31 @@ export interface AuthResponse {
   refresh_token: string;
 }
 
-/** Canonical event shape (minimal -- extend as needed). */
+/** Mirror sync status for an event on a target account. */
+export type MirrorSyncStatus = "ACTIVE" | "PENDING" | "ERROR";
+
+/** Mirror entry: how an event appears on a target account. */
+export interface EventMirror {
+  target_account_id: string;
+  target_account_email?: string;
+  sync_status: MirrorSyncStatus;
+  last_error?: string;
+}
+
+/** Canonical event shape. */
 export interface CalendarEvent {
   canonical_event_id: string;
   summary?: string;
+  description?: string;
+  location?: string;
   start: string;
   end: string;
   origin_account_id?: string;
+  origin_account_email?: string;
   status?: string;
+  version?: number;
+  updated_at?: string;
+  mirrors?: EventMirror[];
 }
 
 // ---------------------------------------------------------------------------
@@ -135,4 +152,14 @@ export async function fetchEvents(
   const qs = search.toString();
   const path = `/v1/events${qs ? `?${qs}` : ""}`;
   return apiFetch<CalendarEvent[]>(path, { token });
+}
+
+/** GET /api/v1/sync/status -- per-account sync health dashboard data. */
+export async function fetchSyncStatus(
+  token: string,
+): Promise<import("./sync-status").SyncStatusResponse> {
+  return apiFetch<import("./sync-status").SyncStatusResponse>(
+    "/v1/sync/status",
+    { token },
+  );
 }
