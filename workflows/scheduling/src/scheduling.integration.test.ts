@@ -1292,6 +1292,8 @@ describe("SchedulingWorkflow integration", () => {
       expect(hasVipScoring).toBe(true);
 
       // 4. Schedule same window WITHOUT VIP participant (non-VIP meeting)
+      // With hard enforcement (TM-yke.2), the entirely after-hours window
+      // (17:00-22:00) produces ZERO candidates for non-VIP meetings.
       const regularSession = await workflow.createSession(makeParams({
         title: "Regular Meeting",
         windowStart: "2026-03-02T17:00:00Z",
@@ -1301,21 +1303,8 @@ describe("SchedulingWorkflow integration", () => {
         // No participantHashes -- non-VIP
       }));
 
-      // Non-VIP meeting also gets candidates (they exist but are scored lower)
-      expect(regularSession.candidates.length).toBeGreaterThan(0);
-
-      // Non-VIP meeting should NOT have VIP override scoring
-      const hasNoVipScoring = regularSession.candidates.every(
-        c => !c.explanation.includes("VIP override"),
-      );
-      expect(hasNoVipScoring).toBe(true);
-
-      // VIP candidates should have higher scores than non-VIP for the same slot
-      const vipSlot = vipSession.candidates[0];
-      const regularSlot = regularSession.candidates.find(c => c.start === vipSlot.start);
-      if (regularSlot) {
-        expect(vipSlot.score).toBeGreaterThan(regularSlot.score);
-      }
+      // Non-VIP meeting gets ZERO candidates (all slots hard-excluded)
+      expect(regularSession.candidates.length).toBe(0);
     });
 
     it("delete nonexistent VIP policy returns deleted=false", async () => {

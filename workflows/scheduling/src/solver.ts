@@ -87,13 +87,25 @@ export interface VipOverrideConstraint {
   };
 }
 
+/** Explicit override constraint: exempts a specific time window from working hours enforcement. */
+export interface OverrideConstraint {
+  readonly kind: "override";
+  readonly config: {
+    readonly reason: string;
+    readonly slot_start: string;  // ISO 8601
+    readonly slot_end: string;    // ISO 8601
+    readonly timezone: string;    // IANA timezone
+  };
+}
+
 /** Union type for all solver constraints. */
 export type SolverConstraint =
   | WorkingHoursConstraint
   | TripConstraint
   | BufferConstraint
   | NoMeetingsAfterConstraint
-  | VipOverrideConstraint;
+  | VipOverrideConstraint
+  | OverrideConstraint;
 
 /** Input to the greedy solver. */
 export interface SolverInput {
@@ -181,6 +193,17 @@ export function greedySolver(
   // Pre-compute trip ranges for fast overlap checks
   const tripRanges = precomputeTripRanges(constraints);
 
+  // Pre-compute override exemption ranges for working hours bypass
+  const overrideRanges = precomputeOverrideRanges(constraints);
+
+  // Determine if working hours hard enforcement applies:
+  // We need working_hours constraints AND either no VIP participant match or no allow_after_hours
+  const hasWorkingHours = constraints.some((c) => c.kind === "working_hours");
+  const hasVipAfterHoursExemption = hasMatchingVipAfterHours(
+    constraints,
+    input.participantHashes,
+  );
+
   const candidates: ScoredCandidate[] = [];
 
   // Enumerate 30-minute aligned slots
@@ -190,6 +213,19 @@ export function greedySolver(
     // Hard-exclude: trip constraint overlap (belt + suspenders with busy intervals)
     if (isBlockedByTrip(slotStart, slotEnd, tripRanges)) {
       continue;
+    }
+
+    // Hard-exclude: working hours enforcement (TM-yke.2)
+    // Non-VIP slots outside working hours are excluded unless an explicit override covers them.
+    if (hasWorkingHours && !hasVipAfterHoursExemption) {
+      const whStatus = checkWorkingHoursHard(slotStart, slotEnd, constraints);
+      if (whStatus === "outside") {
+        // Check for explicit override exemption
+        if (!isExemptedByOverride(slotStart, slotEnd, overrideRanges)) {
+          continue; // Hard-excluded
+        }
+      }
+      // whStatus === "within" or "no_constraint_today" -> allow through
     }
 
     // Check if any busy interval overlaps this slot for any required account
@@ -218,6 +254,7 @@ export function greedySolver(
       busyRanges,
       constraints,
       input.participantHashes,
+      overrideRanges,
     );
 
     candidates.push({
@@ -248,6 +285,7 @@ function scoreSlot(
   busyRanges: ReadonlyArray<{ start: number; end: number }>,
   constraints: readonly SolverConstraint[],
   participantHashes?: readonly string[],
+  overrideRanges?: ReadonlyArray<{ start: number; end: number }>,
 ): { score: number; explanation: string } {
   let score = 0;
   const reasons: string[] = [];
@@ -301,6 +339,16 @@ function scoreSlot(
     const whResult = scoreWorkingHours(slotStartMs, slotEndMs, constraints);
     score += whResult.delta;
     if (whResult.reason) reasons.push(whResult.reason);
+
+    // Override exemption note: if slot was outside working hours but allowed
+    // via an explicit override, add the reason to the explanation
+    if (
+      whResult.delta === CONSTRAINT_SCORES.WORKING_HOURS_VIOLATION &&
+      overrideRanges &&
+      isExemptedByOverride(slotStartMs, slotEndMs, overrideRanges)
+    ) {
+      reasons.push("override exemption: working hours bypassed");
+    }
 
     // Buffer adequacy bonus: +10 if slot has adequate buffer from events
     const bufResult = scoreBufferAdequacy(slotStartMs, slotEndMs, busyRanges, constraints);
@@ -644,6 +692,125 @@ export function scoreVipOverride(
     delta,
     reason: reasons.length > 0 ? reasons.join(", ") : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Working hours hard enforcement helpers (TM-yke.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a slot is within or outside working hours, returning a
+ * tri-state result for hard enforcement decisions.
+ *
+ * Returns:
+ * - "within": slot is fully covered by at least one working_hours constraint
+ * - "outside": working_hours constraints apply to this day but the slot is not covered
+ * - "no_constraint_today": no working_hours constraint applies to this day (allow through)
+ */
+function checkWorkingHoursHard(
+  slotStartMs: number,
+  slotEndMs: number,
+  constraints: readonly SolverConstraint[],
+): "within" | "outside" | "no_constraint_today" {
+  const whConstraints = constraints.filter(
+    (c): c is WorkingHoursConstraint => c.kind === "working_hours",
+  );
+
+  if (whConstraints.length === 0) return "no_constraint_today";
+
+  const slotDate = new Date(slotStartMs);
+
+  let anyApplies = false;
+
+  for (const wh of whConstraints) {
+    let dayOfWeek: number;
+    if (wh.config.timezone === "UTC") {
+      dayOfWeek = slotDate.getUTCDay();
+    } else {
+      dayOfWeek = getDayOfWeekInTimezone(slotDate, wh.config.timezone);
+    }
+
+    if (!wh.config.days.includes(dayOfWeek)) continue;
+    anyApplies = true;
+
+    const workStart = getTimestampForTimeInTimezone(
+      slotDate,
+      wh.config.start_time,
+      wh.config.timezone,
+    );
+    const workEnd = getTimestampForTimeInTimezone(
+      slotDate,
+      wh.config.end_time,
+      wh.config.timezone,
+    );
+
+    // If slot is fully within this constraint's working hours, it's allowed
+    if (slotStartMs >= workStart && slotEndMs <= workEnd) {
+      return "within";
+    }
+  }
+
+  if (!anyApplies) return "no_constraint_today";
+
+  return "outside";
+}
+
+/**
+ * Check whether any VIP participant with allow_after_hours matches the
+ * participant hashes for the current meeting.
+ */
+function hasMatchingVipAfterHours(
+  constraints: readonly SolverConstraint[],
+  participantHashes?: readonly string[],
+): boolean {
+  if (!participantHashes || participantHashes.length === 0) return false;
+
+  const vipConstraints = constraints.filter(
+    (c): c is VipOverrideConstraint => c.kind === "vip_override",
+  );
+  if (vipConstraints.length === 0) return false;
+
+  const participantSet = new Set(participantHashes);
+  return vipConstraints.some(
+    (v) => v.config.allow_after_hours && participantSet.has(v.config.participant_hash),
+  );
+}
+
+/**
+ * Pre-compute override exemption ranges from constraints.
+ * Returns sorted array of {start, end} in milliseconds.
+ */
+function precomputeOverrideRanges(
+  constraints: readonly SolverConstraint[],
+): ReadonlyArray<{ start: number; end: number }> {
+  const ranges: { start: number; end: number }[] = [];
+  for (const c of constraints) {
+    if (c.kind === "override") {
+      ranges.push({
+        start: new Date(c.config.slot_start).getTime(),
+        end: new Date(c.config.slot_end).getTime(),
+      });
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Check if a slot is fully covered by any explicit override constraint.
+ * An override exempts a specific time window from working hours hard exclusion.
+ */
+function isExemptedByOverride(
+  slotStartMs: number,
+  slotEndMs: number,
+  overrideRanges: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+  for (const ovr of overrideRanges) {
+    // Override must fully cover the slot
+    if (slotStartMs >= ovr.start && slotEndMs <= ovr.end) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

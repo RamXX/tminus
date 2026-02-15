@@ -28,7 +28,7 @@
 
 import { describe, it, expect } from "vitest";
 import { greedySolver, CONSTRAINT_SCORES } from "./solver";
-import type { SolverInput, ScoredCandidate, SolverConstraint } from "./solver";
+import type { SolverInput, ScoredCandidate, SolverConstraint, OverrideConstraint } from "./solver";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -244,6 +244,7 @@ describe("greedySolver with constraints", () => {
     it("scores slots within working hours higher than slots outside", () => {
       // Working hours: Mon-Fri 09:00-17:00 UTC
       // Window: single Monday 06:00-20:00 UTC
+      // With hard enforcement (TM-yke.2), outside-hours slots are excluded for non-VIP
       const constraints: SolverConstraint[] = [
         {
           kind: "working_hours",
@@ -266,17 +267,14 @@ describe("greedySolver with constraints", () => {
       const result = greedySolver(input, 50);
       expect(result.length).toBeGreaterThan(0);
 
-      // Find a slot within working hours (09:00) and outside (06:00)
+      // Slot within working hours should be present
       const slot09 = result.find(c => c.start === "2026-03-02T09:00:00Z");
-      const slot06 = result.find(c => c.start === "2026-03-02T06:00:00Z");
-
       expect(slot09).toBeDefined();
-      expect(slot06).toBeDefined();
-
-      // Within working hours should score higher
-      expect(slot09!.score).toBeGreaterThan(slot06!.score);
       expect(slot09!.explanation).toContain("within working hours");
-      expect(slot06!.explanation).toContain("outside working hours");
+
+      // Outside-hours slots should be hard-excluded for non-VIP (TM-yke.2)
+      const slot06 = result.find(c => c.start === "2026-03-02T06:00:00Z");
+      expect(slot06).toBeUndefined();
     });
 
     it("ignores working hours on non-working days", () => {
@@ -311,6 +309,7 @@ describe("greedySolver with constraints", () => {
 
     it("handles multiple working hours constraints (union)", () => {
       // Two working hour configs: one covers 08:00-12:00, another 14:00-18:00
+      // With hard enforcement (TM-yke.2), gap slots are excluded for non-VIP
       const constraints: SolverConstraint[] = [
         {
           kind: "working_hours",
@@ -351,10 +350,9 @@ describe("greedySolver with constraints", () => {
       expect(slot15).toBeDefined();
       expect(slot15!.explanation).toContain("within working hours");
 
-      // 13:00 should be outside working hours (gap between constraints)
+      // 13:00 should be hard-excluded (gap between constraints, non-VIP) (TM-yke.2)
       const slot13 = result.find(c => c.start === "2026-03-02T13:00:00Z");
-      expect(slot13).toBeDefined();
-      expect(slot13!.explanation).toContain("outside working hours");
+      expect(slot13).toBeUndefined();
     });
   });
 
@@ -605,6 +603,7 @@ describe("greedySolver with constraints", () => {
       // Buffer: 15min prep before events
       // No meetings after: 16:00 UTC
       // Busy event at 12:00-13:00
+      // With hard enforcement (TM-yke.2), outside-hours slots are excluded for non-VIP
       const constraints: SolverConstraint[] = [
         {
           kind: "working_hours",
@@ -652,14 +651,13 @@ describe("greedySolver with constraints", () => {
       expect(slot09!.explanation).toContain("adequate buffer");
       expect(slot09!.explanation).not.toContain("past daily cutoff");
 
-      // 17:00 slot: outside working hours (-10), past cutoff (-20)
+      // 17:00 slot: hard-excluded (outside working hours, non-VIP) (TM-yke.2)
       const slot17 = result.find(c => c.start === "2026-03-02T17:00:00Z");
-      expect(slot17).toBeDefined();
-      expect(slot17!.explanation).toContain("outside working hours");
-      expect(slot17!.explanation).toContain("past daily cutoff");
+      expect(slot17).toBeUndefined();
 
-      // 09:00 slot should score much higher than 17:00
-      expect(slot09!.score).toBeGreaterThan(slot17!.score);
+      // 06:00 slot: also hard-excluded
+      const slot06 = result.find(c => c.start === "2026-03-02T06:00:00Z");
+      expect(slot06).toBeUndefined();
     });
 
     it("composes trip + working hours: trip exclusion takes priority", () => {
@@ -861,8 +859,9 @@ describe("greedySolver with constraints", () => {
       expect(slot18!.explanation).toContain("VIP priority weight");
     });
 
-    it("non-VIP meetings still penalized outside working hours", () => {
+    it("non-VIP meetings hard-excluded outside working hours", () => {
       // Same constraints but NO participant hashes (non-VIP meeting)
+      // With hard enforcement (TM-yke.2), outside-hours slots are excluded
       const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
 
       const input = makeInput({
@@ -876,11 +875,16 @@ describe("greedySolver with constraints", () => {
       const result = greedySolver(input, 50);
       expect(result.length).toBeGreaterThan(0);
 
-      // After-hours slot should still be penalized
+      // After-hours slot should be hard-excluded for non-VIP
       const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
-      expect(slot18).toBeDefined();
-      expect(slot18!.explanation).toContain("outside working hours");
-      expect(slot18!.explanation).not.toContain("VIP override");
+      expect(slot18).toBeUndefined();
+
+      // All results should be within working hours
+      for (const c of result) {
+        const h = new Date(c.start).getUTCHours();
+        expect(h).toBeGreaterThanOrEqual(9);
+        expect(h).toBeLessThan(17);
+      }
     });
 
     it("VIP priority weight adds score bonus", () => {
@@ -914,6 +918,8 @@ describe("greedySolver with constraints", () => {
     });
 
     it("VIP override only activates for matching participant hashes", () => {
+      // When participant hash does NOT match VIP, they get no after-hours exemption
+      // Hard enforcement (TM-yke.2) should exclude outside-hours slots
       const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
 
       const input = makeInput({
@@ -925,15 +931,21 @@ describe("greedySolver with constraints", () => {
       });
 
       const result = greedySolver(input, 50);
+
+      // Non-matching VIP: slot18 should be hard-excluded
       const slot18 = result.find(c => c.start === "2026-03-02T18:00:00Z");
-      expect(slot18).toBeDefined();
-      // No VIP override since hash doesn't match
-      expect(slot18!.explanation).not.toContain("VIP override");
-      expect(slot18!.explanation).toContain("outside working hours");
+      expect(slot18).toBeUndefined();
+
+      // All results should be within working hours
+      for (const c of result) {
+        const h = new Date(c.start).getUTCHours();
+        expect(h).toBeGreaterThanOrEqual(9);
+        expect(h).toBeLessThan(17);
+      }
     });
 
     it("VIP after-hours slot scores higher than without VIP", () => {
-      // Run solver with VIP override
+      // Run solver with VIP override -- VIP allows outside hours
       const constraintsWithVip: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
       const inputWithVip = makeInput({
         windowStart: "2026-03-02T17:00:00Z",
@@ -944,7 +956,12 @@ describe("greedySolver with constraints", () => {
       });
       const vipResult = greedySolver(inputWithVip, 5);
 
-      // Run solver without VIP
+      // VIP should have after-hours slots
+      const vipSlot18 = vipResult.find(c => c.start === "2026-03-02T18:00:00Z");
+      expect(vipSlot18).toBeDefined();
+      expect(vipSlot18!.explanation).toContain("VIP override");
+
+      // Without VIP, hard enforcement (TM-yke.2) excludes all outside-hours slots
       const constraintsNoVip: SolverConstraint[] = [workingHoursConstraint];
       const inputNoVip = makeInput({
         windowStart: "2026-03-02T17:00:00Z",
@@ -954,12 +971,8 @@ describe("greedySolver with constraints", () => {
       });
       const noVipResult = greedySolver(inputNoVip, 5);
 
-      // Same slot should score higher with VIP
-      const vipSlot18 = vipResult.find(c => c.start === "2026-03-02T18:00:00Z");
-      const noVipSlot18 = noVipResult.find(c => c.start === "2026-03-02T18:00:00Z");
-      expect(vipSlot18).toBeDefined();
-      expect(noVipSlot18).toBeDefined();
-      expect(vipSlot18!.score).toBeGreaterThan(noVipSlot18!.score);
+      // Without VIP, no slots should be returned (all are outside 09-17 working hours)
+      expect(noVipResult.length).toBe(0);
     });
 
     it("backward compatible: works without participantHashes", () => {
@@ -978,6 +991,261 @@ describe("greedySolver with constraints", () => {
       for (const c of result) {
         expect(c.explanation).not.toContain("VIP override");
       }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Working Hours Hard Enforcement (TM-yke.2)
+  // -----------------------------------------------------------------------
+
+  describe("working hours hard enforcement", () => {
+    const workingHoursConstraint: SolverConstraint = {
+      kind: "working_hours",
+      config: {
+        days: [1, 2, 3, 4, 5], // Mon-Fri
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
+      },
+    };
+
+    it("hard-excludes outside-hours slots for non-VIP meetings", () => {
+      // Window includes before 09:00 and after 17:00
+      const constraints: SolverConstraint[] = [workingHoursConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T06:00:00Z", // Monday
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // No participantHashes = non-VIP
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // ALL candidates must be within working hours (09:00-17:00)
+      for (const c of result) {
+        const startHour = new Date(c.start).getUTCHours();
+        const endHour = new Date(c.end).getUTCHours();
+        const endMinutes = new Date(c.end).getUTCMinutes();
+        // Slot start must be >= 09:00
+        expect(startHour).toBeGreaterThanOrEqual(9);
+        // Slot end must be <= 17:00
+        if (endMinutes === 0) {
+          expect(endHour).toBeLessThanOrEqual(17);
+        } else {
+          expect(endHour).toBeLessThan(17);
+        }
+      }
+    });
+
+    it("VIP override allows outside-hours slots even with hard enforcement", () => {
+      const vipConstraint: SolverConstraint = {
+        kind: "vip_override",
+        config: {
+          participant_hash: "vip_hash_123",
+          display_name: "CEO",
+          priority_weight: 3.0,
+          allow_after_hours: true,
+          min_notice_hours: 0,
+          override_deep_work: false,
+        },
+      };
+
+      const constraints: SolverConstraint[] = [workingHoursConstraint, vipConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T06:00:00Z", // Monday
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        participantHashes: ["vip_hash_123"],
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // VIP meetings SHOULD include outside-hours slots
+      const outsideHoursSlots = result.filter((c) => {
+        const h = new Date(c.start).getUTCHours();
+        return h < 9 || h >= 17;
+      });
+      expect(outsideHoursSlots.length).toBeGreaterThan(0);
+
+      // Those slots should have VIP override in explanation
+      for (const s of outsideHoursSlots) {
+        expect(s.explanation).toContain("VIP override");
+      }
+    });
+
+    it("explicit override constraint allows specific outside-hours slot", () => {
+      const overrideConstraint: OverrideConstraint = {
+        kind: "override",
+        config: {
+          reason: "Board meeting must be at 7 AM",
+          slot_start: "2026-03-02T07:00:00Z",
+          slot_end: "2026-03-02T08:00:00Z",
+          timezone: "UTC",
+        },
+      };
+
+      const constraints: SolverConstraint[] = [workingHoursConstraint, overrideConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T06:00:00Z", // Monday
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // No VIP hashes -- non-VIP meeting
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // The 07:00 slot should be present (exempt from hard exclusion)
+      const slot07 = result.find((c) => c.start === "2026-03-02T07:00:00Z");
+      expect(slot07).toBeDefined();
+      expect(slot07!.explanation).toContain("override exemption");
+
+      // The 06:00 slot should NOT be present (no override for it)
+      const slot06 = result.find((c) => c.start === "2026-03-02T06:00:00Z");
+      expect(slot06).toBeUndefined();
+    });
+
+    it("per-account working hours: different hours per constraint", () => {
+      // Account 1: works 09:00-17:00 UTC
+      // Account 2: works 06:00-14:00 UTC (different timezone worker)
+      // The union means: if ANY account's working hours cover a slot, it's allowed
+      const constraints: SolverConstraint[] = [
+        {
+          kind: "working_hours",
+          config: {
+            days: [1, 2, 3, 4, 5],
+            start_time: "09:00",
+            end_time: "17:00",
+            timezone: "UTC",
+          },
+        },
+        {
+          kind: "working_hours",
+          config: {
+            days: [1, 2, 3, 4, 5],
+            start_time: "06:00",
+            end_time: "14:00",
+            timezone: "UTC",
+          },
+        },
+      ];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T04:00:00Z", // Monday
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // Non-VIP
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // Union of 06:00-14:00 and 09:00-17:00 = 06:00-17:00
+      // Slots at 06:00, 07:00, 08:00 should be allowed (covered by account 2)
+      const slot06 = result.find((c) => c.start === "2026-03-02T06:00:00Z");
+      expect(slot06).toBeDefined();
+
+      // Slots at 15:00, 16:00 should be allowed (covered by account 1)
+      const slot15 = result.find((c) => c.start === "2026-03-02T15:00:00Z");
+      expect(slot15).toBeDefined();
+
+      // Slots at 04:00, 05:00 should be excluded (neither covers)
+      const slot04 = result.find((c) => c.start === "2026-03-02T04:00:00Z");
+      expect(slot04).toBeUndefined();
+
+      // Slots at 17:00+ should be excluded (neither covers end)
+      const slot18 = result.find((c) => c.start === "2026-03-02T18:00:00Z");
+      expect(slot18).toBeUndefined();
+    });
+
+    it("timezone-aware enforcement: US/Eastern working hours", () => {
+      // Working hours: 09:00-17:00 US/Eastern
+      // March 2 2026 is standard time (EST = UTC-5)
+      // So 09:00 ET = 14:00 UTC, 17:00 ET = 22:00 UTC
+      const constraints: SolverConstraint[] = [
+        {
+          kind: "working_hours",
+          config: {
+            days: [1, 2, 3, 4, 5],
+            start_time: "09:00",
+            end_time: "17:00",
+            timezone: "America/New_York",
+          },
+        },
+      ];
+
+      const input = makeInput({
+        windowStart: "2026-03-02T12:00:00Z", // Monday
+        windowEnd: "2026-03-03T00:00:00Z",
+        durationMinutes: 60,
+        constraints,
+        // Non-VIP
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // 13:00 UTC = 08:00 ET -> outside working hours, should be excluded
+      const slot13 = result.find((c) => c.start === "2026-03-02T13:00:00Z");
+      expect(slot13).toBeUndefined();
+
+      // 14:00 UTC = 09:00 ET -> within working hours, should be included
+      const slot14 = result.find((c) => c.start === "2026-03-02T14:00:00Z");
+      expect(slot14).toBeDefined();
+
+      // 21:00 UTC = 16:00 ET -> within working hours, should be included
+      const slot21 = result.find((c) => c.start === "2026-03-02T21:00:00Z");
+      expect(slot21).toBeDefined();
+
+      // 22:00 UTC = 17:00 ET -> outside working hours (end is exclusive)
+      // Slot 22:00-23:00 UTC fully outside => excluded
+      const slot22 = result.find((c) => c.start === "2026-03-02T22:00:00Z");
+      expect(slot22).toBeUndefined();
+    });
+
+    it("no working hours constraints means no hard exclusion (backward compat)", () => {
+      // No working hours constraints at all -- everything should remain as before
+      const input = makeInput({
+        windowStart: "2026-03-02T06:00:00Z",
+        windowEnd: "2026-03-02T22:00:00Z",
+        durationMinutes: 60,
+        constraints: [], // No constraints
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // Slots outside typical hours should still appear
+      const earlySlot = result.find((c) => new Date(c.start).getUTCHours() < 9);
+      expect(earlySlot).toBeDefined();
+    });
+
+    it("on non-working days, no hard exclusion applies", () => {
+      // Saturday -- not in the days array
+      const constraints: SolverConstraint[] = [workingHoursConstraint];
+
+      const input = makeInput({
+        windowStart: "2026-03-07T06:00:00Z", // Saturday
+        windowEnd: "2026-03-07T22:00:00Z",
+        durationMinutes: 60,
+        constraints,
+      });
+
+      const result = greedySolver(input, 100);
+      expect(result.length).toBeGreaterThan(0);
+
+      // Weekend slots at all hours should be allowed (no working hours apply)
+      const earlySlot = result.find((c) => new Date(c.start).getUTCHours() < 9);
+      expect(earlySlot).toBeDefined();
     });
   });
 });

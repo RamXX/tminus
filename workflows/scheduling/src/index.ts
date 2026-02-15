@@ -39,7 +39,7 @@ export { greedySolver, CONSTRAINT_SCORES } from "./solver";
 export type {
   SolverInput, BusyInterval, ScoredCandidate, SolverConstraint,
   WorkingHoursConstraint, TripConstraint, BufferConstraint,
-  NoMeetingsAfterConstraint, VipOverrideConstraint,
+  NoMeetingsAfterConstraint, VipOverrideConstraint, OverrideConstraint,
 } from "./solver";
 export { scoreVipOverride } from "./solver";
 
@@ -816,6 +816,30 @@ export function convertToSolverConstraints(
             timezone: config.timezone,
           },
         });
+        break;
+      }
+      case "override": {
+        // Override constraints exempt specific time windows from working hours enforcement.
+        // They require slot_start/slot_end (or active_from/active_to) to define the window.
+        const config = c.config_json as {
+          reason: string;
+          slot_start?: string;
+          slot_end?: string;
+          timezone?: string;
+        };
+        const slotStart = config.slot_start ?? c.active_from;
+        const slotEnd = config.slot_end ?? c.active_to;
+        if (slotStart && slotEnd) {
+          results.push({
+            kind: "override",
+            config: {
+              reason: config.reason ?? "manual override",
+              slot_start: slotStart,
+              slot_end: slotEnd,
+              timezone: config.timezone ?? "UTC",
+            },
+          });
+        }
         break;
       }
       // Skip unknown constraint kinds silently
