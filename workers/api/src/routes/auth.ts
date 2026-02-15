@@ -69,6 +69,62 @@ const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 128;
 
 // ---------------------------------------------------------------------------
+// Account Lockout Constants & Logic (TM-as6.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Progressive lockout thresholds.
+ *
+ * After N cumulative failed login attempts, the account is locked for the
+ * specified duration (in seconds). Thresholds are evaluated from highest
+ * to lowest so the longest applicable lock duration wins.
+ *
+ * - 20+ fails -> 24 hours
+ * - 10+ fails ->  1 hour
+ * -  5+ fails -> 15 minutes
+ */
+const LOCKOUT_THRESHOLDS: ReadonlyArray<{ attempts: number; durationSeconds: number }> = [
+  { attempts: 20, durationSeconds: 24 * 60 * 60 },  // 24 hours = 86400s
+  { attempts: 10, durationSeconds: 60 * 60 },         //  1 hour  = 3600s
+  { attempts: 5,  durationSeconds: 15 * 60 },         // 15 min   = 900s
+];
+
+/**
+ * Compute the lockout duration (in seconds) for the given number of failed
+ * login attempts. Returns 0 if no lockout threshold is met.
+ */
+function getLockoutDurationSeconds(failedAttempts: number): number {
+  for (const threshold of LOCKOUT_THRESHOLDS) {
+    if (failedAttempts >= threshold.attempts) {
+      return threshold.durationSeconds;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Compute the ISO-8601 `locked_until` timestamp for a given number of failed
+ * attempts (evaluated at `now`). Returns null if no lockout applies.
+ */
+function computeLockedUntil(failedAttempts: number, now: Date = new Date()): string | null {
+  const duration = getLockoutDurationSeconds(failedAttempts);
+  if (duration === 0) return null;
+  return new Date(now.getTime() + duration * 1000).toISOString();
+}
+
+/**
+ * Check whether an account is currently locked. Returns the number of
+ * seconds remaining until the lock expires, or 0 if not locked.
+ */
+function getRetryAfterSeconds(lockedUntil: string | null, now: Date = new Date()): number {
+  if (!lockedUntil) return 0;
+  const lockedUntilMs = new Date(lockedUntil).getTime();
+  const remainingMs = lockedUntilMs - now.getTime();
+  if (remainingMs <= 0) return 0;
+  return Math.ceil(remainingMs / 1000);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -96,12 +152,19 @@ function successResponse<T>(c: { json: (data: unknown, status: number) => Respon
   return c.json(envelope, status);
 }
 
-/** Build an error envelope response. */
-function errorResponse(c: { json: (data: unknown, status: number) => Response }, code: string, message: string, status: number): Response {
-  const envelope: Envelope = {
+/** Build an error envelope response, with optional extra fields merged at the top level. */
+function errorResponse(
+  c: { json: (data: unknown, status: number) => Response },
+  code: string,
+  message: string,
+  status: number,
+  extra?: Record<string, unknown>,
+): Response {
+  const envelope: Envelope & Record<string, unknown> = {
     ok: false,
     error: { code, message },
     meta: makeMeta(),
+    ...extra,
   };
   return c.json(envelope, status);
 }
@@ -291,28 +354,51 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       return errorResponse(c, "AUTH_FAILED", "Invalid email or password", 401);
     }
 
-    // Check if account is locked (lockout logic is managed by TM-as6.4,
-    // but we still respect the locked_until field if present)
-    if (user.locked_until) {
-      const lockedUntilMs = new Date(user.locked_until).getTime();
-      if (Date.now() < lockedUntilMs) {
-        return errorResponse(c, "ACCOUNT_LOCKED", "Account is temporarily locked", 403);
-      }
+    // -----------------------------------------------------------------------
+    // Account lockout check (TM-as6.4)
+    //
+    // If the account is currently locked, reject immediately with 403 and
+    // a retryAfter hint so the client knows when to try again.
+    // -----------------------------------------------------------------------
+    const now = new Date();
+    const retryAfter = getRetryAfterSeconds(user.locked_until, now);
+    if (retryAfter > 0) {
+      return errorResponse(
+        c,
+        "ERR_ACCOUNT_LOCKED",
+        "Account is temporarily locked due to too many failed login attempts",
+        403,
+        { retryAfter },
+      );
     }
 
     // Verify password
     const valid = await verifyPassword(password, user.password_hash);
     if (!valid) {
-      // Increment failed_login_attempts
+      // -----------------------------------------------------------------------
+      // Failed login -- increment counter and potentially lock (TM-as6.4)
+      //
+      // We compute the new attempt count here (rather than using SQL +1)
+      // because we need the value to determine the lockout duration.
+      //
+      // If the lockout had expired (retryAfter was 0 but locked_until was
+      // set in the past), we still count from the existing total because
+      // progressive lockout escalates: 5 -> 15min, 10 -> 1hr, 20 -> 24hr.
+      // -----------------------------------------------------------------------
+      const newAttempts = (user.failed_login_attempts || 0) + 1;
+      const lockedUntil = computeLockedUntil(newAttempts, now);
+
       await env.DB
-        .prepare("UPDATE users SET failed_login_attempts = failed_login_attempts + 1 WHERE user_id = ?1")
-        .bind(user.user_id)
+        .prepare(
+          "UPDATE users SET failed_login_attempts = ?1, locked_until = ?2 WHERE user_id = ?3",
+        )
+        .bind(newAttempts, lockedUntil, user.user_id)
         .run();
 
       return errorResponse(c, "AUTH_FAILED", "Invalid email or password", 401);
     }
 
-    // Successful login -- reset failed attempts
+    // Successful login -- reset failed attempts and clear lockout
     await env.DB
       .prepare("UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE user_id = ?1")
       .bind(user.user_id)
@@ -460,4 +546,13 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
 }
 
 // Re-export helpers for testing
-export { sha256Hex, isValidEmail, validatePassword };
+export {
+  sha256Hex,
+  isValidEmail,
+  validatePassword,
+  // Lockout helpers (TM-as6.4)
+  getLockoutDurationSeconds,
+  computeLockedUntil,
+  getRetryAfterSeconds,
+  LOCKOUT_THRESHOLDS,
+};

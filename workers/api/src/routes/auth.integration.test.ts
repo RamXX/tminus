@@ -917,4 +917,271 @@ describe("Integration: Auth routes", () => {
       expect(row.password_hash).toMatch(/^[0-9a-f]+:[0-9a-f]+$/);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Account lockout and brute force protection (TM-as6.4)
+  // -------------------------------------------------------------------------
+
+  describe("Account lockout (TM-as6.4)", () => {
+    const LOCKOUT_EMAIL = "lockout@example.com";
+    const CORRECT_PASSWORD = "correctpass123";
+    const WRONG_PASSWORD = "wrongpassword";
+
+    /** Register a user for lockout tests. */
+    async function registerLockoutUser(env: Env) {
+      const handler = createHandler();
+      await handler.fetch(
+        new Request("https://api.tminus.dev/v1/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: LOCKOUT_EMAIL, password: CORRECT_PASSWORD }),
+        }),
+        env,
+        mockCtx,
+      );
+    }
+
+    /** Attempt a login and return the response. */
+    async function attemptLogin(env: Env, password: string) {
+      const handler = createHandler();
+      return handler.fetch(
+        new Request("https://api.tminus.dev/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: LOCKOUT_EMAIL, password }),
+        }),
+        env,
+        mockCtx,
+      );
+    }
+
+    /** Get the user's lockout state from D1. */
+    function getLockoutState() {
+      return db.prepare(
+        "SELECT failed_login_attempts, locked_until FROM users WHERE email = ?",
+      ).get(LOCKOUT_EMAIL) as {
+        failed_login_attempts: number;
+        locked_until: string | null;
+      };
+    }
+
+    it("increments failed_login_attempts on each wrong password", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // 3 wrong attempts
+      for (let i = 0; i < 3; i++) {
+        const res = await attemptLogin(env, WRONG_PASSWORD);
+        expect(res.status).toBe(401);
+      }
+
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(3);
+      // Should NOT be locked yet (threshold is 5)
+      expect(state.locked_until).toBeNull();
+    });
+
+    it("locks account for 15 min after 5 failed attempts", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // 5 wrong attempts
+      for (let i = 0; i < 5; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(5);
+      expect(state.locked_until).not.toBeNull();
+
+      // Verify locked_until is approximately 15 min from now
+      const lockedUntilMs = new Date(state.locked_until!).getTime();
+      const expectedMs = Date.now() + 15 * 60 * 1000;
+      expect(lockedUntilMs).toBeGreaterThanOrEqual(expectedMs - 5000);
+      expect(lockedUntilMs).toBeLessThanOrEqual(expectedMs + 5000);
+    });
+
+    it("returns 403 ERR_ACCOUNT_LOCKED with retryAfter when locked", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // Lock the account (5 fails)
+      for (let i = 0; i < 5; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+
+      // Next attempt should be blocked with 403
+      const res = await attemptLogin(env, CORRECT_PASSWORD);
+      expect(res.status).toBe(403);
+
+      const body = await res.json() as {
+        ok: boolean;
+        error: { code: string; message: string };
+        retryAfter: number;
+      };
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("ERR_ACCOUNT_LOCKED");
+      expect(body.error.message).toContain("locked");
+      // retryAfter should be present and approximately 900 seconds (15 min)
+      expect(body.retryAfter).toBeGreaterThan(0);
+      expect(body.retryAfter).toBeLessThanOrEqual(900);
+    });
+
+    it("locks account for 1 hour after 10 failed attempts", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // Set counter directly to 9 (simulating 9 past failures with expired locks)
+      // to avoid having to simulate lock expiry for each intermediate attempt.
+      db.prepare("UPDATE users SET failed_login_attempts = 9, locked_until = NULL WHERE email = ?").run(LOCKOUT_EMAIL);
+
+      // One more fail -> total 10 -> 1 hour lockout
+      await attemptLogin(env, WRONG_PASSWORD);
+
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(10);
+      expect(state.locked_until).not.toBeNull();
+
+      // Verify locked_until is approximately 1 hour from now
+      const lockedUntilMs = new Date(state.locked_until!).getTime();
+      const expectedMs = Date.now() + 60 * 60 * 1000;
+      expect(lockedUntilMs).toBeGreaterThanOrEqual(expectedMs - 5000);
+      expect(lockedUntilMs).toBeLessThanOrEqual(expectedMs + 5000);
+    });
+
+    it("locks account for 24 hours after 20 failed attempts", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // Set the counter directly to 19 to avoid 20 sequential login calls
+      db.prepare("UPDATE users SET failed_login_attempts = 19, locked_until = NULL WHERE email = ?").run(LOCKOUT_EMAIL);
+
+      // One more fail -> total 20 -> 24 hour lockout
+      await attemptLogin(env, WRONG_PASSWORD);
+
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(20);
+      expect(state.locked_until).not.toBeNull();
+
+      // Verify locked_until is approximately 24 hours from now
+      const lockedUntilMs = new Date(state.locked_until!).getTime();
+      const expectedMs = Date.now() + 24 * 60 * 60 * 1000;
+      expect(lockedUntilMs).toBeGreaterThanOrEqual(expectedMs - 5000);
+      expect(lockedUntilMs).toBeLessThanOrEqual(expectedMs + 5000);
+    });
+
+    it("successful login resets failed_login_attempts and locked_until", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // 3 wrong attempts
+      for (let i = 0; i < 3; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+      expect(getLockoutState().failed_login_attempts).toBe(3);
+
+      // Successful login
+      const res = await attemptLogin(env, CORRECT_PASSWORD);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok: boolean; data: { access_token: string } };
+      expect(body.ok).toBe(true);
+      expect(body.data.access_token).toBeTruthy();
+
+      // Verify counter is reset
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(0);
+      expect(state.locked_until).toBeNull();
+    });
+
+    it("login succeeds after lockout expires (simulated expiry)", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // Lock the account (5 fails)
+      for (let i = 0; i < 5; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+
+      // Verify locked
+      const lockedRes = await attemptLogin(env, CORRECT_PASSWORD);
+      expect(lockedRes.status).toBe(403);
+
+      // Simulate lockout expiry: set locked_until to the past
+      db.prepare("UPDATE users SET locked_until = ? WHERE email = ?")
+        .run(new Date(Date.now() - 1000).toISOString(), LOCKOUT_EMAIL);
+
+      // Now login should work with correct password
+      const res = await attemptLogin(env, CORRECT_PASSWORD);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok: boolean; data: { access_token: string } };
+      expect(body.ok).toBe(true);
+
+      // And counter should be reset
+      const state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(0);
+      expect(state.locked_until).toBeNull();
+    });
+
+    it("lockout state is persisted in D1 across handler instances", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // Use one handler instance for 3 failures
+      for (let i = 0; i < 3; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+
+      // Verify D1 state directly
+      const state1 = getLockoutState();
+      expect(state1.failed_login_attempts).toBe(3);
+
+      // Use a fresh handler instance for 2 more failures
+      for (let i = 0; i < 2; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+
+      // D1 should have cumulative count
+      const state2 = getLockoutState();
+      expect(state2.failed_login_attempts).toBe(5);
+      expect(state2.locked_until).not.toBeNull();
+    });
+
+    it("progressive escalation: 5 -> 15min, 10 -> 1hr, 20 -> 24hr", async () => {
+      const env = buildEnv(d1, sessions);
+      await registerLockoutUser(env);
+
+      // --- Phase 1: 5 fails -> 15 min lock ---
+      for (let i = 0; i < 5; i++) {
+        await attemptLogin(env, WRONG_PASSWORD);
+      }
+      let state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(5);
+      let lockedMs = new Date(state.locked_until!).getTime();
+      // Should be ~15 min (900s) from now
+      expect(lockedMs - Date.now()).toBeGreaterThan(895_000);
+      expect(lockedMs - Date.now()).toBeLessThan(905_000);
+
+      // --- Phase 2: Set counter to 9, simulate expiry, one more fail -> total 10 -> 1 hr lock ---
+      // After threshold 5, each subsequent wrong attempt re-locks immediately.
+      // To reach 10 we simulate accumulated failures with expired locks.
+      db.prepare("UPDATE users SET failed_login_attempts = 9, locked_until = NULL WHERE email = ?").run(LOCKOUT_EMAIL);
+      await attemptLogin(env, WRONG_PASSWORD);
+      state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(10);
+      lockedMs = new Date(state.locked_until!).getTime();
+      // Should be ~1 hr (3600s) from now
+      expect(lockedMs - Date.now()).toBeGreaterThan(3_595_000);
+      expect(lockedMs - Date.now()).toBeLessThan(3_605_000);
+
+      // --- Phase 3: Set counter to 19, simulate expiry, one more fail -> total 20 -> 24 hr lock ---
+      db.prepare("UPDATE users SET failed_login_attempts = 19, locked_until = NULL WHERE email = ?").run(LOCKOUT_EMAIL);
+      await attemptLogin(env, WRONG_PASSWORD);
+      state = getLockoutState();
+      expect(state.failed_login_attempts).toBe(20);
+      lockedMs = new Date(state.locked_until!).getTime();
+      // Should be ~24 hr (86400s) from now
+      expect(lockedMs - Date.now()).toBeGreaterThan(86_395_000);
+      expect(lockedMs - Date.now()).toBeLessThan(86_405_000);
+    });
+  });
 });
