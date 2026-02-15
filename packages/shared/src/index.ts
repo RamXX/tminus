@@ -302,3 +302,43 @@ export {
   foldLine,
 } from "./ical";
 export type { VCalendarOptions } from "./ical";
+
+// Re-export what-if simulation engine
+export {
+  simulate,
+  computeWeeklyHours,
+  countConflicts,
+  checkConstraintViolations,
+  computeBurnoutRiskDelta,
+  computeCommitmentComplianceDelta,
+  generateRecurringEvents,
+  SIMULATION_WEEKS,
+} from "./simulation";
+export type {
+  SimulationEvent,
+  SimulationConstraint,
+  SimulationCommitment,
+  SimulationSnapshot,
+  SimulationScenario,
+  AddCommitmentScenario,
+  AddRecurringEventScenario,
+  ChangeWorkingHoursScenario,
+  ImpactReport,
+  ComplianceEntry,
+} from "./simulation";
+
+// Re-export cognitive load engine (scheduling intelligence)
+export {
+  computeCognitiveLoad,
+  computeMeetingDensity,
+  computeContextSwitches,
+  computeDeepWorkBlocks,
+  computeFragmentationScore,
+  computeAggregateScore,
+} from "./cognitive-load";
+export type {
+  CognitiveLoadInput,
+  CognitiveLoadResult,
+  WorkingHoursConstraint,
+  AggregateMetrics,
+} from "./cognitive-load";

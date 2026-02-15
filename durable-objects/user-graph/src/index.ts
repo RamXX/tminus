@@ -45,8 +45,12 @@ import {
   computeNextOccurrence,
   daysBetween,
   expandMilestonesToBusy,
+  simulate,
+  computeCognitiveLoad,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
+import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
+import type { CognitiveLoadResult } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -3306,6 +3310,88 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // What-If Simulation (read-only snapshot builder)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Build a read-only snapshot of the user's current calendar state
+   * for the simulation engine.
+   *
+   * Fetches upcoming events (next 4 weeks), all constraints, and all
+   * commitments. Returns a SimulationSnapshot that the pure simulate()
+   * function can consume without any side effects.
+   */
+  buildSimulationSnapshot(): SimulationSnapshot {
+    this.ensureMigrated();
+
+    const now = new Date();
+    const fourWeeksLater = new Date(now.getTime() + 28 * 24 * 60 * 60 * 1000);
+    const nowIso = now.toISOString();
+    const futureIso = fourWeeksLater.toISOString();
+
+    // Fetch upcoming events (next 4 weeks)
+    const eventRows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+         ORDER BY start_ts ASC`,
+        nowIso,
+        futureIso,
+      )
+      .toArray();
+
+    const events: SimulationEvent[] = eventRows.map((r) => ({
+      canonical_event_id: r.canonical_event_id,
+      title: r.title ?? "",
+      start_ts: r.start_ts,
+      end_ts: r.end_ts,
+      all_day: r.all_day === 1,
+      status: r.status,
+      client_id: this.getEventClientId(r.canonical_event_id),
+    }));
+
+    // Fetch all constraints
+    const constraintRows = this.listConstraints();
+    const constraints: SimulationConstraint[] = constraintRows.map((c) => ({
+      kind: c.kind,
+      config_json: c.config_json,
+    }));
+
+    // Fetch all commitments
+    const commitmentRows = this.listCommitments();
+    const commitments: SimulationCommitment[] = commitmentRows.map((c) => ({
+      commitment_id: c.commitment_id,
+      client_id: c.client_id,
+      client_name: c.client_name,
+      target_hours: c.target_hours,
+      window_type: c.window_type,
+      rolling_window_weeks: c.rolling_window_weeks,
+      hard_minimum: c.hard_minimum,
+    }));
+
+    return {
+      events,
+      constraints,
+      commitments,
+      simulation_start: nowIso,
+    };
+  }
+
+  /**
+   * Get the client_id for an event from its time_allocation, if any.
+   * Returns null if no allocation exists.
+   */
+  private getEventClientId(canonicalEventId: string): string | null {
+    const rows = this.sql
+      .exec<{ client_id: string | null }>(
+        `SELECT client_id FROM time_allocations WHERE canonical_event_id = ? LIMIT 1`,
+        canonicalEventId,
+      )
+      .toArray();
+    return rows.length > 0 ? rows[0].client_id : null;
+  }
+
+  // -------------------------------------------------------------------------
   // Relationship tracking (Phase 4)
   // -------------------------------------------------------------------------
 
@@ -4693,6 +4779,15 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getCognitiveLoad": {
+          const body = (await request.json()) as {
+            date: string;
+            range: "day" | "week";
+          };
+          const result = this.getCognitiveLoad(body.date, body.range);
+          return Response.json(result);
+        }
+
         // ---------------------------------------------------------------
         // Constraint RPC endpoints
         // ---------------------------------------------------------------
@@ -5066,6 +5161,19 @@ export class UserGraphDO {
             body.as_of,
           );
           return Response.json(proofData);
+        }
+
+        // ---------------------------------------------------------------
+        // What-If Simulation RPC endpoint
+        // ---------------------------------------------------------------
+
+        case "/simulate": {
+          const body = (await request.json()) as {
+            scenario: SimulationScenario;
+          };
+          const snapshot = this.buildSimulationSnapshot();
+          const impact = simulate(snapshot, body.scenario);
+          return Response.json(impact);
         }
 
         // ---------------------------------------------------------------
@@ -6246,6 +6354,66 @@ export class UserGraphDO {
       busy_intervals: busyIntervals,
       free_intervals: freeIntervals,
     };
+  }
+
+  // getCognitiveLoad -- Compute cognitive load score for a day/week
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute cognitive load score for a day or week based on the user's
+   * canonical events. Reads events from SQLite and delegates to the pure
+   * computeCognitiveLoad function in @tminus/shared.
+   *
+   * Extracts working hours from active working_hours constraints if present,
+   * otherwise defaults to 9-17.
+   */
+  getCognitiveLoad(date: string, range: "day" | "week"): CognitiveLoadResult {
+    this.ensureMigrated();
+
+    // Determine query time range
+    const startDate = new Date(`${date}T00:00:00Z`);
+    const dayCount = range === "week" ? 7 : 1;
+    const endDate = new Date(startDate.getTime() + dayCount * 24 * 60 * 60 * 1000);
+
+    const startIso = startDate.toISOString();
+    const endIso = endDate.toISOString();
+
+    // Fetch canonical events for the period
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND status != 'cancelled'
+         ORDER BY start_ts ASC`,
+        startIso,
+        endIso,
+      )
+      .toArray();
+
+    const events = rows.map((row) => this.rowToCanonicalEvent(row));
+
+    // Extract working hours from constraints (if set)
+    const workingHoursConstraints = this.listConstraints("working_hours");
+    let workingHoursStart = 9;
+    let workingHoursEnd = 17;
+    if (workingHoursConstraints.length > 0) {
+      const config = workingHoursConstraints[0].config_json as {
+        start_hour?: number;
+        end_hour?: number;
+      };
+      if (typeof config.start_hour === "number") workingHoursStart = config.start_hour;
+      if (typeof config.end_hour === "number") workingHoursEnd = config.end_hour;
+    }
+
+    return computeCognitiveLoad({
+      events,
+      date,
+      range,
+      constraints: {
+        workingHoursStart,
+        workingHoursEnd,
+      },
+    });
   }
 
   /** Convert a DB row to a CanonicalEvent domain object. */

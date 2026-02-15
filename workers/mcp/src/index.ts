@@ -837,6 +837,89 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["event_id", "tone", "truth_level"],
     },
   },
+  {
+    name: "calendar.get_cognitive_load",
+    description:
+      "Get cognitive load score for a day or week. Returns a score (0-100) measuring how mentally demanding the schedule is, based on meeting density, context switches between different meetings, deep work blocks (uninterrupted periods >= 2h), and schedule fragmentation (small gaps < 30min). Use this to assess whether a day/week is overloaded before scheduling more meetings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description:
+            "The date to analyze in YYYY-MM-DD format. For 'week' range, this is the start date.",
+        },
+        range: {
+          type: "string",
+          enum: ["day", "week"],
+          description:
+            "Whether to analyze a single day or an entire week starting from the given date. Defaults to 'day'.",
+        },
+      },
+      required: ["date"],
+    },
+  },
+  {
+    name: "calendar.simulate",
+    description:
+      "Run a what-if simulation to assess calendar impact of accepting new commitments. 'What if I accept this board seat?' Returns projected time allocation, conflict count, constraint violations, and burnout risk. Does NOT modify any real data -- purely read-only analysis. Supports three scenario types: add_commitment (new client hours), add_recurring_event (new weekly meeting), and change_working_hours (adjust schedule boundaries).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scenario: {
+          type: "object",
+          description:
+            "The hypothetical scenario to simulate. Must include 'type' plus type-specific fields.",
+          properties: {
+            type: {
+              type: "string",
+              enum: ["add_commitment", "add_recurring_event", "change_working_hours"],
+              description:
+                "Scenario type: 'add_commitment' to add client hours, 'add_recurring_event' for a new weekly meeting, 'change_working_hours' to adjust work boundaries.",
+            },
+            client_id: {
+              type: "string",
+              description: "Client ID for add_commitment scenario.",
+            },
+            hours_per_week: {
+              type: "number",
+              description: "Hours per week for add_commitment scenario.",
+            },
+            title: {
+              type: "string",
+              description: "Event title for add_recurring_event scenario.",
+            },
+            day_of_week: {
+              type: "number",
+              description: "Day of week for add_recurring_event (0=Monday, 6=Sunday).",
+            },
+            start_time: {
+              type: "number",
+              description: "Start hour (decimal) for add_recurring_event (e.g. 14 for 2pm).",
+            },
+            end_time: {
+              type: "number",
+              description: "End hour (decimal) for add_recurring_event.",
+            },
+            duration_weeks: {
+              type: "number",
+              description: "Number of weeks for add_recurring_event.",
+            },
+            start_hour: {
+              type: "number",
+              description: "New working hours start for change_working_hours.",
+            },
+            end_hour: {
+              type: "number",
+              description: "New working hours end for change_working_hours.",
+            },
+          },
+          required: ["type"],
+        },
+      },
+      required: ["scenario"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -906,6 +989,8 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.upcoming_milestones": "enterprise",
   "calendar.propose_group_times": "premium",
   "calendar.generate_excuse": "enterprise",
+  "calendar.get_cognitive_load": "free",
+  "calendar.simulate": "premium",
 };
 
 /**
@@ -3355,6 +3440,94 @@ async function handleGenerateExcuseMCP(
 }
 
 /**
+ * Execute calendar.get_cognitive_load: validate input and forward to the API
+ * worker to compute cognitive load score for a day or week.
+ */
+async function handleGetCognitiveLoadMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.date !== "string" || args.date.trim().length === 0) {
+    throw new InvalidParamsError("date is required (YYYY-MM-DD format)");
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) {
+    throw new InvalidParamsError("date must be in YYYY-MM-DD format");
+  }
+
+  const range = args.range ?? "day";
+  if (range !== "day" && range !== "week") {
+    throw new InvalidParamsError("range must be 'day' or 'week'");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const params = new URLSearchParams({ date: args.date, range: range as string });
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "GET",
+    `/v1/intelligence/cognitive-load?${params.toString()}`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get cognitive load");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.simulate: validate input and forward to the API
+ * worker to run a what-if simulation on the user's calendar.
+ * Read-only: does not modify any real data.
+ */
+async function handleSimulateMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || !args.scenario || typeof args.scenario !== "object") {
+    throw new InvalidParamsError("scenario is required");
+  }
+
+  const scenario = args.scenario as Record<string, unknown>;
+  if (!scenario.type || typeof scenario.type !== "string") {
+    throw new InvalidParamsError("scenario.type is required");
+  }
+
+  const validTypes = ["add_commitment", "add_recurring_event", "change_working_hours"];
+  if (!validTypes.includes(scenario.type)) {
+    throw new InvalidParamsError(
+      `Invalid scenario.type: ${scenario.type}. Must be one of: ${validTypes.join(", ")}`,
+    );
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "POST",
+    "/v1/simulation",
+    { scenario },
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Simulation failed");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.add_milestone: validate input and forward to the API
  * worker to create a milestone for a relationship contact.
  */
@@ -3780,6 +3953,16 @@ async function dispatch(
           case "calendar.propose_group_times": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleProposeGroupTimes(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_cognitive_load": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetCognitiveLoadMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.simulate": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleSimulateMCP(request, env.API, toolArgs);
             break;
           }
           default:

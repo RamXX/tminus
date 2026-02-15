@@ -13,7 +13,7 @@
  */
 
 import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES, isValidMilestoneKind, isValidMilestoneDate, MILESTONE_KINDS, buildExcusePrompt, parseExcuseResponse, buildVCalendar } from "@tminus/shared";
-import type { CanonicalEvent } from "@tminus/shared";
+import type { CanonicalEvent, SimulationScenario, ImpactReport } from "@tminus/shared";
 import type { ExcuseTone, TruthLevel, ExcuseContext } from "@tminus/shared";
 import {
   checkRateLimit as checkRL,
@@ -2960,6 +2960,65 @@ async function handleListRelationshipsWithReputation(
   }
 }
 
+// -- Cognitive load intelligence -------------------------------------------------
+
+async function handleGetCognitiveLoad(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const date = url.searchParams.get("date");
+  const range = url.searchParams.get("range") ?? "day";
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return jsonResponse(
+      errorEnvelope(
+        "date query parameter is required (YYYY-MM-DD format)",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (range !== "day" && range !== "week") {
+    return jsonResponse(
+      errorEnvelope(
+        "range must be 'day' or 'week'",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      score: number;
+      meeting_density: number;
+      context_switches: number;
+      deep_work_blocks: number;
+      fragmentation: number;
+    }>(env.USER_GRAPH, auth.userId, "/getCognitiveLoad", { date, range });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to compute cognitive load", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to compute cognitive load", err);
+    return jsonResponse(
+      errorEnvelope("Failed to compute cognitive load", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Drift & reputation ---------------------------------------------------------
+
 async function handleGetDriftReport(
   _request: Request,
   auth: AuthContext,
@@ -4075,6 +4134,158 @@ async function handleExportCommitmentProof(
 }
 
 /**
+ * POST /v1/simulation
+ *
+ * Run a what-if simulation. Takes a scenario and returns an impact report.
+ * Read-only: does not modify any real calendar data.
+ *
+ * Body: { scenario: SimulationScenario }
+ * Returns: { ok: true, data: ImpactReport }
+ */
+async function handleSimulation(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<{
+    scenario?: {
+      type?: string;
+      client_id?: string;
+      hours_per_week?: number;
+      title?: string;
+      day_of_week?: number;
+      start_time?: number;
+      end_time?: number;
+      duration_weeks?: number;
+      start_hour?: number;
+      end_hour?: number;
+    };
+  }>(request);
+
+  if (!body || !body.scenario) {
+    return jsonResponse(
+      errorEnvelope("Request body must include a scenario object", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const { scenario } = body;
+
+  if (!scenario.type) {
+    return jsonResponse(
+      errorEnvelope("scenario.type is required", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const validTypes = ["add_commitment", "add_recurring_event", "change_working_hours"];
+  if (!validTypes.includes(scenario.type)) {
+    return jsonResponse(
+      errorEnvelope(
+        `Invalid scenario.type: ${scenario.type}. Must be one of: ${validTypes.join(", ")}`,
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Type-specific validation
+  if (scenario.type === "add_commitment") {
+    if (!scenario.client_id || typeof scenario.client_id !== "string") {
+      return jsonResponse(
+        errorEnvelope("scenario.client_id is required for add_commitment", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.hours_per_week === undefined || typeof scenario.hours_per_week !== "number" || scenario.hours_per_week < 0) {
+      return jsonResponse(
+        errorEnvelope("scenario.hours_per_week is required and must be a non-negative number", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  if (scenario.type === "add_recurring_event") {
+    if (!scenario.title || typeof scenario.title !== "string") {
+      return jsonResponse(
+        errorEnvelope("scenario.title is required for add_recurring_event", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.day_of_week === undefined || typeof scenario.day_of_week !== "number" || scenario.day_of_week < 0 || scenario.day_of_week > 6) {
+      return jsonResponse(
+        errorEnvelope("scenario.day_of_week must be 0-6 (Monday-Sunday)", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.start_time === undefined || typeof scenario.start_time !== "number") {
+      return jsonResponse(
+        errorEnvelope("scenario.start_time is required (decimal hour, e.g. 14 for 2pm)", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.end_time === undefined || typeof scenario.end_time !== "number") {
+      return jsonResponse(
+        errorEnvelope("scenario.end_time is required (decimal hour)", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.duration_weeks === undefined || typeof scenario.duration_weeks !== "number" || scenario.duration_weeks < 1) {
+      return jsonResponse(
+        errorEnvelope("scenario.duration_weeks must be a positive integer", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  if (scenario.type === "change_working_hours") {
+    if (scenario.start_hour === undefined || typeof scenario.start_hour !== "number") {
+      return jsonResponse(
+        errorEnvelope("scenario.start_hour is required for change_working_hours", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.end_hour === undefined || typeof scenario.end_hour !== "number") {
+      return jsonResponse(
+        errorEnvelope("scenario.end_hour is required for change_working_hours", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    if (scenario.start_hour >= scenario.end_hour) {
+      return jsonResponse(
+        errorEnvelope("scenario.start_hour must be less than scenario.end_hour", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  try {
+    const result = await callDO<ImpactReport>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/simulate",
+      { scenario: scenario as SimulationScenario },
+    );
+
+    if (!result.ok) {
+      const errorData = result.data as unknown as { error?: string };
+      return jsonResponse(
+        errorEnvelope(errorData.error ?? "Simulation failed", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Simulation failed", err);
+    return jsonResponse(
+      errorEnvelope("Simulation failed", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+/**
  * GET /v1/proofs/*
  *
  * Download a proof document from R2 by its key.
@@ -5028,6 +5239,14 @@ async function routeAuthenticatedRequest(
         return handleDeleteCommitment(request, auth, env, match.params[0]);
       }
 
+      // -- What-If Simulation route (Premium+) -----------------------------------
+
+      if (method === "POST" && pathname === "/v1/simulation") {
+        const simGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+        if (simGate) return simGate;
+        return handleSimulation(request, auth, env);
+      }
+
       // -- Proof verification and download routes --------------------------------
 
       match = matchRoute(pathname, "/v1/proofs/:id/verify");
@@ -5090,6 +5309,12 @@ async function routeAuthenticatedRequest(
           }),
           200,
         );
+      }
+
+      // -- Intelligence routes -------------------------------------------------
+
+      if (method === "GET" && pathname === "/v1/intelligence/cognitive-load") {
+        return handleGetCognitiveLoad(request, auth, env);
       }
 
       // -- Fallback ---------------------------------------------------------
