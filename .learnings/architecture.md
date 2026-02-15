@@ -173,3 +173,23 @@ For the typical case (2-5 accounts, <100 events), this is negligible overhead. D
 **Applies to:** All D1 queries with multi-ID filters (account_id, event_id, policy_id)
 
 **Source stories:** TM-4qw.4
+
+---
+
+## [Added from Epic TM-nyj retro - 2026-02-14]
+
+### Hash-Based Router Should Strip Query Params
+
+**Priority:** Nice-to-have
+
+**Context:** The hash-based router in App.tsx does not strip query params before matching routes. OAuth callback handling required manual `route.split("?")[0]` to extract the base path, which is error-prone and should be handled centrally.
+
+**Recommendation:**
+- Update the hash router to automatically strip query params before route matching: `const routePath = route.split("?")[0]`
+- This should be done in the base router logic, not in individual route handlers
+- Preserves query params for use in route handlers while ensuring route matching is deterministic
+
+**Applies to:** Hash-based routing infrastructure
+
+**Source stories:** TM-nyj.9
+

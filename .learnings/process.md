@@ -102,3 +102,23 @@ Sr. PM can then decide whether to collapse stories or keep them separate. The ke
 **Applies to:** All stories (developer execution discipline)
 
 **Source stories:** TM-4qw.2, TM-4qw.3, TM-4qw.4, TM-4qw.5
+
+---
+
+## [Added from Epic TM-nyj retro - 2026-02-14]
+
+### Walking Skeleton Observations Should Generate Follow-Up Stories
+
+**Priority:** Important
+
+**Context:** TM-nyj.2 noted that JWT is stored only in React state (lost on refresh), and that the walking skeleton mentioned a future story for refresh token persistence, but no such story exists in the backlog. This creates a gap between identified TODOs and backlog planning.
+
+**Recommendation:**
+- When walking skeleton stories (*.1) note deferred functionality, Sr. PM should immediately create placeholder stories in the backlog
+- These stories should be tagged with `deferred-from-walking-skeleton` label for traceability
+- PM-Acceptor should verify during acceptance that all walking skeleton TODOs have corresponding backlog stories
+
+**Applies to:** All epics that start with a walking skeleton story
+
+**Source stories:** TM-nyj.2
+

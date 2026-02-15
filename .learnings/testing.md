@@ -247,3 +247,96 @@ E2E tests are the "outside-in" validation layer. They should be runnable by a QA
 **Applies to:** All E2E test files
 
 **Source stories:** TM-4qw.7
+
+---
+
+## [Added from Epic TM-nyj retro - 2026-02-14]
+
+### React Testing Library: Multi-Location Text Disambiguation
+
+**Priority:** Important
+
+**Context:** When building UIs with optimistic updates or multi-panel views (e.g., calendar + detail panel), the same text often appears in multiple DOM locations. Standard `getByText` becomes ambiguous and tests fail with "found multiple elements" errors. This pattern appeared in 4 stories during Phase 2C UI development.
+
+**Recommendation:**
+- **Default strategy:** Use `within(container)` scoping to limit queries to specific DOM regions
+- **Fallback strategy:** Use `getAllByText` and index into the array, then close views before using `getByText`
+- **Prevention strategy:** Use unique `data-testid` attributes for click targets in multi-location scenarios
+
+**Applies to:** All UI stories involving optimistic updates, master/detail views, or multi-panel layouts
+
+**Source stories:** TM-nyj.2, TM-nyj.7, TM-nyj.9, TM-nyj.10
+
+---
+
+### Fake Timers Require Explicit Async Advancement
+
+**Priority:** Critical
+
+**Context:** Components with async state updates (API calls, routing) AND timers (setTimeout, setInterval) require careful test orchestration. Standard `await waitFor()` is insufficient when fake timers are active. Multiple stories in Phase 2C struggled with test timeouts until this pattern was discovered.
+
+**Recommendation:**
+- Use `vi.advanceTimersByTimeAsync(0)` after EACH user action or navigation to flush both:
+  1. Promise microtasks (API responses)
+  2. Timer callbacks (routing, status auto-clear)
+- Expect to need TWO separate flushes for complex flows (e.g., login: one for API response, one for route change + data load)
+- When using `userEvent.setup()` with fake timers causes timeouts, fall back to synchronous `fireEvent.click()`
+- For hash-based routing in jsdom, manually dispatch `HashChangeEvent` after setting `window.location.hash`
+
+**Applies to:** All UI integration tests involving async state + timers
+
+**Source stories:** TM-nyj.9, TM-nyj.10
+
+---
+
+### React 19 + Testing Library Setup Requirements
+
+**Priority:** Important
+
+**Context:** React 19 has stricter behavior around event handling and style mutations compared to React 18. Phase 2C was the first epic using React 19, and several patterns needed adjustment.
+
+**Recommendation:**
+- Always call `userEvent.setup()` OUTSIDE test functions (in beforeEach or at module level)
+- Use `@vitejs/plugin-react` in vitest.config.ts for proper JSX transformation
+- Avoid mixing CSS shorthand properties (border, margin, padding) with specific properties (borderColor, marginTop) in the same style object -- React 19 warns about "Removing style property during rerender"
+- Use granular properties: `borderWidth`/`borderStyle`/`borderColor` instead of `border`
+
+**Applies to:** All React 19 component tests using Testing Library
+
+**Source stories:** TM-nyj.2
+
+---
+
+### ISO Datetime Format Consistency in Tests
+
+**Priority:** Important
+
+**Context:** API helpers that normalize datetime strings (stripping `Z` suffix or normalizing to UTC) cause test failures when assertions compare raw ISO strings with normalized strings. This caused form round-trip mismatches in event editing tests.
+
+**Recommendation:**
+- Tests must use the SAME datetime format as the API contract (if API returns `2024-01-01T10:00:00Z`, tests must assert with `Z` suffix)
+- Helper functions that normalize datetimes (extractDatePart, extractTimePart) should be documented with their exact format behavior
+- When building test fixtures, extract datetime strings from the API response format, not from hardcoded assumptions
+
+**Applies to:** All tests involving datetime comparisons (event creation, editing, constraints)
+
+**Source stories:** TM-nyj.7
+
+---
+
+### Comprehensive E2E Validation Resolves Cumulative Test Instability
+
+**Priority:** Important
+
+**Context:** Accounts.test.tsx exhibited timeouts in TM-nyj.7 (17 tests failing), but passed reliably in TM-nyj.10 (47 tests passing). The resolution came from cumulative fixes across multiple stories, not a single targeted fix.
+
+**Recommendation:**
+- Always include a comprehensive E2E validation story at the END of UI epics
+- E2E stories should exercise full user journeys (login -> view -> create -> edit -> delete -> logout)
+- These stories expose integration issues that unit/component tests miss (fake timer interactions, routing edge cases, async flush ordering)
+- E2E stories validate that cumulative fixes across multiple stories have resolved test instability
+
+**Applies to:** All UI epics
+
+**Source stories:** TM-nyj.7, TM-nyj.10
+

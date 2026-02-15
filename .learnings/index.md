@@ -21,3 +21,6 @@ Accumulated insights from epic retrospectives. Organized by category.
 - [Code Quality](code-quality.md) - Refactoring needs, technical debt, maintainability
 - [Beads Workflow](beads-workflow.md) - Git branching, worktrees, sync modes
 - [External Dependencies](external-deps.md) - Third-party libraries, platform constraints, API quirks
+
+## Epic Retrospectives
+- [Epic TM-nyj Retro](TM-nyj-retro.md) - Phase 2C: Web Calendar UI (2026-02-14)
