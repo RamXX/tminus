@@ -3630,6 +3630,60 @@ async function handleSimulateMCP(
 }
 
 /**
+ * Execute calendar.query_graph: validate input and forward to the API
+ * worker's graph endpoints. Maps 'endpoint' to the correct API path
+ * and passes 'filters' as query parameters.
+ */
+async function handleQueryGraphMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.endpoint !== "string" || args.endpoint.trim().length === 0) {
+    throw new InvalidParamsError("endpoint is required ('events', 'relationships', or 'timeline')");
+  }
+
+  const validEndpoints = ["events", "relationships", "timeline"];
+  if (!validEndpoints.includes(args.endpoint)) {
+    throw new InvalidParamsError(
+      `Invalid endpoint: ${args.endpoint}. Must be one of: ${validEndpoints.join(", ")}`,
+    );
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  // Build query parameters from filters
+  const params = new URLSearchParams();
+  const filters = (args.filters ?? {}) as Record<string, unknown>;
+  if (filters.start_date && typeof filters.start_date === "string") {
+    params.set("start_date", filters.start_date);
+  }
+  if (filters.end_date && typeof filters.end_date === "string") {
+    params.set("end_date", filters.end_date);
+  }
+  if (filters.category && typeof filters.category === "string") {
+    params.set("category", filters.category);
+  }
+  if (filters.participant_hash && typeof filters.participant_hash === "string") {
+    params.set("participant_hash", filters.participant_hash);
+  }
+
+  const queryString = params.toString();
+  const path = `/v1/graph/${args.endpoint}${queryString ? `?${queryString}` : ""}`;
+
+  const result = await callConstraintApi(api, jwt, "GET", path);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? `Failed to query graph ${args.endpoint}`);
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.add_milestone: validate input and forward to the API
  * worker to create a milestone for a relationship contact.
  */
@@ -4070,6 +4124,11 @@ async function dispatch(
           case "calendar.simulate": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleSimulateMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.query_graph": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleQueryGraphMCP(request, env.API, toolArgs);
             break;
           }
           default:
