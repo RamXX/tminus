@@ -48,6 +48,7 @@ import {
   handleGetSchedulingCandidates,
   handleCommitSchedulingCandidate,
   handleCancelSchedulingSession,
+  handleExtendHold,
 } from "./routes/scheduling";
 import {
   handleCreateGroupSession,
@@ -4746,6 +4747,12 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/scheduling/sessions/:id/commit");
       if (match && method === "POST") {
         return handleCommitSchedulingCandidate(request, auth, env, match.params[0]);
+      }
+
+      // TM-82s.4: Hold extension route
+      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/extend-hold");
+      if (match && method === "POST") {
+        return handleExtendHold(request, auth, env, match.params[0]);
       }
 
       match = matchRoute(pathname, "/v1/scheduling/sessions/:id");

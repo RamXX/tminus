@@ -4893,6 +4893,21 @@ export class UserGraphDO {
           return Response.json({ ok: true });
         }
 
+        case "/extendHolds": {
+          const body = (await request.json()) as {
+            session_id: string;
+            holds: Array<{ hold_id: string; new_expires_at: string }>;
+          };
+          const extended = this.extendHolds(body.session_id, body.holds);
+          return Response.json({ ok: true, extended });
+        }
+
+        case "/expireSessionIfAllHoldsTerminal": {
+          const body = (await request.json()) as { session_id: string };
+          const expired = this.expireSessionIfAllHoldsTerminal(body.session_id);
+          return Response.json({ ok: true, expired });
+        }
+
         // ---------------------------------------------------------------
         // Time allocation RPC endpoints
         // ---------------------------------------------------------------
@@ -5972,6 +5987,92 @@ export class UserGraphDO {
       "UPDATE schedule_holds SET status = 'released' WHERE session_id = ? AND status = 'held'",
       sessionId,
     );
+  }
+
+  /**
+   * Extend the expiry of active holds for a session (TM-82s.4 AC-3).
+   * Only holds in 'held' status are extended. Returns count of extended holds.
+   */
+  private extendHolds(
+    sessionId: string,
+    holds: Array<{ hold_id: string; new_expires_at: string }>,
+  ): number {
+    this.ensureMigrated();
+
+    let extended = 0;
+    for (const h of holds) {
+      // Only extend holds that belong to this session and are still held
+      const result = this.sql.exec(
+        `UPDATE schedule_holds SET expires_at = ?
+         WHERE hold_id = ? AND session_id = ? AND status = 'held'`,
+        h.new_expires_at,
+        h.hold_id,
+        sessionId,
+      );
+      // Check if the update affected any rows
+      const check = this.sql
+        .exec<{ [key: string]: unknown; hold_id: string }>(
+          "SELECT hold_id FROM schedule_holds WHERE hold_id = ? AND session_id = ? AND status = 'held' AND expires_at = ?",
+          h.hold_id,
+          sessionId,
+          h.new_expires_at,
+        )
+        .toArray();
+      if (check.length > 0) {
+        extended++;
+      }
+    }
+    return extended;
+  }
+
+  /**
+   * Check if all holds for a session are in terminal states (expired, released, committed).
+   * If so, transition the session to 'expired' status (TM-82s.4 AC-4/AC-6).
+   * Returns true if the session was expired, false otherwise.
+   */
+  private expireSessionIfAllHoldsTerminal(sessionId: string): boolean {
+    this.ensureMigrated();
+
+    // Check if any holds are still active (held)
+    const activeHolds = this.sql
+      .exec<{ [key: string]: unknown; cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM schedule_holds WHERE session_id = ? AND status = 'held'",
+        sessionId,
+      )
+      .toArray();
+
+    const activeCount = activeHolds[0]?.cnt ?? 0;
+
+    if (activeCount > 0) {
+      // Still have active holds, do not expire
+      return false;
+    }
+
+    // Verify session exists and is in a candidate-bearing state
+    const sessionRows = this.sql
+      .exec<{ [key: string]: unknown; status: string }>(
+        "SELECT status FROM schedule_sessions WHERE session_id = ?",
+        sessionId,
+      )
+      .toArray();
+
+    if (sessionRows.length === 0) {
+      return false;
+    }
+
+    const currentStatus = sessionRows[0].status;
+    // Only expire sessions that are in candidates_ready state
+    if (currentStatus !== "candidates_ready") {
+      return false;
+    }
+
+    // All holds are terminal, expire the session
+    this.sql.exec(
+      "UPDATE schedule_sessions SET status = 'expired' WHERE session_id = ?",
+      sessionId,
+    );
+
+    return true;
   }
 
   // -------------------------------------------------------------------------

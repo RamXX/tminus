@@ -1,17 +1,27 @@
 /**
  * Scheduling API route handlers for the T-Minus REST API.
  *
- * Provides three endpoints:
+ * Provides endpoints:
  * - POST /v1/scheduling/sessions  -- Create a scheduling session (triggers workflow)
+ * - GET  /v1/scheduling/sessions -- List scheduling sessions
+ * - GET  /v1/scheduling/sessions/:id -- Get a session
  * - GET  /v1/scheduling/sessions/:id/candidates -- Get candidates for a session
  * - POST /v1/scheduling/sessions/:id/commit -- Commit a selected candidate
+ * - DELETE /v1/scheduling/sessions/:id -- Cancel a session
+ * - POST /v1/scheduling/sessions/:id/extend-hold -- Extend hold expiry (TM-82s.4)
  *
  * These handlers delegate to the SchedulingWorkflow which interacts with
  * UserGraphDO for availability computation, session storage, and event creation.
  */
 
 import { SchedulingWorkflow } from "@tminus/workflow-scheduling";
-import type { SchedulingParams } from "@tminus/workflow-scheduling";
+import type { SchedulingParams, SchedulingSession, Hold } from "@tminus/workflow-scheduling";
+import {
+  validateHoldDurationHours,
+  computeExtendedExpiry,
+  isApproachingExpiry,
+  HOLD_DURATION_DEFAULT_HOURS,
+} from "@tminus/workflow-scheduling";
 
 // ---------------------------------------------------------------------------
 // Types for the API handler signatures
@@ -90,6 +100,41 @@ async function parseJsonBody<T>(request: Request): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Hold lifecycle enrichment (TM-82s.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Enrich a session response with hold lifecycle metadata for polling.
+ *
+ * Adds:
+ * - approaching_expiry: true if any active hold is within 1 hour of expiry
+ * - earliest_expiry: ISO string of the soonest hold expiry (for UI countdown)
+ *
+ * This is the polling-based notification mechanism (AC-2). The UI can poll
+ * GET /v1/scheduling/sessions/:id and check these fields.
+ */
+function enrichSessionWithHoldStatus(
+  session: SchedulingSession,
+): SchedulingSession & { approaching_expiry: boolean; earliest_expiry: string | null } {
+  const holds = session.holds ?? [];
+  const activeHolds = holds.filter((h: Hold) => h.status === "held");
+
+  if (activeHolds.length === 0) {
+    return { ...session, approaching_expiry: false, earliest_expiry: null };
+  }
+
+  const anyApproaching = activeHolds.some((h: Hold) => isApproachingExpiry(h));
+
+  // Find the earliest expiry among active holds
+  const earliest = activeHolds.reduce((min: string | null, h: Hold) => {
+    if (!min) return h.expires_at;
+    return new Date(h.expires_at).getTime() < new Date(min).getTime() ? h.expires_at : min;
+  }, null as string | null);
+
+  return { ...session, approaching_expiry: anyApproaching, earliest_expiry: earliest };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +316,8 @@ export async function handleListSchedulingSessions(
  * GET /v1/scheduling/sessions/:id
  *
  * Retrieves a single scheduling session with its candidates.
+ * TM-82s.4: Response includes approaching_expiry and earliest_expiry fields
+ * for UI polling of hold lifecycle status.
  */
 export async function handleGetSchedulingSession(
   _request: Request,
@@ -282,7 +329,10 @@ export async function handleGetSchedulingSession(
     const workflow = new SchedulingWorkflow(env);
     const session = await workflow.getCandidates(auth.userId, sessionId);
 
-    return jsonResponse(successEnvelope(session), 200);
+    // TM-82s.4: Enrich with hold lifecycle metadata for polling
+    const enriched = enrichSessionWithHoldStatus(session);
+
+    return jsonResponse(successEnvelope(enriched), 200);
   } catch (err) {
     console.error("Failed to get scheduling session", err);
     const message = err instanceof Error ? err.message : "Failed to get session";
@@ -400,5 +450,115 @@ export async function handleCommitSchedulingCandidate(
     }
 
     return jsonResponse(errorEnvelope(message), status);
+  }
+}
+
+/**
+ * POST /v1/scheduling/sessions/:id/extend-hold (TM-82s.4)
+ *
+ * Extends the expiry of all active holds for a scheduling session.
+ * Validates the session is in a valid state and the requested duration
+ * is within the configurable range (1-72 hours).
+ */
+export async function handleExtendHold(
+  request: Request,
+  auth: AuthContext,
+  env: SchedulingHandlerEnv,
+  sessionId: string,
+): Promise<Response> {
+  const body = await parseJsonBody<{
+    duration_hours?: number;
+  }>(request);
+
+  // duration_hours is optional -- defaults to HOLD_DURATION_DEFAULT_HOURS (24)
+  const durationHours = body?.duration_hours ?? HOLD_DURATION_DEFAULT_HOURS;
+
+  if (typeof durationHours !== "number" || isNaN(durationHours)) {
+    return jsonResponse(errorEnvelope("duration_hours must be a number"), 400);
+  }
+
+  // Validate the duration is within range
+  try {
+    validateHoldDurationHours(durationHours);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid duration";
+    return jsonResponse(errorEnvelope(message), 400);
+  }
+
+  try {
+    // Get the session to verify it exists and is in a valid state
+    const workflow = new SchedulingWorkflow(env);
+    const session = await workflow.getCandidates(auth.userId, sessionId);
+
+    if (session.status !== "candidates_ready") {
+      return jsonResponse(
+        errorEnvelope(
+          `Cannot extend holds for session in '${session.status}' status. Session must be in 'candidates_ready' status.`,
+        ),
+        409,
+      );
+    }
+
+    // Get active holds for this session
+    const holds = await workflow.getHoldsBySession(auth.userId, sessionId);
+    const activeHolds = holds.filter((h) => h.status === "held");
+
+    if (activeHolds.length === 0) {
+      return jsonResponse(
+        errorEnvelope("No active holds found for this session"),
+        404,
+      );
+    }
+
+    // Compute new expiry for each active hold
+    const now = new Date().toISOString();
+    const extendedHolds: Array<{ hold_id: string; new_expires_at: string }> = [];
+
+    for (const hold of activeHolds) {
+      const newExpiresAt = computeExtendedExpiry(hold, durationHours, now);
+      extendedHolds.push({ hold_id: hold.hold_id, new_expires_at: newExpiresAt });
+    }
+
+    // Update holds in UserGraphDO
+    const userGraphId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/extendHolds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          holds: extendedHolds,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`UserGraphDO.extendHolds failed (${response.status}): ${errBody}`);
+    }
+
+    return jsonResponse(
+      successEnvelope({
+        session_id: sessionId,
+        extended_holds: extendedHolds.length,
+        duration_hours: durationHours,
+        new_expires_at: extendedHolds[0]?.new_expires_at ?? null,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to extend holds", err);
+    const message = err instanceof Error ? err.message : "Failed to extend holds";
+
+    if (message.includes("not found")) {
+      return jsonResponse(errorEnvelope(message), 404);
+    }
+    if (message.includes("Only holds in")) {
+      return jsonResponse(errorEnvelope(message), 409);
+    }
+
+    return jsonResponse(errorEnvelope(message), 500);
   }
 }

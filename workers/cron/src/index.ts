@@ -402,7 +402,11 @@ interface ExpiredHoldRow {
  * to remove the tentative event from the calendar. Then transitions the
  * hold status to 'expired'.
  *
- * This implements AC-5: "Expired holds cleaned up by cron".
+ * TM-82s.4: After expiring all holds for a session, also updates the
+ * session status to 'expired' if all holds for that session are now
+ * in terminal states (expired/released/committed).
+ *
+ * This implements AC-4/AC-6: "Automatic release on expiry / Cron-based expiry cleanup".
  */
 async function handleHoldExpiry(env: Env): Promise<void> {
   // Get all active users (they each have a UserGraphDO with schedule_holds)
@@ -417,6 +421,8 @@ async function handleHoldExpiry(env: Env): Promise<void> {
 
   let totalExpired = 0;
   let totalDeleted = 0;
+  // Track session_ids that had holds expired to check if session should also expire
+  const sessionIdsToCheck = new Set<string>();
 
   for (const row of results) {
     try {
@@ -480,6 +486,8 @@ async function handleHoldExpiry(env: Env): Promise<void> {
               }),
             }),
           );
+          // Track session for potential session-level expiry
+          sessionIdsToCheck.add(hold.session_id);
         } catch (err) {
           console.error(
             `Failed to expire hold ${hold.hold_id}:`,
@@ -487,6 +495,27 @@ async function handleHoldExpiry(env: Env): Promise<void> {
           );
         }
       }
+
+      // TM-82s.4: For each session that had holds expired, check if ALL
+      // holds for that session are now in terminal states. If so, expire
+      // the session itself.
+      for (const sessionId of sessionIdsToCheck) {
+        try {
+          await stub.fetch(
+            new Request("https://user-graph.internal/expireSessionIfAllHoldsTerminal", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: sessionId }),
+            }),
+          );
+        } catch (err) {
+          console.error(
+            `Failed to check/expire session ${sessionId}:`,
+            err,
+          );
+        }
+      }
+      sessionIdsToCheck.clear();
     } catch (err) {
       console.error(
         `Hold expiry error for user ${row.user_id}:`,

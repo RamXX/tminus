@@ -1,5 +1,5 @@
 /**
- * Unit tests for the tentative holds state machine and lifecycle (TM-946.3).
+ * Unit tests for the tentative holds state machine and lifecycle (TM-946.3, TM-82s.4).
  *
  * Covers:
  * - Hold state transitions (valid and invalid)
@@ -10,6 +10,10 @@
  * - Building UPSERT_MIRROR messages for tentative events
  * - Building DELETE_MIRROR messages for hold cleanup
  * - Terminal states cannot transition
+ * - Configurable hold duration (1h-72h) (TM-82s.4)
+ * - Expiry notification: approaching_expiry flag (TM-82s.4)
+ * - Hold extension: computeExtendedExpiry (TM-82s.4)
+ * - Conflict detection: detectHoldConflicts (TM-82s.4)
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -23,6 +27,16 @@ import {
   findExpiredHolds,
   DEFAULT_HOLD_TIMEOUT_MS,
   MIN_HOLD_TIMEOUT_MS,
+  // TM-82s.4: Advanced hold lifecycle
+  validateHoldDurationHours,
+  holdDurationHoursToMs,
+  isApproachingExpiry,
+  computeExtendedExpiry,
+  detectHoldConflicts,
+  HOLD_DURATION_MIN_HOURS,
+  HOLD_DURATION_MAX_HOURS,
+  HOLD_DURATION_DEFAULT_HOURS,
+  APPROACHING_EXPIRY_THRESHOLD_MS,
 } from "./holds";
 import type { Hold, HoldStatus, CreateHoldParams } from "./holds";
 
@@ -346,5 +360,345 @@ describe("findExpiredHolds", () => {
       makeHold({ status: "released", expires_at: "2026-03-15T10:00:00Z" }),
     ];
     expect(findExpiredHolds(holds, now)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TM-82s.4: Configurable hold duration (1h-72h)
+// ---------------------------------------------------------------------------
+
+describe("validateHoldDurationHours", () => {
+  it("accepts default 24 hours", () => {
+    expect(validateHoldDurationHours(24)).toBe(24);
+  });
+
+  it("accepts minimum 1 hour", () => {
+    expect(validateHoldDurationHours(1)).toBe(1);
+  });
+
+  it("accepts maximum 72 hours", () => {
+    expect(validateHoldDurationHours(72)).toBe(72);
+  });
+
+  it("rejects below minimum (0.5 hours)", () => {
+    expect(() => validateHoldDurationHours(0.5)).toThrow("between");
+  });
+
+  it("rejects above maximum (73 hours)", () => {
+    expect(() => validateHoldDurationHours(73)).toThrow("between");
+  });
+
+  it("rejects zero", () => {
+    expect(() => validateHoldDurationHours(0)).toThrow("between");
+  });
+
+  it("rejects negative values", () => {
+    expect(() => validateHoldDurationHours(-1)).toThrow("between");
+  });
+
+  it("accepts fractional hours within range (1.5 hours)", () => {
+    expect(validateHoldDurationHours(1.5)).toBe(1.5);
+  });
+});
+
+describe("holdDurationHoursToMs", () => {
+  it("converts 1 hour to 3600000 ms", () => {
+    expect(holdDurationHoursToMs(1)).toBe(3_600_000);
+  });
+
+  it("converts 24 hours to 86400000 ms", () => {
+    expect(holdDurationHoursToMs(24)).toBe(86_400_000);
+  });
+
+  it("converts 72 hours to 259200000 ms", () => {
+    expect(holdDurationHoursToMs(72)).toBe(259_200_000);
+  });
+
+  it("converts fractional hours correctly (1.5h = 5400000 ms)", () => {
+    expect(holdDurationHoursToMs(1.5)).toBe(5_400_000);
+  });
+});
+
+describe("HOLD_DURATION constants", () => {
+  it("has correct defaults", () => {
+    expect(HOLD_DURATION_MIN_HOURS).toBe(1);
+    expect(HOLD_DURATION_MAX_HOURS).toBe(72);
+    expect(HOLD_DURATION_DEFAULT_HOURS).toBe(24);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TM-82s.4: Expiry notification (approaching expiry)
+// ---------------------------------------------------------------------------
+
+describe("isApproachingExpiry", () => {
+  it("returns true when hold expires within 1 hour", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T12:30:00Z",
+    });
+    // 30 minutes until expiry -- within the 1h threshold
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(true);
+  });
+
+  it("returns false when hold expires in more than 1 hour", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T14:00:00Z",
+    });
+    // 2 hours until expiry -- outside the 1h threshold
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(false);
+  });
+
+  it("returns true when hold is already expired (expired is a subset of approaching)", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T11:00:00Z",
+    });
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(true);
+  });
+
+  it("returns false for holds not in held status", () => {
+    const hold = makeHold({
+      status: "committed",
+      expires_at: "2026-03-15T12:30:00Z",
+    });
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(false);
+  });
+
+  it("returns true when exactly 1 hour before expiry", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T13:00:00Z",
+    });
+    // Exactly 1 hour -- boundary: at threshold
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(true);
+  });
+
+  it("returns false when 1 hour and 1 second before expiry", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T13:00:01Z",
+    });
+    // Just beyond 1h threshold
+    expect(isApproachingExpiry(hold, "2026-03-15T12:00:00Z")).toBe(false);
+  });
+
+  it("uses APPROACHING_EXPIRY_THRESHOLD_MS constant (1 hour)", () => {
+    expect(APPROACHING_EXPIRY_THRESHOLD_MS).toBe(60 * 60 * 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TM-82s.4: Hold extension
+// ---------------------------------------------------------------------------
+
+describe("computeExtendedExpiry", () => {
+  it("extends expiry by the configured duration from current time", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T12:00:00Z",
+    });
+    const now = "2026-03-15T11:30:00Z";
+    const durationHours = 24;
+
+    const result = computeExtendedExpiry(hold, durationHours, now);
+    // Should extend from now + 24h = 2026-03-16T11:30:00Z
+    expect(result).toBe("2026-03-16T11:30:00.000Z");
+  });
+
+  it("extends with custom duration (4 hours)", () => {
+    const hold = makeHold({
+      expires_at: "2026-03-15T12:00:00Z",
+    });
+    const now = "2026-03-15T11:00:00Z";
+
+    const result = computeExtendedExpiry(hold, 4, now);
+    // 11:00 + 4h = 15:00
+    expect(result).toBe("2026-03-15T15:00:00.000Z");
+  });
+
+  it("throws if hold is not in held status", () => {
+    const hold = makeHold({ status: "committed" });
+    expect(() => computeExtendedExpiry(hold, 24, "2026-03-15T11:00:00Z")).toThrow(
+      "Only holds in 'held' status can be extended",
+    );
+  });
+
+  it("throws if hold is expired status", () => {
+    const hold = makeHold({ status: "expired" });
+    expect(() => computeExtendedExpiry(hold, 24, "2026-03-15T11:00:00Z")).toThrow(
+      "Only holds in 'held' status can be extended",
+    );
+  });
+
+  it("throws if hold is released status", () => {
+    const hold = makeHold({ status: "released" });
+    expect(() => computeExtendedExpiry(hold, 24, "2026-03-15T11:00:00Z")).toThrow(
+      "Only holds in 'held' status can be extended",
+    );
+  });
+
+  it("validates duration is within configurable range", () => {
+    const hold = makeHold();
+    expect(() => computeExtendedExpiry(hold, 0.5, "2026-03-15T11:00:00Z")).toThrow("between");
+    expect(() => computeExtendedExpiry(hold, 73, "2026-03-15T11:00:00Z")).toThrow("between");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TM-82s.4: Conflict detection
+// ---------------------------------------------------------------------------
+
+describe("detectHoldConflicts", () => {
+  it("detects conflict when new event overlaps with an active hold", () => {
+    const holds: Hold[] = [
+      makeHold({
+        hold_id: "h1",
+        session_id: "ses_001",
+        status: "held",
+        // Hold covers 09:00-10:00 (from candidate times in hold creation)
+      }),
+    ];
+
+    // Event from 09:30-10:30 overlaps with the hold at 09:00-10:00
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:30:00Z",
+      "2026-03-02T10:30:00Z",
+      holds,
+      // candidateTimes maps hold_id -> {start, end}
+      { h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" } },
+    );
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].hold_id).toBe("h1");
+    expect(conflicts[0].session_id).toBe("ses_001");
+  });
+
+  it("returns empty when no holds overlap", () => {
+    const holds: Hold[] = [
+      makeHold({
+        hold_id: "h1",
+        status: "held",
+      }),
+    ];
+
+    // Event from 11:00-12:00, hold covers 09:00-10:00
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T11:00:00Z",
+      "2026-03-02T12:00:00Z",
+      holds,
+      { h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" } },
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("ignores holds not in held status", () => {
+    const holds: Hold[] = [
+      makeHold({ hold_id: "h1", status: "committed" }),
+      makeHold({ hold_id: "h2", status: "released" }),
+      makeHold({ hold_id: "h3", status: "expired" }),
+    ];
+
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:00:00Z",
+      "2026-03-02T10:00:00Z",
+      holds,
+      {
+        h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" },
+        h2: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" },
+        h3: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" },
+      },
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("detects multiple overlapping holds", () => {
+    const holds: Hold[] = [
+      makeHold({ hold_id: "h1", session_id: "ses_001", status: "held" }),
+      makeHold({ hold_id: "h2", session_id: "ses_002", status: "held" }),
+    ];
+
+    // Both holds overlap with 09:00-10:00
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:00:00Z",
+      "2026-03-02T10:00:00Z",
+      holds,
+      {
+        h1: { start: "2026-03-02T08:30:00Z", end: "2026-03-02T09:30:00Z" },
+        h2: { start: "2026-03-02T09:30:00Z", end: "2026-03-02T10:30:00Z" },
+      },
+    );
+    expect(conflicts).toHaveLength(2);
+  });
+
+  it("returns empty when no holds provided", () => {
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:00:00Z",
+      "2026-03-02T10:00:00Z",
+      [],
+      {},
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("skips holds without candidate time mapping", () => {
+    const holds: Hold[] = [
+      makeHold({ hold_id: "h1", status: "held" }),
+    ];
+
+    // No candidate time mapping for h1
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:00:00Z",
+      "2026-03-02T10:00:00Z",
+      holds,
+      {},
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("handles edge case: events touching but not overlapping", () => {
+    const holds: Hold[] = [
+      makeHold({ hold_id: "h1", status: "held" }),
+    ];
+
+    // Event ends exactly when hold starts (no overlap)
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T08:00:00Z",
+      "2026-03-02T09:00:00Z",
+      holds,
+      { h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" } },
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("handles edge case: hold ends exactly when event starts (no overlap)", () => {
+    const holds: Hold[] = [
+      makeHold({ hold_id: "h1", status: "held" }),
+    ];
+
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T10:00:00Z",
+      "2026-03-02T11:00:00Z",
+      holds,
+      { h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" } },
+    );
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("conflict result includes hold_id and session_id", () => {
+    const holds: Hold[] = [
+      makeHold({
+        hold_id: "h1",
+        session_id: "ses_special",
+        status: "held",
+      }),
+    ];
+
+    const conflicts = detectHoldConflicts(
+      "2026-03-02T09:30:00Z",
+      "2026-03-02T10:30:00Z",
+      holds,
+      { h1: { start: "2026-03-02T09:00:00Z", end: "2026-03-02T10:00:00Z" } },
+    );
+    expect(conflicts[0]).toEqual({
+      hold_id: "h1",
+      session_id: "ses_special",
+      hold_start: "2026-03-02T09:00:00Z",
+      hold_end: "2026-03-02T10:00:00Z",
+    });
   });
 });

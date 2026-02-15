@@ -87,8 +87,18 @@ export {
   transitionHold,
   DEFAULT_HOLD_TIMEOUT_MS,
   MIN_HOLD_TIMEOUT_MS,
+  // TM-82s.4: Advanced hold lifecycle
+  validateHoldDurationHours,
+  holdDurationHoursToMs,
+  isApproachingExpiry,
+  computeExtendedExpiry,
+  detectHoldConflicts,
+  HOLD_DURATION_MIN_HOURS,
+  HOLD_DURATION_MAX_HOURS,
+  HOLD_DURATION_DEFAULT_HOURS,
+  APPROACHING_EXPIRY_THRESHOLD_MS,
 } from "./holds";
-export type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage } from "./holds";
+export type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage, HoldConflict } from "./holds";
 
 // Re-export fairness scoring types and functions for consumers (TM-82s.3)
 export {

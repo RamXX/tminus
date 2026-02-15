@@ -1812,4 +1812,305 @@ describe("SchedulingWorkflow integration", () => {
       }
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Advanced hold lifecycle (TM-82s.4)
+  // -----------------------------------------------------------------------
+
+  describe("advanced hold lifecycle", () => {
+    it("AC1: configurable hold duration via holdTimeoutMs", async () => {
+      const twoHoursMs = 2 * 60 * 60 * 1000;
+      const workflow = createWorkflow();
+      const before = Date.now();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: twoHoursMs,
+        targetCalendarId: "cal_test_primary",
+      }));
+      const after = Date.now();
+
+      expect(session.holds).toBeDefined();
+      expect(session.holds!.length).toBeGreaterThan(0);
+
+      // All holds should expire in ~2 hours (not the default 24h)
+      for (const hold of session.holds!) {
+        const expiresMs = new Date(hold.expires_at).getTime();
+        expect(expiresMs).toBeGreaterThanOrEqual(before + twoHoursMs);
+        expect(expiresMs).toBeLessThanOrEqual(after + twoHoursMs + 1000);
+        // Verify NOT the default 24h
+        expect(expiresMs).toBeLessThan(before + 24 * 60 * 60 * 1000);
+      }
+    });
+
+    it("AC2: approaching_expiry flag detectable on holds near expiry", async () => {
+      // Create a hold that expires in 30 minutes (within 1h threshold)
+      const thirtyMinMs = 30 * 60 * 1000;
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: thirtyMinMs,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      expect(session.holds).toBeDefined();
+      expect(session.holds!.length).toBeGreaterThan(0);
+
+      // Import the pure function to verify on the hold data
+      const { isApproachingExpiry: checkApproaching } = await import("./holds");
+
+      // Holds expiring in 30 min should be approaching expiry
+      for (const hold of session.holds!) {
+        const approaching = checkApproaching(hold);
+        expect(approaching).toBe(true);
+      }
+    });
+
+    it("AC2: holds NOT approaching expiry when far from expiry", async () => {
+      // Create holds with 24h timeout (well beyond 1h threshold)
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      const { isApproachingExpiry: checkApproaching } = await import("./holds");
+
+      // Holds expiring in 24h should NOT be approaching expiry
+      for (const hold of session.holds!) {
+        const approaching = checkApproaching(hold);
+        expect(approaching).toBe(false);
+      }
+    });
+
+    it("AC3: hold extension updates expiry via extendHolds RPC", async () => {
+      const oneHourMs = 60 * 60 * 1000;
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: oneHourMs,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      const holds = await workflow.getHoldsBySession(TEST_USER_ID, session.sessionId);
+      expect(holds.length).toBeGreaterThan(0);
+
+      // Compute new expiry (4 hours from now)
+      const { computeExtendedExpiry: computeExt } = await import("./holds");
+      const now = new Date().toISOString();
+      const newExpiries = holds.map((h) => ({
+        hold_id: h.hold_id,
+        new_expires_at: computeExt(h, 4, now),
+      }));
+
+      // Call extendHolds RPC on UserGraphDO
+      const response = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/extendHolds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: session.sessionId,
+            holds: newExpiries,
+          }),
+        }),
+      );
+
+      expect(response.ok).toBe(true);
+
+      // Verify holds have updated expiry
+      const updatedHolds = await workflow.getHoldsBySession(TEST_USER_ID, session.sessionId);
+      for (const hold of updatedHolds) {
+        if (hold.status === "held") {
+          const matching = newExpiries.find((e) => e.hold_id === hold.hold_id);
+          if (matching) {
+            expect(hold.expires_at).toBe(matching.new_expires_at);
+          }
+        }
+      }
+    });
+
+    it("AC4: expired holds cleaned up and session transitions to expired", async () => {
+      // Insert a session with expired holds directly
+      const sessionId = "ses_01EXPIRY000000000000001";
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, 'candidates_ready', '{}', datetime('now'))`,
+      ).run(sessionId);
+
+      // Insert 3 expired holds
+      for (let i = 1; i <= 3; i++) {
+        db.prepare(
+          `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
+           VALUES (?, ?, ?, NULL, datetime('now', '-2 hours'), 'held')`,
+        ).run(`hld_01EXPIRY00000000000000${i}`, sessionId, TEST_ACCOUNT_ID);
+      }
+
+      // Verify they are found as expired
+      const expiredResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/getExpiredHolds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      const { holds: expiredHolds } = (await expiredResp.json()) as { holds: Hold[] };
+      expect(expiredHolds.length).toBe(3);
+
+      // Expire each hold
+      for (const hold of expiredHolds) {
+        await userGraphDO.handleFetch(
+          new Request("https://user-graph.internal/updateHoldStatus", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hold_id: hold.hold_id, status: "expired" }),
+          }),
+        );
+      }
+
+      // Now call expireSessionIfAllHoldsTerminal
+      const expireSessionResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/expireSessionIfAllHoldsTerminal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId }),
+        }),
+      );
+      expect(expireSessionResp.ok).toBe(true);
+
+      // Verify session is now expired
+      const row = db.prepare("SELECT status FROM schedule_sessions WHERE session_id = ?").get(sessionId) as Record<string, unknown>;
+      expect(row.status).toBe("expired");
+    });
+
+    it("AC5: conflict detection finds overlapping holds", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      expect(session.holds).toBeDefined();
+      expect(session.holds!.length).toBeGreaterThan(0);
+      expect(session.candidates.length).toBeGreaterThan(0);
+
+      const { detectHoldConflicts: detectConflict } = await import("./holds");
+
+      // Build candidate times map from session candidates
+      const candidateTimes: Record<string, { start: string; end: string }> = {};
+      for (let i = 0; i < session.holds!.length; i++) {
+        const hold = session.holds![i];
+        // In this setup, each candidate has one hold per required account
+        const candidateIdx = Math.floor(i / makeParams().requiredAccountIds.length);
+        const candidate = session.candidates[candidateIdx];
+        if (candidate) {
+          candidateTimes[hold.hold_id] = {
+            start: candidate.start,
+            end: candidate.end,
+          };
+        }
+      }
+
+      // Create a new event that overlaps with the first candidate
+      const firstCandidate = session.candidates[0];
+      const conflicts = detectConflict(
+        firstCandidate.start,
+        firstCandidate.end,
+        session.holds!,
+        candidateTimes,
+      );
+
+      // Should find conflicts (overlapping with the holds for this time slot)
+      expect(conflicts.length).toBeGreaterThan(0);
+      expect(conflicts[0].session_id).toBe(session.sessionId);
+    });
+
+    it("AC5: no conflicts when event does not overlap any holds", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-02T18:00:00Z",
+      }));
+
+      const { detectHoldConflicts: detectConflict } = await import("./holds");
+
+      // Build candidate times map
+      const candidateTimes: Record<string, { start: string; end: string }> = {};
+      for (let i = 0; i < session.holds!.length; i++) {
+        const hold = session.holds![i];
+        const candidateIdx = Math.floor(i / makeParams().requiredAccountIds.length);
+        const candidate = session.candidates[candidateIdx];
+        if (candidate) {
+          candidateTimes[hold.hold_id] = {
+            start: candidate.start,
+            end: candidate.end,
+          };
+        }
+      }
+
+      // Use a time slot that doesn't overlap any candidates (far future)
+      const conflicts = detectConflict(
+        "2026-04-01T08:00:00Z",
+        "2026-04-01T09:00:00Z",
+        session.holds!,
+        candidateTimes,
+      );
+
+      expect(conflicts.length).toBe(0);
+    });
+
+    it("AC6: cron can expire and session transitions correctly via RPCs", async () => {
+      // Simulate what the cron worker does:
+      // 1. getExpiredHolds
+      // 2. updateHoldStatus to expired
+      // 3. expireSessionIfAllHoldsTerminal
+
+      const sessionId = "ses_01CRONTEST0000000000001";
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, 'candidates_ready', '{}', datetime('now'))`,
+      ).run(sessionId);
+
+      // Insert one expired hold and one not-yet-expired hold
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, expires_at, status)
+         VALUES (?, ?, ?, datetime('now', '-1 hour'), 'held')`,
+      ).run("hld_01CRONEXPIRED0000000001", sessionId, TEST_ACCOUNT_ID);
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, expires_at, status)
+         VALUES (?, ?, ?, datetime('now', '+1 hour'), 'held')`,
+      ).run("hld_01CRONACTIVE00000000001", sessionId, TEST_ACCOUNT_ID);
+
+      // Step 1: Get expired holds
+      const expResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/getExpiredHolds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      const { holds: exp } = (await expResp.json()) as { holds: Hold[] };
+      expect(exp.length).toBe(1);
+      expect(exp[0].hold_id).toBe("hld_01CRONEXPIRED0000000001");
+
+      // Step 2: Expire the hold
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/updateHoldStatus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hold_id: "hld_01CRONEXPIRED0000000001", status: "expired" }),
+        }),
+      );
+
+      // Step 3: Check if session should expire (it should NOT because one hold is still active)
+      await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/expireSessionIfAllHoldsTerminal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId }),
+        }),
+      );
+
+      // Session should still be candidates_ready (one hold still active)
+      const sessionRow = db.prepare("SELECT status FROM schedule_sessions WHERE session_id = ?").get(sessionId) as Record<string, unknown>;
+      expect(sessionRow.status).toBe("candidates_ready");
+    });
+  });
 });
