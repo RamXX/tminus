@@ -38,6 +38,7 @@ import {
   MS_SCOPES,
   MS_CALLBACK_PATH,
 } from "./microsoft";
+import { handleMarketplaceInstall } from "./marketplace";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -566,6 +567,8 @@ export function createHandler(fetchFn?: FetchFn) {
           return handleMicrosoftStart(request, env);
         case "/oauth/microsoft/callback":
           return handleMicrosoftCallback(request, env, fetchFn);
+        case "/marketplace/install":
+          return handleMarketplaceInstall(request, env, fetchFn);
         default:
           return errorResponse("Not found", 404);
       }
