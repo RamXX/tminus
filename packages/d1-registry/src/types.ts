@@ -133,6 +133,25 @@ export interface McpPolicyRow {
   readonly updated_at: string;
 }
 
+/** Valid subscription tier values for the `subscriptions.tier` column. */
+export type SubscriptionTier = "free" | "premium" | "enterprise";
+
+/** Valid subscription status values for the `subscriptions.status` column. */
+export type BillingSubscriptionStatus = "active" | "past_due" | "cancelled" | "unpaid" | "trialing";
+
+/** Row shape for the `subscriptions` table. */
+export interface SubscriptionRow {
+  readonly subscription_id: string;
+  readonly user_id: string;
+  readonly tier: SubscriptionTier;
+  readonly stripe_customer_id: string | null;
+  readonly stripe_subscription_id: string | null;
+  readonly current_period_end: string | null;
+  readonly status: BillingSubscriptionStatus;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 /** Valid source values for MCP events. */
 export type McpEventSource = "mcp" | "provider" | "ui" | "system";
 

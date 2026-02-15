@@ -32,6 +32,13 @@ import {
   handleGetDeletionRequest,
   handleCancelDeletionRequest,
 } from "./routes/privacy";
+import {
+  handleCreateCheckoutSession,
+  handleStripeWebhook,
+  handleGetBillingStatus,
+} from "./routes/billing";
+import type { BillingEnv } from "./routes/billing";
+import { enforceFeatureGate } from "./middleware/feature-gate";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
 
 // ---------------------------------------------------------------------------
@@ -1771,6 +1778,17 @@ export function createHandler() {
         return finalize(await handleGetDeletionCertificate(certMatch.params[0], env));
       }
 
+      // Public route: Stripe webhook (authenticated via Stripe-Signature header, not JWT)
+      if (method === "POST" && pathname === "/v1/billing/webhook") {
+        if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
+          return finalize(jsonResponse(
+            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+            ErrorCode.INTERNAL_ERROR,
+          ));
+        }
+        return finalize(await handleStripeWebhook(request, env as unknown as BillingEnv));
+      }
+
       // All /v1/* routes require auth (except /v1/auth/*)
       if (!pathname.startsWith("/v1/")) {
         return finalize(jsonResponse(
@@ -1990,6 +2008,22 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/sync/journal") {
         return handleJournal(request, auth, env);
+      }
+
+      // -- Billing routes ---------------------------------------------------
+
+      if (method === "POST" && pathname === "/v1/billing/checkout") {
+        if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
+          return jsonResponse(
+            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+            ErrorCode.INTERNAL_ERROR,
+          );
+        }
+        return handleCreateCheckoutSession(request, auth.userId, env as unknown as BillingEnv);
+      }
+
+      if (method === "GET" && pathname === "/v1/billing/status") {
+        return handleGetBillingStatus(auth.userId, env as unknown as BillingEnv);
       }
 
       // -- Fallback ---------------------------------------------------------

@@ -276,6 +276,38 @@ CREATE INDEX idx_mcp_policies_to ON mcp_policies(to_account);
 ` as const;
 
 /**
+ * Migration 0012: Subscriptions table for Stripe billing.
+ *
+ * Stores subscription state synced from Stripe webhooks.
+ * The tier column drives feature gate middleware (free -> premium -> enterprise).
+ * Status tracks the Stripe subscription lifecycle.
+ *
+ * Design notes:
+ * - subscription_id is our internal ID (sub_ ULID), NOT the Stripe subscription ID.
+ * - stripe_subscription_id is the Stripe-assigned ID (sub_xxx from Stripe).
+ * - One active subscription per user enforced by application logic.
+ * - current_period_end is ISO 8601 timestamp of when the billing period ends.
+ */
+export const MIGRATION_0012_SUBSCRIPTIONS = `
+-- Stripe billing subscriptions
+CREATE TABLE subscriptions (
+  subscription_id        TEXT PRIMARY KEY,
+  user_id                TEXT NOT NULL REFERENCES users(user_id),
+  tier                   TEXT NOT NULL DEFAULT 'free' CHECK(tier IN ('free', 'premium', 'enterprise')),
+  stripe_customer_id     TEXT,
+  stripe_subscription_id TEXT UNIQUE,
+  current_period_end     TEXT,
+  status                 TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'past_due', 'cancelled', 'unpaid', 'trialing')),
+  created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_subscriptions_user ON subscriptions(user_id);
+CREATE INDEX idx_subscriptions_stripe_customer ON subscriptions(stripe_customer_id);
+CREATE INDEX idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -291,4 +323,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0009_MCP_EVENTS,
   MIGRATION_0010_MCP_EVENTS_STATUS,
   MIGRATION_0011_MCP_POLICIES,
+  MIGRATION_0012_SUBSCRIPTIONS,
 ] as const;
