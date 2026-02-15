@@ -1855,4 +1855,597 @@ describe("Integration: Constraint endpoints", () => {
     expect(body.data.constraint_id).toBe(constraintId);
     expect(body.data.kind).toBe("trip");
   });
+
+  // -----------------------------------------------------------------------
+  // PUT /v1/constraints/:id -- update
+  // -----------------------------------------------------------------------
+
+  it("PUT /v1/constraints/:id updates constraint via DO and returns 200", async () => {
+    const constraintId = "cst_01HXY0000000000000000000AA";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        [
+          "/updateConstraint",
+          {
+            constraint_id: constraintId,
+            kind: "trip",
+            config_json: { name: "Updated Trip", timezone: "Europe/London", block_policy: "TITLE" },
+            active_from: "2026-04-01T00:00:00Z",
+            active_to: "2026-04-10T00:00:00Z",
+            created_at: "2026-02-14T00:00:00Z",
+          },
+        ],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          config_json: { name: "Updated Trip", timezone: "Europe/London", block_policy: "TITLE" },
+          active_from: "2026-04-01T00:00:00Z",
+          active_to: "2026-04-10T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        constraint_id: string;
+        kind: string;
+        config_json: { name: string };
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.constraint_id).toBe(constraintId);
+    expect(body.data.config_json.name).toBe("Updated Trip");
+
+    // Verify DO was called with correct payload
+    expect(doNamespace.calls).toHaveLength(1);
+    expect(doNamespace.calls[0].path).toBe("/updateConstraint");
+    expect(doNamespace.calls[0].body).toEqual({
+      constraint_id: constraintId,
+      config_json: { name: "Updated Trip", timezone: "Europe/London", block_policy: "TITLE" },
+      active_from: "2026-04-01T00:00:00Z",
+      active_to: "2026-04-10T00:00:00Z",
+    });
+  });
+
+  it("PUT /v1/constraints/:id returns 404 when constraint does not exist", async () => {
+    const constraintId = "cst_01HXY0000000000000000000BB";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/updateConstraint", null],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          config_json: { reason: "test" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("not found");
+  });
+
+  it("PUT /v1/constraints/:id rejects invalid active_from date", async () => {
+    const constraintId = "cst_01HXY0000000000000000000AA";
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          config_json: { name: "Test" },
+          active_from: "not-a-date",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("active_from");
+  });
+
+  // -----------------------------------------------------------------------
+  // CRUD lifecycle for each constraint kind
+  // -----------------------------------------------------------------------
+
+  it("creates and retrieves a working_hours constraint", async () => {
+    const workingHoursConfig = {
+      days: [1, 2, 3, 4, 5],
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+    };
+    const constraintId = "cst_01HXY0000000000000000000WH";
+
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/addConstraint", {
+          constraint_id: constraintId,
+          kind: "working_hours",
+          config_json: workingHoursConfig,
+          active_from: null,
+          active_to: null,
+          created_at: "2026-02-14T00:00:00Z",
+        }],
+        ["/getConstraint", {
+          constraint_id: constraintId,
+          kind: "working_hours",
+          config_json: workingHoursConfig,
+          active_from: null,
+          active_to: null,
+          created_at: "2026-02-14T00:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    // Create
+    const createResp = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "working_hours", config_json: workingHoursConfig }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(createResp.status).toBe(201);
+    const createBody = (await createResp.json()) as {
+      ok: boolean;
+      data: { constraint_id: string; kind: string };
+    };
+    expect(createBody.ok).toBe(true);
+    expect(createBody.data.kind).toBe("working_hours");
+
+    // Retrieve
+    const getResp = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(getResp.status).toBe(200);
+    const getBody = (await getResp.json()) as {
+      ok: boolean;
+      data: { kind: string; config_json: typeof workingHoursConfig };
+    };
+    expect(getBody.data.kind).toBe("working_hours");
+    expect(getBody.data.config_json.start_time).toBe("09:00");
+  });
+
+  it("creates and retrieves a buffer constraint", async () => {
+    const bufferConfig = { type: "travel", minutes: 15, applies_to: "all" };
+    const constraintId = "cst_01HXY0000000000000000000BF";
+
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/addConstraint", {
+          constraint_id: constraintId,
+          kind: "buffer",
+          config_json: bufferConfig,
+          active_from: null,
+          active_to: null,
+          created_at: "2026-02-14T00:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "buffer", config_json: bufferConfig }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { constraint_id: string; kind: string; config_json: typeof bufferConfig };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.kind).toBe("buffer");
+    expect(body.data.config_json.type).toBe("travel");
+    expect(body.data.config_json.minutes).toBe(15);
+  });
+
+  it("creates a no_meetings_after constraint", async () => {
+    const noMeetingsConfig = { time: "18:00", timezone: "America/Chicago" };
+    const constraintId = "cst_01HXY0000000000000000000NM";
+
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/addConstraint", {
+          constraint_id: constraintId,
+          kind: "no_meetings_after",
+          config_json: noMeetingsConfig,
+          active_from: null,
+          active_to: null,
+          created_at: "2026-02-14T00:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "no_meetings_after", config_json: noMeetingsConfig }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { kind: string; config_json: typeof noMeetingsConfig };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.kind).toBe("no_meetings_after");
+    expect(body.data.config_json.time).toBe("18:00");
+  });
+
+  it("creates an override constraint with active dates", async () => {
+    const overrideConfig = { reason: "Company offsite - no meetings" };
+    const constraintId = "cst_01HXY0000000000000000000V1";
+
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/addConstraint", {
+          constraint_id: constraintId,
+          kind: "override",
+          config_json: overrideConfig,
+          active_from: "2026-06-01T00:00:00Z",
+          active_to: "2026-06-03T00:00:00Z",
+          created_at: "2026-02-14T00:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "override",
+          config_json: overrideConfig,
+          active_from: "2026-06-01T00:00:00Z",
+          active_to: "2026-06-03T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        kind: string;
+        config_json: typeof overrideConfig;
+        active_from: string;
+        active_to: string;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.kind).toBe("override");
+    expect(body.data.config_json.reason).toBe("Company offsite - no meetings");
+    expect(body.data.active_from).toBe("2026-06-01T00:00:00Z");
+  });
+
+  // -----------------------------------------------------------------------
+  // List with kind filter
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/constraints?kind=trip filters by kind", async () => {
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listConstraints", {
+          items: [
+            {
+              constraint_id: "cst_01HXY0000000000000000000AA",
+              kind: "trip",
+              config_json: { name: "Paris" },
+              active_from: "2026-03-01T00:00:00Z",
+              active_to: "2026-03-08T00:00:00Z",
+              created_at: "2026-02-14T00:00:00Z",
+            },
+          ],
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints?kind=trip", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ kind: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].kind).toBe("trip");
+
+    // Verify the kind filter was passed to the DO
+    expect(doNamespace.calls).toHaveLength(1);
+    expect(doNamespace.calls[0].path).toBe("/listConstraints");
+    const doBody = doNamespace.calls[0].body as { kind?: string };
+    expect(doBody.kind).toBe("trip");
+  });
+
+  it("GET /v1/constraints without kind filter returns all constraints", async () => {
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listConstraints", {
+          items: [
+            { constraint_id: "cst_01HXY0000000000000000000AA", kind: "trip" },
+            { constraint_id: "cst_01HXY0000000000000000000BB", kind: "working_hours" },
+            { constraint_id: "cst_01HXY0000000000000000000CC", kind: "buffer" },
+          ],
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ kind: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(3);
+
+    // kind should be undefined (not passed to DO)
+    const doBody = doNamespace.calls[0].body as { kind?: string };
+    expect(doBody.kind).toBeUndefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // Invalid config returns proper error envelope
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/constraints with invalid kind returns 400 with error envelope", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "nonexistent_kind",
+          config_json: { foo: "bar" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string; meta: { request_id: string } };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid constraint kind");
+    expect(body.error).toContain("nonexistent_kind");
+    // Verify proper envelope structure
+    expect(body.meta).toBeDefined();
+    expect(body.meta.request_id).toMatch(/^req_/);
+  });
+
+  it("POST /v1/constraints with invalid working_hours config returns 400", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "working_hours",
+          config_json: { days: "not-an-array" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("days");
+  });
+
+  it("POST /v1/constraints with invalid buffer config returns 400", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "buffer",
+          config_json: { type: "invalid_type", minutes: 15, applies_to: "all" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("type");
+  });
+
+  it("POST /v1/constraints with invalid no_meetings_after config returns 400", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "no_meetings_after",
+          config_json: { time: "25:00", timezone: "UTC" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("time");
+  });
+
+  it("POST /v1/constraints with invalid override config returns 400", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "override",
+          config_json: { reason: "" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("reason");
+  });
+
+  // -----------------------------------------------------------------------
+  // Delete cascades to derived events (verified via DO call)
+  // -----------------------------------------------------------------------
+
+  it("DELETE /v1/constraints/:id calls DO deleteConstraint which cascades", async () => {
+    const constraintId = "cst_01HXY0000000000000000000AA";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/deleteConstraint", { deleted: true }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; data: { deleted: boolean } };
+    expect(body.ok).toBe(true);
+    expect(body.data.deleted).toBe(true);
+
+    // Verify the correct constraint ID was sent to the DO for cascade delete
+    expect(doNamespace.calls).toHaveLength(1);
+    expect(doNamespace.calls[0].path).toBe("/deleteConstraint");
+    expect(doNamespace.calls[0].body).toEqual({ constraint_id: constraintId });
+  });
 });

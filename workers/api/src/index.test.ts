@@ -19,6 +19,8 @@ import {
   errorEnvelope,
   ErrorCode,
   API_VERSION,
+  validateConstraintKindAndConfig,
+  VALID_CONSTRAINT_KINDS,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -783,5 +785,372 @@ describe("request validation: constraints", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it("PUT /v1/constraints/:id with invalid ID returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/bad-id", {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ config_json: {} }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid constraint ID");
+  });
+
+  it("PUT /v1/constraints/:id without body returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/cst_01HXY0000000000000000000AA", {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: "",
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("PUT /v1/constraints/:id without config_json returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/cst_01HXY0000000000000000000AA", {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ active_from: "2026-03-01T00:00:00Z" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.error).toContain("config_json");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Kind-specific config_json validation unit tests (TM-gj5.5)
+// ---------------------------------------------------------------------------
+
+describe("constraint kind validation: VALID_CONSTRAINT_KINDS", () => {
+  it("contains exactly the 5 expected kinds", () => {
+    expect(VALID_CONSTRAINT_KINDS.size).toBe(5);
+    expect(VALID_CONSTRAINT_KINDS.has("trip")).toBe(true);
+    expect(VALID_CONSTRAINT_KINDS.has("working_hours")).toBe(true);
+    expect(VALID_CONSTRAINT_KINDS.has("buffer")).toBe(true);
+    expect(VALID_CONSTRAINT_KINDS.has("no_meetings_after")).toBe(true);
+    expect(VALID_CONSTRAINT_KINDS.has("override")).toBe(true);
+  });
+});
+
+describe("constraint kind validation: invalid kind", () => {
+  it("rejects unknown kind", () => {
+    const result = validateConstraintKindAndConfig("unknown_kind", {});
+    expect(result).not.toBeNull();
+    expect(result).toContain("Invalid constraint kind");
+    expect(result).toContain("unknown_kind");
+  });
+});
+
+describe("constraint kind validation: trip schema", () => {
+  it("accepts valid trip config", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { name: "Paris Trip", timezone: "Europe/Paris", block_policy: "BUSY" },
+      "2026-03-01T00:00:00Z",
+      "2026-03-08T00:00:00Z",
+    );
+    expect(result).toBeNull();
+  });
+
+  it("rejects trip without name", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { timezone: "UTC", block_policy: "BUSY" },
+      "2026-03-01T00:00:00Z",
+      "2026-03-08T00:00:00Z",
+    );
+    expect(result).toContain("name");
+  });
+
+  it("rejects trip without timezone", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { name: "Trip", block_policy: "BUSY" },
+      "2026-03-01T00:00:00Z",
+      "2026-03-08T00:00:00Z",
+    );
+    expect(result).toContain("timezone");
+  });
+
+  it("rejects trip with invalid block_policy", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { name: "Trip", timezone: "UTC", block_policy: "INVALID" },
+      "2026-03-01T00:00:00Z",
+      "2026-03-08T00:00:00Z",
+    );
+    expect(result).toContain("block_policy");
+  });
+
+  it("rejects trip without active_from/active_to", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { name: "Trip", timezone: "UTC", block_policy: "BUSY" },
+      null,
+      null,
+    );
+    expect(result).toContain("active_from");
+  });
+
+  it("accepts trip with TITLE block_policy", () => {
+    const result = validateConstraintKindAndConfig(
+      "trip",
+      { name: "Trip", timezone: "UTC", block_policy: "TITLE" },
+      "2026-03-01T00:00:00Z",
+      "2026-03-08T00:00:00Z",
+    );
+    expect(result).toBeNull();
+  });
+});
+
+describe("constraint kind validation: working_hours schema", () => {
+  it("accepts valid working_hours config", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 2, 3, 4, 5],
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("rejects working_hours without days", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+    });
+    expect(result).toContain("days");
+  });
+
+  it("rejects working_hours with empty days", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [],
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+    });
+    expect(result).toContain("days");
+  });
+
+  it("rejects working_hours with invalid day value", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 7],
+      start_time: "09:00",
+      end_time: "17:00",
+      timezone: "America/New_York",
+    });
+    expect(result).toContain("days");
+  });
+
+  it("rejects working_hours with invalid start_time format", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 2, 3],
+      start_time: "9:00",
+      end_time: "17:00",
+      timezone: "UTC",
+    });
+    expect(result).toContain("start_time");
+  });
+
+  it("rejects working_hours with invalid end_time format", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 2, 3],
+      start_time: "09:00",
+      end_time: "25:00",
+      timezone: "UTC",
+    });
+    expect(result).toContain("end_time");
+  });
+
+  it("rejects working_hours with end_time before start_time", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 2, 3],
+      start_time: "17:00",
+      end_time: "09:00",
+      timezone: "UTC",
+    });
+    expect(result).toContain("end_time");
+  });
+
+  it("rejects working_hours without timezone", () => {
+    const result = validateConstraintKindAndConfig("working_hours", {
+      days: [1, 2, 3],
+      start_time: "09:00",
+      end_time: "17:00",
+    });
+    expect(result).toContain("timezone");
+  });
+});
+
+describe("constraint kind validation: buffer schema", () => {
+  it("accepts valid buffer config", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "travel",
+      minutes: 15,
+      applies_to: "all",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("rejects buffer with invalid type", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "invalid",
+      minutes: 15,
+      applies_to: "all",
+    });
+    expect(result).toContain("type");
+  });
+
+  it("rejects buffer with non-integer minutes", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "prep",
+      minutes: 15.5,
+      applies_to: "all",
+    });
+    expect(result).toContain("minutes");
+  });
+
+  it("rejects buffer with zero minutes", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "prep",
+      minutes: 0,
+      applies_to: "all",
+    });
+    expect(result).toContain("minutes");
+  });
+
+  it("rejects buffer with negative minutes", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "prep",
+      minutes: -5,
+      applies_to: "all",
+    });
+    expect(result).toContain("minutes");
+  });
+
+  it("rejects buffer with invalid applies_to", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "cooldown",
+      minutes: 10,
+      applies_to: "internal",
+    });
+    expect(result).toContain("applies_to");
+  });
+
+  it("accepts buffer with cooldown type and external applies_to", () => {
+    const result = validateConstraintKindAndConfig("buffer", {
+      type: "cooldown",
+      minutes: 5,
+      applies_to: "external",
+    });
+    expect(result).toBeNull();
+  });
+});
+
+describe("constraint kind validation: no_meetings_after schema", () => {
+  it("accepts valid no_meetings_after config", () => {
+    const result = validateConstraintKindAndConfig("no_meetings_after", {
+      time: "18:00",
+      timezone: "America/New_York",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("rejects no_meetings_after without time", () => {
+    const result = validateConstraintKindAndConfig("no_meetings_after", {
+      timezone: "UTC",
+    });
+    expect(result).toContain("time");
+  });
+
+  it("rejects no_meetings_after with invalid time format", () => {
+    const result = validateConstraintKindAndConfig("no_meetings_after", {
+      time: "6pm",
+      timezone: "UTC",
+    });
+    expect(result).toContain("time");
+  });
+
+  it("rejects no_meetings_after without timezone", () => {
+    const result = validateConstraintKindAndConfig("no_meetings_after", {
+      time: "18:00",
+    });
+    expect(result).toContain("timezone");
+  });
+
+  it("rejects no_meetings_after with empty timezone", () => {
+    const result = validateConstraintKindAndConfig("no_meetings_after", {
+      time: "18:00",
+      timezone: "",
+    });
+    expect(result).toContain("timezone");
+  });
+});
+
+describe("constraint kind validation: override schema", () => {
+  it("accepts valid override config", () => {
+    const result = validateConstraintKindAndConfig("override", {
+      reason: "Doctor appointment - cannot reschedule",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("rejects override without reason", () => {
+    const result = validateConstraintKindAndConfig("override", {});
+    expect(result).toContain("reason");
+  });
+
+  it("rejects override with empty reason", () => {
+    const result = validateConstraintKindAndConfig("override", {
+      reason: "",
+    });
+    expect(result).toContain("reason");
+  });
+
+  it("rejects override with whitespace-only reason", () => {
+    const result = validateConstraintKindAndConfig("override", {
+      reason: "   ",
+    });
+    expect(result).toContain("reason");
   });
 });

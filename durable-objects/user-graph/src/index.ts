@@ -1399,6 +1399,102 @@ export class UserGraphDO {
   }
 
   /**
+   * Validate a no_meetings_after config_json object.
+   *
+   * Required fields:
+   * - time: string in HH:MM 24-hour format (cutoff time)
+   * - timezone: string, must be a valid IANA timezone
+   *
+   * Throws on validation failure.
+   */
+  static validateNoMeetingsAfterConfig(configJson: Record<string, unknown>): void {
+    const timeRegex = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (typeof configJson.time !== "string" || !timeRegex.test(configJson.time)) {
+      throw new Error(
+        "no_meetings_after config_json must include 'time' in HH:MM 24-hour format",
+      );
+    }
+
+    if (typeof configJson.timezone !== "string" || configJson.timezone.length === 0) {
+      throw new Error(
+        "no_meetings_after config_json must include a 'timezone' string",
+      );
+    }
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: configJson.timezone });
+    } catch {
+      throw new Error(
+        `no_meetings_after config_json.timezone "${configJson.timezone}" is not a valid IANA timezone`,
+      );
+    }
+  }
+
+  /**
+   * Validate an override config_json object.
+   *
+   * Required fields:
+   * - reason: non-empty string describing why the override exists
+   *
+   * Throws on validation failure.
+   */
+  static validateOverrideConfig(configJson: Record<string, unknown>): void {
+    if (typeof configJson.reason !== "string" || configJson.reason.trim().length === 0) {
+      throw new Error(
+        "override config_json must include a non-empty 'reason' string",
+      );
+    }
+  }
+
+  /**
+   * Validate config_json for a given constraint kind.
+   * Dispatches to the appropriate kind-specific validator.
+   *
+   * Throws on validation failure.
+   */
+  static validateConstraintConfig(
+    kind: string,
+    configJson: Record<string, unknown>,
+    activeFrom: string | null,
+    activeTo: string | null,
+  ): void {
+    switch (kind) {
+      case "working_hours":
+        UserGraphDO.validateWorkingHoursConfig(configJson);
+        break;
+      case "buffer":
+        UserGraphDO.validateBufferConfig(configJson);
+        break;
+      case "no_meetings_after":
+        UserGraphDO.validateNoMeetingsAfterConfig(configJson);
+        break;
+      case "override":
+        UserGraphDO.validateOverrideConfig(configJson);
+        break;
+      case "trip": {
+        if (!configJson.name || typeof configJson.name !== "string") {
+          throw new Error("Trip constraint config_json must include a 'name' string");
+        }
+        if (!configJson.timezone || typeof configJson.timezone !== "string") {
+          throw new Error("Trip constraint config_json must include a 'timezone' string");
+        }
+        const validPolicies = ["BUSY", "TITLE"];
+        if (!configJson.block_policy || !validPolicies.includes(configJson.block_policy as string)) {
+          throw new Error(
+            `Trip constraint config_json.block_policy must be one of: ${validPolicies.join(", ")}`,
+          );
+        }
+        if (!activeFrom || !activeTo) {
+          throw new Error("Trip constraint must have active_from and active_to");
+        }
+        break;
+      }
+      default:
+        // No validation for unknown kinds (they are rejected earlier by kind check)
+        break;
+    }
+  }
+
+  /**
    * Add a new constraint and generate any derived canonical events.
    *
    * For kind="trip": creates a single continuous busy block event
@@ -1425,32 +1521,8 @@ export class UserGraphDO {
       );
     }
 
-    // Kind-specific validation
-    if (kind === "working_hours") {
-      UserGraphDO.validateWorkingHoursConfig(configJson);
-    }
-
-    if (kind === "buffer") {
-      UserGraphDO.validateBufferConfig(configJson);
-    }
-
-    if (kind === "trip") {
-      if (!configJson.name || typeof configJson.name !== "string") {
-        throw new Error("Trip constraint config_json must include a 'name' string");
-      }
-      if (!configJson.timezone || typeof configJson.timezone !== "string") {
-        throw new Error("Trip constraint config_json must include a 'timezone' string");
-      }
-      const validPolicies = ["BUSY", "TITLE"];
-      if (!configJson.block_policy || !validPolicies.includes(configJson.block_policy as string)) {
-        throw new Error(
-          `Trip constraint config_json.block_policy must be one of: ${validPolicies.join(", ")}`,
-        );
-      }
-      if (!activeFrom || !activeTo) {
-        throw new Error("Trip constraint must have active_from and active_to");
-      }
-    }
+    // Kind-specific validation (centralized)
+    UserGraphDO.validateConstraintConfig(kind, configJson, activeFrom, activeTo);
 
     const constraintId = generateId("constraint");
 
@@ -1633,6 +1705,108 @@ export class UserGraphDO {
       .toArray();
 
     if (rows.length === 0) return null;
+    return this.rowToConstraint(rows[0]);
+  }
+
+  /**
+   * Update an existing constraint's config_json and/or active dates.
+   *
+   * The kind cannot be changed (delete + create instead).
+   * For trip constraints, updating active_from/active_to will regenerate
+   * derived events (delete old, create new).
+   *
+   * Returns the updated constraint or null if not found.
+   */
+  async updateConstraint(
+    constraintId: string,
+    configJson: Record<string, unknown>,
+    activeFrom: string | null,
+    activeTo: string | null,
+  ): Promise<Constraint | null> {
+    this.ensureMigrated();
+
+    // Check constraint exists
+    const existing = this.sql
+      .exec<ConstraintRow>(
+        `SELECT * FROM constraints WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
+    if (existing.length === 0) return null;
+
+    const kind = existing[0].kind;
+
+    // Validate config against the existing kind
+    UserGraphDO.validateConstraintConfig(kind, configJson, activeFrom, activeTo);
+
+    // Update the constraint row
+    this.sql.exec(
+      `UPDATE constraints SET config_json = ?, active_from = ?, active_to = ? WHERE constraint_id = ?`,
+      JSON.stringify(configJson),
+      activeFrom,
+      activeTo,
+      constraintId,
+    );
+
+    // For trip constraints, regenerate derived events
+    if (kind === "trip") {
+      // Delete existing derived events for this constraint
+      const derivedEvents = this.sql
+        .exec<{ canonical_event_id: string }>(
+          `SELECT canonical_event_id FROM canonical_events WHERE constraint_id = ?`,
+          constraintId,
+        )
+        .toArray();
+
+      for (const evt of derivedEvents) {
+        // Delete mirrors
+        const mirrors = this.sql
+          .exec<EventMirrorRow>(
+            `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
+            evt.canonical_event_id,
+          )
+          .toArray();
+
+        for (const mirror of mirrors) {
+          await this.writeQueue.send({
+            type: "DELETE_MIRROR",
+            canonical_event_id: evt.canonical_event_id,
+            target_account_id: mirror.target_account_id,
+            target_calendar_id: mirror.target_calendar_id,
+            provider_event_id: mirror.provider_event_id ?? "",
+          });
+        }
+
+        this.sql.exec(
+          `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+          evt.canonical_event_id,
+        );
+        this.sql.exec(
+          `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+          evt.canonical_event_id,
+        );
+
+        this.writeJournal(evt.canonical_event_id, "deleted", "system", {
+          reason: "constraint_updated",
+          constraint_id: constraintId,
+        });
+      }
+
+      // Recreate derived events with updated config
+      if (activeFrom && activeTo) {
+        this.createTripDerivedEvents(constraintId, configJson, activeFrom, activeTo);
+      }
+    }
+
+    // Read back the updated row
+    const rows = this.sql
+      .exec<ConstraintRow>(
+        `SELECT * FROM constraints WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
     return this.rowToConstraint(rows[0]);
   }
 
@@ -2350,6 +2524,22 @@ export class UserGraphDO {
           const body = (await request.json()) as { constraint_id: string };
           const constraint = this.getConstraint(body.constraint_id);
           return Response.json(constraint);
+        }
+
+        case "/updateConstraint": {
+          const body = (await request.json()) as {
+            constraint_id: string;
+            config_json: Record<string, unknown>;
+            active_from: string | null;
+            active_to: string | null;
+          };
+          const updated = await this.updateConstraint(
+            body.constraint_id,
+            body.config_json,
+            body.active_from,
+            body.active_to,
+          );
+          return Response.json(updated);
         }
 
         case "/unlinkAccount": {
