@@ -868,3 +868,527 @@ describe("MCP integration: error paths", () => {
     expect(error.code).toBe(-32700);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Integration: Event CRUD lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper to call an MCP tool and parse the result content.
+ * Returns the parsed JSON from the content[0].text field.
+ */
+async function callTool(
+  toolName: string,
+  toolArgs?: Record<string, unknown>,
+  authHeader?: string,
+): Promise<{
+  status: number;
+  error?: { code: number; message: string };
+  data?: unknown;
+}> {
+  const auth = authHeader ?? (await makeAuthHeader());
+  const result = await sendMcpRequest(
+    {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { name: toolName, arguments: toolArgs },
+      id: Math.floor(Math.random() * 100000),
+    },
+    auth,
+  );
+
+  if (result.body.error) {
+    const err = result.body.error as { code: number; message: string };
+    return { status: result.status, error: err };
+  }
+
+  const resultData = result.body.result as {
+    content: Array<{ type: string; text: string }>;
+  };
+  const data = JSON.parse(resultData.content[0].text);
+  return { status: result.status, data };
+}
+
+describe("MCP integration: tools/list includes event management tools", () => {
+  it("returns all 6 tools including 4 event management tools", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      { jsonrpc: "2.0", method: "tools/list", id: 100 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const toolNames = resultData.tools.map((t) => t.name);
+
+    expect(toolNames).toContain("calendar.list_events");
+    expect(toolNames).toContain("calendar.create_event");
+    expect(toolNames).toContain("calendar.update_event");
+    expect(toolNames).toContain("calendar.delete_event");
+    expect(resultData.tools.length).toBe(6);
+  });
+});
+
+describe("MCP integration: calendar.create_event", () => {
+  it("creates an event and returns it with event_id", async () => {
+    const result = await callTool("calendar.create_event", {
+      title: "Team Standup",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T09:30:00Z",
+      timezone: "America/Chicago",
+      description: "Daily standup meeting",
+      location: "Room 101",
+    });
+
+    expect(result.error).toBeUndefined();
+    const event = result.data as Record<string, unknown>;
+    expect(event.event_id).toBeDefined();
+    expect(typeof event.event_id).toBe("string");
+    expect((event.event_id as string).startsWith("evt_")).toBe(true);
+    expect(event.title).toBe("Team Standup");
+    expect(event.start_ts).toBe("2026-03-15T09:00:00Z");
+    expect(event.end_ts).toBe("2026-03-15T09:30:00Z");
+    expect(event.timezone).toBe("America/Chicago");
+    expect(event.description).toBe("Daily standup meeting");
+    expect(event.location).toBe("Room 101");
+    expect(event.source).toBe("mcp");
+    expect(event.created_at).toBeDefined();
+    expect(event.updated_at).toBeDefined();
+  });
+
+  it("creates an event with minimal fields (defaults for optional)", async () => {
+    const result = await callTool("calendar.create_event", {
+      title: "Quick Sync",
+      start_ts: "2026-03-15T14:00:00Z",
+      end_ts: "2026-03-15T14:15:00Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const event = result.data as Record<string, unknown>;
+    expect(event.event_id).toBeDefined();
+    expect(event.title).toBe("Quick Sync");
+    expect(event.timezone).toBe("UTC");
+    expect(event.description).toBeNull();
+    expect(event.location).toBeNull();
+  });
+
+  it("rejects creation with missing required fields", async () => {
+    const result = await callTool("calendar.create_event", {
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T09:30:00Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("title");
+  });
+
+  it("rejects creation with invalid datetime", async () => {
+    const result = await callTool("calendar.create_event", {
+      title: "Bad Event",
+      start_ts: "not-a-date",
+      end_ts: "2026-03-15T09:30:00Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("start_ts");
+  });
+
+  it("rejects creation when start >= end", async () => {
+    const result = await callTool("calendar.create_event", {
+      title: "Backwards Event",
+      start_ts: "2026-03-15T10:00:00Z",
+      end_ts: "2026-03-15T09:00:00Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("before");
+  });
+});
+
+describe("MCP integration: calendar.list_events", () => {
+  it("returns empty array when no events exist in time range", async () => {
+    const result = await callTool("calendar.list_events", {
+      start: "2026-01-01T00:00:00Z",
+      end: "2026-12-31T23:59:59Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.data).toEqual([]);
+  });
+
+  it("returns events within the time range after creation", async () => {
+    // Create two events
+    await callTool("calendar.create_event", {
+      title: "Event A",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    await callTool("calendar.create_event", {
+      title: "Event B",
+      start_ts: "2026-03-16T09:00:00Z",
+      end_ts: "2026-03-16T10:00:00Z",
+    });
+
+    const result = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    const events = result.data as Array<Record<string, unknown>>;
+    expect(events.length).toBe(2);
+    expect(events[0].title).toBe("Event A"); // sorted by start_ts
+    expect(events[1].title).toBe("Event B");
+  });
+
+  it("filters events outside the time range", async () => {
+    // Create an event in March
+    await callTool("calendar.create_event", {
+      title: "March Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+
+    // Query for April -- should not find March event
+    const result = await callTool("calendar.list_events", {
+      start: "2026-04-01T00:00:00Z",
+      end: "2026-04-30T23:59:59Z",
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.data).toEqual([]);
+  });
+
+  it("respects the limit parameter", async () => {
+    // Create 3 events
+    for (let i = 1; i <= 3; i++) {
+      await callTool("calendar.create_event", {
+        title: `Event ${i}`,
+        start_ts: `2026-03-${String(i).padStart(2, "0")}T09:00:00Z`,
+        end_ts: `2026-03-${String(i).padStart(2, "0")}T10:00:00Z`,
+      });
+    }
+
+    const result = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+      limit: 2,
+    });
+
+    expect(result.error).toBeUndefined();
+    const events = result.data as Array<Record<string, unknown>>;
+    expect(events.length).toBe(2);
+  });
+
+  it("rejects list_events with missing start parameter", async () => {
+    const result = await callTool("calendar.list_events", {
+      end: "2026-12-31T23:59:59Z",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("start");
+  });
+
+  it("enforces user isolation -- other user cannot see events", async () => {
+    // Create an event as TEST_USER
+    await callTool("calendar.create_event", {
+      title: "Private Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+
+    // Query as OTHER_USER
+    const otherAuth = await makeAuthHeader(OTHER_USER.user_id);
+    const result = await callTool(
+      "calendar.list_events",
+      {
+        start: "2026-03-01T00:00:00Z",
+        end: "2026-03-31T23:59:59Z",
+      },
+      otherAuth,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.data).toEqual([]);
+  });
+});
+
+describe("MCP integration: calendar.update_event", () => {
+  it("updates event title and returns updated event", async () => {
+    // Create an event first
+    const created = await callTool("calendar.create_event", {
+      title: "Original Title",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    // Update title
+    const result = await callTool("calendar.update_event", {
+      event_id: eventId,
+      patch: { title: "Updated Title" },
+    });
+
+    expect(result.error).toBeUndefined();
+    const event = result.data as Record<string, unknown>;
+    expect(event.event_id).toBe(eventId);
+    expect(event.title).toBe("Updated Title");
+    // Start/end should be unchanged
+    expect(event.start_ts).toBe("2026-03-15T09:00:00Z");
+    expect(event.end_ts).toBe("2026-03-15T10:00:00Z");
+  });
+
+  it("updates multiple fields at once", async () => {
+    const created = await callTool("calendar.create_event", {
+      title: "Meeting",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    const result = await callTool("calendar.update_event", {
+      event_id: eventId,
+      patch: {
+        title: "Updated Meeting",
+        description: "New description",
+        location: "Room 202",
+        start_ts: "2026-03-15T10:00:00Z",
+        end_ts: "2026-03-15T11:00:00Z",
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    const event = result.data as Record<string, unknown>;
+    expect(event.title).toBe("Updated Meeting");
+    expect(event.description).toBe("New description");
+    expect(event.location).toBe("Room 202");
+    expect(event.start_ts).toBe("2026-03-15T10:00:00Z");
+    expect(event.end_ts).toBe("2026-03-15T11:00:00Z");
+  });
+
+  it("verifies updated event is returned by list_events", async () => {
+    const created = await callTool("calendar.create_event", {
+      title: "Before Update",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    await callTool("calendar.update_event", {
+      event_id: eventId,
+      patch: { title: "After Update" },
+    });
+
+    const listed = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+    });
+
+    const events = listed.data as Array<Record<string, unknown>>;
+    expect(events.length).toBe(1);
+    expect(events[0].title).toBe("After Update");
+  });
+
+  it("returns error for non-existent event_id", async () => {
+    const result = await callTool("calendar.update_event", {
+      event_id: "evt_nonexistent",
+      patch: { title: "Ghost" },
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Event not found");
+  });
+
+  it("returns error when updating another user's event", async () => {
+    // Create event as TEST_USER
+    const created = await callTool("calendar.create_event", {
+      title: "Test User Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    // Try to update as OTHER_USER
+    const otherAuth = await makeAuthHeader(OTHER_USER.user_id);
+    const result = await callTool(
+      "calendar.update_event",
+      { event_id: eventId, patch: { title: "Hacked" } },
+      otherAuth,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Event not found");
+  });
+
+  it("returns error for empty patch object", async () => {
+    const created = await callTool("calendar.create_event", {
+      title: "No-op Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    const result = await callTool("calendar.update_event", {
+      event_id: eventId,
+      patch: {},
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("at least one field");
+  });
+});
+
+describe("MCP integration: calendar.delete_event", () => {
+  it("deletes an event and confirms it is gone", async () => {
+    // Create an event
+    const created = await callTool("calendar.create_event", {
+      title: "Doomed Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    // Verify it exists
+    const beforeDelete = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+    });
+    expect((beforeDelete.data as unknown[]).length).toBe(1);
+
+    // Delete it
+    const deleteResult = await callTool("calendar.delete_event", {
+      event_id: eventId,
+    });
+
+    expect(deleteResult.error).toBeUndefined();
+    const deleted = deleteResult.data as Record<string, unknown>;
+    expect(deleted.deleted).toBe(true);
+    expect(deleted.event_id).toBe(eventId);
+
+    // Verify it is gone
+    const afterDelete = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+    });
+    expect(afterDelete.data).toEqual([]);
+  });
+
+  it("returns error for non-existent event_id", async () => {
+    const result = await callTool("calendar.delete_event", {
+      event_id: "evt_nonexistent",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Event not found");
+  });
+
+  it("returns error when deleting another user's event", async () => {
+    // Create event as TEST_USER
+    const created = await callTool("calendar.create_event", {
+      title: "Protected Event",
+      start_ts: "2026-03-15T09:00:00Z",
+      end_ts: "2026-03-15T10:00:00Z",
+    });
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+
+    // Try to delete as OTHER_USER
+    const otherAuth = await makeAuthHeader(OTHER_USER.user_id);
+    const result = await callTool(
+      "calendar.delete_event",
+      { event_id: eventId },
+      otherAuth,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("Event not found");
+
+    // Verify event still exists for the original user
+    const stillExists = await callTool("calendar.list_events", {
+      start: "2026-03-01T00:00:00Z",
+      end: "2026-03-31T23:59:59Z",
+    });
+    expect((stillExists.data as unknown[]).length).toBe(1);
+  });
+
+  it("rejects delete with missing event_id", async () => {
+    const result = await callTool("calendar.delete_event", {});
+
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe(-32602);
+    expect(result.error!.message).toContain("event_id");
+  });
+});
+
+describe("MCP integration: full CRUD lifecycle", () => {
+  it("create -> list -> update -> list -> delete -> list empty", async () => {
+    // 1. Create
+    const created = await callTool("calendar.create_event", {
+      title: "Lifecycle Event",
+      start_ts: "2026-06-01T10:00:00Z",
+      end_ts: "2026-06-01T11:00:00Z",
+      description: "Full lifecycle test",
+      location: "Conference Room A",
+    });
+    expect(created.error).toBeUndefined();
+    const eventId = (created.data as Record<string, unknown>).event_id as string;
+    expect(eventId).toBeTruthy();
+
+    // 2. List -- should find 1 event
+    const listed = await callTool("calendar.list_events", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-30T23:59:59Z",
+    });
+    const listedEvents = listed.data as Array<Record<string, unknown>>;
+    expect(listedEvents.length).toBe(1);
+    expect(listedEvents[0].event_id).toBe(eventId);
+    expect(listedEvents[0].title).toBe("Lifecycle Event");
+    expect(listedEvents[0].description).toBe("Full lifecycle test");
+    expect(listedEvents[0].location).toBe("Conference Room A");
+
+    // 3. Update
+    const updated = await callTool("calendar.update_event", {
+      event_id: eventId,
+      patch: {
+        title: "Updated Lifecycle Event",
+        location: "Conference Room B",
+      },
+    });
+    expect(updated.error).toBeUndefined();
+    const updatedEvent = updated.data as Record<string, unknown>;
+    expect(updatedEvent.title).toBe("Updated Lifecycle Event");
+    expect(updatedEvent.location).toBe("Conference Room B");
+    expect(updatedEvent.description).toBe("Full lifecycle test"); // unchanged
+
+    // 4. List -- should show updated data
+    const listedAfterUpdate = await callTool("calendar.list_events", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-30T23:59:59Z",
+    });
+    const updatedEvents = listedAfterUpdate.data as Array<Record<string, unknown>>;
+    expect(updatedEvents.length).toBe(1);
+    expect(updatedEvents[0].title).toBe("Updated Lifecycle Event");
+    expect(updatedEvents[0].location).toBe("Conference Room B");
+
+    // 5. Delete
+    const deleted = await callTool("calendar.delete_event", {
+      event_id: eventId,
+    });
+    expect(deleted.error).toBeUndefined();
+    expect((deleted.data as Record<string, unknown>).deleted).toBe(true);
+
+    // 6. List -- should be empty
+    const listedAfterDelete = await callTool("calendar.list_events", {
+      start: "2026-06-01T00:00:00Z",
+      end: "2026-06-30T23:59:59Z",
+    });
+    expect(listedAfterDelete.data).toEqual([]);
+  });
+});
