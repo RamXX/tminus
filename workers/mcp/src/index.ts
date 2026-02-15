@@ -909,6 +909,22 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
     },
   },
   {
+    name: "calendar.get_risk_scores",
+    description:
+      "Compute temporal risk scores including burnout risk, travel overload, and strategic drift. Returns a composite risk score (0-100) with level (LOW/MODERATE/HIGH/CRITICAL) and actionable recommendations. Burnout risk is computed from cognitive load history, travel overload from trip constraints, and strategic drift from allocation trends. Use this to assess overall schedule health and identify potential problems before they become critical.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        weeks: {
+          type: "number",
+          description:
+            "Number of weeks to analyze (1-52). Default: 4. Longer periods give more accurate trend detection.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "calendar.simulate",
     description:
       "Run a what-if simulation to assess calendar impact of accepting new commitments. 'What if I accept this board seat?' Returns projected time allocation, conflict count, constraint violations, and burnout risk. Does NOT modify any real data -- purely read-only analysis. Supports three scenario types: add_commitment (new client hours), add_recurring_event (new weekly meeting), and change_working_hours (adjust schedule boundaries).",
@@ -1081,6 +1097,7 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.get_cognitive_load": "free",
   "calendar.get_context_switches": "free",
   "calendar.get_deep_work": "free",
+  "calendar.get_risk_scores": "free",
   "calendar.simulate": "premium",
   "calendar.query_graph": "free",
 };
@@ -3663,6 +3680,44 @@ async function handleGetDeepWorkMCP(
 }
 
 /**
+ * Execute calendar.get_risk_scores: validate input and forward to the API
+ * worker to compute temporal risk scores (burnout, travel, strategic drift).
+ */
+async function handleGetRiskScoresMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const params = new URLSearchParams();
+
+  if (args?.weeks != null) {
+    const weeks = Number(args.weeks);
+    if (isNaN(weeks) || weeks < 1 || weeks > 52) {
+      throw new InvalidParamsError("weeks must be a positive integer between 1 and 52");
+    }
+    params.set("weeks", String(weeks));
+  }
+
+  const queryStr = params.toString();
+  const path = queryStr
+    ? `/v1/intelligence/risk-scores?${queryStr}`
+    : "/v1/intelligence/risk-scores";
+
+  const result = await callConstraintApi(api, jwt, "GET", path);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get risk scores");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.simulate: validate input and forward to the API
  * worker to run a what-if simulation on the user's calendar.
  * Read-only: does not modify any real data.
@@ -4203,6 +4258,11 @@ async function dispatch(
           case "calendar.get_deep_work": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetDeepWorkMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_risk_scores": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetRiskScoresMCP(request, env.API, toolArgs);
             break;
           }
           case "calendar.simulate": {

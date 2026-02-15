@@ -54,11 +54,19 @@ import {
   computeDeepWorkReport,
   evaluateDeepWorkImpact,
   suggestDeepWorkOptimizations,
+  computeBurnoutRisk,
+  computeTravelOverload,
+  computeStrategicDrift,
+  computeOverallRisk,
+  generateRiskRecommendations,
+  getRiskLevel,
+  classifyEventCategory,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
 import type { CognitiveLoadResult, ContextSwitchResult } from "@tminus/shared";
 import type { DeepWorkReport, DeepWorkImpact } from "@tminus/shared";
+import type { RiskScoreResult, CognitiveLoadHistoryEntry, CategoryAllocation } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -4878,6 +4886,14 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getRiskScores": {
+          const body = (await request.json()) as {
+            weeks?: number;
+          };
+          const result = this.getRiskScores(body.weeks ?? 4);
+          return Response.json(result);
+        }
+
         // ---------------------------------------------------------------
         // Constraint RPC endpoints
         // ---------------------------------------------------------------
@@ -6689,6 +6705,145 @@ export class UserGraphDO {
         estimated_gain_minutes: s.estimated_gain_minutes,
       })),
     };
+  }
+
+  // getRiskScores -- Temporal risk scoring (burnout, travel, drift)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute temporal risk scores for the user.
+   *
+   * Queries cognitive load history, trip constraints, and time allocations
+   * to build inputs for the pure risk scoring functions.
+   *
+   * @param weeks - Number of weeks to analyze (default 4).
+   * @returns Complete risk score result with burnout, travel, drift, overall,
+   *          risk level, and recommendations.
+   */
+  getRiskScores(weeks: number = 4): RiskScoreResult {
+    this.ensureMigrated();
+
+    const now = new Date();
+    const periodDays = weeks * 7;
+    const periodStart = new Date(now.getTime() - periodDays * 24 * 60 * 60 * 1000);
+
+    // 1. Build cognitive load history: compute daily cognitive load for each day
+    const cognitiveLoadHistory: CognitiveLoadHistoryEntry[] = [];
+    for (let i = 0; i < periodDays; i++) {
+      const d = new Date(periodStart.getTime() + i * 24 * 60 * 60 * 1000);
+      const dateStr = d.toISOString().slice(0, 10);
+      const result = this.getCognitiveLoad(dateStr, "day");
+      cognitiveLoadHistory.push({ date: dateStr, score: result.score });
+    }
+
+    // 2. Compute travel overload from trip constraints
+    const tripConstraints = this.listConstraints("trip");
+    const startMs = periodStart.getTime();
+    const endMs = now.getTime();
+    let tripDays = 0;
+
+    for (const tc of tripConstraints) {
+      if (!tc.active_from || !tc.active_to) continue;
+      const tripStart = new Date(tc.active_from).getTime();
+      const tripEnd = new Date(tc.active_to).getTime();
+
+      // Overlap with analysis period
+      const overlapStart = Math.max(tripStart, startMs);
+      const overlapEnd = Math.min(tripEnd, endMs);
+      if (overlapStart < overlapEnd) {
+        tripDays += Math.ceil((overlapEnd - overlapStart) / (24 * 60 * 60 * 1000));
+      }
+    }
+
+    // Working days = total days minus weekends (approximate)
+    const workingDays = Math.round(periodDays * 5 / 7);
+
+    // 3. Compute strategic drift from time allocations
+    // Split the period in half: first half = historical, second half = current
+    const midPoint = new Date(periodStart.getTime() + (endMs - startMs) / 2);
+    const midIso = midPoint.toISOString();
+    const startIso = periodStart.toISOString();
+    const endIso = now.toISOString();
+
+    // Get events for historical period (first half)
+    const historicalRows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND status != 'cancelled' AND all_day = 0
+         ORDER BY start_ts ASC`,
+        startIso,
+        midIso,
+      )
+      .toArray();
+
+    // Get events for current period (second half)
+    const currentRows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND status != 'cancelled' AND all_day = 0
+         ORDER BY start_ts ASC`,
+        midIso,
+        endIso,
+      )
+      .toArray();
+
+    const historicalAllocations = this.computeAllocationsFromEvents(
+      historicalRows.map((r) => this.rowToCanonicalEvent(r)),
+    );
+    const currentAllocations = this.computeAllocationsFromEvents(
+      currentRows.map((r) => this.rowToCanonicalEvent(r)),
+    );
+
+    // 4. Compute risk scores using pure functions
+    const burnout = computeBurnoutRisk(cognitiveLoadHistory);
+    const travel = computeTravelOverload(tripDays, workingDays);
+    const drift = computeStrategicDrift(currentAllocations, historicalAllocations);
+    const overall = computeOverallRisk(burnout, travel, drift);
+    const riskLevel = getRiskLevel(overall);
+    const recommendations = generateRiskRecommendations(burnout, travel, drift);
+
+    return {
+      burnout_risk: burnout,
+      travel_overload: travel,
+      strategic_drift: drift,
+      overall_risk: overall,
+      risk_level: riskLevel,
+      recommendations,
+    };
+  }
+
+  /**
+   * Compute time allocation by category from a set of canonical events.
+   * Uses classifyEventCategory to determine each event's category,
+   * then sums hours per category.
+   */
+  private computeAllocationsFromEvents(
+    events: readonly CanonicalEvent[],
+  ): CategoryAllocation[] {
+    const categoryHours = new Map<string, number>();
+
+    for (const event of events) {
+      if (!event.start.dateTime || !event.end.dateTime) continue;
+      if (event.transparency === "transparent") continue;
+
+      const category = classifyEventCategory(event);
+      const startMs = new Date(event.start.dateTime).getTime();
+      const endMs = new Date(event.end.dateTime).getTime();
+      const hours = (endMs - startMs) / (60 * 60 * 1000);
+
+      if (hours > 0) {
+        const current = categoryHours.get(category) ?? 0;
+        categoryHours.set(category, current + hours);
+      }
+    }
+
+    const allocations: CategoryAllocation[] = [];
+    for (const [category, hours] of categoryHours) {
+      allocations.push({ category, hours: Math.round(hours * 100) / 100 });
+    }
+    return allocations;
   }
 
   /** Convert a DB row to a CanonicalEvent domain object. */

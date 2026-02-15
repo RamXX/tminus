@@ -1819,8 +1819,9 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.list_milestones");
     expect(toolNames).toContain("calendar.upcoming_milestones");
     expect(toolNames).toContain("calendar.get_cognitive_load");
+    expect(toolNames).toContain("calendar.get_risk_scores");
     expect(toolNames).toContain("calendar.query_graph");
-    expect(resultData.tools.length).toBe(36);
+    expect(resultData.tools.length).toBe(38);
   });
 });
 
