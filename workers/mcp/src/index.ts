@@ -690,6 +690,22 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       },
     },
   },
+  {
+    name: "calendar.get_event_briefing",
+    description:
+      "Get a pre-meeting context briefing for a calendar event. Returns participant relationship context including last interaction date, relationship category, reputation score, and mutual connections. Also extracts topic keywords from the event title. Use before meetings to review participant context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event_id: {
+          type: "string",
+          description:
+            "The canonical event ID to get a briefing for. Use event IDs from calendar.list_events.",
+        },
+      },
+      required: ["event_id"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -753,6 +769,7 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.get_drift_report": "enterprise",
   "calendar.mark_outcome": "enterprise",
   "calendar.get_reconnection_suggestions": "enterprise",
+  "calendar.get_event_briefing": "enterprise",
 };
 
 /**
@@ -3117,6 +3134,38 @@ async function handleGetReconnectionSuggestions(
   return envelope.data;
 }
 
+/**
+ * Execute calendar.get_event_briefing: validate input and forward to the API
+ * worker to get the pre-meeting context briefing for an event.
+ */
+async function handleGetEventBriefing(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.event_id !== "string" || args.event_id.trim().length === 0) {
+    throw new InvalidParamsError("event_id is required");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "GET",
+    `/v1/events/${encodeURIComponent(args.event_id)}/briefing`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get event briefing");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -3371,6 +3420,11 @@ async function dispatch(
           case "calendar.get_reconnection_suggestions": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetReconnectionSuggestions(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_event_briefing": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetEventBriefing(request, env.API, toolArgs);
             break;
           }
           default:

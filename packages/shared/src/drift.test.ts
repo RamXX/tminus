@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { computeDrift, matchEventParticipants, computeDriftBadge, driftEntryBadge } from "./drift";
+import {
+  computeDrift,
+  matchEventParticipants,
+  computeDriftBadge,
+  driftEntryBadge,
+  matchCity,
+  categoryDurationMinutes,
+  enrichSuggestionsWithTimeWindows,
+} from "./drift";
 import type { DriftInput, DriftEntry } from "./drift";
 
 // ---------------------------------------------------------------------------
@@ -347,5 +355,185 @@ describe("driftEntryBadge", () => {
       urgency: 19.0,
     };
     expect(driftEntryBadge(entry)).toBe("red");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// matchCity (TM-xwn.1)
+// ---------------------------------------------------------------------------
+
+describe("matchCity", () => {
+  it("matches same city case-insensitively", () => {
+    expect(matchCity("Berlin", "berlin")).toBe(true);
+    expect(matchCity("berlin", "BERLIN")).toBe(true);
+    expect(matchCity("Berlin", "Berlin")).toBe(true);
+  });
+
+  it("rejects different cities", () => {
+    expect(matchCity("Berlin", "Munich")).toBe(false);
+    expect(matchCity("New York", "Los Angeles")).toBe(false);
+  });
+
+  it("trims whitespace before comparing", () => {
+    expect(matchCity("  Berlin  ", "berlin")).toBe(true);
+    expect(matchCity("Berlin", "  berlin  ")).toBe(true);
+  });
+
+  it("returns false for null/empty inputs", () => {
+    expect(matchCity(null, "Berlin")).toBe(false);
+    expect(matchCity("Berlin", null)).toBe(false);
+    expect(matchCity("", "Berlin")).toBe(false);
+    expect(matchCity("Berlin", "")).toBe(false);
+    expect(matchCity(null, null)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// categoryDurationMinutes (TM-xwn.1)
+// ---------------------------------------------------------------------------
+
+describe("categoryDurationMinutes", () => {
+  it("returns 60 minutes for FRIEND", () => {
+    expect(categoryDurationMinutes("FRIEND")).toBe(60);
+  });
+
+  it("returns 60 minutes for FAMILY", () => {
+    expect(categoryDurationMinutes("FAMILY")).toBe(60);
+  });
+
+  it("returns 45 minutes for COLLEAGUE", () => {
+    expect(categoryDurationMinutes("COLLEAGUE")).toBe(45);
+  });
+
+  it("returns 45 minutes for CLIENT", () => {
+    expect(categoryDurationMinutes("CLIENT")).toBe(45);
+  });
+
+  it("returns 45 minutes for BOARD", () => {
+    expect(categoryDurationMinutes("BOARD")).toBe(45);
+  });
+
+  it("returns 30 minutes for INVESTOR", () => {
+    expect(categoryDurationMinutes("INVESTOR")).toBe(30);
+  });
+
+  it("returns 30 minutes for OTHER", () => {
+    expect(categoryDurationMinutes("OTHER")).toBe(30);
+  });
+
+  it("returns 30 minutes for unknown categories", () => {
+    expect(categoryDurationMinutes("UNKNOWN" as string)).toBe(30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enrichSuggestionsWithTimeWindows (TM-xwn.1)
+// ---------------------------------------------------------------------------
+
+describe("enrichSuggestionsWithTimeWindows", () => {
+  const baseDriftEntry: DriftEntry = {
+    relationship_id: "rel_01HXY000000000000000000E01",
+    participant_hash: "abc",
+    display_name: "Alice in Berlin",
+    category: "FRIEND",
+    closeness_weight: 0.8,
+    last_interaction_ts: "2026-01-01T12:00:00Z",
+    interaction_frequency_target: 7,
+    days_since_interaction: 45,
+    days_overdue: 38,
+    drift_ratio: 6.43,
+    urgency: 30.4,
+  };
+
+  it("enriches each suggestion with suggested_duration_minutes based on category", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [baseDriftEntry],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+    );
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].suggested_duration_minutes).toBe(60); // FRIEND -> 60
+  });
+
+  it("computes suggested_time_window within trip dates", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [baseDriftEntry],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+    );
+    expect(suggestions[0].suggested_time_window).toBeDefined();
+    expect(suggestions[0].suggested_time_window!.earliest).toBe("2026-04-01T00:00:00Z");
+    expect(suggestions[0].suggested_time_window!.latest).toBe("2026-04-05T00:00:00Z");
+  });
+
+  it("returns null time_window when no trip dates provided", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [baseDriftEntry],
+      null,
+      null,
+    );
+    expect(suggestions[0].suggested_time_window).toBeNull();
+    // Duration should still be computed
+    expect(suggestions[0].suggested_duration_minutes).toBe(60);
+  });
+
+  it("preserves all original drift entry fields", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [baseDriftEntry],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+    );
+    const s = suggestions[0];
+    expect(s.relationship_id).toBe(baseDriftEntry.relationship_id);
+    expect(s.display_name).toBe(baseDriftEntry.display_name);
+    expect(s.category).toBe(baseDriftEntry.category);
+    expect(s.drift_ratio).toBe(baseDriftEntry.drift_ratio);
+    expect(s.days_overdue).toBe(baseDriftEntry.days_overdue);
+    expect(s.urgency).toBe(baseDriftEntry.urgency);
+  });
+
+  it("enriches multiple suggestions maintaining urgency order", () => {
+    const friend: DriftEntry = {
+      ...baseDriftEntry,
+      relationship_id: "rel_friend",
+      display_name: "Friend Alice",
+      category: "FRIEND",
+      urgency: 30,
+    };
+    const colleague: DriftEntry = {
+      ...baseDriftEntry,
+      relationship_id: "rel_colleague",
+      display_name: "Colleague Bob",
+      category: "COLLEAGUE",
+      urgency: 20,
+    };
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [friend, colleague],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+    );
+    expect(suggestions).toHaveLength(2);
+    expect(suggestions[0].relationship_id).toBe("rel_friend");
+    expect(suggestions[0].suggested_duration_minutes).toBe(60);
+    expect(suggestions[1].relationship_id).toBe("rel_colleague");
+    expect(suggestions[1].suggested_duration_minutes).toBe(45);
+  });
+
+  it("handles empty suggestion list", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+    );
+    expect(suggestions).toHaveLength(0);
+  });
+
+  it("returns null time_window when only trip_start provided without trip_end", () => {
+    const suggestions = enrichSuggestionsWithTimeWindows(
+      [baseDriftEntry],
+      "2026-04-01T00:00:00Z",
+      null,
+    );
+    expect(suggestions[0].suggested_time_window).toBeNull();
   });
 });

@@ -97,6 +97,7 @@ export { computeProjectionHash, computeIdempotencyKey } from "./hash";
 export {
   USER_GRAPH_DO_MIGRATION_V1,
   USER_GRAPH_DO_MIGRATION_V2,
+  USER_GRAPH_DO_MIGRATION_V4,
   ACCOUNT_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V3,
@@ -194,8 +195,24 @@ export type {
 } from "./privacy/deletion-certificate";
 
 // Re-export drift computation (relationship tracking, Phase 4)
-export { computeDrift, matchEventParticipants, computeDriftBadge, driftEntryBadge } from "./drift";
-export type { DriftInput, DriftEntry, DriftReport, DriftBadge, DriftAlert } from "./drift";
+export {
+  computeDrift,
+  matchEventParticipants,
+  computeDriftBadge,
+  driftEntryBadge,
+  matchCity,
+  categoryDurationMinutes,
+  enrichSuggestionsWithTimeWindows,
+} from "./drift";
+export type {
+  DriftInput,
+  DriftEntry,
+  DriftReport,
+  DriftBadge,
+  DriftAlert,
+  SuggestedTimeWindow,
+  ReconnectionSuggestion,
+} from "./drift";
 
 // Re-export reputation scoring (relationship tracking, Phase 4)
 export {
@@ -205,6 +222,18 @@ export {
   computeDecayFactor,
 } from "./reputation";
 export type { LedgerInput, ReputationResult } from "./reputation";
+
+// Re-export pre-meeting briefing assembly (Phase 4C)
+export {
+  extractTopics,
+  summarizeLastInteraction,
+  assembleBriefing,
+} from "./briefing";
+export type {
+  BriefingParticipantInput,
+  BriefingParticipant,
+  EventBriefing,
+} from "./briefing";
 
 // Re-export CORS middleware
 export {

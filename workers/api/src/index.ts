@@ -1983,6 +1983,65 @@ async function handleDeleteAllocation(
   }
 }
 
+// -- Pre-meeting context briefing ---------------------------------------------
+
+async function handleGetEventBriefing(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      event_id: string;
+      event_title: string | null;
+      event_start: string;
+      topics: string[];
+      participants: Array<{
+        participant_hash: string;
+        display_name: string | null;
+        category: string;
+        last_interaction_ts: string | null;
+        last_interaction_summary: string | null;
+        reputation_score: number;
+        mutual_connections_count: number;
+      }>;
+      computed_at: string;
+    } | { error: string }>(env.USER_GRAPH, auth.userId, "/getEventBriefing", {
+      canonical_event_id: eventId,
+    });
+
+    if (!result.ok) {
+      const errData = result.data as { error?: string };
+      if (result.status === 404) {
+        return jsonResponse(
+          errorEnvelope(errData.error ?? "Event not found", "NOT_FOUND"),
+          ErrorCode.NOT_FOUND,
+        );
+      }
+      return jsonResponse(
+        errorEnvelope(errData.error ?? "Failed to get event briefing", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get event briefing", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get event briefing", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Relationship tracking ---------------------------------------------------
 
 async function handleCreateRelationship(
@@ -2563,6 +2622,48 @@ async function handleGetDriftAlerts(
 }
 
 // -- Reconnection suggestions -----------------------------------------------
+
+/**
+ * GET /v1/trips/:trip_id/reconnections
+ *
+ * Dedicated REST route for trip-scoped reconnection suggestions.
+ * Resolves the trip constraint by ID from the URL path and returns
+ * overdue contacts in the trip's destination city.
+ */
+async function handleGetTripReconnections(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  tripId: string,
+): Promise<Response> {
+  try {
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getReconnectionSuggestions",
+      { city: null, trip_id: tripId },
+    );
+
+    if (!result.ok) {
+      const errData = result.data as { message?: string };
+      return jsonResponse(
+        errorEnvelope(
+          errData.message ?? "Failed to get reconnection suggestions for trip",
+          "INTERNAL_ERROR",
+        ),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get trip reconnection suggestions", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get reconnection suggestions for trip", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
 
 async function handleGetReconnectionSuggestions(
   request: Request,
@@ -3927,6 +4028,13 @@ async function routeAuthenticatedRequest(
         }
       }
 
+      // -- Pre-meeting context briefing routes -----------------------------------
+
+      match = matchRoute(pathname, "/v1/events/:id/briefing");
+      if (match && method === "GET") {
+        return handleGetEventBriefing(request, auth, env, match.params[0]);
+      }
+
       // -- Relationship tracking routes -----------------------------------------
 
       if (method === "POST" && pathname === "/v1/relationships") {
@@ -3952,6 +4060,11 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/reconnection-suggestions") {
         return handleGetReconnectionSuggestions(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/trips/:id/reconnections");
+      if (match && method === "GET") {
+        return handleGetTripReconnections(request, auth, env, match.params[0]);
       }
 
       // -- Interaction ledger (outcomes) routes ---------------------------------

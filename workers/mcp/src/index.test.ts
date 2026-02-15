@@ -3784,7 +3784,7 @@ describe("relationship tools in tools/list", () => {
     expect(tripTool!.inputSchema.properties).toHaveProperty("destination_city");
   });
 
-  it("total tool count is 26 (25 existing + 1 new reconnection tool)", async () => {
+  it("total tool count is 27 (25 base + reconnection + briefing)", async () => {
     const handler = createMcpHandler();
     const env = createMinimalEnv();
     const authHeader = await makeAuthHeader();
@@ -3797,7 +3797,7 @@ describe("relationship tools in tools/list", () => {
     );
 
     const resultData = result.body.result as { tools: Array<{ name: string }> };
-    expect(resultData.tools.length).toBe(26);
+    expect(resultData.tools.length).toBe(27);
   });
 });
 

@@ -244,3 +244,98 @@ export function driftEntryBadge(entry: DriftEntry): DriftBadge {
     entry.interaction_frequency_target,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Reconnection suggestion enrichment (TM-xwn.1, Phase 4B)
+// ---------------------------------------------------------------------------
+
+/** A suggested time window for a reconnection meeting. */
+export interface SuggestedTimeWindow {
+  readonly earliest: string;
+  readonly latest: string;
+}
+
+/** A drift entry enriched with reconnection-specific fields. */
+export interface ReconnectionSuggestion extends DriftEntry {
+  /** Suggested meeting duration in minutes, derived from relationship category. */
+  readonly suggested_duration_minutes: number;
+  /**
+   * Suggested time window for the meeting (bounded by trip dates).
+   * Null when no trip context is available.
+   */
+  readonly suggested_time_window: SuggestedTimeWindow | null;
+}
+
+/**
+ * Case-insensitive city matching (v1: exact string match).
+ *
+ * Trims whitespace and compares lowercase. Returns false for null/empty inputs.
+ * Geo-distance matching is deferred to Phase 5 (TM-xwn.3).
+ *
+ * @param a - First city string (may be null)
+ * @param b - Second city string (may be null)
+ * @returns true if cities match case-insensitively
+ */
+export function matchCity(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const trimA = a.trim();
+  const trimB = b.trim();
+  if (trimA.length === 0 || trimB.length === 0) return false;
+  return trimA.toLowerCase() === trimB.toLowerCase();
+}
+
+/**
+ * Default meeting duration in minutes based on relationship category.
+ *
+ * - FRIEND / FAMILY: 60 min (social, likely a meal or longer catch-up)
+ * - COLLEAGUE / CLIENT / BOARD: 45 min (professional meeting)
+ * - INVESTOR / OTHER / unknown: 30 min (shorter catch-up)
+ *
+ * @param category - Relationship category string
+ * @returns Suggested duration in minutes
+ */
+export function categoryDurationMinutes(category: string): number {
+  switch (category) {
+    case "FRIEND":
+    case "FAMILY":
+      return 60;
+    case "COLLEAGUE":
+    case "CLIENT":
+    case "BOARD":
+      return 45;
+    case "INVESTOR":
+    case "OTHER":
+    default:
+      return 30;
+  }
+}
+
+/**
+ * Enrich drift entries with reconnection-specific fields.
+ *
+ * Adds suggested_duration_minutes (from category) and suggested_time_window
+ * (bounded by trip dates) to each drift entry. Preserves the original
+ * urgency ordering of the input.
+ *
+ * Pure function: no side effects.
+ *
+ * @param entries - Overdue drift entries (already filtered by city and drift)
+ * @param tripStart - ISO 8601 trip start, or null if no trip context
+ * @param tripEnd - ISO 8601 trip end, or null if no trip context
+ * @returns Enriched reconnection suggestions
+ */
+export function enrichSuggestionsWithTimeWindows(
+  entries: readonly DriftEntry[],
+  tripStart: string | null,
+  tripEnd: string | null,
+): ReconnectionSuggestion[] {
+  const hasWindow = tripStart !== null && tripEnd !== null;
+
+  return entries.map((entry) => ({
+    ...entry,
+    suggested_duration_minutes: categoryDurationMinutes(entry.category),
+    suggested_time_window: hasWindow
+      ? { earliest: tripStart!, latest: tripEnd! }
+      : null,
+  }));
+}

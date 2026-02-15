@@ -351,6 +351,24 @@ CREATE INDEX idx_drift_alerts_computed ON drift_alerts(computed_at);
 CREATE INDEX idx_drift_alerts_urgency ON drift_alerts(urgency DESC);
 ` as const;
 
+/**
+ * UserGraphDO migration v4: Add event_participants table.
+ *
+ * Persistently links canonical events to their participant hashes.
+ * Populated during applyProviderDelta when participant_hashes are
+ * provided in the delta. Used by the pre-meeting briefing engine
+ * to match event attendees against tracked relationships.
+ */
+export const USER_GRAPH_DO_MIGRATION_V4 = `
+CREATE TABLE event_participants (
+  canonical_event_id TEXT NOT NULL REFERENCES canonical_events(canonical_event_id) ON DELETE CASCADE,
+  participant_hash   TEXT NOT NULL,
+  PRIMARY KEY (canonical_event_id, participant_hash)
+);
+
+CREATE INDEX idx_event_participants_hash ON event_participants(participant_hash);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -367,6 +385,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 3,
     sql: USER_GRAPH_DO_MIGRATION_V3,
     description: "Add drift_alerts table for persisted drift alert snapshots",
+  },
+  {
+    version: 4,
+    sql: USER_GRAPH_DO_MIGRATION_V4,
+    description: "Add event_participants table for briefing participant matching",
   },
 ] as const;
 

@@ -30,8 +30,13 @@ import {
   computeDrift,
   matchEventParticipants,
   computeReputation,
+  enrichSuggestionsWithTimeWindows,
+  matchCity,
+  assembleBriefing,
+  extractTopics,
+  summarizeLastInteraction,
 } from "@tminus/shared";
-import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput } from "@tminus/shared";
+import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -368,7 +373,7 @@ export interface ReconnectionReport {
   readonly trip_name: string | null;
   readonly trip_start: string | null;
   readonly trip_end: string | null;
-  readonly suggestions: readonly DriftEntry[];
+  readonly suggestions: readonly ReconnectionSuggestion[];
   readonly total_in_city: number;
   readonly total_overdue_in_city: number;
   readonly computed_at: string;
@@ -537,6 +542,10 @@ export class UserGraphDO {
               canonicalId,
               accountId,
             );
+            // Store participant hashes for briefing lookups
+            if (delta.participant_hashes && delta.participant_hashes.length > 0) {
+              this.storeEventParticipants(canonicalId, delta.participant_hashes);
+            }
             // Interaction detection: update relationships when event has
             // participant hashes matching known relationships
             if (delta.participant_hashes && delta.participant_hashes.length > 0 && delta.event) {
@@ -553,6 +562,10 @@ export class UserGraphDO {
                 canonicalId,
                 accountId,
               );
+              // Update participant hashes for briefing lookups
+              if (delta.participant_hashes && delta.participant_hashes.length > 0) {
+                this.storeEventParticipants(canonicalId, delta.participant_hashes);
+              }
               // Interaction detection on update
               if (delta.participant_hashes && delta.participant_hashes.length > 0 && delta.event) {
                 const eventStartTs = delta.event.start.dateTime ?? delta.event.start.date ?? new Date().toISOString();
@@ -3819,16 +3832,22 @@ export class UserGraphDO {
       throw new Error("No city available. Provide city parameter or use a trip with destination_city set.");
     }
 
-    // Get all relationships in the target city (case-insensitive)
+    // Get all relationships in the target city (case-insensitive via matchCity)
     const allRelationships = this.listRelationships();
-    const cityLower = targetCity.toLowerCase();
     const cityRelationships = allRelationships.filter(
-      (r) => r.city !== null && r.city.toLowerCase() === cityLower,
+      (r) => matchCity(r.city, targetCity),
     );
 
     // Compute drift for city-filtered relationships
     const now = new Date().toISOString();
     const driftReport = computeDrift(cityRelationships, now);
+
+    // Enrich suggestions with suggested_duration_minutes and time windows
+    const enriched = enrichSuggestionsWithTimeWindows(
+      driftReport.overdue,
+      tripStart,
+      tripEnd,
+    );
 
     return {
       city: targetCity,
@@ -3836,7 +3855,7 @@ export class UserGraphDO {
       trip_name: tripName,
       trip_start: tripStart,
       trip_end: tripEnd,
-      suggestions: driftReport.overdue,
+      suggestions: enriched,
       total_in_city: cityRelationships.length,
       total_overdue_in_city: driftReport.total_overdue,
       computed_at: driftReport.computed_at,
@@ -3883,6 +3902,188 @@ export class UserGraphDO {
     }
 
     return matchingIds.length;
+  }
+
+  // -------------------------------------------------------------------------
+  // Event participant storage (for briefing lookups)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Store participant hashes for a canonical event.
+   *
+   * Uses INSERT OR IGNORE to handle duplicate hashes gracefully.
+   * On update deltas, replaces the full set of participants.
+   *
+   * @param canonicalEventId - The event to store participants for
+   * @param participantHashes - SHA-256 hashes of attendee emails
+   */
+  storeEventParticipants(
+    canonicalEventId: string,
+    participantHashes: readonly string[],
+  ): void {
+    this.ensureMigrated();
+
+    // Delete existing participants for this event (handles updates)
+    this.sql.exec(
+      "DELETE FROM event_participants WHERE canonical_event_id = ?",
+      canonicalEventId,
+    );
+
+    // Insert new participants
+    for (const hash of participantHashes) {
+      this.sql.exec(
+        `INSERT OR IGNORE INTO event_participants (canonical_event_id, participant_hash)
+         VALUES (?, ?)`,
+        canonicalEventId,
+        hash,
+      );
+    }
+  }
+
+  /**
+   * Get participant hashes for a canonical event.
+   *
+   * @param canonicalEventId - The event to get participants for
+   * @returns Array of participant hashes
+   */
+  getEventParticipantHashes(canonicalEventId: string): string[] {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ participant_hash: string }>(
+        "SELECT participant_hash FROM event_participants WHERE canonical_event_id = ?",
+        canonicalEventId,
+      )
+      .toArray();
+
+    return rows.map((r) => r.participant_hash);
+  }
+
+  // -------------------------------------------------------------------------
+  // Pre-meeting context briefing (Phase 4C)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute a pre-meeting context briefing for an event.
+   *
+   * Given a canonical event ID:
+   * 1. Loads the event to get its title and start time
+   * 2. Looks up participant hashes from event_participants table
+   * 3. Matches participant hashes against tracked relationships
+   * 4. For matched relationships, computes reputation scores
+   * 5. Counts mutual connections (contacts who share events with both user and participant)
+   * 6. Assembles the briefing using the pure assembleBriefing function
+   *
+   * Performance: all data is in single UserGraphDO, computed on-demand.
+   *
+   * @param canonicalEventId - The event to compute a briefing for
+   * @returns EventBriefing or null if event not found
+   */
+  getEventBriefing(canonicalEventId: string): EventBriefing | null {
+    this.ensureMigrated();
+
+    // Step 1: Load the event
+    const eventRows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events WHERE canonical_event_id = ?`,
+        canonicalEventId,
+      )
+      .toArray();
+
+    if (eventRows.length === 0) return null;
+
+    const eventRow = eventRows[0];
+    const eventTitle = eventRow.title ?? null;
+    const eventStart = eventRow.start_ts;
+
+    // Step 2: Get participant hashes for this event
+    const participantHashes = this.getEventParticipantHashes(canonicalEventId);
+
+    // Step 3: Get all relationships and find matches
+    const allRelationships = this.listRelationships();
+    const hashToRelationship = new Map(
+      allRelationships.map((r) => [r.participant_hash, r]),
+    );
+
+    // Match event participants against relationships
+    const matchedRelationships = participantHashes
+      .map((hash) => hashToRelationship.get(hash))
+      .filter((r): r is Relationship => r !== undefined);
+
+    // Step 4: Compute reputation for each matched relationship
+    const now = new Date().toISOString();
+    const participants: BriefingParticipantInput[] = matchedRelationships.map((rel) => {
+      const entries = this.listOutcomes(rel.relationship_id);
+      const ledgerInputs: LedgerInput[] = (entries ?? []).map((e) => ({
+        outcome: e.outcome,
+        weight: e.weight,
+        ts: e.ts,
+      }));
+      const reputation = computeReputation(ledgerInputs, now);
+
+      return {
+        participant_hash: rel.participant_hash,
+        display_name: rel.display_name,
+        category: rel.category,
+        closeness_weight: rel.closeness_weight,
+        last_interaction_ts: rel.last_interaction_ts,
+        reputation_score: reputation.reliability_score,
+        total_interactions: reputation.total_interactions,
+      };
+    });
+
+    // Step 5: Compute mutual connections
+    // Mutual connection = a contact who appears in events with both the user
+    // and the briefing participant (i.e., shares events with participant)
+    const mutualConnectionCounts = new Map<string, number>();
+
+    for (const rel of matchedRelationships) {
+      // Find all events this participant is in
+      const participantEvents = this.sql
+        .exec<{ canonical_event_id: string }>(
+          "SELECT canonical_event_id FROM event_participants WHERE participant_hash = ?",
+          rel.participant_hash,
+        )
+        .toArray()
+        .map((r) => r.canonical_event_id);
+
+      if (participantEvents.length === 0) {
+        mutualConnectionCounts.set(rel.participant_hash, 0);
+        continue;
+      }
+
+      // Find other relationships who share events with this participant
+      const mutualSet = new Set<string>();
+      for (const evtId of participantEvents) {
+        const coParticipants = this.sql
+          .exec<{ participant_hash: string }>(
+            `SELECT participant_hash FROM event_participants
+             WHERE canonical_event_id = ? AND participant_hash != ?`,
+            evtId,
+            rel.participant_hash,
+          )
+          .toArray();
+
+        for (const cp of coParticipants) {
+          // Only count if this co-participant is also a tracked relationship
+          if (hashToRelationship.has(cp.participant_hash)) {
+            mutualSet.add(cp.participant_hash);
+          }
+        }
+      }
+
+      mutualConnectionCounts.set(rel.participant_hash, mutualSet.size);
+    }
+
+    // Step 6: Assemble the briefing
+    return assembleBriefing(
+      canonicalEventId,
+      eventTitle,
+      eventStart,
+      participants,
+      mutualConnectionCounts,
+      now,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -4649,6 +4850,32 @@ export class UserGraphDO {
         case "/getDriftAlerts": {
           const alerts = this.getDriftAlerts();
           return Response.json({ alerts });
+        }
+
+        case "/getEventBriefing": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+          };
+          const briefing = this.getEventBriefing(body.canonical_event_id);
+          if (briefing === null) {
+            return Response.json(
+              { error: "Event not found" },
+              { status: 404 },
+            );
+          }
+          return Response.json(briefing);
+        }
+
+        case "/storeEventParticipants": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            participant_hashes: string[];
+          };
+          this.storeEventParticipants(
+            body.canonical_event_id,
+            body.participant_hashes,
+          );
+          return Response.json({ stored: body.participant_hashes.length });
         }
 
         default:

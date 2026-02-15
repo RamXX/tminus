@@ -1428,5 +1428,183 @@ describe("UserGraphDO relationship tracking integration", () => {
       // trip_id still included in response context
       expect(result.trip_id).toBe(tripConstraint.constraint_id);
     });
+
+    // -- TM-xwn.1: Walking Skeleton enrichment tests --
+
+    it("suggestions include suggested_duration_minutes based on category (TM-xwn.1)", () => {
+      // FRIEND -> 60 min
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Friend Alice",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        null,
+        7,
+      );
+      // COLLEAGUE -> 45 min
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Colleague Bob",
+        "COLLEAGUE",
+        0.6,
+        "Berlin",
+        null,
+        14,
+      );
+
+      const result = dObj.getReconnectionSuggestions("Berlin");
+      expect(result.suggestions.length).toBe(2);
+
+      // Find each suggestion by name to avoid ordering assumptions
+      const alice = result.suggestions.find((s) => s.display_name === "Friend Alice");
+      const bob = result.suggestions.find((s) => s.display_name === "Colleague Bob");
+      expect(alice).toBeDefined();
+      expect(bob).toBeDefined();
+      expect(alice!.suggested_duration_minutes).toBe(60);
+      expect(bob!.suggested_duration_minutes).toBe(45);
+    });
+
+    it("suggestions include time_window bounded by trip dates (TM-xwn.1)", () => {
+      const tripConstraint = dObj.addConstraint(
+        "trip",
+        {
+          name: "Berlin Trip",
+          timezone: "Europe/Berlin",
+          block_policy: "BUSY",
+          destination_city: "Berlin",
+        },
+        "2026-04-10T00:00:00Z",
+        "2026-04-15T00:00:00Z",
+      );
+
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Hans in Berlin",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, tripConstraint.constraint_id);
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].suggested_time_window).toBeDefined();
+      expect(result.suggestions[0].suggested_time_window!.earliest).toBe("2026-04-10T00:00:00Z");
+      expect(result.suggestions[0].suggested_time_window!.latest).toBe("2026-04-15T00:00:00Z");
+    });
+
+    it("suggestions have null time_window when queried by city without trip (TM-xwn.1)", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Hans in Berlin",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions("Berlin");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].suggested_time_window).toBeNull();
+      // Duration is still computed even without a trip
+      expect(result.suggestions[0].suggested_duration_minutes).toBe(60);
+    });
+
+    it("full pipeline: trip creation -> city match -> drift filter -> enriched suggestion (TM-xwn.1)", () => {
+      // Step 1: Create a trip to Berlin
+      const trip = dObj.addConstraint(
+        "trip",
+        {
+          name: "Berlin Business Trip",
+          timezone: "Europe/Berlin",
+          block_policy: "BUSY",
+          destination_city: "Berlin",
+        },
+        "2026-05-01T00:00:00Z",
+        "2026-05-07T00:00:00Z",
+      );
+
+      // Step 2: Create relationships - some in Berlin, some not
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Hans (Berlin, overdue)",
+        "FRIEND",
+        0.9,
+        "Berlin",
+        null,
+        7, // weekly - will be overdue since never interacted
+      );
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Greta (Berlin, overdue)",
+        "INVESTOR",
+        0.5,
+        "berlin", // lowercase - should match case-insensitively
+        null,
+        30,
+      );
+      const parisRelId = "rel_01HXY000000000000000PARIS";
+      const parisHash = "sha256_paris_contact";
+      dObj.createRelationship(
+        parisRelId,
+        parisHash,
+        "Pierre (Paris, overdue but wrong city)",
+        "COLLEAGUE",
+        0.7,
+        "Paris",
+        null,
+        7,
+      );
+
+      // Step 3: Query reconnection suggestions for the trip
+      const result = dObj.getReconnectionSuggestions(null, trip.constraint_id);
+
+      // Verify: only Berlin contacts returned
+      expect(result.city).toBe("Berlin");
+      expect(result.trip_id).toBe(trip.constraint_id);
+      expect(result.trip_name).toBe("Berlin Business Trip");
+      expect(result.trip_start).toBe("2026-05-01T00:00:00Z");
+      expect(result.trip_end).toBe("2026-05-07T00:00:00Z");
+      expect(result.total_in_city).toBe(2); // Hans + Greta
+      expect(result.total_overdue_in_city).toBe(2);
+      expect(result.suggestions.length).toBe(2);
+
+      // Verify enriched fields
+      for (const s of result.suggestions) {
+        // All should have time windows from the trip
+        expect(s.suggested_time_window).toBeDefined();
+        expect(s.suggested_time_window!.earliest).toBe("2026-05-01T00:00:00Z");
+        expect(s.suggested_time_window!.latest).toBe("2026-05-07T00:00:00Z");
+        // Duration matches category
+        expect(s.suggested_duration_minutes).toBeGreaterThan(0);
+        // Drift > 1.0 (all are overdue)
+        expect(s.drift_ratio).toBeGreaterThan(1.0);
+        // Days overdue > 0
+        expect(s.days_overdue).toBeGreaterThan(0);
+      }
+
+      // Verify category-specific durations
+      const hans = result.suggestions.find((s) => s.display_name === "Hans (Berlin, overdue)");
+      const greta = result.suggestions.find((s) => s.display_name === "Greta (Berlin, overdue)");
+      expect(hans).toBeDefined();
+      expect(greta).toBeDefined();
+      expect(hans!.suggested_duration_minutes).toBe(60); // FRIEND
+      expect(greta!.suggested_duration_minutes).toBe(30); // INVESTOR
+
+      // Verify never auto-sends (BR-17): response is data-only, no action taken
+      // This is verified structurally: the response is a pure data report,
+      // not a trigger for any email/notification/scheduling action.
+      expect(result).not.toHaveProperty("auto_sent");
+      expect(result).not.toHaveProperty("scheduled");
+    });
   });
 });

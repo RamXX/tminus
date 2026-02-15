@@ -120,6 +120,7 @@ describe("UserGraphDO schema via migration runner", () => {
       "drift_alerts",
       "event_journal",
       "event_mirrors",
+      "event_participants",
       "interaction_ledger",
       "milestones",
       "policies",
