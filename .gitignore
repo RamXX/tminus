@@ -32,3 +32,12 @@ coverage/
 
 # Logs
 *.log
+
+# iOS / Swift
+ios/TMinus/.build/
+ios/TMinus/.swiftpm/
+ios/TMinus/TMinus.xcodeproj/xcuserdata/
+ios/TMinus/TMinus.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+DerivedData/

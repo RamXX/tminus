@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5b test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5b test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck ios-build ios-test ios-clean
 
 # ---- Core targets ----
 
@@ -204,3 +204,16 @@ secrets-setup-production:
 secrets-setup-dry-run:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
 	. ./.env && node scripts/setup-secrets.mjs --dry-run
+
+# ---- iOS targets ----
+# Build and test the iOS walking skeleton (Swift Package Manager).
+# Requires Xcode 16+ with Swift 6.1+ toolchain.
+
+ios-build:
+	cd ios/TMinus && swift build
+
+ios-test:
+	cd ios/TMinus && swift test
+
+ios-clean:
+	cd ios/TMinus && swift package clean
