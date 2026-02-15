@@ -1120,6 +1120,210 @@ async function handleJournal(
   }
 }
 
+// -- Constraints (Trips, Working Hours, etc.) --------------------------------
+
+async function handleCreateConstraint(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<{
+    kind?: string;
+    config_json?: Record<string, unknown>;
+    active_from?: string;
+    active_to?: string;
+  }>(request);
+
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Validate required fields
+  if (!body.kind || typeof body.kind !== "string") {
+    return jsonResponse(
+      errorEnvelope("Constraint must have a 'kind' field", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.config_json || typeof body.config_json !== "object") {
+    return jsonResponse(
+      errorEnvelope("Constraint must have a 'config_json' object", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Validate ISO 8601 date strings when provided
+  if (body.active_from && isNaN(Date.parse(body.active_from))) {
+    return jsonResponse(
+      errorEnvelope("active_from must be a valid ISO 8601 date string", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+  if (body.active_to && isNaN(Date.parse(body.active_to))) {
+    return jsonResponse(
+      errorEnvelope("active_to must be a valid ISO 8601 date string", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      constraint_id: string;
+      kind: string;
+      config_json: Record<string, unknown>;
+      active_from: string | null;
+      active_to: string | null;
+      created_at: string;
+    }>(env.USER_GRAPH, auth.userId, "/addConstraint", {
+      kind: body.kind,
+      config_json: body.config_json,
+      active_from: body.active_from ?? null,
+      active_to: body.active_to ?? null,
+    });
+
+    if (!result.ok) {
+      // Check if it's a validation error from the DO
+      const errData = result.data as unknown as { error?: string };
+      const errMsg = errData?.error ?? "Failed to create constraint";
+      return jsonResponse(
+        errorEnvelope(errMsg, "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 201);
+  } catch (err) {
+    console.error("Failed to create constraint", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create constraint", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleListConstraints(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const kindFilter = url.searchParams.get("kind");
+
+  try {
+    const result = await callDO<{
+      items: unknown[];
+    }>(env.USER_GRAPH, auth.userId, "/listConstraints", {
+      kind: kindFilter ?? undefined,
+    });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to list constraints", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data.items ?? result.data), 200);
+  } catch (err) {
+    console.error("Failed to list constraints", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list constraints", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleDeleteConstraint(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  constraintId: string,
+): Promise<Response> {
+  if (!isValidId(constraintId, "constraint")) {
+    return jsonResponse(
+      errorEnvelope("Invalid constraint ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{ deleted: boolean }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/deleteConstraint",
+      { constraint_id: constraintId },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to delete constraint", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data.deleted) {
+      return jsonResponse(
+        errorEnvelope("Constraint not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope({ deleted: true }), 200);
+  } catch (err) {
+    console.error("Failed to delete constraint", err);
+    return jsonResponse(
+      errorEnvelope("Failed to delete constraint", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetConstraint(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  constraintId: string,
+): Promise<Response> {
+  if (!isValidId(constraintId, "constraint")) {
+    return jsonResponse(
+      errorEnvelope("Invalid constraint ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      constraint_id: string;
+      kind: string;
+      config_json: Record<string, unknown>;
+      active_from: string | null;
+      active_to: string | null;
+      created_at: string;
+    } | null>(env.USER_GRAPH, auth.userId, "/getConstraint", {
+      constraint_id: constraintId,
+    });
+
+    if (!result.ok || result.data === null) {
+      return jsonResponse(
+        errorEnvelope("Constraint not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get constraint", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get constraint", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Deletion Certificates (Public, no auth) --------------------------------
 
 /**
@@ -1554,6 +1758,26 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/policies/:id/edges");
       if (match && method === "PUT") {
         return handleSetPolicyEdges(request, auth, env, match.params[0]);
+      }
+
+      // -- Constraint routes -------------------------------------------------
+
+      if (method === "POST" && pathname === "/v1/constraints") {
+        return handleCreateConstraint(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/constraints") {
+        return handleListConstraints(request, auth, env);
+      }
+
+      match = matchRoute(pathname, "/v1/constraints/:id");
+      if (match) {
+        if (method === "GET") {
+          return handleGetConstraint(request, auth, env, match.params[0]);
+        }
+        if (method === "DELETE") {
+          return handleDeleteConstraint(request, auth, env, match.params[0]);
+        }
       }
 
       // -- Sync status routes -----------------------------------------------

@@ -133,9 +133,11 @@ describe("UserGraphDO schema via migration runner", () => {
     ]);
   });
 
-  it("sets schema version to 1 after initial migration", () => {
+  it("sets schema version to latest after all migrations", () => {
     applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
-    expect(getSchemaVersion(sql, "user_graph")).toBe(1);
+    expect(getSchemaVersion(sql, "user_graph")).toBe(
+      USER_GRAPH_DO_MIGRATIONS[USER_GRAPH_DO_MIGRATIONS.length - 1].version,
+    );
   });
 
   it("creates _schema_meta table", () => {
@@ -147,7 +149,9 @@ describe("UserGraphDO schema via migration runner", () => {
 
     expect(meta).toHaveLength(1);
     expect(meta[0].key).toBe("user_graph_version");
-    expect(meta[0].value).toBe("1");
+    expect(meta[0].value).toBe(
+      String(USER_GRAPH_DO_MIGRATIONS[USER_GRAPH_DO_MIGRATIONS.length - 1].version),
+    );
   });
 
   it("INSERT and SELECT on canonical_events works after migration", () => {
@@ -524,11 +528,12 @@ describe("migration runner", () => {
   });
 
   it("is idempotent: re-running does not change version", () => {
+    const expectedVersion = USER_GRAPH_DO_MIGRATIONS[USER_GRAPH_DO_MIGRATIONS.length - 1].version;
     applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
-    expect(getSchemaVersion(sql, "user_graph")).toBe(1);
+    expect(getSchemaVersion(sql, "user_graph")).toBe(expectedVersion);
 
     applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
-    expect(getSchemaVersion(sql, "user_graph")).toBe(1);
+    expect(getSchemaVersion(sql, "user_graph")).toBe(expectedVersion);
   });
 
   it("is idempotent: re-running preserves existing data", () => {
@@ -593,7 +598,9 @@ describe("migration runner", () => {
     applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
     applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
 
-    expect(getSchemaVersion(sql, "user_graph")).toBe(1);
+    expect(getSchemaVersion(sql, "user_graph")).toBe(
+      USER_GRAPH_DO_MIGRATIONS[USER_GRAPH_DO_MIGRATIONS.length - 1].version,
+    );
     expect(getSchemaVersion(sql, "account")).toBe(
       ACCOUNT_DO_MIGRATIONS[ACCOUNT_DO_MIGRATIONS.length - 1].version,
     );

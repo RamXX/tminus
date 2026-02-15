@@ -23,7 +23,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } from "@tminus/shared";
 import { UserGraphDO, mergeIntervals, computeFreeIntervals } from "./index";
-import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult } from "./index";
+import type { QueueLike, BusyInterval, FreeInterval, AvailabilityQuery, AvailabilityResult, Constraint } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -2596,5 +2596,382 @@ describe("computeFreeIntervals (pure function)", () => {
     );
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({ start: "2026-02-15T08:00:00Z", end: "2026-02-15T15:00:00Z" });
+  });
+});
+
+// ===========================================================================
+// Constraint CRUD Tests (TM-gj5.1)
+// ===========================================================================
+
+describe("UserGraphDO constraint CRUD", () => {
+  let db: DatabaseType;
+  let sql: SqlStorageLike;
+  let queue: MockQueue;
+  let ug: UserGraphDO;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    sql = createSqlStorageAdapter(db);
+    queue = new MockQueue();
+    ug = new UserGraphDO(sql, queue);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // addConstraint -- trip constraint creation
+  // -------------------------------------------------------------------------
+
+  describe("addConstraint with kind=trip", () => {
+    it("creates a constraint row and derived canonical event", () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Paris Vacation", timezone: "Europe/Paris", block_policy: "BUSY" },
+        "2026-03-01T00:00:00Z",
+        "2026-03-08T00:00:00Z",
+      );
+
+      // Verify constraint was created
+      expect(constraint.constraint_id).toMatch(/^cst_/);
+      expect(constraint.kind).toBe("trip");
+      expect(constraint.config_json).toEqual({
+        name: "Paris Vacation",
+        timezone: "Europe/Paris",
+        block_policy: "BUSY",
+      });
+      expect(constraint.active_from).toBe("2026-03-01T00:00:00Z");
+      expect(constraint.active_to).toBe("2026-03-08T00:00:00Z");
+
+      // Verify derived canonical event was created
+      const events = db
+        .prepare("SELECT * FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<Record<string, unknown>>;
+
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      expect(event.origin_account_id).toBe("internal");
+      expect(event.origin_event_id).toBe(`constraint:${constraint.constraint_id}`);
+      expect(event.source).toBe("system");
+      expect(event.title).toBe("Busy"); // BUSY policy hides title
+      expect(event.start_ts).toBe("2026-03-01T00:00:00Z");
+      expect(event.end_ts).toBe("2026-03-08T00:00:00Z");
+      expect(event.timezone).toBe("Europe/Paris");
+      expect(event.transparency).toBe("opaque");
+    });
+
+    it("uses trip name as title when block_policy is TITLE", () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Tokyo Conference", timezone: "Asia/Tokyo", block_policy: "TITLE" },
+        "2026-04-10T00:00:00Z",
+        "2026-04-15T00:00:00Z",
+      );
+
+      const events = db
+        .prepare("SELECT * FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<Record<string, unknown>>;
+
+      expect(events).toHaveLength(1);
+      expect(events[0].title).toBe("Tokyo Conference");
+    });
+
+    it("creates journal entry for derived event", () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Test Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-05-01T00:00:00Z",
+        "2026-05-05T00:00:00Z",
+      );
+
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<{ canonical_event_id: string }>;
+
+      const journal = db
+        .prepare("SELECT * FROM event_journal WHERE canonical_event_id = ?")
+        .all(events[0].canonical_event_id) as Array<Record<string, unknown>>;
+
+      expect(journal).toHaveLength(1);
+      expect(journal[0].change_type).toBe("created");
+      expect(journal[0].actor).toBe("system");
+      const patch = JSON.parse(journal[0].patch_json as string);
+      expect(patch.reason).toBe("trip_constraint");
+      expect(patch.constraint_id).toBe(constraint.constraint_id);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // addConstraint -- validation
+  // -------------------------------------------------------------------------
+
+  describe("addConstraint validation", () => {
+    it("rejects invalid constraint kind", () => {
+      expect(() =>
+        ug.addConstraint("invalid_kind", {}, null, null),
+      ).toThrow('Invalid constraint kind "invalid_kind"');
+    });
+
+    it("rejects trip without name in config_json", () => {
+      expect(() =>
+        ug.addConstraint(
+          "trip",
+          { timezone: "UTC", block_policy: "BUSY" },
+          "2026-03-01T00:00:00Z",
+          "2026-03-08T00:00:00Z",
+        ),
+      ).toThrow("config_json must include a 'name' string");
+    });
+
+    it("rejects trip without timezone in config_json", () => {
+      expect(() =>
+        ug.addConstraint(
+          "trip",
+          { name: "Trip", block_policy: "BUSY" },
+          "2026-03-01T00:00:00Z",
+          "2026-03-08T00:00:00Z",
+        ),
+      ).toThrow("config_json must include a 'timezone' string");
+    });
+
+    it("rejects trip with invalid block_policy", () => {
+      expect(() =>
+        ug.addConstraint(
+          "trip",
+          { name: "Trip", timezone: "UTC", block_policy: "INVALID" },
+          "2026-03-01T00:00:00Z",
+          "2026-03-08T00:00:00Z",
+        ),
+      ).toThrow("block_policy must be one of: BUSY, TITLE");
+    });
+
+    it("rejects trip without active_from", () => {
+      expect(() =>
+        ug.addConstraint(
+          "trip",
+          { name: "Trip", timezone: "UTC", block_policy: "BUSY" },
+          null,
+          "2026-03-08T00:00:00Z",
+        ),
+      ).toThrow("Trip constraint must have active_from and active_to");
+    });
+
+    it("rejects trip without active_to", () => {
+      expect(() =>
+        ug.addConstraint(
+          "trip",
+          { name: "Trip", timezone: "UTC", block_policy: "BUSY" },
+          "2026-03-01T00:00:00Z",
+          null,
+        ),
+      ).toThrow("Trip constraint must have active_from and active_to");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // listConstraints
+  // -------------------------------------------------------------------------
+
+  describe("listConstraints", () => {
+    it("returns empty array when no constraints exist", () => {
+      const constraints = ug.listConstraints();
+      expect(constraints).toEqual([]);
+    });
+
+    it("returns all constraints ordered by created_at", () => {
+      ug.addConstraint(
+        "trip",
+        { name: "Trip A", timezone: "UTC", block_policy: "BUSY" },
+        "2026-03-01T00:00:00Z",
+        "2026-03-05T00:00:00Z",
+      );
+      ug.addConstraint(
+        "trip",
+        { name: "Trip B", timezone: "UTC", block_policy: "TITLE" },
+        "2026-04-01T00:00:00Z",
+        "2026-04-05T00:00:00Z",
+      );
+
+      const constraints = ug.listConstraints();
+      expect(constraints).toHaveLength(2);
+      expect(constraints[0].config_json.name).toBe("Trip A");
+      expect(constraints[1].config_json.name).toBe("Trip B");
+    });
+
+    it("filters by kind", () => {
+      ug.addConstraint(
+        "trip",
+        { name: "Trip A", timezone: "UTC", block_policy: "BUSY" },
+        "2026-03-01T00:00:00Z",
+        "2026-03-05T00:00:00Z",
+      );
+
+      const trips = ug.listConstraints("trip");
+      expect(trips).toHaveLength(1);
+      expect(trips[0].kind).toBe("trip");
+
+      const workingHours = ug.listConstraints("working_hours");
+      expect(workingHours).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getConstraint
+  // -------------------------------------------------------------------------
+
+  describe("getConstraint", () => {
+    it("returns constraint by ID", () => {
+      const created = ug.addConstraint(
+        "trip",
+        { name: "Test Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-06-01T00:00:00Z",
+        "2026-06-05T00:00:00Z",
+      );
+
+      const found = ug.getConstraint(created.constraint_id);
+      expect(found).not.toBeNull();
+      expect(found!.constraint_id).toBe(created.constraint_id);
+      expect(found!.kind).toBe("trip");
+      expect(found!.config_json.name).toBe("Test Trip");
+    });
+
+    it("returns null for non-existent constraint", () => {
+      const found = ug.getConstraint("cst_NONEXISTENT000000000000000");
+      expect(found).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // deleteConstraint -- cascade deletion
+  // -------------------------------------------------------------------------
+
+  describe("deleteConstraint cascade", () => {
+    it("deletes constraint and its derived events", async () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Delete Me Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-07-01T00:00:00Z",
+        "2026-07-05T00:00:00Z",
+      );
+
+      // Verify event exists before deletion
+      const eventsBefore = db
+        .prepare("SELECT * FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<Record<string, unknown>>;
+      expect(eventsBefore).toHaveLength(1);
+
+      // Delete the constraint
+      const deleted = await ug.deleteConstraint(constraint.constraint_id);
+      expect(deleted).toBe(true);
+
+      // Verify constraint is gone
+      const constraintRow = db
+        .prepare("SELECT * FROM constraints WHERE constraint_id = ?")
+        .all(constraint.constraint_id);
+      expect(constraintRow).toHaveLength(0);
+
+      // Verify derived events are gone
+      const eventsAfter = db
+        .prepare("SELECT * FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<Record<string, unknown>>;
+      expect(eventsAfter).toHaveLength(0);
+    });
+
+    it("creates journal entry for deleted derived events", async () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Journaled Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-08-01T00:00:00Z",
+        "2026-08-05T00:00:00Z",
+      );
+
+      // Get the derived event ID
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<{ canonical_event_id: string }>;
+      const eventId = events[0].canonical_event_id;
+
+      await ug.deleteConstraint(constraint.constraint_id);
+
+      // Journal should have created + deleted entries for the derived event
+      const journal = db
+        .prepare("SELECT * FROM event_journal WHERE canonical_event_id = ? ORDER BY ts ASC")
+        .all(eventId) as Array<Record<string, unknown>>;
+
+      expect(journal.length).toBeGreaterThanOrEqual(2);
+      const deletionEntry = journal.find((j) => j.change_type === "deleted");
+      expect(deletionEntry).toBeDefined();
+      const patch = JSON.parse(deletionEntry!.patch_json as string);
+      expect(patch.reason).toBe("constraint_deleted");
+      expect(patch.constraint_id).toBe(constraint.constraint_id);
+    });
+
+    it("returns false for non-existent constraint", async () => {
+      const deleted = await ug.deleteConstraint("cst_NONEXISTENT000000000000000");
+      expect(deleted).toBe(false);
+    });
+
+    it("enqueues DELETE_MIRROR for mirrors on derived events", async () => {
+      const constraint = ug.addConstraint(
+        "trip",
+        { name: "Mirrored Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-09-01T00:00:00Z",
+        "2026-09-05T00:00:00Z",
+      );
+
+      // Get derived event ID
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events WHERE constraint_id = ?")
+        .all(constraint.constraint_id) as Array<{ canonical_event_id: string }>;
+      const eventId = events[0].canonical_event_id;
+
+      // Simulate a mirror existing for the derived event
+      db.prepare(
+        `INSERT INTO event_mirrors (canonical_event_id, target_account_id, target_calendar_id, state)
+         VALUES (?, ?, ?, 'ACTIVE')`,
+      ).run(eventId, "acc_01TESTACCOUNT0000000000001", "cal_test");
+
+      queue.clear();
+
+      await ug.deleteConstraint(constraint.constraint_id);
+
+      // Should have enqueued a DELETE_MIRROR message
+      expect(queue.messages).toHaveLength(1);
+      const msg = queue.messages[0] as Record<string, unknown>;
+      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.canonical_event_id).toBe(eventId);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Derived events appear in computeAvailability
+  // -------------------------------------------------------------------------
+
+  describe("trip derived events in availability", () => {
+    it("trip busy block shows up as busy in availability computation", () => {
+      ug.addConstraint(
+        "trip",
+        { name: "Busy Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-03-10T09:00:00Z",
+        "2026-03-10T17:00:00Z",
+      );
+
+      const result = ug.computeAvailability({
+        start: "2026-03-10T08:00:00Z",
+        end: "2026-03-10T18:00:00Z",
+      });
+
+      expect(result.busy_intervals).toHaveLength(1);
+      expect(result.busy_intervals[0].start).toBe("2026-03-10T09:00:00Z");
+      expect(result.busy_intervals[0].end).toBe("2026-03-10T17:00:00Z");
+
+      expect(result.free_intervals).toHaveLength(2);
+      expect(result.free_intervals[0].start).toBe("2026-03-10T08:00:00Z");
+      expect(result.free_intervals[0].end).toBe("2026-03-10T09:00:00Z");
+      expect(result.free_intervals[1].start).toBe("2026-03-10T17:00:00Z");
+      expect(result.free_intervals[1].end).toBe("2026-03-10T18:00:00Z");
+    });
   });
 });

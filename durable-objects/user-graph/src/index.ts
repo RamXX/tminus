@@ -78,6 +78,17 @@ interface CanonicalEventRow {
   version: number;
   created_at: string;
   updated_at: string;
+  constraint_id: string | null;
+}
+
+interface ConstraintRow {
+  [key: string]: unknown;
+  constraint_id: string;
+  kind: string;
+  config_json: string;
+  active_from: string | null;
+  active_to: string | null;
+  created_at: string;
 }
 
 interface EventMirrorRow {
@@ -217,6 +228,16 @@ export interface PolicyEdgeInput {
   readonly to_account_id: string;
   readonly detail_level: string;
   readonly calendar_kind: string;
+}
+
+/** A constraint as returned by addConstraint / listConstraints. */
+export interface Constraint {
+  readonly constraint_id: string;
+  readonly kind: string;
+  readonly config_json: Record<string, unknown>;
+  readonly active_from: string | null;
+  readonly active_to: string | null;
+  readonly created_at: string;
 }
 
 /** Fields that can be updated on a mirror row via RPC. */
@@ -1258,6 +1279,258 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Constraint CRUD (Trip, Working Hours, Buffer, etc.)
+  // -------------------------------------------------------------------------
+
+  /** Valid constraint kinds. */
+  private static readonly VALID_CONSTRAINT_KINDS: ReadonlySet<string> = new Set([
+    "trip",
+    "working_hours",
+    "buffer",
+    "no_meetings_after",
+    "override",
+  ]);
+
+  /**
+   * Add a new constraint and generate any derived canonical events.
+   *
+   * For kind="trip": creates a single continuous busy block event
+   * spanning active_from to active_to, with source="system" and
+   * origin_account_id="internal".
+   *
+   * Returns the created constraint.
+   */
+  addConstraint(
+    kind: string,
+    configJson: Record<string, unknown>,
+    activeFrom: string | null,
+    activeTo: string | null,
+  ): Constraint {
+    this.ensureMigrated();
+
+    // Validate kind
+    if (!UserGraphDO.VALID_CONSTRAINT_KINDS.has(kind)) {
+      throw new Error(
+        `Invalid constraint kind "${kind}". Must be one of: ${[...UserGraphDO.VALID_CONSTRAINT_KINDS].join(", ")}`,
+      );
+    }
+
+    // Kind-specific validation
+    if (kind === "trip") {
+      if (!configJson.name || typeof configJson.name !== "string") {
+        throw new Error("Trip constraint config_json must include a 'name' string");
+      }
+      if (!configJson.timezone || typeof configJson.timezone !== "string") {
+        throw new Error("Trip constraint config_json must include a 'timezone' string");
+      }
+      const validPolicies = ["BUSY", "TITLE"];
+      if (!configJson.block_policy || !validPolicies.includes(configJson.block_policy as string)) {
+        throw new Error(
+          `Trip constraint config_json.block_policy must be one of: ${validPolicies.join(", ")}`,
+        );
+      }
+      if (!activeFrom || !activeTo) {
+        throw new Error("Trip constraint must have active_from and active_to");
+      }
+    }
+
+    const constraintId = generateId("constraint");
+
+    this.sql.exec(
+      `INSERT INTO constraints (constraint_id, kind, config_json, active_from, active_to, created_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      constraintId,
+      kind,
+      JSON.stringify(configJson),
+      activeFrom,
+      activeTo,
+    );
+
+    // Generate derived events for trip constraints
+    if (kind === "trip" && activeFrom && activeTo) {
+      this.createTripDerivedEvents(constraintId, configJson, activeFrom, activeTo);
+    }
+
+    // Read back the created row
+    const rows = this.sql
+      .exec<ConstraintRow>(
+        `SELECT * FROM constraints WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
+    return this.rowToConstraint(rows[0]);
+  }
+
+  /**
+   * Create derived canonical events for a trip constraint.
+   * One continuous event spanning the full trip duration.
+   */
+  private createTripDerivedEvents(
+    constraintId: string,
+    configJson: Record<string, unknown>,
+    activeFrom: string,
+    activeTo: string,
+  ): void {
+    const eventId = generateId("event");
+    const blockPolicy = configJson.block_policy as string;
+    const tripName = configJson.name as string;
+    const timezone = configJson.timezone as string;
+
+    // Title depends on block_policy: BUSY shows "Busy", TITLE shows trip name
+    const title = blockPolicy === "TITLE" ? tripName : "Busy";
+
+    this.sql.exec(
+      `INSERT INTO canonical_events (
+        canonical_event_id, origin_account_id, origin_event_id,
+        title, description, location, start_ts, end_ts, timezone,
+        all_day, status, visibility, transparency, recurrence_rule,
+        source, version, constraint_id, created_at, updated_at
+      ) VALUES (?, 'internal', ?, ?, NULL, NULL, ?, ?, ?, 0, 'confirmed', 'default', 'opaque', NULL, 'system', 1, ?, datetime('now'), datetime('now'))`,
+      eventId,
+      `constraint:${constraintId}`,
+      title,
+      activeFrom,
+      activeTo,
+      timezone,
+      constraintId,
+    );
+
+    // Journal entry for the derived event creation
+    this.writeJournal(eventId, "created", "system", {
+      reason: "trip_constraint",
+      constraint_id: constraintId,
+    });
+  }
+
+  /**
+   * Delete a constraint and cascade-delete all derived canonical events.
+   *
+   * Returns true if the constraint existed, false if not found.
+   */
+  async deleteConstraint(constraintId: string): Promise<boolean> {
+    this.ensureMigrated();
+
+    // Check constraint exists
+    const rows = this.sql
+      .exec<ConstraintRow>(
+        `SELECT * FROM constraints WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return false;
+
+    // Find and delete derived canonical events linked to this constraint
+    const derivedEvents = this.sql
+      .exec<{ canonical_event_id: string }>(
+        `SELECT canonical_event_id FROM canonical_events WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
+    for (const evt of derivedEvents) {
+      // Delete mirrors for this event (enqueue DELETE_MIRROR for each)
+      const mirrors = this.sql
+        .exec<EventMirrorRow>(
+          `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
+          evt.canonical_event_id,
+        )
+        .toArray();
+
+      for (const mirror of mirrors) {
+        await this.writeQueue.send({
+          type: "DELETE_MIRROR",
+          canonical_event_id: evt.canonical_event_id,
+          target_account_id: mirror.target_account_id,
+          target_calendar_id: mirror.target_calendar_id,
+          provider_event_id: mirror.provider_event_id ?? "",
+        });
+      }
+
+      // Delete mirrors from DB
+      this.sql.exec(
+        `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+        evt.canonical_event_id,
+      );
+
+      // Hard delete the derived event
+      this.sql.exec(
+        `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+        evt.canonical_event_id,
+      );
+
+      // Journal entry for derived event deletion
+      this.writeJournal(evt.canonical_event_id, "deleted", "system", {
+        reason: "constraint_deleted",
+        constraint_id: constraintId,
+      });
+    }
+
+    // Delete the constraint itself
+    this.sql.exec(
+      `DELETE FROM constraints WHERE constraint_id = ?`,
+      constraintId,
+    );
+
+    return true;
+  }
+
+  /**
+   * List all constraints, optionally filtered by kind.
+   */
+  listConstraints(kind?: string): Constraint[] {
+    this.ensureMigrated();
+
+    let rows: ConstraintRow[];
+    if (kind) {
+      rows = this.sql
+        .exec<ConstraintRow>(
+          `SELECT * FROM constraints WHERE kind = ? ORDER BY created_at ASC`,
+          kind,
+        )
+        .toArray();
+    } else {
+      rows = this.sql
+        .exec<ConstraintRow>(
+          `SELECT * FROM constraints ORDER BY created_at ASC`,
+        )
+        .toArray();
+    }
+
+    return rows.map((r) => this.rowToConstraint(r));
+  }
+
+  /**
+   * Get a single constraint by ID. Returns null if not found.
+   */
+  getConstraint(constraintId: string): Constraint | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<ConstraintRow>(
+        `SELECT * FROM constraints WHERE constraint_id = ?`,
+        constraintId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+    return this.rowToConstraint(rows[0]);
+  }
+
+  /** Convert a DB row to a Constraint domain object. */
+  private rowToConstraint(row: ConstraintRow): Constraint {
+    return {
+      constraint_id: row.constraint_id,
+      kind: row.kind,
+      config_json: JSON.parse(row.config_json),
+      active_from: row.active_from,
+      active_to: row.active_to,
+      created_at: row.created_at,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // unlinkAccount -- Cascade deletion for account removal
   // -------------------------------------------------------------------------
 
@@ -1921,6 +2194,44 @@ export class UserGraphDO {
           const body = (await request.json()) as AvailabilityQuery;
           const result = this.computeAvailability(body);
           return Response.json(result);
+        }
+
+        // ---------------------------------------------------------------
+        // Constraint RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/addConstraint": {
+          const body = (await request.json()) as {
+            kind: string;
+            config_json: Record<string, unknown>;
+            active_from: string | null;
+            active_to: string | null;
+          };
+          const constraint = this.addConstraint(
+            body.kind,
+            body.config_json,
+            body.active_from,
+            body.active_to,
+          );
+          return Response.json(constraint);
+        }
+
+        case "/deleteConstraint": {
+          const body = (await request.json()) as { constraint_id: string };
+          const deleted = await this.deleteConstraint(body.constraint_id);
+          return Response.json({ deleted });
+        }
+
+        case "/listConstraints": {
+          const body = (await request.json()) as { kind?: string };
+          const constraints = this.listConstraints(body.kind);
+          return Response.json({ items: constraints });
+        }
+
+        case "/getConstraint": {
+          const body = (await request.json()) as { constraint_id: string };
+          const constraint = this.getConstraint(body.constraint_id);
+          return Response.json(constraint);
         }
 
         case "/unlinkAccount": {

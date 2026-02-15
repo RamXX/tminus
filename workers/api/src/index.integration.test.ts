@@ -1482,3 +1482,377 @@ describe("Integration: Auth enforcement full flow", () => {
     expect(body.ok).toBe(true);
   });
 });
+
+// ===========================================================================
+// Constraint endpoint integration tests (TM-gj5.1)
+// ===========================================================================
+
+describe("Integration: Constraint endpoints", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    // Auth fields migration
+    db.exec(MIGRATION_0004_AUTH_FIELDS);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/constraints -- success
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/constraints creates a trip constraint and returns 201", async () => {
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        [
+          "/addConstraint",
+          {
+            constraint_id: "cst_01HXY0000000000000000000AA",
+            kind: "trip",
+            config_json: { name: "Paris Vacation", timezone: "Europe/Paris", block_policy: "BUSY" },
+            active_from: "2026-03-01T00:00:00Z",
+            active_to: "2026-03-08T00:00:00Z",
+            created_at: "2026-02-14T00:00:00Z",
+          },
+        ],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "trip",
+          config_json: { name: "Paris Vacation", timezone: "Europe/Paris", block_policy: "BUSY" },
+          active_from: "2026-03-01T00:00:00Z",
+          active_to: "2026-03-08T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { constraint_id: string; kind: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.constraint_id).toMatch(/^cst_/);
+    expect(body.data.kind).toBe("trip");
+
+    // Verify the DO was called with correct path and body
+    expect(doNamespace.calls).toHaveLength(1);
+    expect(doNamespace.calls[0].path).toBe("/addConstraint");
+    expect(doNamespace.calls[0].body).toEqual({
+      kind: "trip",
+      config_json: { name: "Paris Vacation", timezone: "Europe/Paris", block_policy: "BUSY" },
+      active_from: "2026-03-01T00:00:00Z",
+      active_to: "2026-03-08T00:00:00Z",
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /v1/constraints -- validation errors
+  // -----------------------------------------------------------------------
+
+  it("POST /v1/constraints rejects missing kind", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          config_json: { name: "Test" },
+          active_from: "2026-03-01T00:00:00Z",
+          active_to: "2026-03-08T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("kind");
+  });
+
+  it("POST /v1/constraints rejects missing config_json", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "trip",
+          active_from: "2026-03-01T00:00:00Z",
+          active_to: "2026-03-08T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("config_json");
+  });
+
+  it("POST /v1/constraints rejects invalid active_from date", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "trip",
+          config_json: { name: "Test", timezone: "UTC", block_policy: "BUSY" },
+          active_from: "not-a-date",
+          active_to: "2026-03-08T00:00:00Z",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("active_from");
+  });
+
+  it("POST /v1/constraints requires auth", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "trip",
+          config_json: { name: "Test" },
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/constraints -- list
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/constraints lists constraints via DO", async () => {
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        [
+          "/listConstraints",
+          {
+            items: [
+              {
+                constraint_id: "cst_01HXY0000000000000000000AA",
+                kind: "trip",
+                config_json: { name: "Trip A" },
+                active_from: "2026-03-01T00:00:00Z",
+                active_to: "2026-03-08T00:00:00Z",
+                created_at: "2026-02-14T00:00:00Z",
+              },
+            ],
+          },
+        ],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ constraint_id: string; kind: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].kind).toBe("trip");
+  });
+
+  // -----------------------------------------------------------------------
+  // DELETE /v1/constraints/:id -- cascading delete
+  // -----------------------------------------------------------------------
+
+  it("DELETE /v1/constraints/:id deletes via DO and returns 200", async () => {
+    const constraintId = "cst_01HXY0000000000000000000AA";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/deleteConstraint", { deleted: true }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; data: { deleted: boolean } };
+    expect(body.ok).toBe(true);
+    expect(body.data.deleted).toBe(true);
+
+    // Verify DO was called
+    expect(doNamespace.calls).toHaveLength(1);
+    expect(doNamespace.calls[0].path).toBe("/deleteConstraint");
+    expect(doNamespace.calls[0].body).toEqual({ constraint_id: constraintId });
+  });
+
+  it("DELETE /v1/constraints/:id returns 404 for non-existent", async () => {
+    const constraintId = "cst_01HXY0000000000000000000BB";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        ["/deleteConstraint", { deleted: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("DELETE /v1/constraints/:id rejects invalid ID format", async () => {
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/bad-id", {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid constraint ID");
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /v1/constraints/:id -- get single
+  // -----------------------------------------------------------------------
+
+  it("GET /v1/constraints/:id returns constraint from DO", async () => {
+    const constraintId = "cst_01HXY0000000000000000000AA";
+    const doNamespace = createMockDONamespace({
+      pathResponses: new Map([
+        [
+          "/getConstraint",
+          {
+            constraint_id: constraintId,
+            kind: "trip",
+            config_json: { name: "Test Trip" },
+            active_from: "2026-03-01T00:00:00Z",
+            active_to: "2026-03-08T00:00:00Z",
+            created_at: "2026-02-14T00:00:00Z",
+          },
+        ],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, doNamespace);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/constraints/${constraintId}`, {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { constraint_id: string; kind: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.constraint_id).toBe(constraintId);
+    expect(body.data.kind).toBe("trip");
+  });
+});

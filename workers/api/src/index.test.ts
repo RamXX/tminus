@@ -649,3 +649,139 @@ describe("request validation: sync status", () => {
     expect(response.status).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Constraint endpoint unit tests (TM-gj5.1)
+// ---------------------------------------------------------------------------
+
+describe("request validation: constraints", () => {
+  it("POST /v1/constraints without auth returns 401", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "trip" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it("POST /v1/constraints with empty body returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: "",
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("POST /v1/constraints without kind returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ config_json: {} }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("kind");
+  });
+
+  it("POST /v1/constraints without config_json returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "trip" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("config_json");
+  });
+
+  it("DELETE /v1/constraints/:id with invalid ID returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/not-valid-id", {
+        method: "DELETE",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid constraint ID");
+  });
+
+  it("GET /v1/constraints/:id with invalid ID returns 400", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints/not-valid-id", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid constraint ID");
+  });
+
+  it("GET /v1/constraints without auth returns 401", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/constraints", { method: "GET" }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(401);
+  });
+});
