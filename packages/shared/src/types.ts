@@ -148,7 +148,7 @@ export interface CanonicalEvent {
   readonly transparency: "opaque" | "transparent";
   readonly recurrence_rule?: string;
   /** How the event entered the system. */
-  readonly source: "provider" | "ui" | "mcp" | "system";
+  readonly source: "provider" | "ui" | "mcp" | "system" | "ics_feed";
   readonly version: number;
   readonly created_at: string;
   readonly updated_at: string;

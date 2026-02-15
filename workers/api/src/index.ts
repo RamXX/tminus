@@ -84,6 +84,10 @@ import {
   handleUpdateSeats,
   enforceSeatLimit,
 } from "./routes/enterprise-billing";
+import {
+  handleImportFeed,
+  handleListFeeds,
+} from "./routes/feeds";
 
 // ---------------------------------------------------------------------------
 // Version -- read from package.json at build time or fallback
@@ -5954,6 +5958,16 @@ async function routeAuthenticatedRequest(
 
       if (method === "POST" && pathname === "/v1/onboarding/session/complete") {
         return handleCompleteOnboardingSession(request, auth, env);
+      }
+
+      // -- ICS feed routes (Phase 6C: zero-auth onboarding) ------------------
+
+      if (method === "POST" && pathname === "/v1/feeds") {
+        return handleImportFeed(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/feeds") {
+        return handleListFeeds(request, auth, env);
       }
 
       // -- Event routes -----------------------------------------------------

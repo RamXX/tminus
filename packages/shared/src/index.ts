@@ -187,6 +187,16 @@ export {
   icalDateTimeToEventDateTime,
 } from "./ical-parse";
 
+// Re-export ICS feed utilities (zero-auth onboarding, Phase 6C)
+export {
+  validateFeedUrl,
+  normalizeIcsFeedEvents,
+} from "./ics-feed";
+export type {
+  FeedValidationResult,
+  NormalizedFeedEvent,
+} from "./ics-feed";
+
 // Re-export authentication utilities (JWT, password hashing)
 export {
   generateJWT,
