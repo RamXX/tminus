@@ -2056,12 +2056,13 @@ async function dispatch(
         return makeErrorResponse(
           rpcReq.id,
           RPC_INTERNAL_ERROR,
-          "Insufficient tier",
+          `This tool requires a ${tierCheck.required_tier} subscription. Please upgrade to access it.`,
           {
             code: "TIER_REQUIRED",
             required_tier: tierCheck.required_tier,
             current_tier: tierCheck.current_tier,
             tool: tierCheck.tool,
+            upgrade_url: `https://app.tminus.ink/billing/upgrade?tier=${tierCheck.required_tier}`,
           },
         );
       }

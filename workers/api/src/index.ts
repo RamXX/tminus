@@ -38,7 +38,7 @@ import {
   handleGetBillingStatus,
 } from "./routes/billing";
 import type { BillingEnv } from "./routes/billing";
-import { enforceFeatureGate } from "./middleware/feature-gate";
+import { enforceFeatureGate, enforceAccountLimit } from "./middleware/feature-gate";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
 
 // ---------------------------------------------------------------------------
@@ -1912,6 +1912,9 @@ async function routeAuthenticatedRequest(
       // -- Account routes ---------------------------------------------------
 
       if (method === "POST" && pathname === "/v1/accounts/link") {
+        // Enforce account limit before allowing new account linking
+        const accountLimited = await enforceAccountLimit(auth.userId, env.DB);
+        if (accountLimited) return accountLimited;
         return handleAccountLink(request, auth, env);
       }
 
@@ -1972,25 +1975,33 @@ async function routeAuthenticatedRequest(
         return handleSetPolicyEdges(request, auth, env, match.params[0]);
       }
 
-      // -- Constraint routes -------------------------------------------------
+      // -- Constraint routes (Premium+) ----------------------------------------
 
       if (method === "POST" && pathname === "/v1/constraints") {
+        const constraintGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+        if (constraintGate) return constraintGate;
         return handleCreateConstraint(request, auth, env);
       }
 
       if (method === "GET" && pathname === "/v1/constraints") {
+        // Listing constraints is read-only, allowed for all tiers
         return handleListConstraints(request, auth, env);
       }
 
       match = matchRoute(pathname, "/v1/constraints/:id");
       if (match) {
         if (method === "GET") {
+          // Reading a single constraint is read-only, allowed for all tiers
           return handleGetConstraint(request, auth, env, match.params[0]);
         }
         if (method === "PUT") {
+          const updateGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+          if (updateGate) return updateGate;
           return handleUpdateConstraint(request, auth, env, match.params[0]);
         }
         if (method === "DELETE") {
+          const deleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+          if (deleteGate) return deleteGate;
           return handleDeleteConstraint(request, auth, env, match.params[0]);
         }
       }
