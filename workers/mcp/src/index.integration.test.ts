@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
+import { ALL_MIGRATIONS } from "@tminus/d1-registry";
 import { generateJWT } from "@tminus/shared";
 import { createMcpHandler } from "./index";
 
@@ -159,12 +159,14 @@ beforeEach(() => {
   db = new Database(":memory:");
   db.pragma("journal_mode = WAL");
 
-  // Apply D1 schema
-  const statements = MIGRATION_0001_INITIAL_SCHEMA.split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const stmt of statements) {
-    db.exec(stmt);
+  // Apply ALL D1 migrations (includes sync status columns from migration 0008)
+  for (const migration of ALL_MIGRATIONS) {
+    const statements = migration.split(";")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const stmt of statements) {
+      db.exec(stmt);
+    }
   }
 
   // Seed test data
@@ -181,8 +183,12 @@ beforeEach(() => {
     "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
   ).run(OTHER_USER.user_id, OTHER_USER.org_id, OTHER_USER.email);
 
+  // Account A: google, active, with channel and recent sync
+  const recentSync = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min ago
+  const futureExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h from now
   db.prepare(
-    "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, ?)",
+    `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status,
+     channel_id, channel_expiry_ts, last_sync_ts, error_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     ACCOUNT_A.account_id,
     ACCOUNT_A.user_id,
@@ -190,8 +196,13 @@ beforeEach(() => {
     ACCOUNT_A.provider_subject,
     ACCOUNT_A.email,
     ACCOUNT_A.status,
+    "ch_test_aaa",
+    futureExpiry,
+    recentSync,
+    0,
   );
 
+  // Account B: microsoft, active, no channel, never synced
   db.prepare(
     "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(
@@ -280,7 +291,7 @@ async function sendMcpRequest(
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: tools/list", () => {
-  it("authenticated request returns tool registry with schemas", async () => {
+  it("authenticated request returns tool registry including list_accounts and get_sync_status", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 1 },
@@ -293,10 +304,17 @@ describe("MCP integration: tools/list", () => {
     expect(result.body.error).toBeUndefined();
 
     const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
-    expect(resultData.tools.length).toBe(1);
-    expect(resultData.tools[0].name).toBe("calendar.list_accounts");
-    expect(resultData.tools[0].description).toBeTruthy();
-    expect(resultData.tools[0].inputSchema).toBeDefined();
+    expect(resultData.tools.length).toBeGreaterThanOrEqual(2);
+
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.list_accounts");
+    expect(toolNames).toContain("calendar.get_sync_status");
+
+    // Verify get_sync_status has account_id in schema
+    const syncTool = resultData.tools.find((t) => t.name === "calendar.get_sync_status");
+    expect(syncTool).toBeDefined();
+    const schema = syncTool?.inputSchema as { properties: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty("account_id");
   });
 });
 
@@ -305,7 +323,7 @@ describe("MCP integration: tools/list", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: tools/call calendar.list_accounts", () => {
-  it("returns accounts for authenticated user from real D1", async () => {
+  it("returns accounts with channel_status for authenticated user from real D1", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       {
@@ -336,22 +354,25 @@ describe("MCP integration: tools/call calendar.list_accounts", () => {
       provider: string;
       email: string;
       status: string;
+      channel_status: string;
     }>;
 
     expect(accounts.length).toBe(2);
 
-    // Verify ACCOUNT_A is present
+    // Verify ACCOUNT_A is present with channel_status
     const accountA = accounts.find((a) => a.account_id === ACCOUNT_A.account_id);
     expect(accountA).toBeDefined();
     expect(accountA?.provider).toBe("google");
     expect(accountA?.email).toBe("alice@gmail.com");
     expect(accountA?.status).toBe("active");
+    expect(accountA?.channel_status).toBe("active"); // has channel with future expiry
 
-    // Verify ACCOUNT_B is present
+    // Verify ACCOUNT_B has channel_status "none" (no channel)
     const accountB = accounts.find((a) => a.account_id === ACCOUNT_B.account_id);
     expect(accountB).toBeDefined();
     expect(accountB?.provider).toBe("microsoft");
     expect(accountB?.email).toBe("bob@outlook.com");
+    expect(accountB?.channel_status).toBe("none"); // no channel_id
 
     // Verify OTHER user's account is NOT present (user isolation)
     const otherAccount = accounts.find(
@@ -468,6 +489,338 @@ describe("MCP integration: health endpoint", () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.ok).toBe(true);
     expect(body.status).toBe("healthy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: error handling for invalid tool calls
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Integration: full MCP flow -- tools/call calendar.get_sync_status
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: tools/call calendar.get_sync_status", () => {
+  it("returns sync health for all accounts (no filter)", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.get_sync_status" },
+        id: 10,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      overall: string;
+      accounts: Array<{
+        account_id: string;
+        provider: string;
+        email: string;
+        health: string;
+        last_sync_ts: string | null;
+        channel_status: string;
+        error_count: number;
+      }>;
+    };
+
+    // Should have 2 accounts (ACCOUNT_A and ACCOUNT_B)
+    expect(syncStatus.accounts.length).toBe(2);
+    expect(syncStatus.overall).toBeDefined();
+
+    // ACCOUNT_A: synced 30 min ago -> healthy
+    const accountA = syncStatus.accounts.find(
+      (a) => a.account_id === ACCOUNT_A.account_id,
+    );
+    expect(accountA).toBeDefined();
+    expect(accountA?.health).toBe("healthy");
+    expect(accountA?.last_sync_ts).toBeTruthy(); // has a sync timestamp
+    expect(accountA?.channel_status).toBe("active");
+    expect(accountA?.error_count).toBe(0);
+
+    // ACCOUNT_B: never synced -> unhealthy
+    const accountB = syncStatus.accounts.find(
+      (a) => a.account_id === ACCOUNT_B.account_id,
+    );
+    expect(accountB).toBeDefined();
+    expect(accountB?.health).toBe("unhealthy");
+    expect(accountB?.last_sync_ts).toBeNull();
+    expect(accountB?.channel_status).toBe("none");
+
+    // Overall should be "unhealthy" (worst of healthy + unhealthy)
+    expect(syncStatus.overall).toBe("unhealthy");
+  });
+
+  it("filters by account_id when provided via arguments", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_A.account_id },
+        },
+        id: 11,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      overall: string;
+      accounts: Array<{ account_id: string; health: string }>;
+    };
+
+    // Should only have 1 account (the filtered one)
+    expect(syncStatus.accounts.length).toBe(1);
+    expect(syncStatus.accounts[0].account_id).toBe(ACCOUNT_A.account_id);
+    expect(syncStatus.accounts[0].health).toBe("healthy");
+    expect(syncStatus.overall).toBe("healthy");
+  });
+
+  it("returns error for non-existent account_id", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: "acc_nonexistent" },
+        },
+        id: 12,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as Record<string, unknown>;
+    expect(error.code).toBe(-32602); // Invalid params
+    expect(error.message).toContain("Account not found");
+    expect(error.message).toContain("acc_nonexistent");
+  });
+
+  it("returns error when account_id belongs to another user", async () => {
+    // Try to access the OTHER user's account as TEST_USER
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: OTHER_USER_ACCOUNT.account_id },
+        },
+        id: 13,
+      },
+      authHeader,
+    );
+
+    // Should fail because the account doesn't belong to this user
+    expect(result.status).toBe(200);
+    const error = result.body.error as Record<string, unknown>;
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Account not found");
+  });
+
+  it("correctly reports degraded health for account synced 3 hours ago", async () => {
+    // Update ACCOUNT_A to have synced 3 hours ago
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      "UPDATE accounts SET last_sync_ts = ? WHERE account_id = ?",
+    ).run(threeHoursAgo, ACCOUNT_A.account_id);
+
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_A.account_id },
+        },
+        id: 14,
+      },
+      authHeader,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      overall: string;
+      accounts: Array<{ health: string }>;
+    };
+
+    expect(syncStatus.accounts[0].health).toBe("degraded");
+    expect(syncStatus.overall).toBe("degraded");
+  });
+
+  it("correctly reports stale health for account synced 12 hours ago", async () => {
+    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      "UPDATE accounts SET last_sync_ts = ? WHERE account_id = ?",
+    ).run(twelveHoursAgo, ACCOUNT_A.account_id);
+
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_A.account_id },
+        },
+        id: 15,
+      },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      accounts: Array<{ health: string }>;
+    };
+    expect(syncStatus.accounts[0].health).toBe("stale");
+  });
+
+  it("correctly reports error health for account with error status", async () => {
+    db.prepare(
+      "UPDATE accounts SET status = 'error', last_sync_ts = ? WHERE account_id = ?",
+    ).run(new Date().toISOString(), ACCOUNT_A.account_id);
+
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_A.account_id },
+        },
+        id: 16,
+      },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      overall: string;
+      accounts: Array<{ health: string }>;
+    };
+    // Error status takes priority over recent sync time
+    expect(syncStatus.accounts[0].health).toBe("error");
+    expect(syncStatus.overall).toBe("error");
+  });
+
+  it("returns empty accounts for user with no accounts", async () => {
+    const noAccountsUserId = "usr_01HXY000000000000000EMPTY";
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(noAccountsUserId, TEST_ORG.org_id, "noaccounts@example.com");
+
+    const authHeader = await makeAuthHeader(noAccountsUserId);
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.get_sync_status" },
+        id: 17,
+      },
+      authHeader,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      overall: string;
+      accounts: unknown[];
+    };
+    expect(syncStatus.accounts).toEqual([]);
+    expect(syncStatus.overall).toBe("healthy"); // no accounts = healthy by default
+  });
+
+  it("includes error_count in response", async () => {
+    db.prepare(
+      "UPDATE accounts SET error_count = 5 WHERE account_id = ?",
+    ).run(ACCOUNT_A.account_id);
+
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_A.account_id },
+        },
+        id: 18,
+      },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      accounts: Array<{ error_count: number }>;
+    };
+    expect(syncStatus.accounts[0].error_count).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: channel_status in sync status
+// ---------------------------------------------------------------------------
+
+describe("MCP integration: channel_status in get_sync_status", () => {
+  it("reports expired channel when channel_expiry_ts is in the past", async () => {
+    const pastExpiry = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour ago
+    db.prepare(
+      "UPDATE accounts SET channel_id = 'ch_expired', channel_expiry_ts = ? WHERE account_id = ?",
+    ).run(pastExpiry, ACCOUNT_B.account_id);
+
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_sync_status",
+          arguments: { account_id: ACCOUNT_B.account_id },
+        },
+        id: 19,
+      },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const syncStatus = JSON.parse(resultData.content[0].text) as {
+      accounts: Array<{ channel_status: string }>;
+    };
+    expect(syncStatus.accounts[0].channel_status).toBe("expired");
   });
 });
 

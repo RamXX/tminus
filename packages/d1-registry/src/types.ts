@@ -46,6 +46,12 @@ export interface AccountRow {
   readonly channel_token: string | null;
   readonly channel_expiry_ts: string | null;
   readonly created_at: string;
+  /** ISO8601 timestamp of the last sync attempt. NULL if never synced. */
+  readonly last_sync_ts: string | null;
+  /** Google Calendar push notification resource ID. NULL if no channel. */
+  readonly resource_id: string | null;
+  /** Rolling error count (incremented on sync failure, reset on success). */
+  readonly error_count: number;
 }
 
 /** Row shape for the `ms_subscriptions` table (Microsoft Graph webhook routing). */
@@ -107,4 +113,23 @@ export interface KeyRotationLogRow {
   readonly error_message: string | null;
   readonly started_at: string;
   readonly completed_at: string | null;
+}
+
+/** Valid source values for MCP events. */
+export type McpEventSource = "mcp" | "provider" | "ui" | "system";
+
+/** Row shape for the `mcp_events` table. */
+export interface McpEventRow {
+  readonly event_id: string;
+  readonly user_id: string;
+  readonly account_id: string | null;
+  readonly title: string;
+  readonly start_ts: string;
+  readonly end_ts: string;
+  readonly timezone: string;
+  readonly description: string | null;
+  readonly location: string | null;
+  readonly source: McpEventSource;
+  readonly created_at: string;
+  readonly updated_at: string;
 }

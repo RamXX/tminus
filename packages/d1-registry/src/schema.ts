@@ -187,6 +187,52 @@ ALTER TABLE deletion_certificates ADD COLUMN deletion_summary TEXT;
 ` as const;
 
 /**
+ * Migration 0008: Add sync-status columns to the accounts table.
+ *
+ * Adds fields that the MCP server and API need for computing
+ * per-account sync health without reaching into the AccountDO:
+ * - last_sync_ts: ISO8601 timestamp of the last sync attempt
+ *   (updated by the sync-consumer after each sync job)
+ * - resource_id: Google Calendar push notification resource ID
+ *   (populated during channel registration in onboarding)
+ * - error_count: rolling error count for the account
+ *   (incremented on sync failure, reset on success)
+ */
+export const MIGRATION_0008_SYNC_STATUS_COLUMNS = `
+ALTER TABLE accounts ADD COLUMN last_sync_ts TEXT;
+ALTER TABLE accounts ADD COLUMN resource_id TEXT;
+ALTER TABLE accounts ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0;
+` as const;
+
+/**
+ * Migration 0009: MCP events table.
+ *
+ * Stores events created via MCP server tools (calendar.create_event).
+ * These are canonical events with source='mcp'. In a later phase, they
+ * will integrate into UserGraphDO's event-sourcing journal.
+ */
+export const MIGRATION_0009_MCP_EVENTS = `
+-- MCP-created events table
+CREATE TABLE mcp_events (
+  event_id     TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(user_id),
+  account_id   TEXT REFERENCES accounts(account_id),
+  title        TEXT NOT NULL,
+  start_ts     TEXT NOT NULL,
+  end_ts       TEXT NOT NULL,
+  timezone     TEXT DEFAULT 'UTC',
+  description  TEXT,
+  location     TEXT,
+  source       TEXT NOT NULL DEFAULT 'mcp',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_mcp_events_user ON mcp_events(user_id);
+CREATE INDEX idx_mcp_events_user_time ON mcp_events(user_id, start_ts, end_ts);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -198,4 +244,6 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0005_DELETION_REQUESTS,
   MIGRATION_0006_KEY_ROTATION_LOG,
   MIGRATION_0007_DELETION_CERTIFICATE_SUMMARY,
+  MIGRATION_0008_SYNC_STATUS_COLUMNS,
+  MIGRATION_0009_MCP_EVENTS,
 ] as const;
