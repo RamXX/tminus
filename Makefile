@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5b test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck ios-build ios-test ios-clean
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck ios-build ios-test ios-clean
 
 # ---- Core targets ----
 
@@ -84,6 +84,14 @@ test-e2e-phase4c: install
 
 test-e2e-phase4d: install
 	npx vitest run --config vitest.e2e.phase4d.config.ts
+
+# ---- Phase 5A E2E validation ----
+# Platform extensions: CalDAV feed, org policy merge, what-if simulation,
+# temporal graph API (relationships, reputation, timeline).
+# Uses real SQLite + real UserGraphDO + real pure functions (no HTTP server).
+
+test-e2e-phase5a: install
+	npx vitest run --config vitest.e2e.phase5a.config.ts
 
 # ---- Phase 5B E2E validation ----
 # Advanced intelligence pipeline: cognitive load scoring, context switch costs,
