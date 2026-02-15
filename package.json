@@ -5,6 +5,7 @@
   "description": "Cloudflare-native temporal and relational intelligence engine",
   "scripts": {
     "build": "pnpm -r run build",
+    "build:web": "pnpm --filter @tminus/web run build",
     "test": "pnpm -r run test",
     "test:unit": "pnpm -r run test:unit",
     "test:integration": "pnpm -r run test:integration",

@@ -1,0 +1,68 @@
+# ============================================================================
+# tminus-app-gateway -- SPA gateway worker
+# Serves React SPA via Workers Assets, proxies /api/* to tminus-api worker.
+# ============================================================================
+
+name = "tminus-app-gateway"
+main = "src/index.ts"
+compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
+
+[placement]
+mode = "smart"
+
+[vars]
+ENVIRONMENT = "development"
+API_ORIGIN = "http://localhost:8787"
+
+[assets]
+directory = "../../src/web/dist"
+binding = "ASSETS"
+
+# ===========================================================================
+# Staging environment
+# Deploy with: wrangler deploy --env staging
+# ===========================================================================
+
+[env.staging]
+name = "tminus-app-gateway-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+API_ORIGIN = "https://api-staging.tminus.ink"
+
+[[env.staging.routes]]
+pattern = "app-staging.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[env.staging.assets]
+directory = "../../src/web/dist"
+binding = "ASSETS"
+
+[[env.staging.services]]
+binding = "API"
+service = "tminus-api-staging"
+
+# ===========================================================================
+# Production environment
+# Deploy with: wrangler deploy --env production
+# ===========================================================================
+
+[env.production]
+name = "tminus-app-gateway-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+API_ORIGIN = "https://api.tminus.ink"
+
+[[env.production.routes]]
+pattern = "app.tminus.ink/*"
+zone_name = "tminus.ink"
+
+[env.production.assets]
+directory = "../../src/web/dist"
+binding = "ASSETS"
+
+[[env.production.services]]
+binding = "API"
+service = "tminus-api-production"

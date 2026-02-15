@@ -3,3 +3,4 @@ packages:
   - "workers/*"
   - "durable-objects/*"
   - "workflows/*"
+  - "src/web"
