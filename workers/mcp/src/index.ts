@@ -25,6 +25,8 @@ import {
 interface McpEnv {
   JWT_SECRET: string;
   DB: D1Database;
+  /** Service binding to the tminus-api worker for constraint operations. */
+  API?: Fetcher;
   ENVIRONMENT?: string;
 }
 
@@ -287,6 +289,72 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["from_account", "to_account", "detail_level"],
     },
   },
+  {
+    name: "calendar.add_trip",
+    description:
+      "Add a trip constraint. Blocks calendar time for the trip duration with the specified block policy. Creates a constraint of kind 'trip' routed through the constraint API.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Trip name (e.g. 'NYC Business Trip').",
+        },
+        start: {
+          type: "string",
+          description: "Trip start datetime (ISO 8601, e.g. '2026-03-15T00:00:00Z').",
+        },
+        end: {
+          type: "string",
+          description: "Trip end datetime (ISO 8601, e.g. '2026-03-20T00:00:00Z').",
+        },
+        timezone: {
+          type: "string",
+          description: "IANA timezone for the trip (e.g. 'America/New_York').",
+        },
+        block_policy: {
+          type: "string",
+          enum: ["BUSY", "TITLE"],
+          description: "How to block time: 'BUSY' (time only) or 'TITLE' (show trip name). Default: 'BUSY'.",
+        },
+      },
+      required: ["name", "start", "end", "timezone"],
+    },
+  },
+  {
+    name: "calendar.add_constraint",
+    description:
+      "Add a scheduling constraint of any supported kind (trip, working_hours, buffer, no_meetings_after, override). Routes through the constraint API.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          description: "Constraint kind: 'trip', 'working_hours', 'buffer', 'no_meetings_after', or 'override'.",
+        },
+        config: {
+          type: "object",
+          description:
+            "Configuration object. Shape depends on kind. See constraint API docs for per-kind schemas.",
+        },
+      },
+      required: ["kind", "config"],
+    },
+  },
+  {
+    name: "calendar.list_constraints",
+    description:
+      "List all scheduling constraints for the authenticated user. Optionally filter by kind.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          description: "Optional filter: only return constraints of this kind.",
+        },
+      },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -334,6 +402,9 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.update_event": "premium",
   "calendar.delete_event": "premium",
   "calendar.set_policy_edge": "premium",
+  "calendar.add_trip": "premium",
+  "calendar.add_constraint": "premium",
+  "calendar.list_constraints": "free",
 };
 
 /**
@@ -1590,6 +1661,276 @@ async function handleSetPolicyEdge(
 }
 
 // ---------------------------------------------------------------------------
+// Constraint tool validation helpers (pure functions)
+// ---------------------------------------------------------------------------
+
+/** Valid block_policy values for trip constraints. */
+const VALID_BLOCK_POLICIES = ["BUSY", "TITLE"] as const;
+
+/**
+ * Validate calendar.add_trip input parameters.
+ * Throws InvalidParamsError on validation failure.
+ *
+ * Transforms the MCP-level input into the API-level constraint shape:
+ *   kind = "trip"
+ *   config_json = { name, timezone, block_policy }
+ *   active_from = start
+ *   active_to = end
+ */
+function validateAddTripParams(args: Record<string, unknown> | undefined): {
+  kind: "trip";
+  config_json: { name: string; timezone: string; block_policy: "BUSY" | "TITLE" };
+  active_from: string;
+  active_to: string;
+} {
+  if (!args) {
+    throw new InvalidParamsError("Missing required parameters: name, start, end, timezone");
+  }
+
+  if (typeof args.name !== "string" || !args.name.trim()) {
+    throw new InvalidParamsError("Parameter 'name' is required and must be a non-empty string");
+  }
+
+  if (typeof args.start !== "string" || !args.start) {
+    throw new InvalidParamsError("Parameter 'start' is required and must be an ISO 8601 datetime string");
+  }
+  if (!isValidIsoDatetime(args.start)) {
+    throw new InvalidParamsError("Parameter 'start' is not a valid ISO 8601 datetime");
+  }
+
+  if (typeof args.end !== "string" || !args.end) {
+    throw new InvalidParamsError("Parameter 'end' is required and must be an ISO 8601 datetime string");
+  }
+  if (!isValidIsoDatetime(args.end)) {
+    throw new InvalidParamsError("Parameter 'end' is not a valid ISO 8601 datetime");
+  }
+
+  // Validate start < end
+  if (new Date(args.start).getTime() >= new Date(args.end).getTime()) {
+    throw new InvalidParamsError("Parameter 'start' must be before 'end'");
+  }
+
+  if (typeof args.timezone !== "string" || !args.timezone.trim()) {
+    throw new InvalidParamsError("Parameter 'timezone' is required and must be a non-empty string");
+  }
+
+  // Default block_policy to BUSY
+  let block_policy: "BUSY" | "TITLE" = "BUSY";
+  if (args.block_policy !== undefined) {
+    if (
+      typeof args.block_policy !== "string" ||
+      !(VALID_BLOCK_POLICIES as readonly string[]).includes(args.block_policy)
+    ) {
+      throw new InvalidParamsError("Parameter 'block_policy' must be one of: BUSY, TITLE");
+    }
+    block_policy = args.block_policy as "BUSY" | "TITLE";
+  }
+
+  return {
+    kind: "trip",
+    config_json: {
+      name: args.name.trim(),
+      timezone: args.timezone.trim(),
+      block_policy,
+    },
+    active_from: args.start,
+    active_to: args.end,
+  };
+}
+
+/**
+ * Validate calendar.add_constraint input parameters.
+ * Throws InvalidParamsError on validation failure.
+ *
+ * Passes kind + config through to the constraint API. The API performs
+ * kind-specific validation (working_hours schema, buffer schema, etc.).
+ */
+function validateAddConstraintParams(args: Record<string, unknown> | undefined): {
+  kind: string;
+  config_json: Record<string, unknown>;
+} {
+  if (!args) {
+    throw new InvalidParamsError("Missing required parameters: kind, config");
+  }
+
+  if (typeof args.kind !== "string" || !args.kind.trim()) {
+    throw new InvalidParamsError("Parameter 'kind' is required and must be a non-empty string");
+  }
+
+  if (typeof args.config !== "object" || args.config === null || Array.isArray(args.config)) {
+    throw new InvalidParamsError("Parameter 'config' is required and must be an object");
+  }
+
+  return {
+    kind: args.kind.trim(),
+    config_json: args.config as Record<string, unknown>,
+  };
+}
+
+/**
+ * Validate calendar.list_constraints input parameters.
+ * Returns the optional kind filter (null if not provided).
+ */
+function validateListConstraintsParams(args: Record<string, unknown> | undefined): {
+  kind: string | null;
+} {
+  if (!args) {
+    return { kind: null };
+  }
+
+  if (args.kind !== undefined) {
+    if (typeof args.kind !== "string" || !args.kind.trim()) {
+      throw new InvalidParamsError("Parameter 'kind' must be a non-empty string when provided");
+    }
+    return { kind: args.kind.trim() };
+  }
+
+  return { kind: null };
+}
+
+// ---------------------------------------------------------------------------
+// Constraint tool handlers (route through API service binding)
+// ---------------------------------------------------------------------------
+
+/** Application-level error for missing API service binding. */
+class ApiBindingMissingError extends Error {
+  constructor() {
+    super("API service binding is not configured");
+    this.name = "ApiBindingMissingError";
+  }
+}
+
+/**
+ * Forward a constraint creation request to the API worker via service binding.
+ *
+ * The API worker expects:
+ *   POST /v1/constraints
+ *   Body: { kind, config_json, active_from?, active_to? }
+ *   Auth: Bearer <jwt>
+ *
+ * We forward the original JWT from the MCP request for auth passthrough.
+ */
+async function callConstraintApi(
+  api: Fetcher,
+  jwt: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const init: RequestInit = {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`,
+    },
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await api.fetch(`https://api.internal${path}`, init);
+  const data = await response.json();
+  return { ok: response.ok, status: response.status, data };
+}
+
+/**
+ * Extract the raw JWT token from a request's Authorization header.
+ * Returns null if no valid Bearer token is present.
+ */
+function extractRawJwt(request: Request): string | null {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader) return null;
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") return null;
+  return parts[1];
+}
+
+/**
+ * Execute calendar.add_trip: validate input, transform to constraint API shape,
+ * and forward to the API worker via service binding.
+ */
+async function handleAddTrip(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateAddTripParams(args);
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "POST", "/v1/constraints", {
+    kind: validated.kind,
+    config_json: validated.config_json,
+    active_from: validated.active_from,
+    active_to: validated.active_to,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create trip constraint");
+  }
+
+  // API returns envelope: { ok, data, meta }
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.add_constraint: validate input and forward to the API worker
+ * via service binding.
+ */
+async function handleAddConstraint(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateAddConstraintParams(args);
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(api, jwt, "POST", "/v1/constraints", {
+    kind: validated.kind,
+    config_json: validated.config_json,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to create constraint");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.list_constraints: validate optional kind filter and forward
+ * to the API worker via service binding.
+ */
+async function handleListConstraints(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const { kind } = validateListConstraintsParams(args);
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const path = kind
+    ? `/v1/constraints?kind=${encodeURIComponent(kind)}`
+    : "/v1/constraints";
+
+  const result = await callConstraintApi(api, jwt, "GET", path);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to list constraints");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+// ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
@@ -1670,11 +2011,19 @@ function makeErrorResponse(
 /**
  * Dispatch a validated JSON-RPC request to the appropriate handler.
  * Handles tools/list and tools/call methods.
+ *
+ * @param rpcReq - Parsed JSON-RPC request.
+ * @param user - Authenticated user context.
+ * @param db - D1 database binding.
+ * @param request - Original HTTP request (needed for JWT forwarding to service bindings).
+ * @param env - Worker environment (needed for API service binding).
  */
 async function dispatch(
   rpcReq: JsonRpcRequest,
   user: McpUserContext,
   db: D1Database,
+  request: Request,
+  env: McpEnv,
 ): Promise<JsonRpcResponse> {
   switch (rpcReq.method) {
     case "tools/list": {
@@ -1756,6 +2105,21 @@ async function dispatch(
           case "calendar.set_policy_edge":
             result = await handleSetPolicyEdge(user, db, toolArgs);
             break;
+          case "calendar.add_trip": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleAddTrip(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.add_constraint": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleAddConstraint(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.list_constraints": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleListConstraints(request, env.API, toolArgs);
+            break;
+          }
           default:
             return makeErrorResponse(
               rpcReq.id,
@@ -1794,6 +2158,13 @@ async function dispatch(
             rpcReq.id,
             RPC_INVALID_PARAMS,
             err.message,
+          );
+        }
+        if (err instanceof ApiBindingMissingError) {
+          return makeErrorResponse(
+            rpcReq.id,
+            RPC_INTERNAL_ERROR,
+            "Constraint API service binding is not configured",
           );
         }
         const message =
@@ -1924,7 +2295,7 @@ async function handleMcpRequest(
   }
 
   // Dispatch to method handler
-  const result = await dispatch(rpcReq, user, env.DB);
+  const result = await dispatch(rpcReq, user, env.DB, request, env);
   return new Response(JSON.stringify(result), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -1960,4 +2331,7 @@ export {
   validateGetPolicyEdgeParams,
   validateSetPolicyEdgeParams,
   checkTierAccess,
+  validateAddTripParams,
+  validateAddConstraintParams,
+  validateListConstraintsParams,
 };

@@ -31,6 +31,9 @@ import {
   validateGetPolicyEdgeParams,
   validateSetPolicyEdgeParams,
   checkTierAccess,
+  validateAddTripParams,
+  validateAddConstraintParams,
+  validateListConstraintsParams,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -2075,6 +2078,8 @@ describe("tier gating in MCP dispatch", () => {
       "calendar.update_event",
       "calendar.delete_event",
       "calendar.set_policy_edge",
+      "calendar.add_trip",
+      "calendar.add_constraint",
     ];
 
     for (const toolName of premiumTools) {
@@ -2103,5 +2108,651 @@ describe("tier gating in MCP dispatch", () => {
       expect(error.data.current_tier).toBe("free");
       expect(error.data.tool).toBe(toolName);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateAddTripParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateAddTripParams", () => {
+  it("throws on undefined args", () => {
+    expect(() => validateAddTripParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when name is missing", () => {
+    expect(() =>
+      validateAddTripParams({
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'name' is required");
+  });
+
+  it("throws when name is empty string", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "   ",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'name' is required");
+  });
+
+  it("throws when start is missing", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'start' is required");
+  });
+
+  it("throws when start is not a valid ISO datetime", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "not-a-date",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'start' is not a valid ISO 8601");
+  });
+
+  it("throws when end is missing", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'end' is required");
+  });
+
+  it("throws when end is not a valid ISO datetime", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "garbage",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'end' is not a valid ISO 8601");
+  });
+
+  it("throws when start >= end", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-20T00:00:00Z",
+        end: "2026-03-15T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'start' must be before 'end'");
+  });
+
+  it("throws when start equals end", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-15T00:00:00Z",
+        timezone: "America/New_York",
+      }),
+    ).toThrow("'start' must be before 'end'");
+  });
+
+  it("throws when timezone is missing", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+      }),
+    ).toThrow("'timezone' is required");
+  });
+
+  it("throws when timezone is empty", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "  ",
+      }),
+    ).toThrow("'timezone' is required");
+  });
+
+  it("throws when block_policy is invalid", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+        block_policy: "FULL",
+      }),
+    ).toThrow("'block_policy' must be one of: BUSY, TITLE");
+  });
+
+  it("throws when block_policy is not a string", () => {
+    expect(() =>
+      validateAddTripParams({
+        name: "NYC Trip",
+        start: "2026-03-15T00:00:00Z",
+        end: "2026-03-20T00:00:00Z",
+        timezone: "America/New_York",
+        block_policy: 42,
+      }),
+    ).toThrow("'block_policy' must be one of: BUSY, TITLE");
+  });
+
+  it("returns validated params with default block_policy=BUSY", () => {
+    const result = validateAddTripParams({
+      name: " NYC Trip ",
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-20T00:00:00Z",
+      timezone: " America/New_York ",
+    });
+
+    expect(result.kind).toBe("trip");
+    expect(result.config_json.name).toBe("NYC Trip"); // trimmed
+    expect(result.config_json.timezone).toBe("America/New_York"); // trimmed
+    expect(result.config_json.block_policy).toBe("BUSY"); // default
+    expect(result.active_from).toBe("2026-03-15T00:00:00Z");
+    expect(result.active_to).toBe("2026-03-20T00:00:00Z");
+  });
+
+  it("accepts TITLE block_policy", () => {
+    const result = validateAddTripParams({
+      name: "London Trip",
+      start: "2026-04-01T00:00:00Z",
+      end: "2026-04-10T00:00:00Z",
+      timezone: "Europe/London",
+      block_policy: "TITLE",
+    });
+
+    expect(result.config_json.block_policy).toBe("TITLE");
+  });
+
+  it("accepts BUSY block_policy explicitly", () => {
+    const result = validateAddTripParams({
+      name: "Trip",
+      start: "2026-05-01T00:00:00Z",
+      end: "2026-05-05T00:00:00Z",
+      timezone: "UTC",
+      block_policy: "BUSY",
+    });
+
+    expect(result.config_json.block_policy).toBe("BUSY");
+  });
+
+  it("transforms input to constraint API shape", () => {
+    const result = validateAddTripParams({
+      name: "Business Trip",
+      start: "2026-06-01T09:00:00Z",
+      end: "2026-06-05T17:00:00Z",
+      timezone: "America/Chicago",
+      block_policy: "TITLE",
+    });
+
+    // Verify the shape matches what the constraint API expects
+    expect(result).toEqual({
+      kind: "trip",
+      config_json: {
+        name: "Business Trip",
+        timezone: "America/Chicago",
+        block_policy: "TITLE",
+      },
+      active_from: "2026-06-01T09:00:00Z",
+      active_to: "2026-06-05T17:00:00Z",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateAddConstraintParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateAddConstraintParams", () => {
+  it("throws on undefined args", () => {
+    expect(() => validateAddConstraintParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when kind is missing", () => {
+    expect(() =>
+      validateAddConstraintParams({ config: { minutes: 15 } }),
+    ).toThrow("'kind' is required");
+  });
+
+  it("throws when kind is empty string", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: "  ", config: {} }),
+    ).toThrow("'kind' is required");
+  });
+
+  it("throws when kind is not a string", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: 42, config: {} }),
+    ).toThrow("'kind' is required");
+  });
+
+  it("throws when config is missing", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: "buffer" }),
+    ).toThrow("'config' is required and must be an object");
+  });
+
+  it("throws when config is null", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: "buffer", config: null }),
+    ).toThrow("'config' is required and must be an object");
+  });
+
+  it("throws when config is an array", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: "buffer", config: [1, 2] }),
+    ).toThrow("'config' is required and must be an object");
+  });
+
+  it("throws when config is a string", () => {
+    expect(() =>
+      validateAddConstraintParams({ kind: "buffer", config: "not-object" }),
+    ).toThrow("'config' is required and must be an object");
+  });
+
+  it("returns validated params for valid buffer input", () => {
+    const result = validateAddConstraintParams({
+      kind: " buffer ",
+      config: { type: "travel", minutes: 15, applies_to: "all" },
+    });
+
+    expect(result.kind).toBe("buffer"); // trimmed
+    expect(result.config_json).toEqual({
+      type: "travel",
+      minutes: 15,
+      applies_to: "all",
+    });
+  });
+
+  it("returns validated params for valid working_hours input", () => {
+    const result = validateAddConstraintParams({
+      kind: "working_hours",
+      config: {
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "America/Chicago",
+      },
+    });
+
+    expect(result.kind).toBe("working_hours");
+    expect(result.config_json.days).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("passes any kind string through (API validates kind)", () => {
+    const result = validateAddConstraintParams({
+      kind: "no_meetings_after",
+      config: { time: "18:00", timezone: "America/Chicago" },
+    });
+
+    expect(result.kind).toBe("no_meetings_after");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateListConstraintsParams (pure function tests)
+// ---------------------------------------------------------------------------
+
+describe("validateListConstraintsParams", () => {
+  it("returns null kind when args is undefined", () => {
+    const result = validateListConstraintsParams(undefined);
+    expect(result.kind).toBeNull();
+  });
+
+  it("returns null kind when args is empty object", () => {
+    const result = validateListConstraintsParams({});
+    expect(result.kind).toBeNull();
+  });
+
+  it("returns kind when provided", () => {
+    const result = validateListConstraintsParams({ kind: "trip" });
+    expect(result.kind).toBe("trip");
+  });
+
+  it("trims kind string", () => {
+    const result = validateListConstraintsParams({ kind: " buffer " });
+    expect(result.kind).toBe("buffer");
+  });
+
+  it("throws when kind is empty string", () => {
+    expect(() =>
+      validateListConstraintsParams({ kind: "" }),
+    ).toThrow("'kind' must be a non-empty string");
+  });
+
+  it("throws when kind is whitespace-only string", () => {
+    expect(() =>
+      validateListConstraintsParams({ kind: "   " }),
+    ).toThrow("'kind' must be a non-empty string");
+  });
+
+  it("throws when kind is not a string", () => {
+    expect(() =>
+      validateListConstraintsParams({ kind: 42 }),
+    ).toThrow("'kind' must be a non-empty string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tools/list includes constraint tools
+// ---------------------------------------------------------------------------
+
+describe("POST /mcp -- tools/list includes constraint tools", () => {
+  it("includes all 3 constraint tools in registry", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.add_trip");
+    expect(toolNames).toContain("calendar.add_constraint");
+    expect(toolNames).toContain("calendar.list_constraints");
+  });
+
+  it("calendar.add_trip schema has required name, start, end, timezone fields", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const addTripTool = resultData.tools.find(
+      (t) => t.name === "calendar.add_trip",
+    );
+    expect(addTripTool).toBeDefined();
+
+    const schema = addTripTool?.inputSchema as { required?: string[]; properties: Record<string, unknown> };
+    expect(schema.required).toContain("name");
+    expect(schema.required).toContain("start");
+    expect(schema.required).toContain("end");
+    expect(schema.required).toContain("timezone");
+    expect(schema.properties).toHaveProperty("block_policy");
+  });
+
+  it("calendar.add_trip schema has block_policy enum", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const addTripTool = resultData.tools.find(
+      (t) => t.name === "calendar.add_trip",
+    );
+
+    const schema = addTripTool?.inputSchema as {
+      properties: Record<string, { enum?: string[] }>;
+    };
+    expect(schema.properties.block_policy.enum).toEqual(["BUSY", "TITLE"]);
+  });
+
+  it("calendar.add_constraint schema has required kind and config fields", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const addConstraintTool = resultData.tools.find(
+      (t) => t.name === "calendar.add_constraint",
+    );
+    expect(addConstraintTool).toBeDefined();
+
+    const schema = addConstraintTool?.inputSchema as { required?: string[] };
+    expect(schema.required).toContain("kind");
+    expect(schema.required).toContain("config");
+  });
+
+  it("calendar.list_constraints schema has optional kind field (no required)", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<Record<string, unknown>> };
+    const listConstraintsTool = resultData.tools.find(
+      (t) => t.name === "calendar.list_constraints",
+    );
+    expect(listConstraintsTool).toBeDefined();
+
+    const schema = listConstraintsTool?.inputSchema as {
+      type: string;
+      required?: string[];
+      properties: Record<string, unknown>;
+    };
+    expect(schema.type).toBe("object");
+    // No required fields -- kind is optional
+    expect(schema.required).toBeUndefined();
+    expect(schema.properties).toHaveProperty("kind");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier checks for constraint tools
+// ---------------------------------------------------------------------------
+
+describe("checkTierAccess for constraint tools", () => {
+  it("denies free tier access to calendar.add_trip", () => {
+    const result = checkTierAccess("calendar.add_trip", "free");
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.required_tier).toBe("premium");
+    }
+  });
+
+  it("allows premium tier access to calendar.add_trip", () => {
+    const result = checkTierAccess("calendar.add_trip", "premium");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("allows enterprise tier access to calendar.add_trip", () => {
+    const result = checkTierAccess("calendar.add_trip", "enterprise");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("denies free tier access to calendar.add_constraint", () => {
+    const result = checkTierAccess("calendar.add_constraint", "free");
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.required_tier).toBe("premium");
+    }
+  });
+
+  it("allows premium tier access to calendar.add_constraint", () => {
+    const result = checkTierAccess("calendar.add_constraint", "premium");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("allows free tier access to calendar.list_constraints (read-only)", () => {
+    const result = checkTierAccess("calendar.list_constraints", "free");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("allows premium tier access to calendar.list_constraints", () => {
+    const result = checkTierAccess("calendar.list_constraints", "premium");
+    expect(result.allowed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Constraint tool dispatch: tier gating for add_trip and add_constraint
+// ---------------------------------------------------------------------------
+
+describe("tier gating for constraint tools in MCP dispatch", () => {
+  it("free user calling calendar.add_trip returns TIER_REQUIRED error", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_trip",
+          arguments: {
+            name: "NYC",
+            start: "2026-03-15T00:00:00Z",
+            end: "2026-03-20T00:00:00Z",
+            timezone: "America/New_York",
+          },
+        },
+        id: 100,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as {
+      code: number;
+      data: { code: string; required_tier: string; current_tier: string; tool: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("premium");
+    expect(error.data.current_tier).toBe("free");
+    expect(error.data.tool).toBe("calendar.add_trip");
+  });
+
+  it("free user calling calendar.add_constraint returns TIER_REQUIRED error", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_constraint",
+          arguments: { kind: "buffer", config: { type: "travel", minutes: 15, applies_to: "all" } },
+        },
+        id: 101,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as {
+      code: number;
+      data: { code: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data.code).toBe("TIER_REQUIRED");
+  });
+
+  it("free user calling calendar.list_constraints is NOT tier-gated", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.list_constraints", arguments: {} },
+        id: 102,
+      },
+      authHeader,
+    );
+
+    // list_constraints is free tier -- should NOT get TIER_REQUIRED error.
+    // It may get an internal error (no API binding in test env), but NOT a tier error.
+    if (result.body.error) {
+      const error = result.body.error as { data?: { code?: string } };
+      expect(error.data?.code).not.toBe("TIER_REQUIRED");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Constraint tools: API binding missing error
+// ---------------------------------------------------------------------------
+
+describe("constraint tools with missing API binding", () => {
+  it("calendar.list_constraints returns internal error when API binding missing", async () => {
+    const handler = createMcpHandler();
+    // Env without API binding
+    const env = createMinimalEnv();
+    // Need premium tier for add_trip/add_constraint, free for list_constraints
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "calendar.list_constraints", arguments: {} },
+        id: 200,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toContain("service binding");
   });
 });

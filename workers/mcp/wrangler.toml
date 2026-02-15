@@ -18,6 +18,12 @@ binding = "DB"
 database_name = "tminus-registry"
 database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
+# --- Service bindings -------------------------------------------------------
+
+[[services]]
+binding = "API"
+service = "tminus-api"
+
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # JWT_SECRET -- API auth JWT signing secret
 
@@ -41,6 +47,10 @@ binding = "DB"
 database_name = "tminus-registry-staging"
 database_id = "placeholder-staging-d1-id"
 
+[[env.staging.services]]
+binding = "API"
+service = "tminus-api-staging"
+
 # ===========================================================================
 # Production environment: tminus-mcp-production
 # Deploy with: wrangler deploy --env production
@@ -60,3 +70,7 @@ zone_name = "tminus.ink"
 binding = "DB"
 database_name = "tminus-registry"
 database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
+
+[[env.production.services]]
+binding = "API"
+service = "tminus-api-production"

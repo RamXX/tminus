@@ -1791,7 +1791,7 @@ describe("MCP integration: calendar.get_availability", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: tools/list includes policy management tools", () => {
-  it("returns all 10 tools including 3 policy management tools", async () => {
+  it("returns all 13 tools including policy and constraint management tools", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 200 },
@@ -1804,7 +1804,10 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.list_policies");
     expect(toolNames).toContain("calendar.get_policy_edge");
     expect(toolNames).toContain("calendar.set_policy_edge");
-    expect(resultData.tools.length).toBe(10);
+    expect(toolNames).toContain("calendar.add_trip");
+    expect(toolNames).toContain("calendar.add_constraint");
+    expect(toolNames).toContain("calendar.list_constraints");
+    expect(resultData.tools.length).toBe(13);
   });
 });
 
