@@ -3688,14 +3688,233 @@ export function generateProofDocument(data: CommitmentProofData, proofHash: stri
 }
 
 /**
+ * Generate an HTML proof document suitable for browser Print-to-PDF.
+ *
+ * Contains: client name, window, target/actual hours, event-level breakdown,
+ * proof hash, and HMAC signature. The HTML is self-contained with inline
+ * styles for clean rendering.
+ */
+export function generateProofHtml(
+  data: CommitmentProofData,
+  proofHash: string,
+  signature?: string,
+): string {
+  const clientDisplay = data.commitment.client_name ?? data.commitment.client_id;
+  const statusUpper = data.status.toUpperCase();
+
+  // Build event rows
+  let eventRows = "";
+  if (data.events.length === 0) {
+    eventRows = `<tr><td colspan="6" style="text-align:center;color:#888;">No events found in this window.</td></tr>`;
+  } else {
+    for (const event of data.events) {
+      eventRows += `<tr>
+        <td>${escapeHtml(event.canonical_event_id)}</td>
+        <td>${escapeHtml(event.title ?? "(untitled)")}</td>
+        <td>${escapeHtml(event.start_ts)}</td>
+        <td>${escapeHtml(event.end_ts)}</td>
+        <td style="text-align:right;">${event.hours}</td>
+        <td>${escapeHtml(event.billing_category)}</td>
+      </tr>`;
+    }
+  }
+
+  const signatureSection = signature
+    ? `<tr><td><strong>HMAC-SHA256 Signature</strong></td><td style="font-family:monospace;word-break:break-all;">${escapeHtml(signature)}</td></tr>`
+    : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Commitment Proof - ${escapeHtml(data.commitment.commitment_id)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.5rem; border-bottom: 2px solid #333; padding-bottom: 0.5rem; }
+    h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; font-size: 0.9rem; }
+    th { background-color: #f5f5f5; }
+    .meta-table { border: none; }
+    .meta-table td { border: none; padding: 0.25rem 0.5rem; }
+    .status { font-weight: bold; }
+    .status.compliant { color: #2e7d32; }
+    .status.under { color: #c62828; }
+    .status.over { color: #1565c0; }
+    .hash { font-family: monospace; word-break: break-all; font-size: 0.85rem; }
+    @media print { body { margin: 1cm; } }
+  </style>
+</head>
+<body>
+  <h1>Commitment Proof Document</h1>
+
+  <h2>Commitment Details</h2>
+  <table class="meta-table">
+    <tr><td><strong>Commitment ID</strong></td><td>${escapeHtml(data.commitment.commitment_id)}</td></tr>
+    <tr><td><strong>Client</strong></td><td>${escapeHtml(clientDisplay)}</td></tr>
+    <tr><td><strong>Window Type</strong></td><td>${escapeHtml(data.commitment.window_type)}</td></tr>
+    <tr><td><strong>Rolling Window</strong></td><td>${data.commitment.rolling_window_weeks} weeks</td></tr>
+    <tr><td><strong>Hard Minimum</strong></td><td>${data.commitment.hard_minimum ? "Yes" : "No"}</td></tr>
+    <tr><td><strong>Proof Required</strong></td><td>${data.commitment.proof_required ? "Yes" : "No"}</td></tr>
+  </table>
+
+  <h2>Compliance Summary</h2>
+  <table class="meta-table">
+    <tr><td><strong>Window Start</strong></td><td>${escapeHtml(data.window_start)}</td></tr>
+    <tr><td><strong>Window End</strong></td><td>${escapeHtml(data.window_end)}</td></tr>
+    <tr><td><strong>Target Hours</strong></td><td>${data.commitment.target_hours}</td></tr>
+    <tr><td><strong>Actual Hours</strong></td><td>${data.actual_hours}</td></tr>
+    <tr><td><strong>Status</strong></td><td class="status ${data.status}">${statusUpper}</td></tr>
+  </table>
+
+  <h2>Event Detail (${data.events.length} events)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Event ID</th>
+        <th>Title</th>
+        <th>Start</th>
+        <th>End</th>
+        <th>Hours</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${eventRows}
+    </tbody>
+  </table>
+
+  <h2>Cryptographic Verification</h2>
+  <table class="meta-table">
+    <tr><td><strong>SHA-256 Proof Hash</strong></td><td class="hash">${escapeHtml(proofHash)}</td></tr>
+    ${signatureSection}
+  </table>
+  <p style="font-size:0.85rem;color:#666;">
+    To verify: compute SHA-256 of the canonical JSON representation of the commitment data
+    (commitment + window + events), then verify the HMAC-SHA256 signature using the system key.
+  </p>
+  <p style="font-size:0.85rem;color:#888;">Generated: ${new Date().toISOString()}</p>
+</body>
+</html>`;
+}
+
+/** Escape HTML special characters to prevent XSS in generated documents. */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// ---------------------------------------------------------------------------
+// Cryptographic proof signing and verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a Uint8Array to hex string. Same logic as in deletion-certificate.ts
+ * but kept local to avoid cross-module coupling for this self-contained feature.
+ */
+function bytesToHex(bytes: Uint8Array): string {
+  const parts: string[] = [];
+  for (const byte of bytes) {
+    parts.push(byte.toString(16).padStart(2, "0"));
+  }
+  return parts.join("");
+}
+
+/** Convert a hex string to Uint8Array. */
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Compute HMAC-SHA256 signature for a commitment proof.
+ *
+ * Signature = HMAC-SHA256(proof_hash + commitment_id + window, MASTER_KEY)
+ *
+ * The signing input concatenates proof_hash, commitment_id, and window
+ * (start..end) to bind the signature to the specific proof and context.
+ *
+ * @param proofHash - SHA-256 hash of the canonical proof data
+ * @param commitmentId - The commitment ID
+ * @param windowStart - Window start timestamp
+ * @param windowEnd - Window end timestamp
+ * @param masterKey - MASTER_KEY secret for HMAC signing
+ * @returns Hex-encoded HMAC-SHA256 signature
+ */
+export async function computeProofSignature(
+  proofHash: string,
+  commitmentId: string,
+  windowStart: string,
+  windowEnd: string,
+  masterKey: string,
+): Promise<string> {
+  const signingInput = `${proofHash}${commitmentId}${windowStart}..${windowEnd}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(masterKey),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const encoded = new TextEncoder().encode(signingInput);
+  const signatureBuffer = await crypto.subtle.sign("HMAC", key, encoded);
+  return bytesToHex(new Uint8Array(signatureBuffer));
+}
+
+/**
+ * Verify a commitment proof signature using Web Crypto (constant-time).
+ *
+ * Re-computes the signing input and uses crypto.subtle.verify for
+ * timing-safe comparison.
+ *
+ * @returns true if the signature is valid, false otherwise.
+ */
+export async function verifyProofSignature(
+  proofHash: string,
+  commitmentId: string,
+  windowStart: string,
+  windowEnd: string,
+  signature: string,
+  masterKey: string,
+): Promise<boolean> {
+  try {
+    const signingInput = `${proofHash}${commitmentId}${windowStart}..${windowEnd}`;
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(masterKey),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    const signatureBytes = hexToBytes(signature);
+    const encoded = new TextEncoder().encode(signingInput);
+    return crypto.subtle.verify("HMAC", key, signatureBytes, encoded);
+  } catch {
+    return false;
+  }
+}
+
+/** Seven years in seconds, used for R2 object retention. */
+const SEVEN_YEARS_SECONDS = 7 * 365 * 24 * 60 * 60; // 220,752,000
+
+/**
  * POST /v1/commitments/:id/export
  *
- * Export a commitment proof document. Gathers proof data from the
- * UserGraphDO, computes SHA-256 hash, generates PDF or CSV,
- * stores in R2, and returns the download URL.
+ * Export a commitment proof document with cryptographic verification.
+ * Gathers proof data from the UserGraphDO, computes SHA-256 hash,
+ * signs with HMAC-SHA256 using MASTER_KEY, generates HTML (PDF) or CSV,
+ * stores in R2 with 7-year retention, and returns the download URL.
  *
  * Body: { format?: "pdf" | "csv" }
- * Response: { download_url, proof_hash, format, r2_key }
+ * Response: { proof_id, download_url, proof_hash, signature, signed_at, format, r2_key }
  */
 async function handleExportCommitmentProof(
   request: Request,
@@ -3713,6 +3932,13 @@ async function handleExportCommitmentProof(
   if (!env.PROOF_BUCKET) {
     return jsonResponse(
       errorEnvelope("Proof export not configured (R2 bucket missing)", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+
+  if (!env.MASTER_KEY) {
+    return jsonResponse(
+      errorEnvelope("Proof signing not configured (MASTER_KEY missing)", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -3762,6 +3988,18 @@ async function handleExportCommitmentProof(
     // Compute SHA-256 proof hash
     const proofHash = await computeProofHash(proofData);
 
+    // Compute HMAC-SHA256 signature: sign(proof_hash + commitment_id + window, MASTER_KEY)
+    const signature = await computeProofSignature(
+      proofHash,
+      commitmentId,
+      proofData.window_start,
+      proofData.window_end,
+      env.MASTER_KEY,
+    );
+
+    const signedAt = new Date().toISOString();
+    const proofId = generateId("proof");
+
     // Generate document content
     let content: string;
     let contentType: string;
@@ -3772,39 +4010,49 @@ async function handleExportCommitmentProof(
       contentType = "text/csv";
       fileExtension = "csv";
     } else {
-      content = generateProofDocument(proofData, proofHash);
-      contentType = "application/pdf";
-      fileExtension = "pdf";
+      // HTML document for browser Print-to-PDF
+      content = generateProofHtml(proofData, proofHash, signature);
+      contentType = "text/html";
+      fileExtension = "html";
     }
 
-    // Build R2 key: proofs/{userId}/{commitmentId}/{timestamp}.{ext}
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const r2Key = `proofs/${auth.userId}/${commitmentId}/${timestamp}.${fileExtension}`;
+    // Build R2 key: proofs/{userId}/{commitmentId}/{window}.{ext}
+    const windowKey = `${proofData.window_start}_${proofData.window_end}`.replace(/[:.]/g, "-");
+    const r2Key = `proofs/${auth.userId}/${commitmentId}/${windowKey}.${fileExtension}`;
 
-    // Store in R2
+    // Store in R2 with 7-year retention metadata for compliance (NFR-27)
+    const retentionExpiry = new Date(Date.now() + SEVEN_YEARS_SECONDS * 1000).toISOString();
     await env.PROOF_BUCKET.put(r2Key, content, {
       httpMetadata: {
         contentType,
         contentDisposition: `attachment; filename="commitment-proof-${commitmentId}.${fileExtension}"`,
       },
       customMetadata: {
+        proof_id: proofId,
         commitment_id: commitmentId,
         user_id: auth.userId,
         proof_hash: proofHash,
+        signature,
+        signed_at: signedAt,
         format,
-        generated_at: new Date().toISOString(),
+        generated_at: signedAt,
+        retention_policy: "7_years",
+        retention_expiry: retentionExpiry,
+        window_start: proofData.window_start,
+        window_end: proofData.window_end,
       },
     });
 
-    // Build download URL. In production this would be a presigned URL
-    // or a dedicated download endpoint. For now, return the R2 key
-    // and a download path on the API.
+    // Build download URL
     const downloadUrl = `/v1/proofs/${encodeURIComponent(r2Key)}`;
 
     return jsonResponse(
       successEnvelope({
+        proof_id: proofId,
         download_url: downloadUrl,
         proof_hash: proofHash,
+        signature,
+        signed_at: signedAt,
         format,
         r2_key: r2Key,
         commitment_id: commitmentId,
@@ -3869,6 +4117,110 @@ async function handleDownloadProof(
     console.error("Failed to download proof", err);
     return jsonResponse(
       errorEnvelope("Failed to download proof", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+/**
+ * GET /v1/proofs/:proof_id/verify
+ *
+ * Verify a proof document's cryptographic signature.
+ * Looks up the proof metadata in R2 by proof_id (stored in customMetadata),
+ * then re-verifies the HMAC-SHA256 signature.
+ *
+ * Response: { valid: boolean, proof_hash: string, signed_at: string }
+ */
+async function handleVerifyProof(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  proofId: string,
+): Promise<Response> {
+  // Validate input first, before checking env bindings
+  if (!proofId || !proofId.startsWith("prf_")) {
+    return jsonResponse(
+      errorEnvelope("Invalid proof ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!env.PROOF_BUCKET) {
+    return jsonResponse(
+      errorEnvelope("Proof export not configured", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+
+  if (!env.MASTER_KEY) {
+    return jsonResponse(
+      errorEnvelope("Proof verification not configured", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+
+  try {
+    // List objects in user's proof directory to find the one with matching proof_id
+    const prefix = `proofs/${auth.userId}/`;
+    const listed = await env.PROOF_BUCKET.list({ prefix, limit: 500 });
+
+    let foundObject: R2Object | null = null;
+    for (const obj of listed.objects) {
+      if (obj.customMetadata?.proof_id === proofId) {
+        foundObject = obj;
+        break;
+      }
+    }
+
+    if (!foundObject) {
+      return jsonResponse(
+        errorEnvelope("Proof not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    const meta = foundObject.customMetadata ?? {};
+    const proofHash = meta.proof_hash;
+    const storedSignature = meta.signature;
+    const signedAt = meta.signed_at;
+    const commitmentId = meta.commitment_id;
+    const windowStart = meta.window_start;
+    const windowEnd = meta.window_end;
+
+    if (!proofHash || !storedSignature || !commitmentId || !windowStart || !windowEnd) {
+      return jsonResponse(
+        successEnvelope({
+          valid: false,
+          proof_hash: proofHash ?? null,
+          signed_at: signedAt ?? null,
+          reason: "Incomplete proof metadata",
+        }),
+        200,
+      );
+    }
+
+    // Re-verify the HMAC-SHA256 signature using Web Crypto (constant-time)
+    const valid = await verifyProofSignature(
+      proofHash,
+      commitmentId,
+      windowStart,
+      windowEnd,
+      storedSignature,
+      env.MASTER_KEY,
+    );
+
+    return jsonResponse(
+      successEnvelope({
+        valid,
+        proof_hash: proofHash,
+        signed_at: signedAt ?? null,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to verify proof", err);
+    return jsonResponse(
+      errorEnvelope("Failed to verify proof", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -4599,7 +4951,12 @@ async function routeAuthenticatedRequest(
         return handleDeleteCommitment(request, auth, env, match.params[0]);
       }
 
-      // -- Proof download routes -----------------------------------------------
+      // -- Proof verification and download routes --------------------------------
+
+      match = matchRoute(pathname, "/v1/proofs/:id/verify");
+      if (match && method === "GET") {
+        return handleVerifyProof(request, auth, env, match.params[0]);
+      }
 
       if (method === "GET" && pathname.startsWith("/v1/proofs/")) {
         const r2Key = decodeURIComponent(pathname.slice("/v1/proofs/".length));

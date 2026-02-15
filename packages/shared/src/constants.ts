@@ -66,6 +66,7 @@ export const ID_PREFIXES = {
   ledger: "ldg_",
   alert: "alt_",
   milestone: "mst_",
+  proof: "prf_",
 } as const;
 
 // ---------------------------------------------------------------------------

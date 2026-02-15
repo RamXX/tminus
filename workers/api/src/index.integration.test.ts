@@ -2466,3 +2466,533 @@ describe("Integration: Constraint endpoints", () => {
     expect(doNamespace.calls[0].body).toEqual({ constraint_id: constraintId });
   });
 });
+
+// ===========================================================================
+// Integration: Enhanced Commitment Proof Export (TM-3m7.3)
+// ===========================================================================
+
+/**
+ * Mock R2Bucket for integration tests.
+ *
+ * Stores objects in memory with metadata, supports get/put/list operations.
+ * This proves the full export -> store -> retrieve -> verify flow.
+ */
+function createMockR2Bucket(): R2Bucket & {
+  objects: Map<string, { body: string; httpMetadata: Record<string, string>; customMetadata: Record<string, string> }>;
+} {
+  const objects = new Map<string, { body: string; httpMetadata: Record<string, string>; customMetadata: Record<string, string> }>();
+
+  return {
+    objects,
+
+    async put(key: string, value: string | ReadableStream | ArrayBuffer | null, options?: R2PutOptions): Promise<R2Object> {
+      const body = typeof value === "string" ? value : "";
+      const httpMeta: Record<string, string> = {};
+      if (options?.httpMetadata && typeof options.httpMetadata === "object" && !(options.httpMetadata instanceof Headers)) {
+        if (options.httpMetadata.contentType) httpMeta.contentType = options.httpMetadata.contentType;
+        if (options.httpMetadata.contentDisposition) httpMeta.contentDisposition = options.httpMetadata.contentDisposition;
+      }
+      const customMeta = (options?.customMetadata ?? {}) as Record<string, string>;
+      objects.set(key, { body, httpMetadata: httpMeta, customMetadata: customMeta });
+
+      return {
+        key,
+        version: "v1",
+        size: body.length,
+        etag: "mock-etag",
+        httpEtag: '"mock-etag"',
+        uploaded: new Date(),
+        httpMetadata: httpMeta,
+        customMetadata: customMeta,
+        writeHttpMetadata(headers: Headers) {
+          if (httpMeta.contentType) headers.set("content-type", httpMeta.contentType);
+          if (httpMeta.contentDisposition) headers.set("content-disposition", httpMeta.contentDisposition);
+        },
+      } as unknown as R2Object;
+    },
+
+    async get(key: string): Promise<R2ObjectBody | null> {
+      const obj = objects.get(key);
+      if (!obj) return null;
+
+      return {
+        key,
+        version: "v1",
+        size: obj.body.length,
+        etag: "mock-etag",
+        httpEtag: '"mock-etag"',
+        uploaded: new Date(),
+        httpMetadata: obj.httpMetadata,
+        customMetadata: obj.customMetadata,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(obj.body));
+            controller.close();
+          },
+        }),
+        bodyUsed: false,
+        arrayBuffer: async () => new TextEncoder().encode(obj.body).buffer,
+        text: async () => obj.body,
+        json: async () => JSON.parse(obj.body),
+        blob: async () => new Blob([obj.body]),
+        writeHttpMetadata(headers: Headers) {
+          if (obj.httpMetadata.contentType) headers.set("content-type", obj.httpMetadata.contentType);
+          if (obj.httpMetadata.contentDisposition) headers.set("content-disposition", obj.httpMetadata.contentDisposition);
+        },
+      } as unknown as R2ObjectBody;
+    },
+
+    async list(options?: R2ListOptions): Promise<R2Objects> {
+      const prefix = options?.prefix ?? "";
+      const matchingObjects: R2Object[] = [];
+
+      for (const [key, obj] of objects.entries()) {
+        if (key.startsWith(prefix)) {
+          matchingObjects.push({
+            key,
+            version: "v1",
+            size: obj.body.length,
+            etag: "mock-etag",
+            httpEtag: '"mock-etag"',
+            uploaded: new Date(),
+            httpMetadata: obj.httpMetadata,
+            customMetadata: obj.customMetadata,
+          } as unknown as R2Object);
+        }
+      }
+
+      return {
+        objects: matchingObjects,
+        truncated: false,
+        delimitedPrefixes: [],
+      } as unknown as R2Objects;
+    },
+
+    async delete(_key: string | string[]): Promise<void> {},
+    async head(_key: string): Promise<R2Object | null> { return null; },
+    createMultipartUpload: undefined as unknown as R2Bucket["createMultipartUpload"],
+    resumeMultipartUpload: undefined as unknown as R2Bucket["resumeMultipartUpload"],
+  } as unknown as R2Bucket & {
+    objects: Map<string, { body: string; httpMetadata: Record<string, string>; customMetadata: Record<string, string> }>;
+  };
+}
+
+const TEST_MASTER_KEY = "integration-test-master-key-for-hmac-sha256-signing";
+
+/** Proof data as the DO returns it (raw JSON body, not wrapped in an envelope). */
+const TEST_PROOF_DATA = {
+  commitment: {
+    commitment_id: "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+    client_id: "client_acme",
+    client_name: "Acme Corp",
+    window_type: "WEEKLY",
+    target_hours: 10,
+    rolling_window_weeks: 4,
+    hard_minimum: false,
+    proof_required: true,
+    created_at: "2026-02-01T00:00:00.000Z",
+  },
+  window_start: "2026-01-18T00:00:00.000Z",
+  window_end: "2026-02-15T00:00:00.000Z",
+  actual_hours: 12.5,
+  status: "compliant",
+  events: [
+    {
+      canonical_event_id: "evt_01TESTEVT00000000000001",
+      title: "Sprint Planning",
+      start_ts: "2026-02-10T09:00:00.000Z",
+      end_ts: "2026-02-10T11:00:00.000Z",
+      hours: 2,
+      billing_category: "BILLABLE",
+    },
+    {
+      canonical_event_id: "evt_01TESTEVT00000000000002",
+      title: "Code Review",
+      start_ts: "2026-02-11T14:00:00.000Z",
+      end_ts: "2026-02-11T16:30:00.000Z",
+      hours: 2.5,
+      billing_category: "BILLABLE",
+    },
+    {
+      canonical_event_id: "evt_01TESTEVT00000000000003",
+      title: "Client Meeting",
+      start_ts: "2026-02-12T10:00:00.000Z",
+      end_ts: "2026-02-12T18:00:00.000Z",
+      hours: 8,
+      billing_category: "BILLABLE",
+    },
+  ],
+};
+
+describe("Integration: Enhanced Commitment Proof Export", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let r2Bucket: ReturnType<typeof createMockR2Bucket>;
+  const handler = createHandler();
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(TEST_ORG.org_id, TEST_ORG.name);
+    db.prepare("INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)").run(
+      TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email,
+    );
+    // Add premium tier so feature gate passes
+    db.prepare(
+      `INSERT INTO subscriptions (subscription_id, user_id, tier, status)
+       VALUES (?, ?, 'premium', 'active')`,
+    ).run("sub_test_proof", TEST_USER.user_id);
+
+    d1 = createRealD1(db);
+    r2Bucket = createMockR2Bucket();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function buildProofEnv(doPathResponses?: Map<string, unknown>): Env {
+    const doNamespace = createMockDONamespace({
+      defaultResponse: { ok: true },
+      pathResponses: doPathResponses,
+    });
+    return {
+      DB: d1,
+      USER_GRAPH: doNamespace,
+      ACCOUNT: createMockDONamespace(),
+      SYNC_QUEUE: createMockQueue(),
+      WRITE_QUEUE: createMockQueue(),
+      SESSIONS: createMockKV(),
+      JWT_SECRET,
+      MASTER_KEY: TEST_MASTER_KEY,
+      PROOF_BUCKET: r2Bucket as unknown as R2Bucket,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // PDF (HTML) export with cryptographic signature
+  // -------------------------------------------------------------------------
+
+  it("POST /v1/commitments/:id/export generates HTML proof with signature", async () => {
+    const doResponses = new Map<string, unknown>();
+    doResponses.set("/getCommitmentProofData", TEST_PROOF_DATA);
+    const env = buildProofEnv(doResponses);
+
+    const authHeader = await makeAuthHeader();
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "pdf" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      ok: boolean;
+      data: {
+        proof_id: string;
+        proof_hash: string;
+        signature: string;
+        signed_at: string;
+        format: string;
+        r2_key: string;
+        download_url: string;
+        commitment_id: string;
+        actual_hours: number;
+        target_hours: number;
+        status: string;
+        event_count: number;
+      };
+    };
+
+    expect(body.ok).toBe(true);
+
+    // AC 1: PDF export generated with event breakdown
+    expect(body.data.format).toBe("pdf");
+    expect(body.data.event_count).toBe(3);
+
+    // AC 2: SHA-256 proof hash computed
+    expect(body.data.proof_hash).toMatch(/^[a-f0-9]{64}$/);
+
+    // Signature present (HMAC-SHA256 produces 64-char hex)
+    expect(body.data.signature).toMatch(/^[a-f0-9]{64}$/);
+    expect(body.data.signed_at).toBeTruthy();
+
+    // proof_id has correct prefix
+    expect(body.data.proof_id).toMatch(/^prf_/);
+
+    // R2 key matches expected pattern: proofs/{userId}/{commitmentId}/{window}.html
+    expect(body.data.r2_key).toContain(`proofs/${TEST_USER.user_id}/`);
+    expect(body.data.r2_key).toContain("cmt_01TESTAAAAAAAAAAAAAAAAAA88");
+    expect(body.data.r2_key).toMatch(/\.html$/);
+
+    // AC 4: Stored in R2 with 7-year retention
+    expect(r2Bucket.objects.size).toBe(1);
+    const storedKey = Array.from(r2Bucket.objects.keys())[0];
+    const storedObj = r2Bucket.objects.get(storedKey)!;
+
+    // Verify R2 metadata
+    expect(storedObj.customMetadata.proof_id).toMatch(/^prf_/);
+    expect(storedObj.customMetadata.proof_hash).toBe(body.data.proof_hash);
+    expect(storedObj.customMetadata.signature).toBe(body.data.signature);
+    expect(storedObj.customMetadata.retention_policy).toBe("7_years");
+    expect(storedObj.customMetadata.retention_expiry).toBeTruthy();
+    expect(storedObj.customMetadata.window_start).toBe("2026-01-18T00:00:00.000Z");
+    expect(storedObj.customMetadata.window_end).toBe("2026-02-15T00:00:00.000Z");
+
+    // Verify 7-year retention expiry is approximately 7 years from now
+    const retentionDate = new Date(storedObj.customMetadata.retention_expiry);
+    const expectedMinDate = new Date(Date.now() + 6.9 * 365 * 24 * 60 * 60 * 1000);
+    expect(retentionDate.getTime()).toBeGreaterThan(expectedMinDate.getTime());
+
+    // Verify HTML content
+    expect(storedObj.body).toContain("<!DOCTYPE html>");
+    expect(storedObj.body).toContain("Acme Corp");
+    expect(storedObj.body).toContain("Sprint Planning");
+    expect(storedObj.body).toContain("Code Review");
+    expect(storedObj.body).toContain("Client Meeting");
+    expect(storedObj.body).toContain(body.data.proof_hash);
+    expect(storedObj.httpMetadata.contentType).toBe("text/html");
+  });
+
+  // -------------------------------------------------------------------------
+  // CSV export
+  // -------------------------------------------------------------------------
+
+  it("POST /v1/commitments/:id/export generates CSV with signature", async () => {
+    const doResponses = new Map<string, unknown>();
+    doResponses.set("/getCommitmentProofData", TEST_PROOF_DATA);
+    const env = buildProofEnv(doResponses);
+
+    const authHeader = await makeAuthHeader();
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "csv" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      ok: boolean;
+      data: { format: string; proof_hash: string; signature: string; r2_key: string };
+    };
+
+    expect(body.ok).toBe(true);
+
+    // AC 5: CSV alternative format available
+    expect(body.data.format).toBe("csv");
+    expect(body.data.r2_key).toMatch(/\.csv$/);
+    expect(body.data.proof_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(body.data.signature).toMatch(/^[a-f0-9]{64}$/);
+
+    // Verify CSV stored in R2
+    const storedKey = Array.from(r2Bucket.objects.keys())[0];
+    const storedObj = r2Bucket.objects.get(storedKey)!;
+    expect(storedObj.httpMetadata.contentType).toBe("text/csv");
+    expect(storedObj.body).toContain("event_id,title,start,end,hours,billing_category");
+    expect(storedObj.body).toContain("Sprint Planning");
+  });
+
+  // -------------------------------------------------------------------------
+  // Proof verification endpoint
+  // -------------------------------------------------------------------------
+
+  it("GET /v1/proofs/:id/verify returns valid=true for genuine proof", async () => {
+    // Step 1: Export a proof to create R2 object with metadata
+    const doResponses = new Map<string, unknown>();
+    doResponses.set("/getCommitmentProofData", TEST_PROOF_DATA);
+    const env = buildProofEnv(doResponses);
+
+    const authHeader = await makeAuthHeader();
+    const exportResponse = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "pdf" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(exportResponse.status).toBe(200);
+    const exportBody = await exportResponse.json() as { ok: boolean; data: { proof_id: string; proof_hash: string; signature: string } };
+    expect(exportBody.ok).toBe(true);
+
+    const proofId = exportBody.data.proof_id;
+
+    // Step 2: Verify the proof
+    // AC 3: Signature verifiable via endpoint
+    // AC 6: Verification endpoint returns validity
+    const verifyResponse = await handler.fetch(
+      new Request(`https://api.test/v1/proofs/${proofId}/verify`, {
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(verifyResponse.status).toBe(200);
+    const verifyBody = await verifyResponse.json() as {
+      ok: boolean;
+      data: { valid: boolean; proof_hash: string; signed_at: string | null };
+    };
+
+    expect(verifyBody.ok).toBe(true);
+    expect(verifyBody.data.valid).toBe(true);
+    expect(verifyBody.data.proof_hash).toBe(exportBody.data.proof_hash);
+    expect(verifyBody.data.signed_at).toBeTruthy();
+  });
+
+  it("GET /v1/proofs/:id/verify returns valid=false when signature is tampered", async () => {
+    // Create a proof with tampered signature in R2
+    const doResponses = new Map<string, unknown>();
+    doResponses.set("/getCommitmentProofData", TEST_PROOF_DATA);
+    const env = buildProofEnv(doResponses);
+
+    const authHeader = await makeAuthHeader();
+
+    // Export to create the proof
+    const exportResponse = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+      }),
+      env,
+      mockCtx,
+    );
+    const exportBody = await exportResponse.json() as { ok: boolean; data: { proof_id: string; r2_key: string } };
+    const proofId = exportBody.data.proof_id;
+    const r2Key = exportBody.data.r2_key;
+
+    // Tamper with the stored signature
+    const storedObj = r2Bucket.objects.get(r2Key)!;
+    storedObj.customMetadata.signature = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    // Verify should return false
+    const verifyResponse = await handler.fetch(
+      new Request(`https://api.test/v1/proofs/${proofId}/verify`, {
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(verifyResponse.status).toBe(200);
+    const verifyBody = await verifyResponse.json() as { ok: boolean; data: { valid: boolean } };
+    expect(verifyBody.ok).toBe(true);
+    expect(verifyBody.data.valid).toBe(false);
+  });
+
+  it("GET /v1/proofs/:id/verify returns 404 for non-existent proof", async () => {
+    const env = buildProofEnv();
+    const authHeader = await makeAuthHeader();
+
+    const verifyResponse = await handler.fetch(
+      new Request("https://api.test/v1/proofs/prf_01NONEXISTENT000000000001/verify", {
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(verifyResponse.status).toBe(404);
+    const body = await verifyResponse.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Proof not found");
+  });
+
+  // -------------------------------------------------------------------------
+  // Proof download
+  // -------------------------------------------------------------------------
+
+  it("GET /v1/proofs/{r2_key} downloads stored proof document", async () => {
+    const doResponses = new Map<string, unknown>();
+    doResponses.set("/getCommitmentProofData", TEST_PROOF_DATA);
+    const env = buildProofEnv(doResponses);
+
+    const authHeader = await makeAuthHeader();
+
+    // Export first
+    const exportResponse = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "pdf" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    const exportBody = await exportResponse.json() as { ok: boolean; data: { r2_key: string; download_url: string } };
+    expect(exportBody.ok).toBe(true);
+
+    // Download via the download_url
+    const downloadResponse = await handler.fetch(
+      new Request(`https://api.test${exportBody.data.download_url}`, {
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(downloadResponse.status).toBe(200);
+    const downloadedContent = await downloadResponse.text();
+    expect(downloadedContent).toContain("<!DOCTYPE html>");
+    expect(downloadedContent).toContain("Acme Corp");
+  });
+
+  // -------------------------------------------------------------------------
+  // Validation / error cases
+  // -------------------------------------------------------------------------
+
+  it("POST /v1/commitments/:id/export returns 500 when MASTER_KEY missing", async () => {
+    const env = buildProofEnv();
+    // Remove MASTER_KEY
+    delete (env as Record<string, unknown>).MASTER_KEY;
+
+    const authHeader = await makeAuthHeader();
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(500);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("MASTER_KEY missing");
+  });
+
+  it("POST /v1/commitments/:id/export rejects invalid format", async () => {
+    const env = buildProofEnv();
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.test/v1/commitments/cmt_01TESTAAAAAAAAAAAAAAAAAA88/export", {
+        method: "POST",
+        headers: { Authorization: authHeader, "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "xml" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("format must be");
+  });
+});

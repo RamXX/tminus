@@ -24,6 +24,9 @@ import {
   computeProofHash,
   generateProofCsv,
   generateProofDocument,
+  generateProofHtml,
+  computeProofSignature,
+  verifyProofSignature,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -1495,5 +1498,410 @@ describe("commitment proof export routing", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(401);
+  });
+
+  it("GET /v1/proofs/:id/verify requires auth", async () => {
+    const request = new Request("https://api.test/v1/proofs/prf_01TESTAAAAAAAAAAAAAAAAAA01/verify");
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(401);
+  });
+
+  it("GET /v1/proofs/:id/verify returns 400 for invalid proof ID format", async () => {
+    const auth = await makeAuthHeader();
+    const request = new Request("https://api.test/v1/proofs/bad-id/verify", {
+      headers: { Authorization: auth },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(400);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Invalid proof ID format");
+  });
+
+  it("GET /v1/proofs/:id/verify returns 500 when PROOF_BUCKET missing", async () => {
+    const auth = await makeAuthHeader();
+    const request = new Request("https://api.test/v1/proofs/prf_01TESTAAAAAAAAAAAAAAAAAA01/verify", {
+      headers: { Authorization: auth },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(500);
+    const body = await response.json() as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Proof export not configured");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateProofHtml
+// ---------------------------------------------------------------------------
+
+describe("generateProofHtml", () => {
+  it("returns valid HTML with doctype", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "abc123hash");
+
+    expect(html).toContain("<!DOCTYPE html>");
+    expect(html).toContain("<html");
+    expect(html).toContain("</html>");
+  });
+
+  it("includes commitment details in HTML", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "abc123hash");
+
+    expect(html).toContain("cmt_01TESTAAAAAAAAAAAAAAAAAA88");
+    expect(html).toContain("Acme Corp");
+    expect(html).toContain("WEEKLY");
+    expect(html).toContain("4 weeks");
+  });
+
+  it("includes compliance summary", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).toContain("Target Hours");
+    expect(html).toContain("10");
+    expect(html).toContain("Actual Hours");
+    expect(html).toContain("12.5");
+    expect(html).toContain("COMPLIANT");
+  });
+
+  it("includes event detail rows", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).toContain("Sprint Planning");
+    expect(html).toContain("Code Review");
+    expect(html).toContain("Client Meeting");
+    expect(html).toContain("evt_01TESTEVT00000000000001");
+  });
+
+  it("shows no events message when events array is empty", () => {
+    const data = makeTestProofData({ events: [], actual_hours: 0 });
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).toContain("No events found in this window");
+    expect(html).toContain("Event Detail (0 events)");
+  });
+
+  it("includes proof hash in verification section", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "my_proof_hash_value");
+
+    expect(html).toContain("Cryptographic Verification");
+    expect(html).toContain("my_proof_hash_value");
+  });
+
+  it("includes HMAC signature when provided", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "hash", "my_signature_value");
+
+    expect(html).toContain("HMAC-SHA256 Signature");
+    expect(html).toContain("my_signature_value");
+  });
+
+  it("omits signature section when signature is not provided", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).not.toContain("HMAC-SHA256 Signature");
+  });
+
+  it("escapes HTML special characters to prevent XSS", () => {
+    const data = makeTestProofData({
+      events: [
+        {
+          canonical_event_id: "evt_xss",
+          title: '<script>alert("xss")</script>',
+          start_ts: "2026-02-10T09:00:00.000Z",
+          end_ts: "2026-02-10T10:00:00.000Z",
+          hours: 1,
+          billing_category: "BILLABLE",
+        },
+      ],
+      actual_hours: 1,
+    });
+
+    const html = generateProofHtml(data, "hash");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("falls back to client_id when client_name is null", () => {
+    const data = makeTestProofData();
+    data.commitment.client_name = null;
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).toContain("client_acme");
+  });
+
+  it("includes print media query styles", () => {
+    const data = makeTestProofData();
+    const html = generateProofHtml(data, "hash");
+
+    expect(html).toContain("@media print");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeProofSignature
+// ---------------------------------------------------------------------------
+
+const TEST_MASTER_KEY = "test-master-key-for-hmac-signing-must-be-long-enough";
+
+describe("computeProofSignature", () => {
+  it("returns a 64-character hex string (HMAC-SHA256)", async () => {
+    const signature = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+
+    expect(signature).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("produces deterministic output for same inputs", async () => {
+    const args = [
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    ] as const;
+
+    const sig1 = await computeProofSignature(...args);
+    const sig2 = await computeProofSignature(...args);
+
+    expect(sig1).toBe(sig2);
+  });
+
+  it("produces different signature for different proof hashes", async () => {
+    const sig1 = await computeProofSignature(
+      "hash_one",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+    const sig2 = await computeProofSignature(
+      "hash_two",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+
+    expect(sig1).not.toBe(sig2);
+  });
+
+  it("produces different signature for different commitment IDs", async () => {
+    const sig1 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA01",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+    const sig2 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA02",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+
+    expect(sig1).not.toBe(sig2);
+  });
+
+  it("produces different signature for different windows", async () => {
+    const sig1 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-31T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+    const sig2 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-02-01T00:00:00.000Z",
+      "2026-02-28T00:00:00.000Z",
+      TEST_MASTER_KEY,
+    );
+
+    expect(sig1).not.toBe(sig2);
+  });
+
+  it("produces different signature for different keys", async () => {
+    const sig1 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      "key-one-aaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    const sig2 = await computeProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      "key-two-bbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+
+    expect(sig1).not.toBe(sig2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifyProofSignature
+// ---------------------------------------------------------------------------
+
+describe("verifyProofSignature", () => {
+  it("returns true for valid signature", async () => {
+    const proofHash = "abc123hash";
+    const commitmentId = "cmt_01TESTAAAAAAAAAAAAAAAAAA88";
+    const windowStart = "2026-01-18T00:00:00.000Z";
+    const windowEnd = "2026-02-15T00:00:00.000Z";
+
+    const signature = await computeProofSignature(
+      proofHash,
+      commitmentId,
+      windowStart,
+      windowEnd,
+      TEST_MASTER_KEY,
+    );
+
+    const valid = await verifyProofSignature(
+      proofHash,
+      commitmentId,
+      windowStart,
+      windowEnd,
+      signature,
+      TEST_MASTER_KEY,
+    );
+
+    expect(valid).toBe(true);
+  });
+
+  it("returns false for tampered proof hash", async () => {
+    const commitmentId = "cmt_01TESTAAAAAAAAAAAAAAAAAA88";
+    const windowStart = "2026-01-18T00:00:00.000Z";
+    const windowEnd = "2026-02-15T00:00:00.000Z";
+
+    const signature = await computeProofSignature(
+      "original_hash",
+      commitmentId,
+      windowStart,
+      windowEnd,
+      TEST_MASTER_KEY,
+    );
+
+    const valid = await verifyProofSignature(
+      "tampered_hash",
+      commitmentId,
+      windowStart,
+      windowEnd,
+      signature,
+      TEST_MASTER_KEY,
+    );
+
+    expect(valid).toBe(false);
+  });
+
+  it("returns false for tampered commitment ID", async () => {
+    const proofHash = "abc123hash";
+    const windowStart = "2026-01-18T00:00:00.000Z";
+    const windowEnd = "2026-02-15T00:00:00.000Z";
+
+    const signature = await computeProofSignature(
+      proofHash,
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      windowStart,
+      windowEnd,
+      TEST_MASTER_KEY,
+    );
+
+    const valid = await verifyProofSignature(
+      proofHash,
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA99",
+      windowStart,
+      windowEnd,
+      signature,
+      TEST_MASTER_KEY,
+    );
+
+    expect(valid).toBe(false);
+  });
+
+  it("returns false for wrong key", async () => {
+    const proofHash = "abc123hash";
+    const commitmentId = "cmt_01TESTAAAAAAAAAAAAAAAAAA88";
+    const windowStart = "2026-01-18T00:00:00.000Z";
+    const windowEnd = "2026-02-15T00:00:00.000Z";
+
+    const signature = await computeProofSignature(
+      proofHash,
+      commitmentId,
+      windowStart,
+      windowEnd,
+      TEST_MASTER_KEY,
+    );
+
+    const valid = await verifyProofSignature(
+      proofHash,
+      commitmentId,
+      windowStart,
+      windowEnd,
+      signature,
+      "wrong-key-zzzzzzzzzzzzzzzzzzzzzzz",
+    );
+
+    expect(valid).toBe(false);
+  });
+
+  it("returns false for garbage signature", async () => {
+    const valid = await verifyProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      "not-a-valid-hex-signature",
+      TEST_MASTER_KEY,
+    );
+
+    expect(valid).toBe(false);
+  });
+
+  it("returns false for empty signature", async () => {
+    const valid = await verifyProofSignature(
+      "abc123hash",
+      "cmt_01TESTAAAAAAAAAAAAAAAAAA88",
+      "2026-01-18T00:00:00.000Z",
+      "2026-02-15T00:00:00.000Z",
+      "",
+      TEST_MASTER_KEY,
+    );
+
+    expect(valid).toBe(false);
+  });
+
+  it("round-trips: sign then verify with different proof data", async () => {
+    // Test multiple different inputs all round-trip correctly
+    const testCases = [
+      { hash: "aaa", id: "cmt_01TESTAAAAAAAAAAAAAAAAAA01", ws: "2026-01-01T00:00:00Z", we: "2026-01-31T00:00:00Z" },
+      { hash: "bbb", id: "cmt_01TESTAAAAAAAAAAAAAAAAAA02", ws: "2026-02-01T00:00:00Z", we: "2026-02-28T00:00:00Z" },
+      { hash: "ccc", id: "cmt_01TESTAAAAAAAAAAAAAAAAAA03", ws: "2026-03-01T00:00:00Z", we: "2026-03-31T00:00:00Z" },
+    ];
+
+    for (const tc of testCases) {
+      const sig = await computeProofSignature(tc.hash, tc.id, tc.ws, tc.we, TEST_MASTER_KEY);
+      const valid = await verifyProofSignature(tc.hash, tc.id, tc.ws, tc.we, sig, TEST_MASTER_KEY);
+      expect(valid).toBe(true);
+    }
   });
 });
