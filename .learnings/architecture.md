@@ -80,3 +80,58 @@ DO routes internally based on action field. Clean, testable, consistent.
 **Applies to:** All HTTP clients, all RPC helpers, DO routing code
 
 **Source stories:** TM-a9h
+
+---
+
+## [Added from Epic TM-as6 retro - 2026-02-14]
+
+### Envelope encryption is O(1) rotation by design
+
+**Priority:** Important
+
+**Context:** DEK encryption production hardening (TM-1pc) revealed that AES-256-GCM key rotation only needs to re-encrypt the DEK wrapper, not the underlying token ciphertext. Token data is encrypted with the DEK, not the master key.
+
+**Recommendation:** When implementing any envelope encryption pattern in future work (not just tokens), structure the system so:
+1. Data is encrypted with a Data Encryption Key (DEK)
+2. DEK is encrypted with a Master Key
+3. Master key rotation = re-encrypt DEK wrapper only (O(1))
+4. Backups need encrypted DEK + IV, not data ciphertext
+
+This makes key rotation practical at scale.
+
+**Applies to:** All encryption-at-rest stories, Phase 3+ sensitive data handling
+
+**Source stories:** TM-1pc
+
+### KV write rate limits require timestamp-in-key design for counters
+
+**Priority:** Critical
+
+**Context:** Rate limiting (TM-as6.3) discovered that KV has a 1-write-per-second-per-key limit. Fixed-window counters that embed the window timestamp in the key (rl:<identity>:<window_start>) avoid this limit because each window gets a unique key.
+
+**Recommendation:** For any KV-based counter pattern (rate limiting, usage tracking, metrics):
+- Embed the time window in the key itself (e.g., rl:user123:1634567890)
+- Each window gets a unique key → no write rate limit conflict
+- Use TTL for automatic cleanup (no manual sweeping needed)
+- NEVER increment a single long-lived key repeatedly
+
+**Applies to:** All rate limiting, usage tracking, metrics stories; Phase 3+ billing/metering
+
+**Source stories:** TM-as6.3
+
+### Progressive lockout counters accumulate; test isolation requires direct DB manipulation
+
+**Priority:** Important
+
+**Context:** Account lockout testing (TM-as6.4) revealed that progressive lockout counters persist across test runs. Once the first threshold is reached, subsequent failed attempts immediately re-lock after expiry because the counter continues accumulating.
+
+**Recommendation:** For state machines with persistent counters (lockout, reputation, abuse detection):
+- Integration tests MUST either:
+  1. Set counter state directly in D1/DO storage before test (preferred)
+  2. Simulate lock expiry + wait between attempts (slower)
+- Do NOT rely on repeated API calls to reach higher thresholds (non-deterministic)
+- Document the state transition table in test comments
+
+**Applies to:** All state machine stories with persistent counters; Phase 4 reputation system
+
+**Source stories:** TM-as6.4

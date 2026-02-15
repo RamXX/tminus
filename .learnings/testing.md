@@ -126,3 +126,70 @@ Do NOT use:
 **Applies to:** All schema/migration tests, any code that iterates migrations
 
 **Source stories:** TM-swj
+
+---
+
+## [Added from Epic TM-as6 retro - 2026-02-14]
+
+### E2E tests must register users upfront to avoid rate limit quota conflicts
+
+**Priority:** Critical
+
+**Context:** E2E validation (TM-as6.10) discovered that /register endpoint has 5/hr/IP rate limit. E2E tests that register users during individual test cases quickly exhaust the quota, causing cascading failures.
+
+**Recommendation:** For E2E tests against rate-limited endpoints:
+- Register all needed users in beforeAll (shared test fixture)
+- Store credentials in test context for reuse across test cases
+- Rate limit testing MUST happen AFTER user registration
+- Document rate limit quotas in E2E test setup comments
+
+**Applies to:** All E2E test stories for Phase 2B (MCP), 2C (Web UI), 2D (Trips)
+
+**Source stories:** TM-as6.10
+
+### JWT iat second precision causes identical tokens; tests need >1s delay
+
+**Priority:** Important
+
+**Context:** E2E validation (TM-as6.10) discovered that JWT iat timestamp uses second precision. Two JWTs generated within the same second for the same user are byte-identical, breaking tests that compare old vs new tokens.
+
+**Recommendation:** For tests that generate multiple JWTs for the same user:
+- Include `await new Promise(r => setTimeout(r, 1100))` between generations
+- OR use explicit iat parameter in test JWT creation (if supported)
+- Document this timing requirement in test comments
+- Consider using millisecond-precision iat in production (requires JWT library support)
+
+**Applies to:** All auth-related tests; Phase 2B MCP auth tests
+
+**Source stories:** TM-as6.10
+
+### wrangler dev D1 migrations must be applied manually
+
+**Priority:** Important
+
+**Context:** E2E validation (TM-as6.10) and multi-environment config (TM-as6.5) revealed that wrangler dev creates a fresh local D1 database on each restart. The api worker's wrangler.toml does not have migrations_dir set, so migrations must be applied separately via `wrangler d1 execute`.
+
+**Recommendation:** For local development:
+- Add `migrations_dir = "../../packages/shared/migrations"` to api worker wrangler.toml (consider pros/cons)
+- OR document the manual migration step in README: `pnpm run migrate-local`
+- E2E test setup MUST apply migrations before running tests
+- Consider a make dev target that applies migrations + starts wrangler dev
+
+**Applies to:** All Phase 2B, 2C, 2D stories with D1 schema changes
+
+**Source stories:** TM-as6.10, TM-as6.5
+
+### vitest.workspace.ts auto-merges; E2E tests need explicit test.projects override
+
+**Priority:** Important
+
+**Context:** E2E validation (TM-as6.10) discovered that vitest.workspace.ts is auto-detected and merged into any config. E2E tests were unintentionally running workspace unit tests.
+
+**Recommendation:** For isolated test suites (E2E, performance, smoke):
+- Use `test.projects` in vitest.config.ts to override workspace projects
+- Explicitly define the test directory and exclude patterns
+- Verify isolation with `pnpm run test:e2e -- --reporter=verbose`
+
+**Applies to:** All E2E test stories; Phase 2B MCP E2E tests, Phase 2C UI E2E tests
+
+**Source stories:** TM-as6.10
