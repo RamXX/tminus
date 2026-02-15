@@ -10,6 +10,7 @@
  *   #/policies    -> Policy Management (requires auth)
  *   #/errors      -> Error Recovery (requires auth)
  *   #/billing     -> Billing & Subscription (requires auth)
+ *   #/scheduling  -> Scheduling Dashboard (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -22,6 +23,7 @@ import { SyncStatus } from "./pages/SyncStatus";
 import { Policies } from "./pages/Policies";
 import { ErrorRecovery } from "./pages/ErrorRecovery";
 import { Billing } from "./pages/Billing";
+import { Scheduling } from "./pages/Scheduling";
 import {
   fetchSyncStatus,
   fetchAccounts,
@@ -32,6 +34,10 @@ import {
   createCheckoutSession,
   createPortalSession,
   fetchBillingHistory,
+  createSchedulingSession,
+  listSessions,
+  commitCandidate,
+  cancelSession,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
@@ -137,6 +143,36 @@ function Router() {
     return fetchBillingHistory(token);
   }, [token]);
 
+  // Bound scheduling functions -- injects current token
+  const boundListSessions = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return listSessions(token);
+  }, [token]);
+
+  const boundCreateSchedulingSession = useCallback(
+    async (payload: import("./lib/scheduling").CreateSessionPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      return createSchedulingSession(token, payload);
+    },
+    [token],
+  );
+
+  const boundCommitCandidate = useCallback(
+    async (sessionId: string, candidateId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return commitCandidate(token, sessionId, candidateId);
+    },
+    [token],
+  );
+
+  const boundCancelSession = useCallback(
+    async (sessionId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return cancelSession(token, sessionId);
+    },
+    [token],
+  );
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -188,6 +224,16 @@ function Router() {
           createPortalSession={boundCreatePortalSession}
           fetchBillingHistory={boundFetchBillingHistory}
           accountsUsed={accountsCount}
+        />
+      );
+    case "#/scheduling":
+      return (
+        <Scheduling
+          listSessions={boundListSessions}
+          fetchAccounts={boundFetchAccounts}
+          createSession={boundCreateSchedulingSession}
+          commitCandidate={boundCommitCandidate}
+          cancelSession={boundCancelSession}
         />
       );
     default:

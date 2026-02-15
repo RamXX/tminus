@@ -314,3 +314,62 @@ export async function fetchBillingHistory(
     { token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+/** POST /api/v1/scheduling/sessions -- create a new scheduling session. */
+export async function createSchedulingSession(
+  token: string,
+  payload: import("./scheduling").CreateSessionPayload,
+): Promise<import("./scheduling").SchedulingSession> {
+  return apiFetch<import("./scheduling").SchedulingSession>(
+    "/v1/scheduling/sessions",
+    { method: "POST", body: payload, token },
+  );
+}
+
+/** GET /api/v1/scheduling/sessions/:id -- get a single scheduling session. */
+export async function getSession(
+  token: string,
+  sessionId: string,
+): Promise<import("./scheduling").SchedulingSession> {
+  return apiFetch<import("./scheduling").SchedulingSession>(
+    `/v1/scheduling/sessions/${encodeURIComponent(sessionId)}`,
+    { token },
+  );
+}
+
+/** GET /api/v1/scheduling/sessions -- list all scheduling sessions. */
+export async function listSessions(
+  token: string,
+): Promise<import("./scheduling").SchedulingSession[]> {
+  return apiFetch<import("./scheduling").SchedulingSession[]>(
+    "/v1/scheduling/sessions",
+    { token },
+  );
+}
+
+/** DELETE /api/v1/scheduling/sessions/:id -- cancel a scheduling session. */
+export async function cancelSession(
+  token: string,
+  sessionId: string,
+): Promise<import("./scheduling").CancelResponse> {
+  return apiFetch<import("./scheduling").CancelResponse>(
+    `/v1/scheduling/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE", token },
+  );
+}
+
+/** POST /api/v1/scheduling/sessions/:id/commit/:candidateId -- commit a candidate. */
+export async function commitCandidate(
+  token: string,
+  sessionId: string,
+  candidateId: string,
+): Promise<import("./scheduling").CommitResponse> {
+  return apiFetch<import("./scheduling").CommitResponse>(
+    `/v1/scheduling/sessions/${encodeURIComponent(sessionId)}/commit/${encodeURIComponent(candidateId)}`,
+    { method: "POST", token },
+  );
+}
