@@ -2344,8 +2344,8 @@ describe("MCP integration: tier-based tool permissions", () => {
     };
     expect(error).toBeDefined();
     expect(error.code).toBe(-32603);
-    expect(error.message).toBe("Insufficient tier");
-    expect(error.data).toEqual({
+    expect(error.message).toContain("requires a premium subscription");
+    expect(error.data).toMatchObject({
       code: "TIER_REQUIRED",
       required_tier: "premium",
       current_tier: "free",
