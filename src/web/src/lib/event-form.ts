@@ -4,7 +4,7 @@
  * Pure functions for form validation, payload construction, and
  * optimistic update logic. No React dependencies -- easy to unit test.
  */
-import type { CalendarEvent, CreateEventPayload } from "./api";
+import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "./api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -190,6 +190,125 @@ export function removeOptimisticEvent(
   tempId: string,
 ): CalendarEvent[] {
   return events.filter((e) => e.canonical_event_id !== tempId);
+}
+
+// ---------------------------------------------------------------------------
+// Optimistic edit helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply an optimistic edit to an event in the events list.
+ * Merges the update payload into the matching event.
+ * Returns a new array (does not mutate).
+ */
+export function updateOptimisticEvent(
+  events: CalendarEvent[],
+  eventId: string,
+  updates: UpdateEventPayload,
+): CalendarEvent[] {
+  return events.map((e) => {
+    if (e.canonical_event_id !== eventId) return e;
+    return {
+      ...e,
+      ...(updates.summary !== undefined && { summary: updates.summary }),
+      ...(updates.start !== undefined && { start: updates.start }),
+      ...(updates.end !== undefined && { end: updates.end }),
+      ...(updates.description !== undefined && { description: updates.description }),
+      ...(updates.location !== undefined && { location: updates.location }),
+    };
+  });
+}
+
+/**
+ * Remove an event from the events list (optimistic delete).
+ * Returns a new array (does not mutate).
+ */
+export function deleteOptimisticEvent(
+  events: CalendarEvent[],
+  eventId: string,
+): CalendarEvent[] {
+  return events.filter((e) => e.canonical_event_id !== eventId);
+}
+
+/**
+ * Build an UpdateEventPayload from edited form values and the original event.
+ * Only includes fields that actually changed.
+ */
+export function buildUpdatePayload(
+  original: CalendarEvent,
+  values: EventFormValues,
+): UpdateEventPayload {
+  const payload: UpdateEventPayload = {};
+
+  const newSummary = values.title.trim();
+  if (newSummary !== (original.summary ?? "")) {
+    payload.summary = newSummary;
+  }
+
+  const newStart = `${values.startDate}T${values.startTime}:00`;
+  if (newStart !== original.start) {
+    payload.start = newStart;
+  }
+
+  const newEnd = `${values.endDate}T${values.endTime}:00`;
+  if (newEnd !== original.end) {
+    payload.end = newEnd;
+  }
+
+  const newDescription = values.description.trim() || undefined;
+  if (newDescription !== (original.description ?? undefined)) {
+    payload.description = newDescription ?? "";
+  }
+
+  const newLocation = values.location.trim() || undefined;
+  if (newLocation !== (original.location ?? undefined)) {
+    payload.location = newLocation ?? "";
+  }
+
+  return payload;
+}
+
+/**
+ * Create form values pre-populated from an existing event for editing.
+ */
+export function createEditFormValues(event: CalendarEvent): EventFormValues {
+  // Parse start/end to extract date and time parts
+  const startDate = extractDatePart(event.start);
+  const startTime = extractTimePart(event.start);
+  const endDate = extractDatePart(event.end);
+  const endTime = extractTimePart(event.end);
+
+  return {
+    title: event.summary ?? "",
+    startDate,
+    startTime,
+    endDate,
+    endTime,
+    timezone: getLocalTimezone(),
+    description: event.description ?? "",
+    location: event.location ?? "",
+  };
+}
+
+/**
+ * Extract the date part (YYYY-MM-DD) from an ISO-ish datetime string.
+ * Handles both "2026-02-14T09:00:00" and "2026-02-14T09:00:00Z" formats.
+ */
+function extractDatePart(datetime: string): string {
+  // Take the part before 'T'
+  const tIndex = datetime.indexOf("T");
+  if (tIndex === -1) return datetime.slice(0, 10);
+  return datetime.slice(0, tIndex);
+}
+
+/**
+ * Extract the time part (HH:MM) from an ISO-ish datetime string.
+ */
+function extractTimePart(datetime: string): string {
+  const tIndex = datetime.indexOf("T");
+  if (tIndex === -1) return "00:00";
+  // Take HH:MM after the T
+  return datetime.slice(tIndex + 1, tIndex + 6);
 }
 
 // ---------------------------------------------------------------------------

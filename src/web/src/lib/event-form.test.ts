@@ -19,6 +19,10 @@ import {
   removeOptimisticEvent,
   createDefaultFormValues,
   getLocalTimezone,
+  updateOptimisticEvent,
+  deleteOptimisticEvent,
+  buildUpdatePayload,
+  createEditFormValues,
   type EventFormValues,
 } from "./event-form";
 import type { CalendarEvent, CreateEventPayload } from "./api";
@@ -347,5 +351,229 @@ describe("getLocalTimezone", () => {
   it("returns a non-empty string", () => {
     const tz = getLocalTimezone();
     expect(tz.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateOptimisticEvent
+// ---------------------------------------------------------------------------
+
+describe("updateOptimisticEvent", () => {
+  const events: CalendarEvent[] = [
+    { canonical_event_id: "evt-1", summary: "Meeting", start: "2026-02-14T09:00:00", end: "2026-02-14T10:00:00", description: "Original desc" },
+    { canonical_event_id: "evt-2", summary: "Lunch", start: "2026-02-14T12:00:00", end: "2026-02-14T13:00:00" },
+  ];
+
+  it("updates the matching event's summary", () => {
+    const result = updateOptimisticEvent(events, "evt-1", { summary: "Updated Meeting" });
+    expect(result[0].summary).toBe("Updated Meeting");
+    expect(result[1].summary).toBe("Lunch");
+  });
+
+  it("updates multiple fields at once", () => {
+    const result = updateOptimisticEvent(events, "evt-1", {
+      summary: "New Title",
+      start: "2026-02-14T10:00:00",
+      description: "New desc",
+    });
+    expect(result[0].summary).toBe("New Title");
+    expect(result[0].start).toBe("2026-02-14T10:00:00");
+    expect(result[0].description).toBe("New desc");
+  });
+
+  it("does not mutate original array", () => {
+    updateOptimisticEvent(events, "evt-1", { summary: "Changed" });
+    expect(events[0].summary).toBe("Meeting");
+  });
+
+  it("returns same-length array when ID not found", () => {
+    const result = updateOptimisticEvent(events, "evt-999", { summary: "Nope" });
+    expect(result).toHaveLength(2);
+    expect(result[0].summary).toBe("Meeting");
+  });
+
+  it("preserves other fields when updating one field", () => {
+    const result = updateOptimisticEvent(events, "evt-1", { summary: "New" });
+    expect(result[0].start).toBe("2026-02-14T09:00:00");
+    expect(result[0].end).toBe("2026-02-14T10:00:00");
+    expect(result[0].description).toBe("Original desc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteOptimisticEvent
+// ---------------------------------------------------------------------------
+
+describe("deleteOptimisticEvent", () => {
+  const events: CalendarEvent[] = [
+    { canonical_event_id: "evt-1", summary: "Keep", start: "s", end: "e" },
+    { canonical_event_id: "evt-2", summary: "Delete", start: "s", end: "e" },
+    { canonical_event_id: "evt-3", summary: "Also Keep", start: "s", end: "e" },
+  ];
+
+  it("removes the event with matching ID", () => {
+    const result = deleteOptimisticEvent(events, "evt-2");
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.canonical_event_id)).toEqual(["evt-1", "evt-3"]);
+  });
+
+  it("does not mutate original array", () => {
+    deleteOptimisticEvent(events, "evt-2");
+    expect(events).toHaveLength(3);
+  });
+
+  it("returns same array if ID not found", () => {
+    const result = deleteOptimisticEvent(events, "evt-999");
+    expect(result).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildUpdatePayload
+// ---------------------------------------------------------------------------
+
+describe("buildUpdatePayload", () => {
+  const original: CalendarEvent = {
+    canonical_event_id: "evt-1",
+    summary: "Team Meeting",
+    start: "2026-02-14T09:00:00",
+    end: "2026-02-14T10:00:00",
+    description: "Discuss Q1",
+    location: "Room A",
+  };
+
+  it("returns empty object when nothing changed", () => {
+    const values = validForm({
+      title: "Team Meeting",
+      startDate: "2026-02-14",
+      startTime: "09:00",
+      endDate: "2026-02-14",
+      endTime: "10:00",
+      description: "Discuss Q1",
+      location: "Room A",
+    });
+    const payload = buildUpdatePayload(original, values);
+    expect(payload).toEqual({});
+  });
+
+  it("includes only changed fields (summary)", () => {
+    const values = validForm({
+      title: "Updated Title",
+      startDate: "2026-02-14",
+      startTime: "09:00",
+      endDate: "2026-02-14",
+      endTime: "10:00",
+      description: "Discuss Q1",
+      location: "Room A",
+    });
+    const payload = buildUpdatePayload(original, values);
+    expect(payload).toEqual({ summary: "Updated Title" });
+  });
+
+  it("includes changed start time", () => {
+    const values = validForm({
+      title: "Team Meeting",
+      startDate: "2026-02-14",
+      startTime: "10:00",
+      endDate: "2026-02-14",
+      endTime: "10:00",
+      description: "Discuss Q1",
+      location: "Room A",
+    });
+    const payload = buildUpdatePayload(original, values);
+    expect(payload.start).toBe("2026-02-14T10:00:00");
+  });
+
+  it("includes cleared description as empty string", () => {
+    const values = validForm({
+      title: "Team Meeting",
+      startDate: "2026-02-14",
+      startTime: "09:00",
+      endDate: "2026-02-14",
+      endTime: "10:00",
+      description: "",
+      location: "Room A",
+    });
+    const payload = buildUpdatePayload(original, values);
+    expect(payload.description).toBe("");
+  });
+
+  it("includes multiple changed fields", () => {
+    const values = validForm({
+      title: "New Name",
+      startDate: "2026-02-15",
+      startTime: "11:00",
+      endDate: "2026-02-15",
+      endTime: "12:00",
+      description: "New desc",
+      location: "Room B",
+    });
+    const payload = buildUpdatePayload(original, values);
+    expect(payload.summary).toBe("New Name");
+    expect(payload.start).toBe("2026-02-15T11:00:00");
+    expect(payload.end).toBe("2026-02-15T12:00:00");
+    expect(payload.description).toBe("New desc");
+    expect(payload.location).toBe("Room B");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createEditFormValues
+// ---------------------------------------------------------------------------
+
+describe("createEditFormValues", () => {
+  it("creates form values from an event with all fields", () => {
+    const event: CalendarEvent = {
+      canonical_event_id: "evt-1",
+      summary: "Test Event",
+      start: "2026-02-14T09:00:00",
+      end: "2026-02-14T10:30:00",
+      description: "Some description",
+      location: "Office",
+    };
+    const values = createEditFormValues(event);
+    expect(values.title).toBe("Test Event");
+    expect(values.startDate).toBe("2026-02-14");
+    expect(values.startTime).toBe("09:00");
+    expect(values.endDate).toBe("2026-02-14");
+    expect(values.endTime).toBe("10:30");
+    expect(values.description).toBe("Some description");
+    expect(values.location).toBe("Office");
+  });
+
+  it("handles event with timezone suffix (Z)", () => {
+    const event: CalendarEvent = {
+      canonical_event_id: "evt-2",
+      summary: "UTC Event",
+      start: "2026-02-14T14:00:00Z",
+      end: "2026-02-14T15:30:00Z",
+    };
+    const values = createEditFormValues(event);
+    expect(values.startDate).toBe("2026-02-14");
+    expect(values.startTime).toBe("14:00");
+    expect(values.endDate).toBe("2026-02-14");
+    expect(values.endTime).toBe("15:30");
+  });
+
+  it("defaults missing fields to empty strings", () => {
+    const event: CalendarEvent = {
+      canonical_event_id: "evt-3",
+      start: "2026-02-14T09:00:00",
+      end: "2026-02-14T10:00:00",
+    };
+    const values = createEditFormValues(event);
+    expect(values.title).toBe("");
+    expect(values.description).toBe("");
+    expect(values.location).toBe("");
+  });
+
+  it("sets timezone to local timezone", () => {
+    const event: CalendarEvent = {
+      canonical_event_id: "evt-4",
+      start: "2026-02-14T09:00:00",
+      end: "2026-02-14T10:00:00",
+    };
+    const values = createEditFormValues(event);
+    expect(values.timezone.length).toBeGreaterThan(0);
   });
 });

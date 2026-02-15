@@ -12,8 +12,8 @@
 
 import { useCallback } from "react";
 import { useAuth } from "../lib/auth";
-import { fetchEvents, ApiError } from "../lib/api";
-import type { CalendarEvent } from "../lib/api";
+import { fetchEvents, createEvent, updateEvent, deleteEvent, ApiError } from "../lib/api";
+import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
 import { UnifiedCalendar } from "../components/UnifiedCalendar";
 
 export function Calendar() {
@@ -32,6 +32,54 @@ export function Calendar() {
         if (err instanceof ApiError && err.status === 401) {
           logout();
           return [];
+        }
+        throw err;
+      }
+    },
+    [token, logout],
+  );
+
+  /** Create a new event via the API. */
+  const handleCreateEvent = useCallback(
+    async (payload: CreateEventPayload): Promise<CalendarEvent> => {
+      if (!token) throw new Error("Not authenticated");
+      try {
+        return await createEvent(token, payload);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout();
+        }
+        throw err;
+      }
+    },
+    [token, logout],
+  );
+
+  /** Update an existing event via the API. */
+  const handleUpdateEvent = useCallback(
+    async (eventId: string, payload: UpdateEventPayload): Promise<CalendarEvent> => {
+      if (!token) throw new Error("Not authenticated");
+      try {
+        return await updateEvent(token, eventId, payload);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout();
+        }
+        throw err;
+      }
+    },
+    [token, logout],
+  );
+
+  /** Delete an event via the API. */
+  const handleDeleteEvent = useCallback(
+    async (eventId: string): Promise<void> => {
+      if (!token) throw new Error("Not authenticated");
+      try {
+        await deleteEvent(token, eventId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout();
         }
         throw err;
       }
@@ -65,7 +113,12 @@ export function Calendar() {
 
       {/* Calendar */}
       <main style={styles.main}>
-        <UnifiedCalendar fetchEvents={fetchCalendarEvents} />
+        <UnifiedCalendar
+          fetchEvents={fetchCalendarEvents}
+          onCreateEvent={handleCreateEvent}
+          onUpdateEvent={handleUpdateEvent}
+          onDeleteEvent={handleDeleteEvent}
+        />
       </main>
     </div>
   );

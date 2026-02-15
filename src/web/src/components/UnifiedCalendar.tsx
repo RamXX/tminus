@@ -18,7 +18,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import type { CalendarEvent, CreateEventPayload } from "../lib/api";
+import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
 import {
   getAccountColor,
   getDateRangeForView,
@@ -39,6 +39,8 @@ import {
   addOptimisticEvent,
   replaceOptimisticEvent,
   removeOptimisticEvent,
+  updateOptimisticEvent,
+  deleteOptimisticEvent,
 } from "../lib/event-form";
 import { EventDetail } from "./EventDetail";
 import { EventCreateForm } from "./EventCreateForm";
@@ -52,6 +54,10 @@ export interface UnifiedCalendarProps {
   fetchEvents: (start: string, end: string) => Promise<CalendarEvent[]>;
   /** Optional. Create a new event. Returns the created CalendarEvent. */
   onCreateEvent?: (payload: CreateEventPayload) => Promise<CalendarEvent>;
+  /** Optional. Update an existing event. Returns the updated CalendarEvent. */
+  onUpdateEvent?: (eventId: string, payload: UpdateEventPayload) => Promise<CalendarEvent>;
+  /** Optional. Delete an event by ID. */
+  onDeleteEvent?: (eventId: string) => Promise<void>;
   /** Initial date to display. Defaults to today. */
   initialDate?: Date;
   /** Initial view. Defaults to "week". */
@@ -65,6 +71,8 @@ export interface UnifiedCalendarProps {
 export function UnifiedCalendar({
   fetchEvents,
   onCreateEvent,
+  onUpdateEvent,
+  onDeleteEvent,
   initialDate,
   initialView = "week",
 }: UnifiedCalendarProps) {
@@ -80,13 +88,99 @@ export function UnifiedCalendar({
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Event edit/delete state
+  const [editSaving, setEditSaving] = useState(false);
+  const [editDeleting, setEditDeleting] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const handleEventClick = useCallback((event: CalendarEvent) => {
     setSelectedEvent(event);
+    setEditError(null);
   }, []);
 
   const handleCloseDetail = useCallback(() => {
     setSelectedEvent(null);
+    setEditError(null);
   }, []);
+
+  // Save edits with optimistic update
+  const handleSaveEvent = useCallback(
+    async (eventId: string, payload: UpdateEventPayload) => {
+      if (!onUpdateEvent || !selectedEvent) return;
+
+      setEditSaving(true);
+      setEditError(null);
+
+      // Snapshot for rollback
+      const snapshot = [...events];
+
+      // Optimistic update
+      setEvents((prev) => updateOptimisticEvent(prev, eventId, payload));
+
+      // Update selectedEvent optimistically so the panel shows the new values
+      setSelectedEvent((prev) => {
+        if (!prev || prev.canonical_event_id !== eventId) return prev;
+        return {
+          ...prev,
+          ...(payload.summary !== undefined && { summary: payload.summary }),
+          ...(payload.start !== undefined && { start: payload.start }),
+          ...(payload.end !== undefined && { end: payload.end }),
+          ...(payload.description !== undefined && { description: payload.description }),
+          ...(payload.location !== undefined && { location: payload.location }),
+        };
+      });
+
+      try {
+        const updated = await onUpdateEvent(eventId, payload);
+        // Replace optimistic with real from API
+        setEvents((prev) =>
+          prev.map((e) => (e.canonical_event_id === eventId ? updated : e)),
+        );
+        setSelectedEvent(updated);
+      } catch (err) {
+        // Rollback
+        setEvents(snapshot);
+        setSelectedEvent(selectedEvent);
+        setEditError(
+          err instanceof Error ? err.message : "Failed to save changes",
+        );
+      } finally {
+        setEditSaving(false);
+      }
+    },
+    [onUpdateEvent, selectedEvent, events],
+  );
+
+  // Delete with optimistic removal
+  const handleDeleteEvent = useCallback(
+    async (eventId: string) => {
+      if (!onDeleteEvent) return;
+
+      setEditDeleting(true);
+      setEditError(null);
+
+      // Snapshot for rollback
+      const snapshot = [...events];
+
+      // Optimistic removal
+      setEvents((prev) => deleteOptimisticEvent(prev, eventId));
+
+      try {
+        await onDeleteEvent(eventId);
+        // Success -- close the detail panel
+        setSelectedEvent(null);
+      } catch (err) {
+        // Rollback
+        setEvents(snapshot);
+        setEditError(
+          err instanceof Error ? err.message : "Failed to delete event",
+        );
+      } finally {
+        setEditDeleting(false);
+      }
+    },
+    [onDeleteEvent, events],
+  );
 
   // Time slot click handler -- opens creation form
   const handleTimeSlotClick = useCallback(
@@ -350,7 +444,15 @@ export function UnifiedCalendar({
 
       {/* Event detail panel */}
       {selectedEvent && (
-        <EventDetail event={selectedEvent} onClose={handleCloseDetail} />
+        <EventDetail
+          event={selectedEvent}
+          onClose={handleCloseDetail}
+          onSave={onUpdateEvent ? handleSaveEvent : undefined}
+          onDelete={onDeleteEvent ? handleDeleteEvent : undefined}
+          saving={editSaving}
+          deleting={editDeleting}
+          error={editError}
+        />
       )}
 
       {/* Event creation form */}

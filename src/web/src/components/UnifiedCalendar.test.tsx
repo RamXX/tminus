@@ -15,7 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UnifiedCalendar } from "./UnifiedCalendar";
-import type { CalendarEvent, CreateEventPayload } from "../lib/api";
+import type { CalendarEvent, CreateEventPayload, UpdateEventPayload } from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -1070,6 +1070,363 @@ describe("UnifiedCalendar", () => {
 
       // Should show a hint to click
       expect(screen.getByText(/click a time slot/i)).toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Event editing
+  // =========================================================================
+
+  describe("event editing", () => {
+    /** Mock onUpdateEvent that resolves with the updated event. */
+    function createMockUpdate(delay = 0) {
+      return vi.fn(async (eventId: string, payload: UpdateEventPayload): Promise<CalendarEvent> => {
+        if (delay > 0) {
+          await new Promise((r) => setTimeout(r, delay));
+        }
+        // Find the original event and merge updates
+        const original = MOCK_EVENTS.find((e) => e.canonical_event_id === eventId);
+        return {
+          ...(original ?? { canonical_event_id: eventId, start: "", end: "" }),
+          ...payload,
+          version: (original?.version ?? 0) + 1,
+        } as CalendarEvent;
+      });
+    }
+
+    /** Mock onUpdateEvent that rejects. */
+    function createFailingUpdate(errorMessage = "Update failed") {
+      return vi.fn(async (): Promise<CalendarEvent> => {
+        throw new Error(errorMessage);
+      });
+    }
+
+    it("opens event detail -> clicks edit -> edits title -> saves -> API PATCH called -> calendar updated", async () => {
+      const fetchFn = createMockFetch();
+      const updateFn = createMockUpdate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onUpdateEvent={updateFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      // Wait for events to load
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click on an event to open detail
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+
+      // Click edit button
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Change title
+      const titleInput = screen.getByTestId("edit-title-input");
+      await user.clear(titleInput);
+      await user.type(titleInput, "Updated Standup");
+
+      // Save
+      await user.click(screen.getByTestId("edit-save-btn"));
+
+      // API should be called with the event ID and updated summary
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalledTimes(1);
+      });
+      expect(updateFn).toHaveBeenCalledWith(
+        "evt-1",
+        expect.objectContaining({ summary: "Updated Standup" }),
+      );
+
+      // Calendar should show the updated title (it also appears in the detail panel heading)
+      await waitFor(() => {
+        const matches = screen.getAllByText("Updated Standup");
+        // Should appear in calendar chip + detail panel heading
+        expect(matches.length).toBeGreaterThanOrEqual(1);
+      });
+
+      // Close detail panel and verify calendar chip has the new title
+      await user.click(screen.getByRole("button", { name: /close/i }));
+      expect(screen.queryByTestId("event-detail-panel")).not.toBeInTheDocument();
+      expect(screen.getByText("Updated Standup")).toBeInTheDocument();
+    });
+
+    it("shows edit button only when onUpdateEvent is provided", async () => {
+      const fetchFn = createMockFetch();
+      const updateFn = createMockUpdate();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onUpdateEvent={updateFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click event to open detail
+      await user.click(screen.getByText("Team Standup"));
+
+      // Edit button should be visible
+      expect(screen.getByTestId("edit-event-btn")).toBeInTheDocument();
+    });
+
+    it("does NOT show edit button when onUpdateEvent is not provided", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Click event to open detail
+      await user.click(screen.getByText("Team Standup"));
+
+      // No edit button
+      expect(screen.queryByTestId("edit-event-btn")).not.toBeInTheDocument();
+    });
+
+    it("rolls back to original state on API error", async () => {
+      const fetchFn = createMockFetch();
+      const updateFn = createFailingUpdate("Server error");
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onUpdateEvent={updateFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open event detail
+      await user.click(screen.getByText("Team Standup"));
+
+      // Edit title
+      await user.click(screen.getByTestId("edit-event-btn"));
+      const titleInput = screen.getByTestId("edit-title-input");
+      await user.clear(titleInput);
+      await user.type(titleInput, "Will Fail");
+      await user.click(screen.getByTestId("edit-save-btn"));
+
+      // Wait for error to appear in the detail panel
+      await waitFor(() => {
+        expect(screen.getByTestId("event-detail-error")).toBeInTheDocument();
+      });
+      expect(screen.getByText("Server error")).toBeInTheDocument();
+
+      // Calendar should still show the original title (rollback)
+      // Close the detail panel first to check
+      await user.click(screen.getByRole("button", { name: /close/i }));
+      expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      expect(screen.queryByText("Will Fail")).not.toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Event deletion
+  // =========================================================================
+
+  describe("event deletion", () => {
+    /** Mock onDeleteEvent that resolves. */
+    function createMockDelete(delay = 0) {
+      return vi.fn(async (_eventId: string): Promise<void> => {
+        if (delay > 0) {
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      });
+    }
+
+    /** Mock onDeleteEvent that rejects. */
+    function createFailingDelete(errorMessage = "Delete failed") {
+      return vi.fn(async (): Promise<void> => {
+        throw new Error(errorMessage);
+      });
+    }
+
+    it("deletes event -> confirm dialog -> DELETE API called -> event removed from calendar", async () => {
+      const fetchFn = createMockFetch();
+      const deleteFn = createMockDelete();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onDeleteEvent={deleteFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open event detail
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.getByTestId("event-detail-panel")).toBeInTheDocument();
+
+      // Click delete
+      await user.click(screen.getByTestId("delete-event-btn"));
+
+      // Confirmation dialog should appear
+      expect(screen.getByTestId("delete-confirm-dialog")).toBeInTheDocument();
+      expect(screen.getByText(/are you sure/i)).toBeInTheDocument();
+
+      // Confirm
+      await user.click(screen.getByTestId("delete-confirm-btn"));
+
+      // API should be called
+      await waitFor(() => {
+        expect(deleteFn).toHaveBeenCalledTimes(1);
+      });
+      expect(deleteFn).toHaveBeenCalledWith("evt-1");
+
+      // Detail panel should close
+      await waitFor(() => {
+        expect(screen.queryByTestId("event-detail-panel")).not.toBeInTheDocument();
+      });
+
+      // Event should be removed from calendar
+      expect(screen.queryByText("Team Standup")).not.toBeInTheDocument();
+
+      // Other events should still be present
+      expect(screen.getByText("Lunch with Alice")).toBeInTheDocument();
+    });
+
+    it("shows delete button only when onDeleteEvent is provided", async () => {
+      const fetchFn = createMockFetch();
+      const deleteFn = createMockDelete();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onDeleteEvent={deleteFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.getByTestId("delete-event-btn")).toBeInTheDocument();
+    });
+
+    it("does NOT show delete button when onDeleteEvent is not provided", async () => {
+      const fetchFn = createMockFetch();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Team Standup"));
+      expect(screen.queryByTestId("delete-event-btn")).not.toBeInTheDocument();
+    });
+
+    it("rolls back when delete API fails", async () => {
+      const fetchFn = createMockFetch();
+      const deleteFn = createFailingDelete("Forbidden");
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onDeleteEvent={deleteFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open event detail and delete
+      await user.click(screen.getByText("Team Standup"));
+      await user.click(screen.getByTestId("delete-event-btn"));
+      await user.click(screen.getByTestId("delete-confirm-btn"));
+
+      // Wait for error
+      await waitFor(() => {
+        expect(screen.getByTestId("event-detail-error")).toBeInTheDocument();
+      });
+      expect(screen.getByText("Forbidden")).toBeInTheDocument();
+
+      // Close detail panel
+      await user.click(screen.getByRole("button", { name: /close/i }));
+
+      // Event should still be on the calendar (rolled back)
+      expect(screen.getByText("Team Standup")).toBeInTheDocument();
+    });
+
+    it("cancel in confirmation dialog does NOT delete", async () => {
+      const fetchFn = createMockFetch();
+      const deleteFn = createMockDelete();
+      const initialDate = new Date("2026-02-14T12:00:00Z");
+
+      render(
+        <UnifiedCalendar
+          fetchEvents={fetchFn}
+          onDeleteEvent={deleteFn}
+          initialDate={initialDate}
+          initialView="week"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Team Standup")).toBeInTheDocument();
+      });
+
+      // Open event and click delete
+      await user.click(screen.getByText("Team Standup"));
+      await user.click(screen.getByTestId("delete-event-btn"));
+
+      // Cancel the confirmation
+      await user.click(screen.getByTestId("delete-cancel-btn"));
+
+      // API should NOT be called
+      expect(deleteFn).not.toHaveBeenCalled();
+
+      // Event should still be there
+      await user.click(screen.getByRole("button", { name: /close/i }));
+      expect(screen.getByText("Team Standup")).toBeInTheDocument();
     });
   });
 });

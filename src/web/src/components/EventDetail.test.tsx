@@ -4,12 +4,16 @@
  * Unit tests:
  * - MirrorStatusBadge renders correct color per status (ACTIVE=green, PENDING=yellow, ERROR=red)
  * - Event detail formatting (time range, version, updated_at)
+ * - Edit mode: inline edit toggle, save/cancel logic, validation errors
+ * - Delete confirmation dialog: show/hide, confirm/cancel
  *
  * Integration tests:
  * - Full component renders with mock event data including mirrors array
  * - Status badges show correct colors
  * - Handles missing optional fields (no description, no location)
  * - Close/dismiss behavior
+ * - Edit flow: click edit -> modify title -> save -> onSave called with payload
+ * - Delete flow: click delete -> confirm dialog -> confirm -> onDelete called
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
@@ -313,6 +317,328 @@ describe("EventDetail", () => {
       await user.click(panel);
 
       expect(onClose).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Edit mode
+  // -------------------------------------------------------------------------
+
+  describe("edit mode", () => {
+    it("shows edit button when onSave is provided", () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      expect(screen.getByTestId("edit-event-btn")).toBeInTheDocument();
+    });
+
+    it("does NOT show edit button when onSave is not provided", () => {
+      render(<EventDetail event={FULL_EVENT} onClose={vi.fn()} />);
+      expect(screen.queryByTestId("edit-event-btn")).not.toBeInTheDocument();
+    });
+
+    it("enters edit mode on edit button click", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Should show title input with event summary
+      const titleInput = screen.getByTestId("edit-title-input");
+      expect(titleInput).toBeInTheDocument();
+      expect((titleInput as HTMLInputElement).value).toBe("Architecture Review");
+
+      // Should show save/cancel buttons
+      expect(screen.getByTestId("edit-save-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-cancel-btn")).toBeInTheDocument();
+    });
+
+    it("shows time edit inputs in edit mode", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      expect(screen.getByTestId("edit-start-date-input")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-start-time-input")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-end-date-input")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-end-time-input")).toBeInTheDocument();
+    });
+
+    it("shows description textarea in edit mode", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      const descInput = screen.getByTestId("edit-description-input");
+      expect(descInput).toBeInTheDocument();
+      expect((descInput as HTMLTextAreaElement).value).toBe(
+        "Review Q1 architecture decisions and plan Q2 roadmap.",
+      );
+    });
+
+    it("shows location input in edit mode", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      const locInput = screen.getByTestId("edit-location-input");
+      expect(locInput).toBeInTheDocument();
+      expect((locInput as HTMLInputElement).value).toBe(
+        "Conference Room B, Floor 3",
+      );
+    });
+
+    it("cancels edit mode and returns to view", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // In edit mode
+      expect(screen.getByTestId("edit-title-input")).toBeInTheDocument();
+
+      // Click cancel
+      await user.click(screen.getByTestId("edit-cancel-btn"));
+
+      // Back to view mode
+      expect(screen.queryByTestId("edit-title-input")).not.toBeInTheDocument();
+      expect(screen.getByText("Architecture Review")).toBeInTheDocument();
+    });
+
+    it("calls onSave with changed fields when save is clicked", async () => {
+      const onSave = vi.fn();
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={onSave} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Change title
+      const titleInput = screen.getByTestId("edit-title-input");
+      await user.clear(titleInput);
+      await user.type(titleInput, "Updated Review");
+
+      // Save
+      await user.click(screen.getByTestId("edit-save-btn"));
+
+      expect(onSave).toHaveBeenCalledTimes(1);
+      expect(onSave).toHaveBeenCalledWith(
+        "evt-detail-1",
+        expect.objectContaining({ summary: "Updated Review" }),
+      );
+    });
+
+    it("does not call onSave when nothing changed", async () => {
+      // Use an event without Z suffix so form values match exactly
+      const event: CalendarEvent = {
+        canonical_event_id: "evt-no-change",
+        summary: "Unchanged",
+        start: "2026-02-14T09:00:00",
+        end: "2026-02-14T10:00:00",
+        description: "Same desc",
+        location: "Same loc",
+      };
+      const onSave = vi.fn();
+      render(
+        <EventDetail event={event} onClose={vi.fn()} onSave={onSave} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Save without changing anything
+      await user.click(screen.getByTestId("edit-save-btn"));
+
+      // Should exit edit mode without calling onSave
+      expect(onSave).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("edit-title-input")).not.toBeInTheDocument();
+    });
+
+    it("shows validation error for empty title", async () => {
+      const onSave = vi.fn();
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={onSave} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Clear title
+      const titleInput = screen.getByTestId("edit-title-input");
+      await user.clear(titleInput);
+
+      // Try to save
+      await user.click(screen.getByTestId("edit-save-btn"));
+
+      // Should show error and NOT call onSave
+      expect(screen.getByTestId("edit-title-error")).toBeInTheDocument();
+      expect(onSave).not.toHaveBeenCalled();
+    });
+
+    it("clears validation error when user types", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Clear title and try to save
+      const titleInput = screen.getByTestId("edit-title-input");
+      await user.clear(titleInput);
+      await user.click(screen.getByTestId("edit-save-btn"));
+      expect(screen.getByTestId("edit-title-error")).toBeInTheDocument();
+
+      // Start typing -- error should clear
+      await user.type(titleInput, "N");
+      expect(screen.queryByTestId("edit-title-error")).not.toBeInTheDocument();
+    });
+
+    it("shows error banner when error prop is set", () => {
+      render(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onSave={vi.fn()}
+          error="Failed to save changes"
+        />,
+      );
+      expect(screen.getByTestId("event-detail-error")).toHaveTextContent(
+        "Failed to save changes",
+      );
+    });
+
+    it("shows 'Saving...' on save button when saving prop is true", async () => {
+      // Render without saving first so we can enter edit mode
+      const { rerender } = render(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onSave={vi.fn()}
+          saving={false}
+        />,
+      );
+      // Enter edit mode
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Now re-render with saving=true (simulating API call in flight)
+      rerender(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onSave={vi.fn()}
+          saving={true}
+        />,
+      );
+
+      expect(screen.getByTestId("edit-save-btn")).toHaveTextContent("Saving...");
+    });
+
+    it("hides edit button when in edit mode", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onSave={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      expect(screen.queryByTestId("edit-event-btn")).not.toBeInTheDocument();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Delete
+  // -------------------------------------------------------------------------
+
+  describe("delete", () => {
+    it("shows delete button when onDelete is provided", () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onDelete={vi.fn()} />,
+      );
+      expect(screen.getByTestId("delete-event-btn")).toBeInTheDocument();
+    });
+
+    it("does NOT show delete button when onDelete is not provided", () => {
+      render(<EventDetail event={FULL_EVENT} onClose={vi.fn()} />);
+      expect(screen.queryByTestId("delete-event-btn")).not.toBeInTheDocument();
+    });
+
+    it("shows confirmation dialog when delete is clicked", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onDelete={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("delete-event-btn"));
+
+      expect(screen.getByTestId("delete-confirm-dialog")).toBeInTheDocument();
+      expect(screen.getByTestId("delete-confirm-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("delete-cancel-btn")).toBeInTheDocument();
+      expect(screen.getByText(/are you sure/i)).toBeInTheDocument();
+    });
+
+    it("hides confirmation dialog on cancel", async () => {
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onDelete={vi.fn()} />,
+      );
+      await user.click(screen.getByTestId("delete-event-btn"));
+      await user.click(screen.getByTestId("delete-cancel-btn"));
+
+      expect(screen.queryByTestId("delete-confirm-dialog")).not.toBeInTheDocument();
+      // Delete button should be visible again
+      expect(screen.getByTestId("delete-event-btn")).toBeInTheDocument();
+    });
+
+    it("calls onDelete with event ID on confirm", async () => {
+      const onDelete = vi.fn();
+      render(
+        <EventDetail event={FULL_EVENT} onClose={vi.fn()} onDelete={onDelete} />,
+      );
+      await user.click(screen.getByTestId("delete-event-btn"));
+      await user.click(screen.getByTestId("delete-confirm-btn"));
+
+      expect(onDelete).toHaveBeenCalledTimes(1);
+      expect(onDelete).toHaveBeenCalledWith("evt-detail-1");
+    });
+
+    it("shows 'Deleting...' when deleting prop is true", async () => {
+      // Start without deleting so we can click the delete button
+      const { rerender } = render(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onDelete={vi.fn()}
+          deleting={false}
+        />,
+      );
+      // Click delete to open confirmation
+      await user.click(screen.getByTestId("delete-event-btn"));
+
+      // Re-render with deleting=true (simulating API call in flight)
+      rerender(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onDelete={vi.fn()}
+          deleting={true}
+        />,
+      );
+
+      expect(screen.getByTestId("delete-confirm-btn")).toHaveTextContent(
+        "Deleting...",
+      );
+    });
+
+    it("hides delete button during edit mode", async () => {
+      render(
+        <EventDetail
+          event={FULL_EVENT}
+          onClose={vi.fn()}
+          onSave={vi.fn()}
+          onDelete={vi.fn()}
+        />,
+      );
+
+      // Initially delete button is visible
+      expect(screen.getByTestId("delete-event-btn")).toBeInTheDocument();
+
+      // Enter edit mode
+      await user.click(screen.getByTestId("edit-event-btn"));
+
+      // Delete button should be hidden
+      expect(screen.queryByTestId("delete-event-btn")).not.toBeInTheDocument();
     });
   });
 });
