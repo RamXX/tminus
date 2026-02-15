@@ -47,10 +47,14 @@ import {
   expandMilestonesToBusy,
   simulate,
   computeCognitiveLoad,
+  computeTransitions,
+  computeDailySwitchCost,
+  computeWeeklySwitchCost,
+  generateClusteringSuggestions,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
-import type { CognitiveLoadResult } from "@tminus/shared";
+import type { CognitiveLoadResult, ContextSwitchResult } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -3805,6 +3809,62 @@ export class UserGraphDO {
   }
 
   /**
+   * Get the interaction timeline across all relationships.
+   *
+   * Queries the full interaction_ledger ordered by timestamp descending.
+   * Supports optional filtering by participant_hash and date range.
+   *
+   * @param participantHash - Optional participant hash to filter by
+   * @param startDate - Optional start date (ISO string, inclusive)
+   * @param endDate - Optional end date (ISO string, inclusive)
+   * @returns Array of ledger entries
+   */
+  getTimeline(
+    participantHash?: string | null,
+    startDate?: string | null,
+    endDate?: string | null,
+  ): LedgerEntry[] {
+    this.ensureMigrated();
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (participantHash) {
+      conditions.push("participant_hash = ?");
+      params.push(participantHash);
+    }
+    if (startDate) {
+      conditions.push("ts >= ?");
+      params.push(startDate);
+    }
+    if (endDate) {
+      conditions.push("ts <= ?");
+      params.push(endDate + "T23:59:59Z");
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const query = `SELECT ledger_id, participant_hash, canonical_event_id, outcome, weight, note, ts
+                   FROM interaction_ledger ${where}
+                   ORDER BY ts DESC, ledger_id DESC
+                   LIMIT 200`;
+
+    const rows = this.sql
+      .exec<LedgerRow>(query, ...params)
+      .toArray();
+
+    return rows.map((row) => ({
+      ledger_id: row.ledger_id,
+      participant_hash: row.participant_hash,
+      canonical_event_id: row.canonical_event_id,
+      outcome: row.outcome,
+      weight: row.weight,
+      note: row.note,
+      ts: row.ts,
+    }));
+  }
+
+  /**
    * Compute reputation scores for a specific relationship.
    *
    * Queries the interaction ledger, then delegates to the pure
@@ -4795,6 +4855,15 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getContextSwitches": {
+          const body = (await request.json()) as {
+            date: string;
+            range: "day" | "week";
+          };
+          const result = this.getContextSwitches(body.date, body.range);
+          return Response.json(result);
+        }
+
         // ---------------------------------------------------------------
         // Constraint RPC endpoints
         // ---------------------------------------------------------------
@@ -5426,6 +5495,32 @@ export class UserGraphDO {
           };
           const history = this.getSchedulingHistory(body.participant_hashes);
           return Response.json({ history });
+        }
+
+        // ---------------------------------------------------------------
+        // Graph API RPC endpoints (TM-b3i.4)
+        // ---------------------------------------------------------------
+
+        case "/getEventParticipantHashes": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+          };
+          const hashes = this.getEventParticipantHashes(body.canonical_event_id);
+          return Response.json({ hashes });
+        }
+
+        case "/getTimeline": {
+          const body = (await request.json()) as {
+            participant_hash?: string | null;
+            start_date?: string | null;
+            end_date?: string | null;
+          };
+          const items = this.getTimeline(
+            body.participant_hash,
+            body.start_date,
+            body.end_date,
+          );
+          return Response.json({ items });
         }
 
         default:
@@ -6421,6 +6516,88 @@ export class UserGraphDO {
         workingHoursEnd,
       },
     });
+  }
+
+  // getContextSwitches -- Context-switch cost estimation for a day/week
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute context-switch costs for a day or week based on the user's
+   * canonical events. Reads events from SQLite and delegates to the pure
+   * context-switch functions in @tminus/shared.
+   *
+   * For "day" range: computes transitions for the single date.
+   * For "week" range: computes transitions for each day, aggregates costs.
+   */
+  getContextSwitches(date: string, range: "day" | "week"): ContextSwitchResult {
+    this.ensureMigrated();
+
+    const dayCount = range === "week" ? 7 : 1;
+    const startDate = new Date(`${date}T00:00:00Z`);
+    const endDate = new Date(startDate.getTime() + dayCount * 24 * 60 * 60 * 1000);
+
+    const startIso = startDate.toISOString();
+    const endIso = endDate.toISOString();
+
+    // Fetch canonical events for the period
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND status != 'cancelled'
+         ORDER BY start_ts ASC`,
+        startIso,
+        endIso,
+      )
+      .toArray();
+
+    const allEvents = rows.map((row) => this.rowToCanonicalEvent(row));
+
+    if (range === "day") {
+      const transitions = computeTransitions(allEvents);
+      const totalCost = computeDailySwitchCost(transitions);
+      const suggestions = generateClusteringSuggestions(transitions, allEvents);
+      return {
+        transitions,
+        total_cost: Math.round(totalCost * 100) / 100,
+        daily_costs: [Math.round(totalCost * 100) / 100],
+        suggestions,
+      };
+    }
+
+    // Week range: compute per-day then aggregate
+    const allTransitions: Array<import("@tminus/shared").Transition> = [];
+    const dailyCosts: number[] = [];
+
+    for (let i = 0; i < dayCount; i++) {
+      const d = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      const dayStr = d.toISOString().slice(0, 10);
+      const dayStart = new Date(`${dayStr}T00:00:00Z`).getTime();
+      const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+
+      // Filter events for this day
+      const dayEvents = allEvents.filter((e) => {
+        if (!e.start.dateTime || !e.end.dateTime) return false;
+        const eStart = new Date(e.start.dateTime).getTime();
+        const eEnd = new Date(e.end.dateTime).getTime();
+        return eStart < dayEnd && eEnd > dayStart;
+      });
+
+      const dayTransitions = computeTransitions(dayEvents);
+      const dayCost = computeDailySwitchCost(dayTransitions);
+      allTransitions.push(...dayTransitions);
+      dailyCosts.push(Math.round(dayCost * 100) / 100);
+    }
+
+    const weekly = computeWeeklySwitchCost(dailyCosts);
+    const suggestions = generateClusteringSuggestions(allTransitions, allEvents);
+
+    return {
+      transitions: allTransitions,
+      total_cost: Math.round(weekly.total * 100) / 100,
+      daily_costs: dailyCosts,
+      suggestions,
+    };
   }
 
   /** Convert a DB row to a CanonicalEvent domain object. */

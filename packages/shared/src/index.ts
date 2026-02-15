@@ -342,3 +342,22 @@ export type {
   WorkingHoursConstraint,
   AggregateMetrics,
 } from "./cognitive-load";
+
+// Re-export context-switch cost estimation (scheduling intelligence)
+export {
+  classifyEventCategory,
+  lookupTransitionCost,
+  COST_MATRIX,
+  DEFAULT_TRANSITION_COST,
+  computeTransitions,
+  computeDailySwitchCost,
+  computeWeeklySwitchCost,
+  generateClusteringSuggestions,
+} from "./context-switch";
+export type {
+  EventCategory,
+  Transition,
+  WeeklySwitchCost,
+  ClusteringSuggestion,
+  ContextSwitchResult,
+} from "./context-switch";

@@ -860,6 +860,28 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
     },
   },
   {
+    name: "calendar.get_context_switches",
+    description:
+      "Analyze context-switch costs between meeting categories for a day or week. Returns transitions between consecutive events (engineering->sales, admin->deep_work, etc.), total switching cost, daily cost breakdown, and actionable suggestions to cluster meetings and reduce context-switching overhead. Use this to identify fragmented schedules and recommend meeting reorganization.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description:
+            "The date to analyze in YYYY-MM-DD format. For 'week' range, this is the start date.",
+        },
+        range: {
+          type: "string",
+          enum: ["day", "week"],
+          description:
+            "Whether to analyze a single day or an entire week starting from the given date. Defaults to 'day'.",
+        },
+      },
+      required: ["date"],
+    },
+  },
+  {
     name: "calendar.simulate",
     description:
       "Run a what-if simulation to assess calendar impact of accepting new commitments. 'What if I accept this board seat?' Returns projected time allocation, conflict count, constraint violations, and burnout risk. Does NOT modify any real data -- purely read-only analysis. Supports three scenario types: add_commitment (new client hours), add_recurring_event (new weekly meeting), and change_working_hours (adjust schedule boundaries).",
@@ -918,6 +940,46 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
         },
       },
       required: ["scenario"],
+    },
+  },
+  {
+    name: "calendar.query_graph",
+    description:
+      "Query the temporal graph API. Returns events with participants, relationship graph with reputation scores, or interaction timeline. Use 'endpoint' to select: 'events' returns enriched events (title, start, end, category, participants), 'relationships' returns the relationship graph (reputation, drift_days), 'timeline' returns the interaction history (outcomes, timestamps). All endpoints support filtering via the 'filters' parameter.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        endpoint: {
+          type: "string",
+          enum: ["events", "relationships", "timeline"],
+          description:
+            "Which graph endpoint to query: 'events' for enriched calendar events, 'relationships' for the relationship graph, 'timeline' for the interaction history.",
+        },
+        filters: {
+          type: "object",
+          description:
+            "Optional filters. For events: start_date, end_date, category. For relationships: category. For timeline: participant_hash, start_date, end_date.",
+          properties: {
+            start_date: {
+              type: "string",
+              description: "Start date filter (YYYY-MM-DD format).",
+            },
+            end_date: {
+              type: "string",
+              description: "End date filter (YYYY-MM-DD format).",
+            },
+            category: {
+              type: "string",
+              description: "Category filter (e.g. CLIENT, COLLEAGUE, INVESTOR, FAMILY).",
+            },
+            participant_hash: {
+              type: "string",
+              description: "Participant hash filter (for timeline endpoint).",
+            },
+          },
+        },
+      },
+      required: ["endpoint"],
     },
   },
 ];
@@ -990,7 +1052,9 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.propose_group_times": "premium",
   "calendar.generate_excuse": "enterprise",
   "calendar.get_cognitive_load": "free",
+  "calendar.get_context_switches": "free",
   "calendar.simulate": "premium",
+  "calendar.query_graph": "free",
 };
 
 /**
@@ -3482,6 +3546,44 @@ async function handleGetCognitiveLoadMCP(
 }
 
 /**
+ * Execute calendar.get_context_switches: validate input and forward to the
+ * API worker to compute context-switch costs for a day or week.
+ */
+async function handleGetContextSwitchesMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.date !== "string" || args.date.trim().length === 0) {
+    throw new InvalidParamsError("date is required (YYYY-MM-DD format)");
+  }
+
+  const range = args.range ?? "day";
+  if (range !== "day" && range !== "week") {
+    throw new InvalidParamsError("range must be 'day' or 'week'");
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const params = new URLSearchParams({ date: args.date, range: range as string });
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "GET",
+    `/v1/intelligence/context-switches?${params.toString()}`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to get context switches");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.simulate: validate input and forward to the API
  * worker to run a what-if simulation on the user's calendar.
  * Read-only: does not modify any real data.
@@ -3958,6 +4060,11 @@ async function dispatch(
           case "calendar.get_cognitive_load": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetCognitiveLoadMCP(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_context_switches": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetContextSwitchesMCP(request, env.API, toolArgs);
             break;
           }
           case "calendar.simulate": {
