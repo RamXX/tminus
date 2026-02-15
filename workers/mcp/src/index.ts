@@ -10,6 +10,7 @@
  * types, or utilities (workerd restriction).
  */
 
+import { z } from "zod";
 import { extractMcpAuth } from "./auth";
 import type { McpUserContext } from "./auth";
 import {
@@ -355,6 +356,71 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       },
     },
   },
+  {
+    name: "calendar.propose_times",
+    description:
+      "Propose candidate meeting times for a set of participants within a time window. Creates a scheduling session that computes availability across all participants, runs a greedy solver, and returns scored candidate time slots. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        participants: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "List of participant account IDs whose calendars must be checked for availability.",
+        },
+        window: {
+          type: "object",
+          description: "Time window to search for available slots.",
+          properties: {
+            start: {
+              type: "string",
+              description: "Window start (ISO 8601 datetime, e.g. '2026-03-15T09:00:00Z').",
+            },
+            end: {
+              type: "string",
+              description: "Window end (ISO 8601 datetime, e.g. '2026-03-15T17:00:00Z').",
+            },
+          },
+          required: ["start", "end"],
+        },
+        duration_minutes: {
+          type: "number",
+          description: "Desired meeting duration in minutes (15-480).",
+        },
+        constraints: {
+          type: "object",
+          description:
+            "Optional scheduling constraints (e.g. preferred times, buffer requirements). Passed through to the scheduling engine.",
+        },
+        objective: {
+          type: "string",
+          description:
+            "Optional optimization objective: 'earliest' (default), 'least_conflicts', or 'best_distribution'.",
+        },
+      },
+      required: ["participants", "window", "duration_minutes"],
+    },
+  },
+  {
+    name: "calendar.commit_candidate",
+    description:
+      "Commit a selected scheduling candidate from a propose_times session. Creates the calendar event at the chosen time and projects mirror events to all participant calendars. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The scheduling session ID returned by propose_times.",
+        },
+        candidate_id: {
+          type: "string",
+          description: "The candidate ID to commit (from the candidates array).",
+        },
+      },
+      required: ["session_id", "candidate_id"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -405,6 +471,8 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.add_trip": "premium",
   "calendar.add_constraint": "premium",
   "calendar.list_constraints": "free",
+  "calendar.propose_times": "premium",
+  "calendar.commit_candidate": "premium",
 };
 
 /**
@@ -1789,6 +1857,126 @@ function validateListConstraintsParams(args: Record<string, unknown> | undefined
 }
 
 // ---------------------------------------------------------------------------
+// Scheduling tool Zod schemas (AC #3: Zod validation on all inputs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Zod schema for calendar.propose_times input.
+ *
+ * Validates:
+ * - participants: non-empty array of non-empty strings (account IDs)
+ * - window: { start: ISO8601, end: ISO8601 } where start < end
+ * - duration_minutes: integer between 15 and 480
+ * - constraints: optional object (passed through to scheduling engine)
+ * - objective: optional enum
+ */
+const ProposeTimesSchema = z.object({
+  participants: z
+    .array(z.string().min(1, "Each participant must be a non-empty string"))
+    .min(1, "At least one participant is required"),
+  window: z.object({
+    start: z.string().min(1, "window.start is required").refine(
+      (s) => !isNaN(new Date(s).getTime()),
+      "window.start must be a valid ISO 8601 datetime",
+    ),
+    end: z.string().min(1, "window.end is required").refine(
+      (s) => !isNaN(new Date(s).getTime()),
+      "window.end must be a valid ISO 8601 datetime",
+    ),
+  }).refine(
+    (w) => new Date(w.start).getTime() < new Date(w.end).getTime(),
+    "window.start must be before window.end",
+  ),
+  duration_minutes: z
+    .number()
+    .int("duration_minutes must be an integer")
+    .min(15, "duration_minutes must be at least 15")
+    .max(480, "duration_minutes must be at most 480"),
+  constraints: z.record(z.string(), z.unknown()).optional(),
+  objective: z
+    .enum(["earliest", "least_conflicts", "best_distribution"])
+    .optional(),
+});
+
+/** Inferred type for propose_times validated input. */
+type ProposeTimesInput = z.infer<typeof ProposeTimesSchema>;
+
+/**
+ * Zod schema for calendar.commit_candidate input.
+ *
+ * Validates:
+ * - session_id: non-empty string
+ * - candidate_id: non-empty string
+ */
+const CommitCandidateSchema = z.object({
+  session_id: z.string().min(1, "session_id is required"),
+  candidate_id: z.string().min(1, "candidate_id is required"),
+});
+
+/** Inferred type for commit_candidate validated input. */
+type CommitCandidateInput = z.infer<typeof CommitCandidateSchema>;
+
+/**
+ * Validate propose_times input using Zod schema.
+ * Throws InvalidParamsError with structured Zod error messages on failure.
+ */
+function validateProposeTimesParams(
+  args: Record<string, unknown> | undefined,
+): ProposeTimesInput {
+  if (!args) {
+    throw new InvalidParamsError(
+      "Missing required parameters: participants, window, duration_minutes",
+    );
+  }
+  const result = ProposeTimesSchema.safeParse(args);
+  if (!result.success) {
+    const messages = result.error.issues.map(
+      (issue) => `${issue.path.join(".")}: ${issue.message}`,
+    );
+    throw new InvalidParamsError(
+      `Invalid parameters: ${messages.join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+/**
+ * Validate commit_candidate input using Zod schema.
+ * Throws InvalidParamsError with structured Zod error messages on failure.
+ */
+function validateCommitCandidateParams(
+  args: Record<string, unknown> | undefined,
+): CommitCandidateInput {
+  if (!args) {
+    throw new InvalidParamsError(
+      "Missing required parameters: session_id, candidate_id",
+    );
+  }
+  const result = CommitCandidateSchema.safeParse(args);
+  if (!result.success) {
+    const messages = result.error.issues.map(
+      (issue) => `${issue.path.join(".")}: ${issue.message}`,
+    );
+    throw new InvalidParamsError(
+      `Invalid parameters: ${messages.join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling tool error types
+// ---------------------------------------------------------------------------
+
+/** Application-level error for no candidates found. */
+class NoCandidatesError extends Error {
+  constructor(sessionId: string) {
+    super(`No candidate times found for session ${sessionId}. Try widening the time window or reducing duration.`);
+    this.name = "NoCandidatesError";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Constraint tool handlers (route through API service binding)
 // ---------------------------------------------------------------------------
 
@@ -1924,6 +2112,146 @@ async function handleListConstraints(
   if (!result.ok) {
     const errData = result.data as { error?: string };
     throw new InvalidParamsError(errData.error ?? "Failed to list constraints");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling tool handlers (route through API service binding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Forward a scheduling API request to the API worker via service binding.
+ *
+ * Uses the same callConstraintApi helper (which is really a general-purpose
+ * service-binding forwarder) since the pattern is identical:
+ *   - method + path + optional body
+ *   - Authorization: Bearer <jwt> header
+ *   - Returns { ok, status, data }
+ */
+async function callSchedulingApi(
+  api: Fetcher,
+  jwt: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  return callConstraintApi(api, jwt, method, path, body);
+}
+
+/**
+ * Execute calendar.propose_times: validate input with Zod, create a
+ * scheduling session via the API service binding, and return the session
+ * with scored candidate time slots.
+ *
+ * The API endpoint POST /v1/scheduling/sessions:
+ * - Computes availability across all participant accounts
+ * - Runs the greedy solver to find candidate slots
+ * - Returns session_id + candidates array
+ *
+ * If no candidates are found, returns an explicit error with guidance.
+ */
+async function handleProposeTimes(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateProposeTimesParams(args);
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  // Map MCP tool input to the scheduling API body shape
+  const apiBody: Record<string, unknown> = {
+    title: "Scheduling Session",
+    duration_minutes: validated.duration_minutes,
+    window_start: validated.window.start,
+    window_end: validated.window.end,
+    required_account_ids: validated.participants,
+  };
+
+  // Pass through optional fields
+  if (validated.constraints) {
+    apiBody.constraints = validated.constraints;
+  }
+  if (validated.objective) {
+    apiBody.objective = validated.objective;
+  }
+
+  const result = await callSchedulingApi(
+    api,
+    jwt,
+    "POST",
+    "/v1/scheduling/sessions",
+    apiBody,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(
+      errData.error ?? "Failed to create scheduling session",
+    );
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  const session = envelope.data as {
+    session_id?: string;
+    candidates?: unknown[];
+  };
+
+  // AC #5: Proper error handling for no-candidates scenarios
+  if (
+    session &&
+    session.candidates &&
+    Array.isArray(session.candidates) &&
+    session.candidates.length === 0
+  ) {
+    throw new NoCandidatesError(session.session_id ?? "unknown");
+  }
+
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.commit_candidate: validate input with Zod, commit the
+ * selected candidate via the API service binding, and return the created event.
+ *
+ * The API endpoint POST /v1/scheduling/sessions/:id/commit:
+ * - Validates the session is still open and candidate exists
+ * - Creates the canonical event at the chosen time
+ * - Projects mirror events to all participant calendars
+ * - Returns { event_id, session }
+ */
+async function handleCommitCandidate(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateCommitCandidateParams(args);
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callSchedulingApi(
+    api,
+    jwt,
+    "POST",
+    `/v1/scheduling/sessions/${encodeURIComponent(validated.session_id)}/commit`,
+    { candidate_id: validated.candidate_id },
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    const errorMsg = errData.error ?? "Failed to commit candidate";
+
+    // Surface not-found, conflict (already committed/expired/cancelled) errors
+    if (result.status === 404) {
+      throw new InvalidParamsError(errorMsg);
+    }
+    if (result.status === 409) {
+      throw new InvalidParamsError(errorMsg);
+    }
+    throw new InvalidParamsError(errorMsg);
   }
 
   const envelope = result.data as { ok: boolean; data: unknown };
@@ -2121,6 +2449,16 @@ async function dispatch(
             result = await handleListConstraints(request, env.API, toolArgs);
             break;
           }
+          case "calendar.propose_times": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleProposeTimes(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.commit_candidate": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleCommitCandidate(request, env.API, toolArgs);
+            break;
+          }
           default:
             return makeErrorResponse(
               rpcReq.id,
@@ -2161,11 +2499,19 @@ async function dispatch(
             err.message,
           );
         }
+        if (err instanceof NoCandidatesError) {
+          return makeErrorResponse(
+            rpcReq.id,
+            RPC_INVALID_PARAMS,
+            err.message,
+            { code: "NO_CANDIDATES" },
+          );
+        }
         if (err instanceof ApiBindingMissingError) {
           return makeErrorResponse(
             rpcReq.id,
             RPC_INTERNAL_ERROR,
-            "Constraint API service binding is not configured",
+            "API service binding is not configured",
           );
         }
         const message =
@@ -2335,4 +2681,6 @@ export {
   validateAddTripParams,
   validateAddConstraintParams,
   validateListConstraintsParams,
+  validateProposeTimesParams,
+  validateCommitCandidateParams,
 };

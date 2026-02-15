@@ -1791,7 +1791,7 @@ describe("MCP integration: calendar.get_availability", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: tools/list includes policy management tools", () => {
-  it("returns all 13 tools including policy and constraint management tools", async () => {
+  it("returns all 15 tools including policy, constraint, and scheduling management tools", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 200 },
@@ -1807,7 +1807,9 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.add_trip");
     expect(toolNames).toContain("calendar.add_constraint");
     expect(toolNames).toContain("calendar.list_constraints");
-    expect(resultData.tools.length).toBe(13);
+    expect(toolNames).toContain("calendar.propose_times");
+    expect(toolNames).toContain("calendar.commit_candidate");
+    expect(resultData.tools.length).toBe(15);
   });
 });
 
@@ -2499,5 +2501,653 @@ describe("MCP integration: tier-based tool permissions", () => {
     const deleted = JSON.parse(deleteContent[0].text);
     expect(deleted.deleted).toBe(true);
     expect(deleted.event_id).toBe(eventId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: scheduling tools (TM-946.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a mock API Fetcher that simulates the scheduling API endpoints.
+ * Allows tests to verify the full MCP -> service binding -> API flow.
+ */
+function createMockSchedulingApi(options?: {
+  sessionResponse?: unknown;
+  commitResponse?: unknown;
+  sessionStatus?: number;
+  commitStatus?: number;
+  noCandidates?: boolean;
+}): Fetcher {
+  const sessionData = options?.noCandidates
+    ? {
+        ok: true,
+        data: {
+          session_id: "sched_empty_001",
+          status: "candidates_ready",
+          candidates: [],
+        },
+        meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+      }
+    : options?.sessionResponse ?? {
+        ok: true,
+        data: {
+          session_id: "sched_test_001",
+          status: "candidates_ready",
+          title: "Scheduling Session",
+          candidates: [
+            {
+              candidate_id: "cand_001",
+              start: "2026-03-15T10:00:00Z",
+              end: "2026-03-15T10:30:00Z",
+              score: 0.95,
+            },
+            {
+              candidate_id: "cand_002",
+              start: "2026-03-15T14:00:00Z",
+              end: "2026-03-15T14:30:00Z",
+              score: 0.80,
+            },
+          ],
+        },
+        meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+      };
+
+  const commitData = options?.commitResponse ?? {
+    ok: true,
+    data: {
+      event_id: "evt_committed_001",
+      session: {
+        session_id: "sched_test_001",
+        status: "committed",
+      },
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  return {
+    fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+      const url = typeof input === "string" ? input : input.url;
+      const method = init?.method ?? "GET";
+
+      // POST /v1/scheduling/sessions -- create session
+      if (method === "POST" && url.includes("/v1/scheduling/sessions") && !url.includes("/commit")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionData), {
+            status: options?.sessionStatus ?? 201,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+
+      // POST /v1/scheduling/sessions/:id/commit
+      if (method === "POST" && url.includes("/commit")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(commitData), {
+            status: options?.commitStatus ?? 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: false, error: "Unknown endpoint" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    },
+    connect: vi.fn() as unknown as Fetcher["connect"],
+  } as unknown as Fetcher;
+}
+
+/**
+ * Helper: send an MCP request with a mock API Fetcher for scheduling tools.
+ */
+async function sendMcpRequestWithApi(
+  body: unknown,
+  authHeader: string,
+  api: Fetcher,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const handler = createMcpHandler();
+  const env = {
+    JWT_SECRET,
+    DB: d1,
+    ENVIRONMENT: "development",
+    API: api,
+  };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: authHeader,
+  };
+
+  const request = new Request("https://mcp.tminus.ink/mcp", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  const response = await handler.fetch(request, env, mockCtx);
+  const responseBody = (await response.json()) as Record<string, unknown>;
+  return { status: response.status, body: responseBody };
+}
+
+describe("MCP integration: calendar.propose_times (TM-946.5)", () => {
+  it("creates scheduling session and returns candidates (AC #1)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: [ACCOUNT_A.account_id],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 30,
+          },
+        },
+        id: 500,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(resultData.content).toHaveLength(1);
+    expect(resultData.content[0].type).toBe("text");
+
+    const session = JSON.parse(resultData.content[0].text);
+    expect(session.session_id).toBe("sched_test_001");
+    expect(session.candidates).toHaveLength(2);
+    expect(session.candidates[0].candidate_id).toBe("cand_001");
+    expect(session.candidates[0].score).toBe(0.95);
+    expect(session.candidates[1].candidate_id).toBe("cand_002");
+  });
+
+  it("returns candidates with all optional fields (objective + constraints)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: [ACCOUNT_A.account_id, ACCOUNT_B.account_id],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 60,
+            constraints: { prefer_morning: true },
+            objective: "least_conflicts",
+          },
+        },
+        id: 501,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+    const resultData = result.body.result as { content: Array<{ text: string }> };
+    const session = JSON.parse(resultData.content[0].text);
+    expect(session.session_id).toBeDefined();
+    expect(session.candidates).toBeInstanceOf(Array);
+  });
+
+  it("handles no-candidates scenario with proper error (AC #5)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi({ noCandidates: true });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: [ACCOUNT_A.account_id],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 30,
+          },
+        },
+        id: 502,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as {
+      code: number;
+      message: string;
+      data?: { code?: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("No candidate times found");
+    expect(error.data?.code).toBe("NO_CANDIDATES");
+  });
+
+  it("rejects invalid input via Zod validation (missing participants)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 30,
+          },
+        },
+        id: 503,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Invalid parameters");
+  });
+
+  it("rejects when duration_minutes is out of range", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: ["acc_001"],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 5,
+          },
+        },
+        id: 504,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("at least 15");
+  });
+
+  it("handles API error response", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi({
+      sessionResponse: { ok: false, error: "Internal scheduling error" },
+      sessionStatus: 500,
+    });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: ["acc_001"],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 30,
+          },
+        },
+        id: 505,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Internal scheduling error");
+  });
+
+  it("routes through service binding (AC #6) -- verifies fetch is called", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const fetchCalls: { url: string; method: string; body: unknown }[] = [];
+    const api = {
+      fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        const url = typeof input === "string" ? input : input.url;
+        const method = init?.method ?? "GET";
+        const bodyText = init?.body as string | undefined;
+        fetchCalls.push({ url, method, body: bodyText ? JSON.parse(bodyText) : null });
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session_id: "sched_verified_001",
+                candidates: [{ candidate_id: "cand_v1", score: 0.9, start: "2026-03-15T10:00:00Z", end: "2026-03-15T10:30:00Z" }],
+              },
+              meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn(),
+    } as unknown as Fetcher;
+
+    await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: ["acc_001", "acc_002"],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 45,
+          },
+        },
+        id: 506,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].method).toBe("POST");
+    expect(fetchCalls[0].url).toContain("/v1/scheduling/sessions");
+    const requestBody = fetchCalls[0].body as Record<string, unknown>;
+    expect(requestBody.duration_minutes).toBe(45);
+    expect(requestBody.window_start).toBe("2026-03-15T09:00:00Z");
+    expect(requestBody.window_end).toBe("2026-03-15T17:00:00Z");
+    expect(requestBody.required_account_ids).toEqual(["acc_001", "acc_002"]);
+  });
+});
+
+describe("MCP integration: calendar.commit_candidate (TM-946.5)", () => {
+  it("commits selected candidate and returns created event (AC #2)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_test_001",
+            candidate_id: "cand_001",
+          },
+        },
+        id: 600,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(resultData.content).toHaveLength(1);
+    expect(resultData.content[0].type).toBe("text");
+
+    const committed = JSON.parse(resultData.content[0].text);
+    expect(committed.event_id).toBe("evt_committed_001");
+    expect(committed.session.session_id).toBe("sched_test_001");
+    expect(committed.session.status).toBe("committed");
+  });
+
+  it("rejects invalid input via Zod validation (missing session_id)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            candidate_id: "cand_001",
+          },
+        },
+        id: 601,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Invalid parameters");
+  });
+
+  it("rejects invalid input via Zod validation (missing candidate_id)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_test_001",
+          },
+        },
+        id: 602,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Invalid parameters");
+  });
+
+  it("handles session not found (404)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi({
+      commitResponse: { ok: false, error: "Session not found" },
+      commitStatus: 404,
+    });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_nonexistent",
+            candidate_id: "cand_001",
+          },
+        },
+        id: 603,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("Session not found");
+  });
+
+  it("handles session already committed (409)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi({
+      commitResponse: { ok: false, error: "Session already committed" },
+      commitStatus: 409,
+    });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_committed",
+            candidate_id: "cand_001",
+          },
+        },
+        id: 604,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain("already committed");
+  });
+
+  it("routes through service binding (AC #6) -- verifies fetch is called", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const fetchCalls: { url: string; method: string; body: unknown }[] = [];
+    const api = {
+      fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        const url = typeof input === "string" ? input : input.url;
+        const method = init?.method ?? "GET";
+        const bodyText = init?.body as string | undefined;
+        fetchCalls.push({ url, method, body: bodyText ? JSON.parse(bodyText) : null });
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                event_id: "evt_verify_001",
+                session: { session_id: "sched_verify_001", status: "committed" },
+              },
+              meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn(),
+    } as unknown as Fetcher;
+
+    await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_verify_001",
+            candidate_id: "cand_v1",
+          },
+        },
+        id: 606,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].method).toBe("POST");
+    expect(fetchCalls[0].url).toContain("/v1/scheduling/sessions/sched_verify_001/commit");
+    const requestBody = fetchCalls[0].body as Record<string, unknown>;
+    expect(requestBody.candidate_id).toBe("cand_v1");
+  });
+
+  it("premium user can commit (tier check passes before execution)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockSchedulingApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_test_001",
+            candidate_id: "cand_001",
+          },
+        },
+        id: 607,
+      },
+      authHeader,
+      api,
+    );
+
+    // Should not get TIER_REQUIRED error
+    if (result.body.error) {
+      const error = result.body.error as { data?: { code?: string } };
+      expect(error.data?.code).not.toBe("TIER_REQUIRED");
+    }
+    expect(result.body.result).toBeDefined();
+  });
+});
+
+describe("MCP integration: scheduling tools -- tools/list registration (TM-946.5)", () => {
+  it("tools/list includes propose_times and commit_candidate", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      { jsonrpc: "2.0", method: "tools/list", id: 700 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<{ name: string }> };
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.propose_times");
+    expect(toolNames).toContain("calendar.commit_candidate");
   });
 });

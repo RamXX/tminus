@@ -2756,3 +2756,621 @@ describe("constraint tools with missing API binding", () => {
     expect(error.message).toContain("service binding");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scheduling tools: Zod schema validation (TM-946.5)
+// ---------------------------------------------------------------------------
+
+import {
+  validateProposeTimesParams,
+  validateCommitCandidateParams,
+} from "./index";
+
+describe("validateProposeTimesParams (Zod)", () => {
+  // -- Happy path --
+
+  it("accepts valid minimal input", () => {
+    const result = validateProposeTimesParams({
+      participants: ["acc_001"],
+      window: {
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+      },
+      duration_minutes: 30,
+    });
+
+    expect(result.participants).toEqual(["acc_001"]);
+    expect(result.window.start).toBe("2026-03-15T09:00:00Z");
+    expect(result.window.end).toBe("2026-03-15T17:00:00Z");
+    expect(result.duration_minutes).toBe(30);
+    expect(result.constraints).toBeUndefined();
+    expect(result.objective).toBeUndefined();
+  });
+
+  it("accepts valid input with all optional fields", () => {
+    const result = validateProposeTimesParams({
+      participants: ["acc_001", "acc_002"],
+      window: {
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+      },
+      duration_minutes: 60,
+      constraints: { prefer_morning: true },
+      objective: "least_conflicts",
+    });
+
+    expect(result.participants).toEqual(["acc_001", "acc_002"]);
+    expect(result.duration_minutes).toBe(60);
+    expect(result.constraints).toEqual({ prefer_morning: true });
+    expect(result.objective).toBe("least_conflicts");
+  });
+
+  it("accepts all valid objective values", () => {
+    for (const obj of ["earliest", "least_conflicts", "best_distribution"]) {
+      const result = validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+        objective: obj,
+      });
+      expect(result.objective).toBe(obj);
+    }
+  });
+
+  // -- Missing required fields --
+
+  it("throws when args is undefined", () => {
+    expect(() => validateProposeTimesParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when participants is missing", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when participants is empty array", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: [],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("At least one participant");
+  });
+
+  it("throws when participants contains empty string", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001", ""],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("non-empty string");
+  });
+
+  it("throws when window is missing", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        duration_minutes: 30,
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when window.start is missing", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: { end: "2026-03-15T17:00:00Z" },
+        duration_minutes: 30,
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when window.start is invalid ISO 8601", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "not-a-date",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("valid ISO 8601");
+  });
+
+  it("throws when window.start is after window.end", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T17:00:00Z",
+          end: "2026-03-15T09:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("before window.end");
+  });
+
+  it("throws when window.start equals window.end", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T09:00:00Z",
+        },
+        duration_minutes: 30,
+      }),
+    ).toThrow("before window.end");
+  });
+
+  it("throws when duration_minutes is missing", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when duration_minutes is below 15", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 10,
+      }),
+    ).toThrow("at least 15");
+  });
+
+  it("throws when duration_minutes is above 480", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 500,
+      }),
+    ).toThrow("at most 480");
+  });
+
+  it("throws when duration_minutes is not an integer", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30.5,
+      }),
+    ).toThrow("integer");
+  });
+
+  it("throws when duration_minutes is a string", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: "30" as unknown as number,
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when objective is invalid", () => {
+    expect(() =>
+      validateProposeTimesParams({
+        participants: ["acc_001"],
+        window: {
+          start: "2026-03-15T09:00:00Z",
+          end: "2026-03-15T17:00:00Z",
+        },
+        duration_minutes: 30,
+        objective: "invalid_objective",
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  // -- Edge cases --
+
+  it("accepts duration_minutes at minimum boundary (15)", () => {
+    const result = validateProposeTimesParams({
+      participants: ["acc_001"],
+      window: {
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+      },
+      duration_minutes: 15,
+    });
+    expect(result.duration_minutes).toBe(15);
+  });
+
+  it("accepts duration_minutes at maximum boundary (480)", () => {
+    const result = validateProposeTimesParams({
+      participants: ["acc_001"],
+      window: {
+        start: "2026-03-15T09:00:00Z",
+        end: "2026-03-15T17:00:00Z",
+      },
+      duration_minutes: 480,
+    });
+    expect(result.duration_minutes).toBe(480);
+  });
+});
+
+describe("validateCommitCandidateParams (Zod)", () => {
+  // -- Happy path --
+
+  it("accepts valid input", () => {
+    const result = validateCommitCandidateParams({
+      session_id: "sched_01abc",
+      candidate_id: "cand_01xyz",
+    });
+
+    expect(result.session_id).toBe("sched_01abc");
+    expect(result.candidate_id).toBe("cand_01xyz");
+  });
+
+  // -- Missing required fields --
+
+  it("throws when args is undefined", () => {
+    expect(() => validateCommitCandidateParams(undefined)).toThrow(
+      "Missing required parameters",
+    );
+  });
+
+  it("throws when session_id is missing", () => {
+    expect(() =>
+      validateCommitCandidateParams({ candidate_id: "cand_01xyz" }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when candidate_id is missing", () => {
+    expect(() =>
+      validateCommitCandidateParams({ session_id: "sched_01abc" }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when session_id is empty string", () => {
+    expect(() =>
+      validateCommitCandidateParams({
+        session_id: "",
+        candidate_id: "cand_01xyz",
+      }),
+    ).toThrow("session_id is required");
+  });
+
+  it("throws when candidate_id is empty string", () => {
+    expect(() =>
+      validateCommitCandidateParams({
+        session_id: "sched_01abc",
+        candidate_id: "",
+      }),
+    ).toThrow("candidate_id is required");
+  });
+
+  it("throws when session_id is not a string", () => {
+    expect(() =>
+      validateCommitCandidateParams({
+        session_id: 123,
+        candidate_id: "cand_01xyz",
+      }),
+    ).toThrow("Invalid parameters");
+  });
+
+  it("throws when candidate_id is not a string", () => {
+    expect(() =>
+      validateCommitCandidateParams({
+        session_id: "sched_01abc",
+        candidate_id: 456,
+      }),
+    ).toThrow("Invalid parameters");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling tools: tier check (TM-946.5 AC #4)
+// ---------------------------------------------------------------------------
+
+describe("checkTierAccess for scheduling tools", () => {
+  it("free user is denied calendar.propose_times", () => {
+    const result = checkTierAccess("calendar.propose_times", "free");
+    if (result.allowed) throw new Error("Expected denied");
+    expect(result.allowed).toBe(false);
+    expect(result.required_tier).toBe("premium");
+  });
+
+  it("premium user is allowed calendar.propose_times", () => {
+    const result = checkTierAccess("calendar.propose_times", "premium");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("enterprise user is allowed calendar.propose_times", () => {
+    const result = checkTierAccess("calendar.propose_times", "enterprise");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("free user is denied calendar.commit_candidate", () => {
+    const result = checkTierAccess("calendar.commit_candidate", "free");
+    if (result.allowed) throw new Error("Expected denied");
+    expect(result.allowed).toBe(false);
+    expect(result.required_tier).toBe("premium");
+  });
+
+  it("premium user is allowed calendar.commit_candidate", () => {
+    const result = checkTierAccess("calendar.commit_candidate", "premium");
+    expect(result.allowed).toBe(true);
+  });
+
+  it("enterprise user is allowed calendar.commit_candidate", () => {
+    const result = checkTierAccess("calendar.commit_candidate", "enterprise");
+    expect(result.allowed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling tools: tool registration in TOOL_REGISTRY (TM-946.5)
+// ---------------------------------------------------------------------------
+
+describe("scheduling tools in tools/list", () => {
+  it("tools/list includes calendar.propose_times and calendar.commit_candidate", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> };
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.propose_times");
+    expect(toolNames).toContain("calendar.commit_candidate");
+  });
+
+  it("calendar.propose_times has correct required fields in schema", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<{ name: string; inputSchema: { type: string; properties: Record<string, unknown>; required?: string[] } }> };
+    const proposeTool = resultData.tools.find((t) => t.name === "calendar.propose_times");
+    expect(proposeTool).toBeDefined();
+    expect(proposeTool!.inputSchema.type).toBe("object");
+    expect(proposeTool!.inputSchema.properties).toHaveProperty("participants");
+    expect(proposeTool!.inputSchema.properties).toHaveProperty("window");
+    expect(proposeTool!.inputSchema.properties).toHaveProperty("duration_minutes");
+    expect(proposeTool!.inputSchema.properties).toHaveProperty("constraints");
+    expect(proposeTool!.inputSchema.properties).toHaveProperty("objective");
+    expect(proposeTool!.inputSchema.required).toEqual(["participants", "window", "duration_minutes"]);
+  });
+
+  it("calendar.commit_candidate has correct required fields in schema", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 1 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<{ name: string; inputSchema: { type: string; properties: Record<string, unknown>; required?: string[] } }> };
+    const commitTool = resultData.tools.find((t) => t.name === "calendar.commit_candidate");
+    expect(commitTool).toBeDefined();
+    expect(commitTool!.inputSchema.type).toBe("object");
+    expect(commitTool!.inputSchema.properties).toHaveProperty("session_id");
+    expect(commitTool!.inputSchema.properties).toHaveProperty("candidate_id");
+    expect(commitTool!.inputSchema.required).toEqual(["session_id", "candidate_id"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling tools: tier-gating via full MCP dispatch (TM-946.5)
+// ---------------------------------------------------------------------------
+
+describe("scheduling tools tier-gating via MCP dispatch", () => {
+  it("free user calling calendar.propose_times is tier-gated", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader(); // defaults to free tier
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: ["acc_001"],
+            window: { start: "2026-03-15T09:00:00Z", end: "2026-03-15T17:00:00Z" },
+            duration_minutes: 30,
+          },
+        },
+        id: 300,
+      },
+      authHeader,
+    );
+
+    const error = result.body.error as {
+      code: number;
+      message: string;
+      data?: { code?: string; required_tier?: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+    expect(error.data?.required_tier).toBe("premium");
+  });
+
+  it("free user calling calendar.commit_candidate is tier-gated", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader(); // defaults to free tier
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_01abc",
+            candidate_id: "cand_01xyz",
+          },
+        },
+        id: 301,
+      },
+      authHeader,
+    );
+
+    const error = result.body.error as {
+      code: number;
+      message: string;
+      data?: { code?: string; required_tier?: string };
+    };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+    expect(error.data?.required_tier).toBe("premium");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling tools: API binding missing (TM-946.5)
+// ---------------------------------------------------------------------------
+
+describe("scheduling tools with missing API binding", () => {
+  it("calendar.propose_times returns internal error when API binding missing", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv(); // no API binding
+    // Need premium tier for this tool
+    const token = await generateJWT(
+      {
+        sub: TEST_USER_ID,
+        email: TEST_EMAIL,
+        tier: "premium",
+        pwd_ver: 1,
+      },
+      JWT_SECRET,
+      3600,
+    );
+    const authHeader = `Bearer ${token}`;
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.propose_times",
+          arguments: {
+            participants: ["acc_001"],
+            window: {
+              start: "2026-03-15T09:00:00Z",
+              end: "2026-03-15T17:00:00Z",
+            },
+            duration_minutes: 30,
+          },
+        },
+        id: 400,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toContain("service binding");
+  });
+
+  it("calendar.commit_candidate returns internal error when API binding missing", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv(); // no API binding
+    const token = await generateJWT(
+      {
+        sub: TEST_USER_ID,
+        email: TEST_EMAIL,
+        tier: "premium",
+        pwd_ver: 1,
+      },
+      JWT_SECRET,
+      3600,
+    );
+    const authHeader = `Bearer ${token}`;
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.commit_candidate",
+          arguments: {
+            session_id: "sched_01abc",
+            candidate_id: "cand_01xyz",
+          },
+        },
+        id: 401,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toContain("service binding");
+  });
+});
