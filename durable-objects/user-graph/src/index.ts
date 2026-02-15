@@ -29,8 +29,9 @@ import {
   getOutcomeWeight,
   computeDrift,
   matchEventParticipants,
+  computeReputation,
 } from "@tminus/shared";
-import type { DriftReport, DriftAlert, InteractionOutcome } from "@tminus/shared";
+import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -358,6 +359,19 @@ export interface LedgerEntry {
   readonly weight: number;
   readonly note: string | null;
   readonly ts: string;
+}
+
+/** Reconnection suggestions report: overdue contacts in a specific city. */
+export interface ReconnectionReport {
+  readonly city: string;
+  readonly trip_id: string | null;
+  readonly trip_name: string | null;
+  readonly trip_start: string | null;
+  readonly trip_end: string | null;
+  readonly suggestions: readonly DriftEntry[];
+  readonly total_in_city: number;
+  readonly total_overdue_in_city: number;
+  readonly computed_at: string;
 }
 
 /** Fields that can be updated on a mirror row via RPC. */
@@ -3670,6 +3684,82 @@ export class UserGraphDO {
   }
 
   /**
+   * Compute reputation scores for a specific relationship.
+   *
+   * Queries the interaction ledger, then delegates to the pure
+   * computeReputation function from @tminus/shared.
+   *
+   * Returns null if the relationship does not exist.
+   * Scores are computed on-demand (not pre-computed).
+   *
+   * @param relationshipId - The relationship to compute reputation for
+   * @param asOf - Optional timestamp for computation (defaults to now)
+   * @returns ReputationResult or null if relationship not found
+   */
+  getReputation(
+    relationshipId: string,
+    asOf?: string,
+  ): ReputationResult | null {
+    this.ensureMigrated();
+
+    const relationship = this.getRelationship(relationshipId);
+    if (!relationship) return null;
+
+    const entries = this.listOutcomes(relationshipId);
+    if (!entries) return null;
+
+    const ledgerInputs: LedgerInput[] = entries.map((e) => ({
+      outcome: e.outcome,
+      weight: e.weight,
+      ts: e.ts,
+    }));
+
+    const now = asOf ?? new Date().toISOString();
+    return computeReputation(ledgerInputs, now);
+  }
+
+  /**
+   * List relationships sorted by reliability score (descending).
+   *
+   * Computes reputation on-demand for each relationship that has
+   * ledger entries, then sorts by reliability_score descending.
+   *
+   * Returns all relationships with their scores attached.
+   *
+   * @param asOf - Optional timestamp for computation (defaults to now)
+   * @returns Array of relationships with reputation data
+   */
+  listRelationshipsWithReputation(
+    asOf?: string,
+  ): Array<Relationship & { reputation: ReputationResult }> {
+    this.ensureMigrated();
+
+    const relationships = this.listRelationships();
+    const now = asOf ?? new Date().toISOString();
+
+    const results: Array<Relationship & { reputation: ReputationResult }> = [];
+
+    for (const rel of relationships) {
+      const entries = this.listOutcomes(rel.relationship_id);
+      const ledgerInputs: LedgerInput[] = (entries ?? []).map((e) => ({
+        outcome: e.outcome,
+        weight: e.weight,
+        ts: e.ts,
+      }));
+
+      const reputation = computeReputation(ledgerInputs, now);
+      results.push({ ...rel, reputation });
+    }
+
+    // Sort by reliability_score descending
+    results.sort(
+      (a, b) => b.reputation.reliability_score - a.reputation.reliability_score,
+    );
+
+    return results;
+  }
+
+  /**
    * Compute drift report for all relationships.
    *
    * Uses the pure drift computation from @tminus/shared.
@@ -3681,6 +3771,75 @@ export class UserGraphDO {
     const relationships = this.listRelationships();
     const now = asOf ?? new Date().toISOString();
     return computeDrift(relationships, now);
+  }
+
+  /**
+   * Get reconnection suggestions: overdue relationships in a specific city.
+   *
+   * Combines drift computation with city filtering. If trip_id is provided,
+   * resolves the trip constraint's destination_city first. If city is provided
+   * directly, uses that. Returns overdue contacts in the target city sorted
+   * by urgency.
+   *
+   * @param city - City to filter relationships by (case-insensitive)
+   * @param tripId - Optional trip constraint ID to resolve city from
+   * @returns Reconnection suggestions with city and trip context
+   */
+  getReconnectionSuggestions(
+    city?: string | null,
+    tripId?: string | null,
+  ): ReconnectionReport {
+    this.ensureMigrated();
+
+    let targetCity: string | null = city ?? null;
+    let tripName: string | null = null;
+    let tripStart: string | null = null;
+    let tripEnd: string | null = null;
+
+    // If trip_id provided, resolve destination_city from trip constraint
+    if (tripId) {
+      const constraint = this.getConstraint(tripId);
+      if (!constraint) {
+        throw new Error(`Trip constraint not found: ${tripId}`);
+      }
+      if (constraint.kind !== "trip") {
+        throw new Error(`Constraint ${tripId} is not a trip (kind: ${constraint.kind})`);
+      }
+      const config = constraint.config_json;
+      if (config.destination_city && typeof config.destination_city === "string") {
+        targetCity = config.destination_city;
+      }
+      tripName = typeof config.name === "string" ? config.name : null;
+      tripStart = constraint.active_from;
+      tripEnd = constraint.active_to;
+    }
+
+    if (!targetCity) {
+      throw new Error("No city available. Provide city parameter or use a trip with destination_city set.");
+    }
+
+    // Get all relationships in the target city (case-insensitive)
+    const allRelationships = this.listRelationships();
+    const cityLower = targetCity.toLowerCase();
+    const cityRelationships = allRelationships.filter(
+      (r) => r.city !== null && r.city.toLowerCase() === cityLower,
+    );
+
+    // Compute drift for city-filtered relationships
+    const now = new Date().toISOString();
+    const driftReport = computeDrift(cityRelationships, now);
+
+    return {
+      city: targetCity,
+      trip_id: tripId ?? null,
+      trip_name: tripName,
+      trip_start: tripStart,
+      trip_end: tripEnd,
+      suggestions: driftReport.overdue,
+      total_in_city: cityRelationships.length,
+      total_overdue_in_city: driftReport.total_overdue,
+      computed_at: driftReport.computed_at,
+    };
   }
 
   /**
@@ -4432,10 +4591,40 @@ export class UserGraphDO {
           return Response.json({ items: entries });
         }
 
+        case "/getReputation": {
+          const body = (await request.json()) as {
+            relationship_id: string;
+            as_of?: string;
+          };
+          const reputation = this.getReputation(
+            body.relationship_id,
+            body.as_of,
+          );
+          return Response.json(reputation);
+        }
+
+        case "/listRelationshipsWithReputation": {
+          const body = (await request.json()) as { as_of?: string };
+          const items = this.listRelationshipsWithReputation(body.as_of);
+          return Response.json({ items });
+        }
+
         case "/getDriftReport": {
           const body = (await request.json()) as { as_of?: string };
           const report = this.getDriftReport(body.as_of);
           return Response.json(report);
+        }
+
+        case "/getReconnectionSuggestions": {
+          const body = (await request.json()) as {
+            city?: string | null;
+            trip_id?: string | null;
+          };
+          const suggestions = this.getReconnectionSuggestions(
+            body.city,
+            body.trip_id,
+          );
+          return Response.json(suggestions);
         }
 
         case "/updateInteractions": {

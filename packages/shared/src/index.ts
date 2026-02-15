@@ -197,6 +197,15 @@ export type {
 export { computeDrift, matchEventParticipants, computeDriftBadge, driftEntryBadge } from "./drift";
 export type { DriftInput, DriftEntry, DriftReport, DriftBadge, DriftAlert } from "./drift";
 
+// Re-export reputation scoring (relationship tracking, Phase 4)
+export {
+  computeReliabilityScore,
+  computeReciprocityScore,
+  computeReputation,
+  computeDecayFactor,
+} from "./reputation";
+export type { LedgerInput, ReputationResult } from "./reputation";
+
 // Re-export CORS middleware
 export {
   isAllowedOrigin,

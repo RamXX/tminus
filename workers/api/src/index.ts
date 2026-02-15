@@ -2423,6 +2423,85 @@ async function handleListOutcomes(
   }
 }
 
+// -- Reputation scoring (Phase 4) -------------------------------------------
+
+async function handleGetReputation(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  relationshipId: string,
+): Promise<Response> {
+  if (!isValidId(relationshipId, "relationship")) {
+    return jsonResponse(
+      errorEnvelope("Invalid relationship ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      reliability_score: number;
+      reciprocity_score: number;
+      total_interactions: number;
+      last_30_days: number;
+      computed_at: string;
+    } | null>(env.USER_GRAPH, auth.userId, "/getReputation", {
+      relationship_id: relationshipId,
+    });
+
+    if (!result.ok) {
+      const errorData = result.data as unknown as { error?: string };
+      return jsonResponse(
+        errorEnvelope(errorData.error ?? "Failed to get reputation", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data) {
+      return jsonResponse(
+        errorEnvelope("Relationship not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get reputation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get reputation", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleListRelationshipsWithReputation(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await callDO<{
+      items: unknown[];
+    }>(env.USER_GRAPH, auth.userId, "/listRelationshipsWithReputation", {});
+
+    if (!result.ok) {
+      const errorData = result.data as unknown as { error?: string };
+      return jsonResponse(
+        errorEnvelope(errorData.error ?? "Failed to list relationships with reputation", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data.items), 200);
+  } catch (err) {
+    console.error("Failed to list relationships with reputation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list relationships with reputation", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 async function handleGetDriftReport(
   _request: Request,
   auth: AuthContext,
@@ -2478,6 +2557,56 @@ async function handleGetDriftAlerts(
     console.error("Failed to get drift alerts", err);
     return jsonResponse(
       errorEnvelope("Failed to get drift alerts", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Reconnection suggestions -----------------------------------------------
+
+async function handleGetReconnectionSuggestions(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const tripId = url.searchParams.get("trip_id") || null;
+    const city = url.searchParams.get("city") || null;
+
+    if (!tripId && !city) {
+      return jsonResponse(
+        errorEnvelope(
+          "Either trip_id or city query parameter is required",
+          "VALIDATION_ERROR",
+        ),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+
+    const result = await callDO<unknown>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getReconnectionSuggestions",
+      { city, trip_id: tripId },
+    );
+
+    if (!result.ok) {
+      const errData = result.data as { message?: string };
+      return jsonResponse(
+        errorEnvelope(
+          errData.message ?? "Failed to get reconnection suggestions",
+          "INTERNAL_ERROR",
+        ),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get reconnection suggestions", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get reconnection suggestions", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -3805,6 +3934,11 @@ async function routeAuthenticatedRequest(
       }
 
       if (method === "GET" && pathname === "/v1/relationships") {
+        // Check for ?sort=reliability_desc to return relationships with reputation
+        const urlCheck = new URL(request.url);
+        if (urlCheck.searchParams.get("sort") === "reliability_desc") {
+          return handleListRelationshipsWithReputation(request, auth, env);
+        }
         return handleListRelationships(request, auth, env);
       }
 
@@ -3814,6 +3948,10 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/drift-alerts") {
         return handleGetDriftAlerts(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/reconnection-suggestions") {
+        return handleGetReconnectionSuggestions(request, auth, env);
       }
 
       // -- Interaction ledger (outcomes) routes ---------------------------------
@@ -3828,6 +3966,14 @@ async function routeAuthenticatedRequest(
         if (method === "GET") {
           return handleListOutcomes(request, auth, env, relId);
         }
+      }
+
+      // -- Reputation scoring routes ----------------------------------------------
+      // Must match before /v1/relationships/:id since it has more segments
+
+      match = matchRoute(pathname, "/v1/relationships/:id/reputation");
+      if (match && method === "GET") {
+        return handleGetReputation(request, auth, env, match.params[0]);
       }
 
       match = matchRoute(pathname, "/v1/relationships/:id");
