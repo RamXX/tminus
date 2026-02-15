@@ -555,3 +555,28 @@ export async function fetchReconnectionSuggestions(
     { token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Reconnections (full typed for dashboard)
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/reconnection-suggestions -- full typed for reconnection dashboard. */
+export async function fetchReconnectionSuggestionsFull(
+  token: string,
+): Promise<import("./reconnections").ReconnectionSuggestionFull[]> {
+  return apiFetch<import("./reconnections").ReconnectionSuggestionFull[]>(
+    "/v1/reconnection-suggestions",
+    { token },
+  );
+}
+
+/** GET /api/v1/milestones/upcoming -- upcoming milestones within N days. */
+export async function fetchUpcomingMilestones(
+  token: string,
+  days: number = 30,
+): Promise<import("./reconnections").UpcomingMilestone[]> {
+  return apiFetch<import("./reconnections").UpcomingMilestone[]>(
+    `/v1/milestones/upcoming?days=${days}`,
+    { token },
+  );
+}

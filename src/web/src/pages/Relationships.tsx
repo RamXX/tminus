@@ -950,6 +950,13 @@ export function Relationships({
       <div style={styles.headerRow}>
         <h1 style={styles.title}>Relationships</h1>
         <div style={styles.headerActions}>
+          <a
+            href="#/reconnections"
+            data-testid="reconnections-link"
+            style={styles.reconnectionsBtn}
+          >
+            Reconnections
+          </a>
           <button
             data-testid="drift-report-btn"
             onClick={openDriftReport}
@@ -1262,6 +1269,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "0.875rem",
     fontWeight: 600,
     cursor: "pointer",
+  },
+  reconnectionsBtn: {
+    padding: "0.5rem 1rem",
+    borderRadius: "6px",
+    border: "1px solid #8b5cf6",
+    background: "transparent",
+    color: "#8b5cf6",
+    cursor: "pointer",
+    fontSize: "0.875rem",
+    fontWeight: 600,
+    textDecoration: "none",
   },
   driftReportBtn: {
     padding: "0.5rem 1rem",

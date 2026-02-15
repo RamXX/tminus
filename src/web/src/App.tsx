@@ -13,6 +13,7 @@
  *   #/scheduling  -> Scheduling Dashboard (requires auth)
  *   #/governance  -> Governance Dashboard (requires auth)
  *   #/relationships -> Relationships Dashboard (requires auth)
+ *   #/reconnections -> Reconnections Dashboard (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -28,6 +29,7 @@ import { Billing } from "./pages/Billing";
 import { Scheduling } from "./pages/Scheduling";
 import { Governance } from "./pages/Governance";
 import { Relationships } from "./pages/Relationships";
+import { Reconnections } from "./pages/Reconnections";
 import {
   fetchSyncStatus,
   fetchAccounts,
@@ -56,6 +58,8 @@ import {
   fetchOutcomes,
   createOutcome,
   fetchDriftReport,
+  fetchReconnectionSuggestionsFull,
+  fetchUpcomingMilestones,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
@@ -293,6 +297,17 @@ function Router() {
     return fetchDriftReport(token);
   }, [token]);
 
+  // Bound reconnection functions -- injects current token
+  const boundFetchReconnectionSuggestions = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchReconnectionSuggestionsFull(token);
+  }, [token]);
+
+  const boundFetchUpcomingMilestones = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchUpcomingMilestones(token);
+  }, [token]);
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -378,6 +393,13 @@ function Router() {
           fetchOutcomes={boundFetchOutcomes}
           createOutcome={boundCreateOutcome}
           fetchDriftReport={boundFetchDriftReport}
+        />
+      );
+    case "#/reconnections":
+      return (
+        <Reconnections
+          fetchReconnectionSuggestions={boundFetchReconnectionSuggestions}
+          fetchUpcomingMilestones={boundFetchUpcomingMilestones}
         />
       );
     default:
