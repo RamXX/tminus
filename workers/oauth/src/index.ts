@@ -40,6 +40,7 @@ import {
 } from "./microsoft";
 import { handleMarketplaceInstall } from "./marketplace";
 import { handleAdminInstall, handleOrgUserActivation } from "./marketplace-admin";
+import { handleMarketplaceUninstall } from "./marketplace-uninstall";
 import { handlePrivacyPolicy, handleTermsOfService } from "./legal";
 import { handleSupportPage } from "./support";
 
@@ -555,6 +556,11 @@ export function createHandler(fetchFn?: FetchFn) {
       // Health check -- no auth, no method restriction
       if (url.pathname === "/health") {
         return new Response("OK", { status: 200 });
+      }
+
+      // POST /marketplace/uninstall -- webhook from Google (must be before GET-only check)
+      if (url.pathname === "/marketplace/uninstall") {
+        return handleMarketplaceUninstall(request, env, fetchFn);
       }
 
       if (request.method !== "GET") {
