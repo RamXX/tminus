@@ -285,3 +285,25 @@ export interface DeviceTokenRow {
   readonly created_at: string;
   readonly updated_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Org delegations (Migration 0022, TM-9iu.1)
+// ---------------------------------------------------------------------------
+
+/** Valid delegation status values for the `org_delegations.delegation_status` column. */
+export type OrgDelegationStatus = "pending" | "active" | "revoked";
+
+/** Row shape for the `org_delegations` table. */
+export interface OrgDelegationRow {
+  readonly delegation_id: string;
+  readonly domain: string;
+  readonly admin_email: string;
+  readonly delegation_status: OrgDelegationStatus;
+  /** Encrypted service account key (JSON envelope: {iv, ciphertext, encryptedDek, dekIv}). */
+  readonly encrypted_sa_key: string;
+  readonly sa_client_email: string;
+  readonly sa_client_id: string;
+  readonly validated_at: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}

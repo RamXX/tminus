@@ -86,6 +86,10 @@ import {
   handleGetOrgInstallStatus,
 } from "./routes/org-admin";
 import {
+  handleOrgRegister,
+  handleDelegationCalendars,
+} from "./routes/org-delegation";
+import {
   handleUpdateSeats,
   enforceSeatLimit,
 } from "./routes/enterprise-billing";
@@ -6449,6 +6453,22 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/graph/openapi.json") {
         return handleGraphOpenApi();
+      }
+
+      // -- Domain-wide delegation routes (Phase 6D: TM-9iu.1) ----------------
+
+      if (method === "POST" && pathname === "/v1/orgs/register") {
+        return handleOrgRegister(request, auth, env as unknown as { DB: D1Database; MASTER_KEY?: string });
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/delegation/calendars/:email");
+      if (match && method === "GET") {
+        return handleDelegationCalendars(
+          request,
+          auth,
+          env as unknown as { DB: D1Database; MASTER_KEY?: string },
+          match.params[0],
+        );
       }
 
       // -- Organization routes (Enterprise) -----------------------------------

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>T-Minus -- Workspace Admin Delegation Guide</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <style>
+    :root {
+      --primary: #1a73e8;
+      --bg: #ffffff;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #dadce0;
+      --code-bg: #f8f9fa;
+      --success: #34a853;
+      --step-bg: #e8f0fe;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1e1e2e;
+        --text: #cdd6f4;
+        --muted: #a6adc8;
+        --border: #45475a;
+        --code-bg: #313244;
+        --step-bg: #1e3a5f;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 1.1rem;
+      margin-bottom: 2rem;
+    }
+    h2 {
+      font-size: 1.4rem;
+      margin-top: 2.5rem;
+      margin-bottom: 1rem;
+      color: var(--primary);
+    }
+    .step {
+      background: var(--step-bg);
+      border-left: 4px solid var(--primary);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.5rem;
+      border-radius: 0 8px 8px 0;
+    }
+    .step-number {
+      display: inline-block;
+      background: var(--primary);
+      color: white;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 2rem;
+      font-weight: bold;
+      margin-right: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .step h3 {
+      display: inline;
+      font-size: 1.1rem;
+    }
+    .step p, .step ul {
+      margin-top: 0.75rem;
+    }
+    .step ul {
+      padding-left: 1.5rem;
+    }
+    .step li {
+      margin-bottom: 0.5rem;
+    }
+    code {
+      background: var(--code-bg);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    .scope-list {
+      background: var(--code-bg);
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      margin: 1rem 0;
+      font-family: monospace;
+      font-size: 0.9rem;
+      line-height: 1.8;
+      word-break: break-all;
+    }
+    .note {
+      background: var(--code-bg);
+      border-left: 4px solid var(--success);
+      padding: 1rem 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 0 8px 8px 0;
+    }
+    .note strong {
+      color: var(--success);
+    }
+    .time-estimate {
+      color: var(--muted);
+      font-style: italic;
+      margin-bottom: 2rem;
+    }
+    a { color: var(--primary); }
+    .back-link {
+      display: inline-block;
+      margin-top: 2rem;
+      padding: 0.5rem 1rem;
+      background: var(--primary);
+      color: white;
+      text-decoration: none;
+      border-radius: 6px;
+    }
+    .back-link:hover { opacity: 0.9; }
+  </style>
+</head>
+<body>
+
+<h1>Domain-Wide Delegation Setup</h1>
+<p class="subtitle">
+  Allow T-Minus to access your organization's calendars without
+  individual user consent.
+</p>
+<p class="time-estimate">Estimated time: 5 minutes</p>
+
+<div class="note">
+  <strong>What this does:</strong> Domain-wide delegation lets T-Minus read
+  calendar information for users in your Google Workspace organization. Individual
+  users never see an OAuth consent screen -- when they open T-Minus, their work
+  calendar is already there.
+</div>
+
+<h2>Prerequisites</h2>
+<ul>
+  <li>You are a <strong>Google Workspace administrator</strong> (Super Admin or delegated admin with API controls access)</li>
+  <li>T-Minus has provided you with a <strong>Service Account Client ID</strong> (a numeric string)</li>
+</ul>
+
+<h2>Step-by-Step Instructions</h2>
+
+<div class="step">
+  <span class="step-number">1</span>
+  <h3>Open Google Admin Console</h3>
+  <p>
+    Go to <a href="https://admin.google.com" target="_blank" rel="noopener">admin.google.com</a>
+    and sign in with your administrator account.
+  </p>
+</div>
+
+<div class="step">
+  <span class="step-number">2</span>
+  <h3>Navigate to API Controls</h3>
+  <p>
+    In the left sidebar, go to:
+  </p>
+  <ul>
+    <li><strong>Security</strong></li>
+    <li><strong>Access and data control</strong></li>
+    <li><strong>API controls</strong></li>
+  </ul>
+  <p>
+    Then click <strong>"Manage Domain Wide Delegation"</strong> at the bottom of the page.
+  </p>
+</div>
+
+<div class="step">
+  <span class="step-number">3</span>
+  <h3>Add the T-Minus Service Account</h3>
+  <p>Click <strong>"Add new"</strong> and enter:</p>
+  <ul>
+    <li><strong>Client ID:</strong> The numeric Client ID provided by T-Minus</li>
+    <li><strong>OAuth Scopes:</strong> Copy and paste the following scopes (comma-separated):</li>
+  </ul>
+  <div class="scope-list">
+    https://www.googleapis.com/auth/calendar.readonly,https://www.googleapis.com/auth/calendar.events,https://www.googleapis.com/auth/calendar.calendarlist.readonly
+  </div>
+  <p>Click <strong>"Authorize"</strong>.</p>
+</div>
+
+<div class="step">
+  <span class="step-number">4</span>
+  <h3>Confirm Delegation</h3>
+  <p>
+    You should see the T-Minus service account in the domain-wide delegation list
+    with the three scopes listed. This means delegation is active.
+  </p>
+</div>
+
+<div class="step">
+  <span class="step-number">5</span>
+  <h3>Register with T-Minus</h3>
+  <p>
+    Return to T-Minus and complete the organization registration. T-Minus will
+    verify the delegation is working by making a test API call to your admin account's
+    calendar. If successful, your organization is registered and users can start
+    using T-Minus immediately.
+  </p>
+</div>
+
+<div class="note">
+  <strong>What happens next:</strong> Users in your organization who visit
+  T-Minus will automatically see their work calendars. They do not need to sign in
+  with Google or grant any permissions. T-Minus uses the delegation you configured
+  to securely access calendar data on their behalf.
+</div>
+
+<h2>Scopes Explained</h2>
+<ul>
+  <li>
+    <code>calendar.readonly</code> -- Read calendar metadata (names, settings).
+    T-Minus uses this to discover which calendars exist.
+  </li>
+  <li>
+    <code>calendar.events</code> -- Read and manage calendar events.
+    T-Minus uses this to sync events and create busy-overlay entries.
+  </li>
+  <li>
+    <code>calendar.calendarlist.readonly</code> -- Read the list of calendars.
+    T-Minus uses this to show the user their available calendars.
+  </li>
+</ul>
+
+<h2>Revoking Access</h2>
+<p>
+  To revoke T-Minus access at any time, return to
+  <strong>Security &gt; API Controls &gt; Domain-wide Delegation</strong>
+  and remove the T-Minus service account entry. All calendar access for your
+  organization will stop immediately.
+</p>
+
+<a href="/" class="back-link">Back to T-Minus</a>
+
+</body>
+</html>

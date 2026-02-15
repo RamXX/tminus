@@ -11,6 +11,10 @@ declare class TextEncoder {
   encode(input?: string): Uint8Array;
 }
 
+declare class TextDecoder {
+  decode(input?: BufferSource): string;
+}
+
 /** Opaque handle returned by crypto.subtle.importKey. */
 declare interface CryptoKey {
   readonly type: string;
@@ -46,6 +50,18 @@ declare const crypto: {
       signature: BufferSource,
       data: BufferSource,
     ): Promise<boolean>;
+
+    encrypt(
+      algorithm: string | { name: string; iv?: BufferSource },
+      key: CryptoKey,
+      data: BufferSource,
+    ): Promise<ArrayBuffer>;
+
+    decrypt(
+      algorithm: string | { name: string; iv?: BufferSource },
+      key: CryptoKey,
+      data: BufferSource,
+    ): Promise<ArrayBuffer>;
 
     deriveBits(
       algorithm: {

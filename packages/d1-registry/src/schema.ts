@@ -532,6 +532,31 @@ CREATE INDEX idx_org_installations_status ON org_installations(status);
 ` as const;
 
 /**
+ * Migration 0022: Domain-wide delegation for Workspace orgs (TM-9iu.1).
+ *
+ * Stores domain-wide delegation configuration per Workspace domain.
+ * Service account credentials encrypted with AES-256-GCM (AD-2).
+ * delegation_status: 'pending' | 'active' | 'revoked'.
+ */
+export const MIGRATION_0022_ORG_DELEGATIONS = `
+CREATE TABLE org_delegations (
+  delegation_id       TEXT PRIMARY KEY,
+  domain              TEXT NOT NULL UNIQUE,
+  admin_email         TEXT NOT NULL,
+  delegation_status   TEXT NOT NULL DEFAULT 'pending' CHECK(delegation_status IN ('pending', 'active', 'revoked')),
+  encrypted_sa_key    TEXT NOT NULL,
+  sa_client_email     TEXT NOT NULL,
+  sa_client_id        TEXT NOT NULL,
+  validated_at        TEXT,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_org_delegations_domain ON org_delegations(domain);
+CREATE INDEX idx_org_delegations_status ON org_delegations(delegation_status);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -557,4 +582,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0019_DEVICE_TOKENS,
   MIGRATION_0020_FEED_REFRESH,
   MIGRATION_0021_ORG_INSTALLATIONS,
+  MIGRATION_0022_ORG_DELEGATIONS,
 ] as const;

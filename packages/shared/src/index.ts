@@ -611,3 +611,27 @@ export type {
   DowngradeInput,
   DowngradePlan,
 } from "./ics-upgrade";
+
+// Re-export JWT assertion for service account impersonation (Phase 6D)
+export {
+  buildJwtAssertion,
+  exchangeJwtForToken,
+  getImpersonationToken,
+  importPrivateKey,
+  validateServiceAccountKey,
+  DELEGATION_SCOPES,
+} from "./jwt-assertion";
+export type {
+  ServiceAccountKey,
+  TokenResponse,
+} from "./jwt-assertion";
+
+// Re-export service account encryption (Phase 6D, AD-2 compliance)
+export {
+  importMasterKeyForServiceAccount,
+  encryptServiceAccountKey,
+  decryptServiceAccountKey,
+} from "./service-account-crypto";
+export type {
+  EncryptedServiceAccountEnvelope,
+} from "./service-account-crypto";
