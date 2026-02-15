@@ -125,3 +125,15 @@ export {
   TokenBucket,
 } from "./microsoft-api";
 export type { MicrosoftClientOptions } from "./microsoft-api";
+
+// Re-export authentication utilities (JWT, password hashing)
+export {
+  generateJWT,
+  verifyJWT,
+  generateRefreshToken,
+  JWT_EXPIRY_SECONDS,
+  REFRESH_TOKEN_EXPIRY_SECONDS,
+  hashPassword,
+  verifyPassword,
+} from "./auth";
+export type { JWTPayload, SubscriptionTier } from "./auth";
