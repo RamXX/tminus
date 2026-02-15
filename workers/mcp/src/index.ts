@@ -486,6 +486,65 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["vip_id"],
     },
   },
+  {
+    name: "calendar.override",
+    description:
+      "Create a manual scheduling override that bypasses working hours enforcement for a specific time window. Use this when you need to schedule a meeting outside normal working hours without VIP status. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description:
+            "Explanation for why this override is needed (e.g., 'Board meeting must be at 7 AM', 'Client in different timezone').",
+        },
+        slot_start: {
+          type: "string",
+          description:
+            "Start of the override window (ISO 8601 datetime, e.g. '2026-03-15T07:00:00Z').",
+        },
+        slot_end: {
+          type: "string",
+          description:
+            "End of the override window (ISO 8601 datetime, e.g. '2026-03-15T08:00:00Z').",
+        },
+        timezone: {
+          type: "string",
+          description:
+            "IANA timezone for the override (e.g., 'America/New_York'). Defaults to 'UTC'.",
+        },
+      },
+      required: ["reason", "slot_start", "slot_end"],
+    },
+  },
+  {
+    name: "calendar.tag_billable",
+    description:
+      "Tag a calendar event as billable with client attribution and category. Creates or updates a time allocation for the event. Categories: BILLABLE, NON_BILLABLE, STRATEGIC, INVESTOR, INTERNAL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event_id: {
+          type: "string",
+          description: "The canonical event ID to tag.",
+        },
+        client: {
+          type: "string",
+          description: "Client identifier for billing attribution.",
+        },
+        category: {
+          type: "string",
+          enum: ["BILLABLE", "NON_BILLABLE", "STRATEGIC", "INVESTOR", "INTERNAL"],
+          description: "Billing category. Default: BILLABLE.",
+        },
+        rate: {
+          type: "number",
+          description: "Optional hourly billing rate.",
+        },
+      },
+      required: ["event_id", "client", "category"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -541,6 +600,8 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.set_vip": "premium",
   "calendar.list_vips": "free",
   "calendar.delete_vip": "premium",
+  "calendar.override": "premium",
+  "calendar.tag_billable": "premium",
 };
 
 /**
@@ -2443,6 +2504,145 @@ async function handleDeleteVip(
   return envelope.data;
 }
 
+/**
+ * Execute calendar.tag_billable: create or update a time allocation for
+ * an event via the API worker.
+ *
+ * If the event already has an allocation, updates it. Otherwise creates one.
+ */
+/**
+ * Handle calendar.override: create a manual scheduling override that bypasses
+ * working hours enforcement for a specific time window.
+ *
+ * Routes through POST /v1/scheduling/override on the API worker.
+ */
+async function handleCalendarOverride(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.reason !== "string" || args.reason.trim().length === 0) {
+    throw new InvalidParamsError("reason is required");
+  }
+  if (typeof args.slot_start !== "string" || args.slot_start.trim().length === 0) {
+    throw new InvalidParamsError("slot_start is required (ISO 8601 datetime)");
+  }
+  if (typeof args.slot_end !== "string" || args.slot_end.trim().length === 0) {
+    throw new InvalidParamsError("slot_end is required (ISO 8601 datetime)");
+  }
+  if (isNaN(Date.parse(args.slot_start))) {
+    throw new InvalidParamsError("slot_start must be a valid ISO 8601 date");
+  }
+  if (isNaN(Date.parse(args.slot_end))) {
+    throw new InvalidParamsError("slot_end must be a valid ISO 8601 date");
+  }
+  if (new Date(args.slot_start) >= new Date(args.slot_end)) {
+    throw new InvalidParamsError("slot_start must be before slot_end");
+  }
+
+  if (args.timezone !== undefined && typeof args.timezone === "string") {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: args.timezone });
+    } catch {
+      throw new InvalidParamsError(`Invalid timezone: ${args.timezone}`);
+    }
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "POST",
+    "/v1/scheduling/override",
+    {
+      reason: args.reason,
+      slot_start: args.slot_start,
+      slot_end: args.slot_end,
+      timezone: args.timezone ?? "UTC",
+    },
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(
+      errData.error ?? "Failed to create scheduling override",
+    );
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data ?? result.data;
+}
+
+async function handleTagBillable(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.event_id !== "string" || args.event_id.trim().length === 0) {
+    throw new InvalidParamsError("event_id is required");
+  }
+  if (typeof args.client !== "string" || args.client.trim().length === 0) {
+    throw new InvalidParamsError("client is required");
+  }
+  if (typeof args.category !== "string" || args.category.trim().length === 0) {
+    throw new InvalidParamsError("category is required");
+  }
+
+  const validCategories = ["BILLABLE", "NON_BILLABLE", "STRATEGIC", "INVESTOR", "INTERNAL"];
+  if (!validCategories.includes(args.category)) {
+    throw new InvalidParamsError(
+      `Invalid category: ${args.category}. Must be one of: ${validCategories.join(", ")}`,
+    );
+  }
+
+  if (args.rate !== undefined && args.rate !== null) {
+    if (typeof args.rate !== "number" || args.rate < 0) {
+      throw new InvalidParamsError("rate must be a non-negative number");
+    }
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const eventId = args.event_id as string;
+  const apiPath = `/v1/events/${encodeURIComponent(eventId)}/allocation`;
+
+  // Try to create first (POST)
+  const createResult = await callConstraintApi(api, jwt, "POST", apiPath, {
+    billing_category: args.category,
+    client_id: args.client,
+    rate: args.rate ?? null,
+  });
+
+  if (createResult.ok) {
+    const envelope = createResult.data as { ok: boolean; data: unknown };
+    return envelope.data;
+  }
+
+  // If creation failed due to conflict (409), try update (PUT)
+  if (createResult.status === 409) {
+    const updateResult = await callConstraintApi(api, jwt, "PUT", apiPath, {
+      billing_category: args.category,
+      client_id: args.client,
+      rate: args.rate ?? null,
+    });
+
+    if (!updateResult.ok) {
+      const errData = updateResult.data as { error?: string };
+      throw new InvalidParamsError(errData.error ?? "Failed to update allocation");
+    }
+
+    const envelope = updateResult.data as { ok: boolean; data: unknown };
+    return envelope.data;
+  }
+
+  // Other errors
+  const errData = createResult.data as { error?: string };
+  throw new InvalidParamsError(errData.error ?? "Failed to tag event as billable");
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -2657,6 +2857,16 @@ async function dispatch(
           case "calendar.delete_vip": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleDeleteVip(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.override": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleCalendarOverride(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.tag_billable": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleTagBillable(request, env.API, toolArgs);
             break;
           }
           default:

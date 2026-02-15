@@ -12,7 +12,7 @@
  * - D1 for account lookups (cross-user registry)
  */
 
-import { isValidId, generateId } from "@tminus/shared";
+import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES } from "@tminus/shared";
 import {
   checkRateLimit as checkRL,
   selectRateLimitConfig,
@@ -1228,6 +1228,32 @@ export function validateConstraintKindAndConfig(
       if (typeof configJson.reason !== "string" || configJson.reason.trim().length === 0) {
         return "override config_json must include a non-empty 'reason' string";
       }
+      // slot_start and slot_end are required for working hours bypass (TM-yke.2)
+      if (configJson.slot_start !== undefined) {
+        if (typeof configJson.slot_start !== "string" || isNaN(Date.parse(configJson.slot_start))) {
+          return "override config_json.slot_start must be a valid ISO 8601 date string";
+        }
+      }
+      if (configJson.slot_end !== undefined) {
+        if (typeof configJson.slot_end !== "string" || isNaN(Date.parse(configJson.slot_end))) {
+          return "override config_json.slot_end must be a valid ISO 8601 date string";
+        }
+      }
+      if (configJson.slot_start && configJson.slot_end) {
+        if (new Date(configJson.slot_start as string) >= new Date(configJson.slot_end as string)) {
+          return "override config_json.slot_start must be before slot_end";
+        }
+      }
+      if (configJson.timezone !== undefined) {
+        if (typeof configJson.timezone !== "string" || configJson.timezone.length === 0) {
+          return "override config_json.timezone must be a non-empty string";
+        }
+        try {
+          Intl.DateTimeFormat(undefined, { timeZone: configJson.timezone as string });
+        } catch {
+          return `override config_json.timezone "${configJson.timezone}" is not a valid IANA timezone`;
+        }
+      }
       break;
     }
   }
@@ -1530,6 +1556,428 @@ async function handleUpdateConstraint(
     console.error("Failed to update constraint", err);
     return jsonResponse(
       errorEnvelope("Failed to update constraint", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Scheduling Override (TM-yke.2) -----------------------------------------
+
+/**
+ * POST /v1/scheduling/override
+ *
+ * Creates an override constraint that exempts a specific time window from
+ * working hours enforcement. This is the "escape hatch" that allows
+ * scheduling outside working hours without VIP status.
+ *
+ * Required fields:
+ * - reason: non-empty string explaining the override
+ * - slot_start: ISO 8601 start of the override window
+ * - slot_end: ISO 8601 end of the override window
+ *
+ * Optional fields:
+ * - timezone: IANA timezone (defaults to UTC)
+ */
+async function handleCreateSchedulingOverride(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const body = await parseJsonBody<{
+    reason?: string;
+    slot_start?: string;
+    slot_end?: string;
+    timezone?: string;
+  }>(request);
+
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Validate required fields
+  if (!body.reason || typeof body.reason !== "string" || body.reason.trim().length === 0) {
+    return jsonResponse(
+      errorEnvelope("reason is required and must be a non-empty string", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.slot_start || typeof body.slot_start !== "string") {
+    return jsonResponse(
+      errorEnvelope("slot_start is required (ISO 8601 datetime)", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+  if (isNaN(Date.parse(body.slot_start))) {
+    return jsonResponse(
+      errorEnvelope("slot_start must be a valid ISO 8601 date string", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.slot_end || typeof body.slot_end !== "string") {
+    return jsonResponse(
+      errorEnvelope("slot_end is required (ISO 8601 datetime)", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+  if (isNaN(Date.parse(body.slot_end))) {
+    return jsonResponse(
+      errorEnvelope("slot_end must be a valid ISO 8601 date string", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (new Date(body.slot_start) >= new Date(body.slot_end)) {
+    return jsonResponse(
+      errorEnvelope("slot_start must be before slot_end", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Validate timezone if provided
+  const timezone = body.timezone ?? "UTC";
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: timezone });
+  } catch {
+    return jsonResponse(
+      errorEnvelope(`timezone "${timezone}" is not a valid IANA timezone`, "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Create an override constraint via the existing constraint pipeline
+  const configJson = {
+    reason: body.reason.trim(),
+    slot_start: body.slot_start,
+    slot_end: body.slot_end,
+    timezone,
+  };
+
+  try {
+    const result = await callDO<{
+      constraint_id: string;
+      kind: string;
+      config_json: Record<string, unknown>;
+      active_from: string | null;
+      active_to: string | null;
+      created_at: string;
+    }>(env.USER_GRAPH, auth.userId, "/addConstraint", {
+      kind: "override",
+      config_json: configJson,
+      active_from: body.slot_start,
+      active_to: body.slot_end,
+    });
+
+    if (!result.ok) {
+      const errData = result.data as unknown as { error?: string };
+      const errMsg = errData?.error ?? "Failed to create scheduling override";
+      return jsonResponse(
+        errorEnvelope(errMsg, "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 201);
+  } catch (err) {
+    console.error("Failed to create scheduling override", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create scheduling override", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+// -- Time Allocations -------------------------------------------------------
+
+async function handleSetAllocation(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const body = await parseJsonBody<{
+    billing_category?: string;
+    client_id?: string;
+    rate?: number;
+  }>(request);
+
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!body.billing_category || typeof body.billing_category !== "string") {
+    return jsonResponse(
+      errorEnvelope("billing_category is required", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (!isValidBillingCategory(body.billing_category)) {
+    return jsonResponse(
+      errorEnvelope(
+        `Invalid billing_category: ${body.billing_category}. Must be one of: ${BILLING_CATEGORIES.join(", ")}`,
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (body.rate !== undefined && body.rate !== null) {
+    if (typeof body.rate !== "number" || body.rate < 0) {
+      return jsonResponse(
+        errorEnvelope("rate must be a non-negative number", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  try {
+    const allocationId = generateId("allocation");
+    const result = await callDO<{
+      allocation_id: string;
+      canonical_event_id: string;
+      client_id: string | null;
+      billing_category: string;
+      rate: number | null;
+      confidence: string;
+      locked: boolean;
+      created_at: string;
+    }>(env.USER_GRAPH, auth.userId, "/createAllocation", {
+      allocation_id: allocationId,
+      canonical_event_id: eventId,
+      billing_category: body.billing_category,
+      client_id: body.client_id ?? null,
+      rate: body.rate ?? null,
+    });
+
+    if (!result.ok) {
+      const errorData = result.data as { error?: string };
+      const errorMsg = errorData.error ?? "Failed to create allocation";
+      // Check if it's a "not found" or "already exists" error
+      if (errorMsg.includes("not found")) {
+        return jsonResponse(
+          errorEnvelope(errorMsg, "NOT_FOUND"),
+          ErrorCode.NOT_FOUND,
+        );
+      }
+      if (errorMsg.includes("already exists")) {
+        return jsonResponse(
+          errorEnvelope(errorMsg, "CONFLICT"),
+          ErrorCode.CONFLICT,
+        );
+      }
+      return jsonResponse(
+        errorEnvelope(errorMsg, "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 201);
+  } catch (err) {
+    console.error("Failed to create allocation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to create allocation", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleGetAllocation(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      allocation_id: string;
+      canonical_event_id: string;
+      client_id: string | null;
+      billing_category: string;
+      rate: number | null;
+      confidence: string;
+      locked: boolean;
+      created_at: string;
+    } | null>(env.USER_GRAPH, auth.userId, "/getAllocation", {
+      canonical_event_id: eventId,
+    });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to get allocation", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (result.data === null) {
+      return jsonResponse(
+        errorEnvelope("No allocation found for this event", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get allocation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get allocation", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleUpdateAllocation(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  const body = await parseJsonBody<{
+    billing_category?: string;
+    client_id?: string | null;
+    rate?: number | null;
+  }>(request);
+
+  if (!body) {
+    return jsonResponse(
+      errorEnvelope("Request body must be valid JSON", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (body.billing_category !== undefined) {
+    if (!isValidBillingCategory(body.billing_category)) {
+      return jsonResponse(
+        errorEnvelope(
+          `Invalid billing_category: ${body.billing_category}. Must be one of: ${BILLING_CATEGORIES.join(", ")}`,
+          "VALIDATION_ERROR",
+        ),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  if (body.rate !== undefined && body.rate !== null) {
+    if (typeof body.rate !== "number" || body.rate < 0) {
+      return jsonResponse(
+        errorEnvelope("rate must be a non-negative number", "VALIDATION_ERROR"),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+  }
+
+  try {
+    const result = await callDO<{
+      allocation_id: string;
+      canonical_event_id: string;
+      client_id: string | null;
+      billing_category: string;
+      rate: number | null;
+      confidence: string;
+      locked: boolean;
+      created_at: string;
+    } | null>(env.USER_GRAPH, auth.userId, "/updateAllocation", {
+      canonical_event_id: eventId,
+      updates: {
+        billing_category: body.billing_category,
+        client_id: body.client_id,
+        rate: body.rate,
+      },
+    });
+
+    if (!result.ok) {
+      const errorData = result.data as { error?: string };
+      return jsonResponse(
+        errorEnvelope(errorData.error ?? "Failed to update allocation", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (result.data === null) {
+      return jsonResponse(
+        errorEnvelope("No allocation found for this event", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to update allocation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to update allocation", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleDeleteAllocation(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  eventId: string,
+): Promise<Response> {
+  if (!isValidId(eventId, "event")) {
+    return jsonResponse(
+      errorEnvelope("Invalid event ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{ deleted: boolean }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/deleteAllocation",
+      { canonical_event_id: eventId },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to delete allocation", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data.deleted) {
+      return jsonResponse(
+        errorEnvelope("No allocation found for this event", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    return jsonResponse(successEnvelope({ deleted: true }), 200);
+  } catch (err) {
+    console.error("Failed to delete allocation", err);
+    return jsonResponse(
+      errorEnvelope("Failed to delete allocation", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -2182,6 +2630,12 @@ async function routeAuthenticatedRequest(
 
       // -- Scheduling routes ------------------------------------------------
 
+      if (method === "POST" && pathname === "/v1/scheduling/override") {
+        const overrideGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+        if (overrideGate) return overrideGate;
+        return handleCreateSchedulingOverride(request, auth, env);
+      }
+
       if (method === "POST" && pathname === "/v1/scheduling/sessions") {
         return handleCreateSchedulingSession(request, auth, env);
       }
@@ -2207,6 +2661,25 @@ async function routeAuthenticatedRequest(
         }
         if (method === "DELETE") {
           return handleCancelSchedulingSession(request, auth, env, match.params[0]);
+        }
+      }
+
+      // -- Time allocation routes -----------------------------------------------
+
+      match = matchRoute(pathname, "/v1/events/:id/allocation");
+      if (match) {
+        const allocEventId = match.params[0];
+        if (method === "POST") {
+          return handleSetAllocation(request, auth, env, allocEventId);
+        }
+        if (method === "GET") {
+          return handleGetAllocation(request, auth, env, allocEventId);
+        }
+        if (method === "PUT") {
+          return handleUpdateAllocation(request, auth, env, allocEventId);
+        }
+        if (method === "DELETE") {
+          return handleDeleteAllocation(request, auth, env, allocEventId);
         }
       }
 

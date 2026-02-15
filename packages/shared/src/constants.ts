@@ -59,4 +59,30 @@ export const ID_PREFIXES = {
   candidate: "cnd_",
   hold: "hld_",
   vip: "vip_",
+  allocation: "alc_",
 } as const;
+
+// ---------------------------------------------------------------------------
+// Billing category enum for time allocations
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid billing categories for time allocation tagging.
+ * Used by the time_allocations table in UserGraphDO.
+ */
+export const BILLING_CATEGORIES = [
+  "BILLABLE",
+  "NON_BILLABLE",
+  "STRATEGIC",
+  "INVESTOR",
+  "INTERNAL",
+] as const;
+
+export type BillingCategory = (typeof BILLING_CATEGORIES)[number];
+
+/**
+ * Validate that a string is a valid billing category.
+ */
+export function isValidBillingCategory(value: string): value is BillingCategory {
+  return BILLING_CATEGORIES.includes(value as BillingCategory);
+}

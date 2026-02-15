@@ -47,7 +47,10 @@ export {
   DEFAULT_DETAIL_LEVEL,
   DEFAULT_CALENDAR_KIND,
   ID_PREFIXES,
+  BILLING_CATEGORIES,
+  isValidBillingCategory,
 } from "./constants";
+export type { BillingCategory } from "./constants";
 
 // Re-export ID utilities
 export { generateId, parseId, isValidId } from "./id";

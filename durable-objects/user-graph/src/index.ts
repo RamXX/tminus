@@ -23,6 +23,7 @@ import {
   computeProjectionHash,
   computeIdempotencyKey,
   BUSY_OVERLAY_CALENDAR_NAME,
+  isValidBillingCategory,
 } from "@tminus/shared";
 import type {
   SqlStorageLike,
@@ -36,6 +37,7 @@ import type {
   DetailLevel,
   CalendarKind,
   MirrorState,
+  BillingCategory,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -101,6 +103,18 @@ interface EventMirrorRow {
   last_write_ts: string | null;
   state: string;
   error_message: string | null;
+}
+
+interface AllocationRow {
+  [key: string]: unknown;
+  allocation_id: string;
+  canonical_event_id: string;
+  client_id: string | null;
+  billing_category: string;
+  rate: number | null;
+  confidence: string;
+  locked: number;
+  created_at: string;
 }
 
 interface VipPolicyRow {
@@ -258,6 +272,18 @@ export interface MirrorStateUpdate {
   state?: MirrorState;
   error_message?: string | null;
   target_calendar_id?: string;
+}
+
+/** A time allocation as returned by allocation CRUD methods. */
+export interface TimeAllocation {
+  readonly allocation_id: string;
+  readonly canonical_event_id: string;
+  readonly client_id: string | null;
+  readonly billing_category: string;
+  readonly rate: number | null;
+  readonly confidence: string;
+  readonly locked: boolean;
+  readonly created_at: string;
 }
 
 /** Result of a GDPR full-user deletion step. */
@@ -1445,6 +1471,11 @@ export class UserGraphDO {
    * Required fields:
    * - reason: non-empty string describing why the override exists
    *
+   * Optional fields (TM-yke.2 working hours bypass):
+   * - slot_start: ISO 8601 start of override window
+   * - slot_end: ISO 8601 end of override window
+   * - timezone: IANA timezone string
+   *
    * Throws on validation failure.
    */
   static validateOverrideConfig(configJson: Record<string, unknown>): void {
@@ -1452,6 +1483,34 @@ export class UserGraphDO {
       throw new Error(
         "override config_json must include a non-empty 'reason' string",
       );
+    }
+    // Optional slot_start/slot_end for working hours bypass (TM-yke.2)
+    if (configJson.slot_start !== undefined) {
+      if (typeof configJson.slot_start !== "string" || isNaN(Date.parse(configJson.slot_start))) {
+        throw new Error("override config_json.slot_start must be a valid ISO 8601 date string");
+      }
+    }
+    if (configJson.slot_end !== undefined) {
+      if (typeof configJson.slot_end !== "string" || isNaN(Date.parse(configJson.slot_end))) {
+        throw new Error("override config_json.slot_end must be a valid ISO 8601 date string");
+      }
+    }
+    if (configJson.slot_start && configJson.slot_end) {
+      if (new Date(configJson.slot_start as string) >= new Date(configJson.slot_end as string)) {
+        throw new Error("override config_json.slot_start must be before slot_end");
+      }
+    }
+    if (configJson.timezone !== undefined) {
+      if (typeof configJson.timezone !== "string" || configJson.timezone.length === 0) {
+        throw new Error("override config_json.timezone must be a non-empty string");
+      }
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: configJson.timezone as string });
+      } catch {
+        throw new Error(
+          `override config_json.timezone "${configJson.timezone}" is not a valid IANA timezone`,
+        );
+      }
     }
   }
 
@@ -2322,6 +2381,237 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Time allocation management (billable time tagging)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a time allocation for a canonical event.
+   * Links an event to a billing category with optional client and rate.
+   *
+   * Validates:
+   * - billing_category against BILLING_CATEGORIES enum
+   * - canonical_event_id references an existing event (FK integrity)
+   * - Only one allocation per event (enforced via UNIQUE on canonical_event_id
+   *   is NOT in schema -- we check manually and reject duplicates)
+   */
+  createAllocation(
+    allocationId: string,
+    canonicalEventId: string,
+    billingCategory: string,
+    clientId: string | null,
+    rate: number | null,
+  ): TimeAllocation {
+    this.ensureMigrated();
+
+    // Validate billing category
+    if (!isValidBillingCategory(billingCategory)) {
+      throw new Error(
+        `Invalid billing_category: ${billingCategory}. Must be one of: BILLABLE, NON_BILLABLE, STRATEGIC, INVESTOR, INTERNAL`,
+      );
+    }
+
+    // Validate rate if provided
+    if (rate !== null && (typeof rate !== "number" || rate < 0)) {
+      throw new Error("rate must be a non-negative number or null");
+    }
+
+    // Verify the event exists
+    const eventRows = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM canonical_events WHERE canonical_event_id = ?",
+        canonicalEventId,
+      )
+      .toArray();
+
+    if (eventRows[0].cnt === 0) {
+      throw new Error(`Event ${canonicalEventId} not found`);
+    }
+
+    // Check for existing allocation on this event
+    const existing = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM time_allocations WHERE canonical_event_id = ?",
+        canonicalEventId,
+      )
+      .toArray();
+
+    if (existing[0].cnt > 0) {
+      throw new Error(
+        `Allocation already exists for event ${canonicalEventId}. Use updateAllocation instead.`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO time_allocations (allocation_id, canonical_event_id, client_id, billing_category, rate, confidence, locked, created_at)
+       VALUES (?, ?, ?, ?, ?, 'manual', 0, ?)`,
+      allocationId,
+      canonicalEventId,
+      clientId,
+      billingCategory,
+      rate,
+      now,
+    );
+
+    return {
+      allocation_id: allocationId,
+      canonical_event_id: canonicalEventId,
+      client_id: clientId,
+      billing_category: billingCategory,
+      rate: rate,
+      confidence: "manual",
+      locked: false,
+      created_at: now,
+    };
+  }
+
+  /**
+   * Get the time allocation for a specific event.
+   * Returns null if no allocation exists for the event.
+   */
+  getAllocation(canonicalEventId: string): TimeAllocation | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<AllocationRow>(
+        `SELECT allocation_id, canonical_event_id, client_id, billing_category, rate, confidence, locked, created_at
+         FROM time_allocations WHERE canonical_event_id = ?`,
+        canonicalEventId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      allocation_id: row.allocation_id,
+      canonical_event_id: row.canonical_event_id,
+      client_id: row.client_id,
+      billing_category: row.billing_category,
+      rate: row.rate,
+      confidence: row.confidence,
+      locked: row.locked === 1,
+      created_at: row.created_at,
+    };
+  }
+
+  /**
+   * Update an existing time allocation.
+   * Only updates provided fields (partial update).
+   * Returns the updated allocation or null if not found.
+   */
+  updateAllocation(
+    canonicalEventId: string,
+    updates: {
+      billing_category?: string;
+      client_id?: string | null;
+      rate?: number | null;
+    },
+  ): TimeAllocation | null {
+    this.ensureMigrated();
+
+    // Validate billing category if provided
+    if (updates.billing_category !== undefined) {
+      if (!isValidBillingCategory(updates.billing_category)) {
+        throw new Error(
+          `Invalid billing_category: ${updates.billing_category}. Must be one of: BILLABLE, NON_BILLABLE, STRATEGIC, INVESTOR, INTERNAL`,
+        );
+      }
+    }
+
+    // Validate rate if provided
+    if (updates.rate !== undefined && updates.rate !== null) {
+      if (typeof updates.rate !== "number" || updates.rate < 0) {
+        throw new Error("rate must be a non-negative number or null");
+      }
+    }
+
+    // Check allocation exists
+    const existing = this.getAllocation(canonicalEventId);
+    if (!existing) return null;
+
+    // Build dynamic SET clause
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.billing_category !== undefined) {
+      setClauses.push("billing_category = ?");
+      values.push(updates.billing_category);
+    }
+    if (updates.client_id !== undefined) {
+      setClauses.push("client_id = ?");
+      values.push(updates.client_id);
+    }
+    if (updates.rate !== undefined) {
+      setClauses.push("rate = ?");
+      values.push(updates.rate);
+    }
+
+    if (setClauses.length === 0) {
+      // Nothing to update
+      return existing;
+    }
+
+    values.push(canonicalEventId);
+    this.sql.exec(
+      `UPDATE time_allocations SET ${setClauses.join(", ")} WHERE canonical_event_id = ?`,
+      ...values,
+    );
+
+    // Return the updated record
+    return this.getAllocation(canonicalEventId)!;
+  }
+
+  /**
+   * Delete a time allocation for a specific event.
+   * Returns true if a row was deleted, false if not found.
+   */
+  deleteAllocation(canonicalEventId: string): boolean {
+    this.ensureMigrated();
+
+    const before = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM time_allocations WHERE canonical_event_id = ?",
+        canonicalEventId,
+      )
+      .toArray()[0].cnt;
+
+    if (before === 0) return false;
+
+    this.sql.exec(
+      "DELETE FROM time_allocations WHERE canonical_event_id = ?",
+      canonicalEventId,
+    );
+    return true;
+  }
+
+  /**
+   * List all time allocations for this user.
+   * Returns all allocations ordered by created_at descending.
+   */
+  listAllocations(): TimeAllocation[] {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<AllocationRow>(
+        `SELECT allocation_id, canonical_event_id, client_id, billing_category, rate, confidence, locked, created_at
+         FROM time_allocations ORDER BY created_at DESC`,
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      allocation_id: row.allocation_id,
+      canonical_event_id: row.canonical_event_id,
+      client_id: row.client_id,
+      billing_category: row.billing_category,
+      rate: row.rate,
+      confidence: row.confidence,
+      locked: row.locked === 1,
+      created_at: row.created_at,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
   // VIP policy management
   // -------------------------------------------------------------------------
 
@@ -2835,6 +3125,58 @@ export class UserGraphDO {
           const body = (await request.json()) as { session_id: string };
           this.releaseSessionHolds(body.session_id);
           return Response.json({ ok: true });
+        }
+
+        // ---------------------------------------------------------------
+        // Time allocation RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/createAllocation": {
+          const body = (await request.json()) as {
+            allocation_id: string;
+            canonical_event_id: string;
+            billing_category: string;
+            client_id: string | null;
+            rate: number | null;
+          };
+          const alloc = this.createAllocation(
+            body.allocation_id,
+            body.canonical_event_id,
+            body.billing_category,
+            body.client_id,
+            body.rate,
+          );
+          return Response.json(alloc);
+        }
+
+        case "/getAllocation": {
+          const body = (await request.json()) as { canonical_event_id: string };
+          const alloc = this.getAllocation(body.canonical_event_id);
+          return Response.json(alloc);
+        }
+
+        case "/updateAllocation": {
+          const body = (await request.json()) as {
+            canonical_event_id: string;
+            updates: {
+              billing_category?: string;
+              client_id?: string | null;
+              rate?: number | null;
+            };
+          };
+          const alloc = this.updateAllocation(body.canonical_event_id, body.updates);
+          return Response.json(alloc);
+        }
+
+        case "/deleteAllocation": {
+          const body = (await request.json()) as { canonical_event_id: string };
+          const deleted = this.deleteAllocation(body.canonical_event_id);
+          return Response.json({ deleted });
+        }
+
+        case "/listAllocations": {
+          const items = this.listAllocations();
+          return Response.json({ items });
         }
 
         // ---------------------------------------------------------------
