@@ -57,6 +57,7 @@ describe("constants.ts -- ID_PREFIXES", () => {
       "session",
       "candidate",
       "hold",
+      "vip",
     ];
     expect(Object.keys(ID_PREFIXES).sort()).toEqual(expectedKeys.sort());
   });
