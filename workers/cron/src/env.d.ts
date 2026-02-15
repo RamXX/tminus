@@ -9,7 +9,9 @@
 interface Env {
   DB: D1Database;
   ACCOUNT: DurableObjectNamespace;
+  USER_GRAPH: DurableObjectNamespace;
   RECONCILE_QUEUE: Queue;
+  WRITE_QUEUE: Queue;
   DELETION_WORKFLOW?: {
     create(params: { id: string; params: unknown }): Promise<{ id: string }>;
   };

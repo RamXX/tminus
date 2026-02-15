@@ -21,7 +21,7 @@ import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } f
 import { UserGraphDO } from "@tminus/do-user-graph";
 import type { QueueLike } from "@tminus/do-user-graph";
 import { SchedulingWorkflow } from "./index";
-import type { SchedulingParams } from "./index";
+import type { SchedulingParams, Hold } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -700,6 +700,432 @@ describe("SchedulingWorkflow integration", () => {
       expect(elapsed).toBeLessThan(2000); // <2s
       expect(session.candidates.length).toBeGreaterThan(0);
       expect(session.candidates.length).toBeLessThanOrEqual(10);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Session lifecycle management (TM-946.4)
+  // -----------------------------------------------------------------------
+
+  describe("session lifecycle management", () => {
+    it("full lifecycle: create -> list -> get detail -> cancel", async () => {
+      const workflow = createWorkflow();
+
+      // Step 1: Create session
+      const session = await workflow.createSession(makeParams());
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.status).toBe("candidates_ready");
+      expect(session.candidates.length).toBeGreaterThanOrEqual(3);
+
+      // Step 2: List sessions (no filter)
+      const listResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listSchedulingSessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(listResp.ok).toBe(true);
+
+      const listData = await listResp.json() as {
+        items: Array<{ sessionId: string; status: string; candidateCount: number }>;
+        total: number;
+      };
+      expect(listData.total).toBe(1);
+      expect(listData.items[0].sessionId).toBe(session.sessionId);
+      expect(listData.items[0].status).toBe("candidates_ready");
+      expect(listData.items[0].candidateCount).toBe(session.candidates.length);
+
+      // Step 3: Get detail with candidates
+      const detail = await workflow.getCandidates(TEST_USER_ID, session.sessionId);
+      expect(detail.sessionId).toBe(session.sessionId);
+      expect(detail.status).toBe("candidates_ready");
+      expect(detail.candidates.length).toBe(session.candidates.length);
+
+      // Step 4: Cancel session
+      const cancelResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/cancelSchedulingSession", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: session.sessionId }),
+        }),
+      );
+      expect(cancelResp.ok).toBe(true);
+
+      // Step 5: Verify cancelled status in list
+      const listAfterCancel = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listSchedulingSessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "cancelled" }),
+        }),
+      );
+      const afterCancelData = await listAfterCancel.json() as {
+        items: Array<{ sessionId: string; status: string }>;
+        total: number;
+      };
+      expect(afterCancelData.total).toBe(1);
+      expect(afterCancelData.items[0].status).toBe("cancelled");
+    });
+
+    it("list sessions filters by status correctly", async () => {
+      const workflow = createWorkflow();
+
+      // Create two sessions
+      const session1 = await workflow.createSession(makeParams({ title: "Session 1" }));
+      const session2 = await workflow.createSession(makeParams({ title: "Session 2" }));
+
+      // Commit session 1
+      const candidateId = session1.candidates[0].candidateId;
+      await workflow.commitCandidate(TEST_USER_ID, session1.sessionId, candidateId);
+
+      // List only candidates_ready sessions
+      const listResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listSchedulingSessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "candidates_ready" }),
+        }),
+      );
+      const data = await listResp.json() as {
+        items: Array<{ sessionId: string; status: string }>;
+        total: number;
+      };
+      expect(data.total).toBe(1);
+      expect(data.items[0].sessionId).toBe(session2.sessionId);
+
+      // List committed sessions
+      const committedResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/listSchedulingSessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "committed" }),
+        }),
+      );
+      const committedData = await committedResp.json() as {
+        items: Array<{ sessionId: string; status: string }>;
+        total: number;
+      };
+      expect(committedData.total).toBe(1);
+      expect(committedData.items[0].sessionId).toBe(session1.sessionId);
+    });
+
+    it("get session detail returns candidates with correct structure", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams());
+
+      const detail = await workflow.getCandidates(TEST_USER_ID, session.sessionId);
+
+      // Verify the session detail has all expected fields
+      expect(detail.sessionId).toBe(session.sessionId);
+      expect(detail.status).toBe("candidates_ready");
+      expect(detail.createdAt).toBeDefined();
+      expect(typeof detail.createdAt).toBe("string");
+
+      // Verify each candidate has the expected structure
+      for (const c of detail.candidates) {
+        expect(c.candidateId).toMatch(/^cnd_/);
+        expect(c.sessionId).toBe(session.sessionId);
+        expect(c.start).toBeTruthy();
+        expect(c.end).toBeTruthy();
+        expect(typeof c.score).toBe("number");
+        expect(typeof c.explanation).toBe("string");
+      }
+    });
+
+    it("cancel on non-cancellable session returns error", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams());
+
+      // Commit the session first
+      const candidateId = session.candidates[0].candidateId;
+      await workflow.commitCandidate(TEST_USER_ID, session.sessionId, candidateId);
+
+      // Try to cancel a committed session
+      const cancelResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/cancelSchedulingSession", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: session.sessionId }),
+        }),
+      );
+      expect(cancelResp.ok).toBe(false);
+
+      const body = await cancelResp.json() as { error: string };
+      expect(body.error).toContain("already committed");
+    });
+
+    it("cancelled session cannot be committed", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams());
+      const candidateId = session.candidates[0].candidateId;
+
+      // Cancel session
+      const cancelResp = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/cancelSchedulingSession", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: session.sessionId }),
+        }),
+      );
+      expect(cancelResp.ok).toBe(true);
+
+      // Try to commit the cancelled session
+      await expect(
+        workflow.commitCandidate(TEST_USER_ID, session.sessionId, candidateId),
+      ).rejects.toThrow("cancelled");
+    });
+
+    it("session get detail returns committed info after commit", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams());
+      const candidateId = session.candidates[0].candidateId;
+
+      const result = await workflow.commitCandidate(
+        TEST_USER_ID,
+        session.sessionId,
+        candidateId,
+      );
+
+      // Get detail should show committed status with committed info
+      const detail = await workflow.getCandidates(TEST_USER_ID, session.sessionId);
+      expect(detail.status).toBe("committed");
+      expect(detail.committedCandidateId).toBe(candidateId);
+      expect(detail.committedEventId).toBe(result.eventId);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Tentative holds lifecycle (TM-946.3)
+  // -----------------------------------------------------------------------
+
+  describe("tentative holds", () => {
+    it("AC1: creates tentative holds for candidates when session is created", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000, // 24h
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+      expect(session.holds).toBeDefined();
+      expect(session.holds!.length).toBeGreaterThan(0);
+
+      // Each candidate should have a hold for each required account
+      const expectedHoldCount = session.candidates.length * makeParams().requiredAccountIds.length;
+      expect(session.holds!.length).toBe(expectedHoldCount);
+
+      // All holds should be in 'held' status
+      for (const hold of session.holds!) {
+        expect(hold.status).toBe("held");
+        expect(hold.session_id).toBe(session.sessionId);
+        expect(hold.hold_id).toMatch(/^hld_/);
+      }
+    });
+
+    it("AC2: hold UPSERT_MIRROR messages enqueued with tentative event data", async () => {
+      queue.clear();
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      // Write queue should have UPSERT_MIRROR messages for holds
+      const holdMessages = queue.messages.filter(
+        (m: unknown) => {
+          const msg = m as Record<string, unknown>;
+          return msg.type === "UPSERT_MIRROR" &&
+            typeof msg.canonical_event_id === "string" &&
+            (msg.canonical_event_id as string).startsWith("hold_");
+        },
+      );
+
+      expect(holdMessages.length).toBe(session.holds!.length);
+
+      // Verify first message has tentative event properties
+      const firstMsg = holdMessages[0] as Record<string, unknown>;
+      const payload = firstMsg.projected_payload as Record<string, unknown>;
+      expect((payload.summary as string)).toContain("[Hold]");
+      expect(payload.transparency).toBe("opaque");
+    });
+
+    it("AC3: holds are stored in schedule_holds table via UserGraphDO", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      // Verify holds are retrievable via the workflow
+      const holds = await workflow.getHoldsBySession(TEST_USER_ID, session.sessionId);
+      expect(holds.length).toBe(session.holds!.length);
+
+      // Verify hold records match
+      for (const hold of holds) {
+        expect(hold.session_id).toBe(session.sessionId);
+        expect(hold.status).toBe("held");
+        expect(hold.account_id).toBe(TEST_ACCOUNT_ID);
+      }
+    });
+
+    it("AC4: commit releases all holds and creates confirmed event", async () => {
+      queue.clear();
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      const candidateId = session.candidates[0].candidateId;
+      const result = await workflow.commitCandidate(
+        TEST_USER_ID,
+        session.sessionId,
+        candidateId,
+      );
+
+      // Canonical event created as confirmed
+      expect(result.eventId).toMatch(/^evt_/);
+      expect(result.session.status).toBe("committed");
+
+      // All holds should be released
+      const holds = await workflow.getHoldsBySession(TEST_USER_ID, session.sessionId);
+      for (const hold of holds) {
+        expect(hold.status).toBe("released");
+      }
+    });
+
+    it("AC5: cancel releases all holds", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 24 * 60 * 60 * 1000,
+        targetCalendarId: "cal_test_primary",
+      }));
+
+      expect(session.holds!.length).toBeGreaterThan(0);
+
+      // Cancel the session
+      const cancelled = await workflow.cancelSession(TEST_USER_ID, session.sessionId);
+      expect(cancelled.status).toBe("cancelled");
+
+      // All holds should be released
+      const holds = await workflow.getHoldsBySession(TEST_USER_ID, session.sessionId);
+      for (const hold of holds) {
+        expect(hold.status).toBe("released");
+      }
+    });
+
+    it("AC6: holds not created when holdTimeoutMs is 0", async () => {
+      const workflow = createWorkflow();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: 0,
+      }));
+
+      expect(session.candidates.length).toBeGreaterThan(0);
+      expect(session.holds).toEqual([]);
+    });
+
+    it("hold expiry check finds expired holds in UserGraphDO", async () => {
+      // Insert a hold with expired timestamp directly into DB
+      const holdId = "hld_01TESTHOLD00000000000001";
+      const sessionId = "ses_01TESTSES000000000000001";
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, 'candidates_ready', '{}', datetime('now'))`,
+      ).run(sessionId);
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
+         VALUES (?, ?, ?, ?, datetime('now', '-1 hour'), 'held')`,
+      ).run(holdId, sessionId, TEST_ACCOUNT_ID, "google_evt_123");
+
+      // Query via UserGraphDO RPC
+      const response = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/getExpiredHolds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      expect(response.ok).toBe(true);
+      const { holds } = (await response.json()) as { holds: Hold[] };
+      expect(holds.length).toBe(1);
+      expect(holds[0].hold_id).toBe(holdId);
+      expect(holds[0].provider_event_id).toBe("google_evt_123");
+    });
+
+    it("updateHoldStatus transitions from held to expired", async () => {
+      // Insert a held hold
+      const holdId = "hld_01TESTHOLD00000000000002";
+      const sessionId = "ses_01TESTSES000000000000002";
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, 'candidates_ready', '{}', datetime('now'))`,
+      ).run(sessionId);
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
+         VALUES (?, ?, ?, NULL, datetime('now', '+1 hour'), 'held')`,
+      ).run(holdId, sessionId, TEST_ACCOUNT_ID);
+
+      // Transition to expired
+      const response = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/updateHoldStatus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hold_id: holdId, status: "expired" }),
+        }),
+      );
+
+      expect(response.ok).toBe(true);
+
+      // Verify status changed
+      const row = db.prepare("SELECT status FROM schedule_holds WHERE hold_id = ?").get(holdId) as Record<string, unknown>;
+      expect(row.status).toBe("expired");
+    });
+
+    it("updateHoldStatus rejects invalid transition from expired to held", async () => {
+      // Insert an expired hold
+      const holdId = "hld_01TESTHOLD00000000000003";
+      const sessionId = "ses_01TESTSES000000000000003";
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, 'candidates_ready', '{}', datetime('now'))`,
+      ).run(sessionId);
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
+         VALUES (?, ?, ?, NULL, datetime('now', '-1 hour'), 'expired')`,
+      ).run(holdId, sessionId, TEST_ACCOUNT_ID);
+
+      // Try invalid transition
+      const response = await userGraphDO.handleFetch(
+        new Request("https://user-graph.internal/updateHoldStatus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hold_id: holdId, status: "held" }),
+        }),
+      );
+
+      expect(response.ok).toBe(false);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("Invalid hold transition");
+    });
+
+    it("holds have correct expiry time based on holdTimeoutMs", async () => {
+      const oneHourMs = 60 * 60 * 1000;
+      const workflow = createWorkflow();
+      const before = Date.now();
+      const session = await workflow.createSession(makeParams({
+        holdTimeoutMs: oneHourMs,
+        targetCalendarId: "cal_test_primary",
+      }));
+      const after = Date.now();
+
+      for (const hold of session.holds!) {
+        const expiresMs = new Date(hold.expires_at).getTime();
+        // Expiry should be approximately now + 1 hour (within 1 second tolerance)
+        expect(expiresMs).toBeGreaterThanOrEqual(before + oneHourMs);
+        expect(expiresMs).toBeLessThanOrEqual(after + oneHourMs + 1000);
+      }
     });
   });
 });

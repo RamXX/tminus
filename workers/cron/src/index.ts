@@ -15,12 +15,13 @@
  * - Per ADR-6: Daily reconciliation, not weekly
  */
 
-import type { ReconcileAccountMessage, AccountId } from "@tminus/shared";
+import type { ReconcileAccountMessage, AccountId, DeleteMirrorMessage, EventId } from "@tminus/shared";
 import {
   CRON_CHANNEL_RENEWAL,
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CRON_DELETION_CHECK,
+  CRON_HOLD_EXPIRY,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
@@ -381,6 +382,123 @@ async function handleDeletionCheck(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Hold Expiry Cleanup (every hour at :30)
+// ---------------------------------------------------------------------------
+
+interface ExpiredHoldRow {
+  readonly hold_id: string;
+  readonly session_id: string;
+  readonly account_id: string;
+  readonly provider_event_id: string | null;
+}
+
+/**
+ * Query UserGraphDO for expired tentative holds and clean them up.
+ *
+ * For each active user, calls UserGraphDO.getExpiredHolds(). For each
+ * expired hold with a provider_event_id, enqueues a DELETE_MIRROR message
+ * to remove the tentative event from the calendar. Then transitions the
+ * hold status to 'expired'.
+ *
+ * This implements AC-5: "Expired holds cleaned up by cron".
+ */
+async function handleHoldExpiry(env: Env): Promise<void> {
+  // Get all active users (they each have a UserGraphDO with schedule_holds)
+  const { results } = await env.DB
+    .prepare(
+      `SELECT DISTINCT user_id FROM accounts WHERE status = ?1`,
+    )
+    .bind("active")
+    .all<{ user_id: string }>();
+
+  console.log(`Hold expiry cleanup: checking ${results.length} active users`);
+
+  let totalExpired = 0;
+  let totalDeleted = 0;
+
+  for (const row of results) {
+    try {
+      const doId = env.USER_GRAPH.idFromName(row.user_id);
+      const stub = env.USER_GRAPH.get(doId);
+
+      // Query for expired holds
+      const response = await stub.fetch(
+        new Request("https://user-graph.internal/getExpiredHolds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      if (!response.ok) {
+        console.error(
+          `Failed to get expired holds for user ${row.user_id}: ${response.status}`,
+        );
+        continue;
+      }
+
+      const { holds } = (await response.json()) as {
+        holds: ExpiredHoldRow[];
+      };
+
+      if (holds.length === 0) continue;
+
+      totalExpired += holds.length;
+
+      // Enqueue DELETE_MIRROR messages for holds with provider events
+      for (const hold of holds) {
+        if (hold.provider_event_id) {
+          try {
+            const deleteMsg: DeleteMirrorMessage = {
+              type: "DELETE_MIRROR",
+              canonical_event_id: `hold_${hold.hold_id}` as EventId,
+              target_account_id: hold.account_id as AccountId,
+              provider_event_id: hold.provider_event_id,
+              idempotency_key: `hold_expire_${hold.hold_id}`,
+            };
+            await env.WRITE_QUEUE.send(deleteMsg);
+            totalDeleted++;
+          } catch (err) {
+            console.error(
+              `Failed to enqueue delete for hold ${hold.hold_id}:`,
+              err,
+            );
+          }
+        }
+
+        // Transition hold to 'expired' status
+        try {
+          await stub.fetch(
+            new Request("https://user-graph.internal/updateHoldStatus", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                hold_id: hold.hold_id,
+                status: "expired",
+              }),
+            }),
+          );
+        } catch (err) {
+          console.error(
+            `Failed to expire hold ${hold.hold_id}:`,
+            err,
+          );
+        }
+      }
+    } catch (err) {
+      console.error(
+        `Hold expiry error for user ${row.user_id}:`,
+        err,
+      );
+    }
+  }
+
+  console.log(
+    `Hold expiry cleanup: expired ${totalExpired} holds, enqueued ${totalDeleted} deletes`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled handler dispatch
 // ---------------------------------------------------------------------------
 
@@ -410,6 +528,10 @@ async function handleScheduled(
 
     case CRON_DELETION_CHECK:
       await handleDeletionCheck(env);
+      break;
+
+    case CRON_HOLD_EXPIRY:
+      await handleHoldExpiry(env);
       break;
 
     default:

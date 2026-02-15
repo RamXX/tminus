@@ -199,6 +199,165 @@ export async function handleGetSchedulingCandidates(
 }
 
 /**
+ * GET /v1/scheduling/sessions
+ *
+ * Lists scheduling sessions for the authenticated user.
+ * Supports optional ?status= query parameter for filtering.
+ */
+export async function handleListSchedulingSessions(
+  request: Request,
+  auth: AuthContext,
+  env: SchedulingHandlerEnv,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const statusFilter = url.searchParams.get("status") ?? undefined;
+  const limitStr = url.searchParams.get("limit");
+  const offsetStr = url.searchParams.get("offset");
+
+  // Validate status filter if provided
+  const validStatuses = new Set([
+    "open",
+    "candidates_ready",
+    "committed",
+    "cancelled",
+    "expired",
+  ]);
+  if (statusFilter && !validStatuses.has(statusFilter)) {
+    return jsonResponse(
+      errorEnvelope(
+        `Invalid status filter "${statusFilter}". Must be one of: ${[...validStatuses].join(", ")}`,
+      ),
+      400,
+    );
+  }
+
+  const limit = limitStr ? parseInt(limitStr, 10) : 50;
+  const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
+
+  if (isNaN(limit) || limit < 1 || limit > 100) {
+    return jsonResponse(errorEnvelope("limit must be between 1 and 100"), 400);
+  }
+  if (isNaN(offset) || offset < 0) {
+    return jsonResponse(errorEnvelope("offset must be >= 0"), 400);
+  }
+
+  try {
+    const userGraphId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/listSchedulingSessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: statusFilter, limit, offset }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(body);
+    }
+
+    const data = await response.json();
+    return jsonResponse(successEnvelope(data), 200);
+  } catch (err) {
+    console.error("Failed to list scheduling sessions", err);
+    const message = err instanceof Error ? err.message : "Failed to list scheduling sessions";
+    return jsonResponse(errorEnvelope(message), 500);
+  }
+}
+
+/**
+ * GET /v1/scheduling/sessions/:id
+ *
+ * Retrieves a single scheduling session with its candidates.
+ */
+export async function handleGetSchedulingSession(
+  _request: Request,
+  auth: AuthContext,
+  env: SchedulingHandlerEnv,
+  sessionId: string,
+): Promise<Response> {
+  try {
+    const workflow = new SchedulingWorkflow(env);
+    const session = await workflow.getCandidates(auth.userId, sessionId);
+
+    return jsonResponse(successEnvelope(session), 200);
+  } catch (err) {
+    console.error("Failed to get scheduling session", err);
+    const message = err instanceof Error ? err.message : "Failed to get session";
+    const status = message.includes("not found") ? 404 : 500;
+    return jsonResponse(errorEnvelope(message), status);
+  }
+}
+
+/**
+ * DELETE /v1/scheduling/sessions/:id
+ *
+ * Cancels a scheduling session and releases any held calendar slots.
+ */
+export async function handleCancelSchedulingSession(
+  _request: Request,
+  auth: AuthContext,
+  env: SchedulingHandlerEnv,
+  sessionId: string,
+): Promise<Response> {
+  try {
+    const userGraphId = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/cancelSchedulingSession", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      let errorMsg: string;
+      try {
+        const parsed = JSON.parse(body);
+        errorMsg = parsed.error ?? body;
+      } catch {
+        errorMsg = body;
+      }
+
+      if (errorMsg.includes("not found")) {
+        return jsonResponse(errorEnvelope(errorMsg), 404);
+      }
+      if (
+        errorMsg.includes("already cancelled") ||
+        errorMsg.includes("already committed") ||
+        errorMsg.includes("expired")
+      ) {
+        return jsonResponse(errorEnvelope(errorMsg), 409);
+      }
+      throw new Error(errorMsg);
+    }
+
+    return jsonResponse(successEnvelope({ cancelled: true, session_id: sessionId }), 200);
+  } catch (err) {
+    console.error("Failed to cancel scheduling session", err);
+    const message = err instanceof Error ? err.message : "Failed to cancel session";
+
+    if (message.includes("not found")) {
+      return jsonResponse(errorEnvelope(message), 404);
+    }
+    if (
+      message.includes("already cancelled") ||
+      message.includes("already committed") ||
+      message.includes("expired")
+    ) {
+      return jsonResponse(errorEnvelope(message), 409);
+    }
+
+    return jsonResponse(errorEnvelope(message), 500);
+  }
+}
+
+/**
  * POST /v1/scheduling/sessions/:id/commit
  *
  * Commits a selected candidate: creates canonical event, projects mirrors.

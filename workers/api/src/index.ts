@@ -42,8 +42,11 @@ import {
 import type { BillingEnv } from "./routes/billing";
 import {
   handleCreateSchedulingSession,
+  handleListSchedulingSessions,
+  handleGetSchedulingSession,
   handleGetSchedulingCandidates,
   handleCommitSchedulingCandidate,
+  handleCancelSchedulingSession,
 } from "./routes/scheduling";
 import { enforceFeatureGate, enforceAccountLimit } from "./middleware/feature-gate";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
@@ -2034,6 +2037,10 @@ async function routeAuthenticatedRequest(
         return handleCreateSchedulingSession(request, auth, env);
       }
 
+      if (method === "GET" && pathname === "/v1/scheduling/sessions") {
+        return handleListSchedulingSessions(request, auth, env);
+      }
+
       match = matchRoute(pathname, "/v1/scheduling/sessions/:id/candidates");
       if (match && method === "GET") {
         return handleGetSchedulingCandidates(request, auth, env, match.params[0]);
@@ -2042,6 +2049,16 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/scheduling/sessions/:id/commit");
       if (match && method === "POST") {
         return handleCommitSchedulingCandidate(request, auth, env, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/scheduling/sessions/:id");
+      if (match) {
+        if (method === "GET") {
+          return handleGetSchedulingSession(request, auth, env, match.params[0]);
+        }
+        if (method === "DELETE") {
+          return handleCancelSchedulingSession(request, auth, env, match.params[0]);
+        }
       }
 
       // -- Billing routes ---------------------------------------------------

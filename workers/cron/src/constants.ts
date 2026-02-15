@@ -22,6 +22,9 @@ export const CRON_RECONCILIATION = "0 3 * * *";
 /** Deletion check: every hour, checks for pending deletions past grace period. */
 export const CRON_DELETION_CHECK = "0 * * * *";
 
+/** Hold expiry cleanup: every hour, checks for expired tentative holds. */
+export const CRON_HOLD_EXPIRY = "30 * * * *";
+
 // ---------------------------------------------------------------------------
 // Renewal thresholds
 // ---------------------------------------------------------------------------

@@ -18,9 +18,21 @@
  */
 
 import { generateId } from "@tminus/shared";
-import type { CanonicalEvent } from "@tminus/shared";
+import type { CanonicalEvent, AccountId, CalendarId, EventId } from "@tminus/shared";
 import { greedySolver } from "./solver";
 import type { SolverInput, BusyInterval, ScoredCandidate, SolverConstraint } from "./solver";
+import {
+  createHoldRecord,
+  buildHoldUpsertMessage,
+  buildHoldDeleteMessage,
+  isHoldExpired,
+  findExpiredHolds,
+  isValidTransition,
+  transitionHold,
+  DEFAULT_HOLD_TIMEOUT_MS,
+  MIN_HOLD_TIMEOUT_MS,
+} from "./holds";
+import type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage } from "./holds";
 
 // Re-export solver types and constants for consumers
 export { greedySolver, CONSTRAINT_SCORES } from "./solver";
@@ -29,6 +41,20 @@ export type {
   WorkingHoursConstraint, TripConstraint, BufferConstraint,
   NoMeetingsAfterConstraint,
 } from "./solver";
+
+// Re-export holds types and helpers for consumers
+export {
+  createHoldRecord,
+  buildHoldUpsertMessage,
+  buildHoldDeleteMessage,
+  isHoldExpired,
+  findExpiredHolds,
+  isValidTransition,
+  transitionHold,
+  DEFAULT_HOLD_TIMEOUT_MS,
+  MIN_HOLD_TIMEOUT_MS,
+} from "./holds";
+export type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage } from "./holds";
 
 // ---------------------------------------------------------------------------
 // Env bindings
@@ -60,6 +86,10 @@ export interface SchedulingParams {
   readonly requiredAccountIds: string[];
   /** Maximum candidates to produce (default 5). */
   readonly maxCandidates?: number;
+  /** Hold timeout in milliseconds. Default: 24 hours. Set to 0 to skip hold creation. */
+  readonly holdTimeoutMs?: number;
+  /** Target calendar ID for creating tentative hold events. */
+  readonly targetCalendarId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +105,7 @@ export interface SchedulingSession {
   readonly candidates: StoredCandidate[];
   readonly committedCandidateId?: string;
   readonly committedEventId?: string;
+  readonly holds?: Hold[];
   readonly createdAt: string;
 }
 
@@ -146,27 +177,95 @@ export class SchedulingWorkflow {
 
     await this.storeSession(params.userId, sessionId, params, candidates, now);
 
+    // Step 5: Create tentative holds for candidates (if enabled)
+    let holds: Hold[] = [];
+    if (candidates.length > 0 && params.holdTimeoutMs !== 0) {
+      holds = await this.createHolds(params, sessionId, candidates);
+    }
+
     return {
       sessionId,
       status: candidates.length > 0 ? "candidates_ready" : "open",
       params,
       candidates,
+      holds,
       createdAt: now,
     };
   }
 
   /**
-   * Step 5: Retrieve candidates for a session.
+   * Step 5a: Retrieve candidates for a session.
    */
   async getCandidates(userId: string, sessionId: string): Promise<SchedulingSession> {
     return this.getSession(userId, sessionId);
   }
 
   /**
+   * Step 5b: Create tentative holds for candidates.
+   *
+   * For each candidate, creates a hold record and enqueues an UPSERT_MIRROR
+   * message via the write-queue to create a tentative calendar event.
+   * The tentative event appears as striped in Google Calendar UI.
+   *
+   * @param params - Session parameters (includes timeout, calendar, accounts)
+   * @param sessionId - The scheduling session ID
+   * @param candidates - The candidate time slots from the solver
+   * @returns Array of created hold records
+   */
+  async createHolds(
+    params: SchedulingParams,
+    sessionId: string,
+    candidates: StoredCandidate[],
+  ): Promise<Hold[]> {
+    const holds: Hold[] = [];
+    const writeMessages: HoldWriteMessage[] = [];
+
+    // Default calendar: use primary calendar convention
+    const calendarId = params.targetCalendarId ?? `primary_${params.requiredAccountIds[0]}`;
+
+    for (const candidate of candidates) {
+      // Create one hold per candidate per required account
+      for (const accountId of params.requiredAccountIds) {
+        const holdParams: CreateHoldParams = {
+          sessionId,
+          accountId,
+          candidateStart: candidate.start,
+          candidateEnd: candidate.end,
+          title: params.title,
+          holdTimeoutMs: params.holdTimeoutMs ?? DEFAULT_HOLD_TIMEOUT_MS,
+        };
+
+        const hold = createHoldRecord(holdParams);
+        holds.push(hold);
+
+        // Build UPSERT_MIRROR message for tentative event creation
+        const accountCalendarId = params.targetCalendarId ?? `primary_${accountId}`;
+        const msg = buildHoldUpsertMessage(hold, holdParams, accountCalendarId);
+        writeMessages.push(msg);
+      }
+    }
+
+    // Store holds in UserGraphDO
+    if (holds.length > 0) {
+      await this.storeHolds(params.userId, holds);
+    }
+
+    // Enqueue write messages for tentative event creation
+    if (writeMessages.length > 0) {
+      await this.env.WRITE_QUEUE.sendBatch(
+        writeMessages.map((msg) => ({ body: msg })),
+      );
+    }
+
+    return holds;
+  }
+
+  /**
    * Step 6: Commit a candidate -- create canonical event + project mirrors.
    *
    * Creates a canonical event from the selected candidate, marks the session
-   * as committed, and triggers mirror projection to all target accounts.
+   * as committed, releases all tentative holds (deleting their provider
+   * events), and triggers mirror projection to all target accounts.
    */
   async commitCandidate(
     userId: string,
@@ -187,6 +286,9 @@ export class SchedulingWorkflow {
     if (!candidate) {
       throw new Error(`Candidate ${candidateId} not found in session ${sessionId}`);
     }
+
+    // Release all tentative holds for this session (delete provider events)
+    await this.releaseSessionHolds(userId, sessionId);
 
     // Create canonical event from the candidate
     const eventId = generateId("event");
@@ -217,6 +319,39 @@ export class SchedulingWorkflow {
     const updatedSession = await this.getSession(userId, sessionId);
 
     return { eventId, session: updatedSession };
+  }
+
+  /**
+   * Cancel a session and release all tentative holds.
+   *
+   * Transitions session to 'cancelled' status and enqueues DELETE_MIRROR
+   * messages for all held provider events.
+   */
+  async cancelSession(
+    userId: string,
+    sessionId: string,
+  ): Promise<SchedulingSession> {
+    // Release holds first (enqueue delete messages)
+    await this.releaseSessionHolds(userId, sessionId);
+
+    // Cancel the session via UserGraphDO
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/cancelSchedulingSession", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`UserGraphDO.cancelSchedulingSession failed (${response.status}): ${body}`);
+    }
+
+    return this.getSession(userId, sessionId);
   }
 
   // -------------------------------------------------------------------------
@@ -403,6 +538,120 @@ export class SchedulingWorkflow {
       const body = await response.text();
       throw new Error(`UserGraphDO.commitSchedulingSession failed (${response.status}): ${body}`);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Hold-related DO interactions
+  // -------------------------------------------------------------------------
+
+  /**
+   * Store hold records in UserGraphDO's schedule_holds table.
+   */
+  private async storeHolds(userId: string, holds: Hold[]): Promise<void> {
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/storeHolds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ holds }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`UserGraphDO.storeHolds failed (${response.status}): ${body}`);
+    }
+  }
+
+  /**
+   * Get all holds for a session from UserGraphDO.
+   */
+  async getHoldsBySession(userId: string, sessionId: string): Promise<Hold[]> {
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/getHoldsBySession", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`UserGraphDO.getHoldsBySession failed (${response.status}): ${body}`);
+    }
+
+    const data = (await response.json()) as { holds: Hold[] };
+    return data.holds;
+  }
+
+  /**
+   * Release all held holds for a session.
+   * Enqueues DELETE_MIRROR messages for holds with provider events.
+   */
+  private async releaseSessionHolds(
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    // Get current holds to find provider events that need deletion
+    const holds = await this.getHoldsBySession(userId, sessionId);
+    const heldHolds = holds.filter((h) => h.status === "held");
+
+    // Enqueue delete messages for holds that have provider events
+    const deleteMessages = heldHolds
+      .map((h) => buildHoldDeleteMessage(h))
+      .filter((msg): msg is NonNullable<typeof msg> => msg !== null);
+
+    if (deleteMessages.length > 0) {
+      await this.env.WRITE_QUEUE.sendBatch(
+        deleteMessages.map((msg) => ({ body: msg })),
+      );
+    }
+
+    // Release holds in the DO
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/releaseSessionHolds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`UserGraphDO.releaseSessionHolds failed (${response.status}): ${body}`);
+    }
+  }
+
+  /**
+   * Get expired holds from UserGraphDO (for cron cleanup).
+   */
+  async getExpiredHolds(userId: string): Promise<Hold[]> {
+    const userGraphId = this.env.USER_GRAPH.idFromName(userId);
+    const stub = this.env.USER_GRAPH.get(userGraphId);
+
+    const response = await stub.fetch(
+      new Request("https://user-graph.internal/getExpiredHolds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`UserGraphDO.getExpiredHolds failed (${response.status}): ${body}`);
+    }
+
+    const data = (await response.json()) as { holds: Hold[] };
+    return data.holds;
   }
 }
 
