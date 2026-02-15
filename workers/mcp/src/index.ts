@@ -318,6 +318,10 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
           enum: ["BUSY", "TITLE"],
           description: "How to block time: 'BUSY' (time only) or 'TITLE' (show trip name). Default: 'BUSY'.",
         },
+        destination_city: {
+          type: "string",
+          description: "Destination city for the trip (e.g. 'New York'). Used by calendar.get_reconnection_suggestions to find overdue contacts in the trip destination.",
+        },
       },
       required: ["name", "start", "end", "timezone"],
     },
@@ -666,6 +670,26 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["relationship_id", "outcome"],
     },
   },
+  {
+    name: "calendar.get_reconnection_suggestions",
+    description:
+      "Get reconnection suggestions for overdue contacts in a specific city. Optionally provide a trip_id to automatically resolve the destination city from a trip constraint. Returns overdue relationships in the target city, sorted by urgency. Useful for planning reconnections during travel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        trip_id: {
+          type: "string",
+          description:
+            "Optional trip constraint ID. If provided, the destination city is resolved from the trip's destination_city config field.",
+        },
+        city: {
+          type: "string",
+          description:
+            "City to find overdue contacts in (e.g., 'San Francisco'). Required if trip_id is not provided or trip has no destination_city.",
+        },
+      },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -725,7 +749,10 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.tag_billable": "premium",
   "calendar.get_commitment_status": "premium",
   "calendar.export_commitment_proof": "premium",
-  "calendar.mark_outcome": "premium",
+  "calendar.add_relationship": "enterprise",
+  "calendar.get_drift_report": "enterprise",
+  "calendar.mark_outcome": "enterprise",
+  "calendar.get_reconnection_suggestions": "enterprise",
 };
 
 /**
@@ -2000,7 +2027,7 @@ const VALID_BLOCK_POLICIES = ["BUSY", "TITLE"] as const;
  */
 function validateAddTripParams(args: Record<string, unknown> | undefined): {
   kind: "trip";
-  config_json: { name: string; timezone: string; block_policy: "BUSY" | "TITLE" };
+  config_json: { name: string; timezone: string; block_policy: "BUSY" | "TITLE"; destination_city?: string };
   active_from: string;
   active_to: string;
 } {
@@ -2047,13 +2074,19 @@ function validateAddTripParams(args: Record<string, unknown> | undefined): {
     block_policy = args.block_policy as "BUSY" | "TITLE";
   }
 
+  const config_json: { name: string; timezone: string; block_policy: "BUSY" | "TITLE"; destination_city?: string } = {
+    name: args.name.trim(),
+    timezone: args.timezone.trim(),
+    block_policy,
+  };
+
+  if (typeof args.destination_city === "string" && args.destination_city.trim()) {
+    config_json.destination_city = args.destination_city.trim();
+  }
+
   return {
     kind: "trip",
-    config_json: {
-      name: args.name.trim(),
-      timezone: args.timezone.trim(),
-      block_policy,
-    },
+    config_json,
     active_from: args.start,
     active_to: args.end,
   };
@@ -3041,6 +3074,49 @@ async function handleMarkOutcome(
   return envelope.data;
 }
 
+/**
+ * Execute calendar.get_reconnection_suggestions: forward to the API worker
+ * to get overdue contacts in a specific city, optionally resolved from a trip.
+ */
+async function handleGetReconnectionSuggestions(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const tripId = args && typeof args.trip_id === "string" ? args.trip_id : null;
+  const city = args && typeof args.city === "string" ? args.city : null;
+
+  if (!tripId && !city) {
+    throw new InvalidParamsError(
+      "Either trip_id or city is required for reconnection suggestions",
+    );
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const params = new URLSearchParams();
+  if (tripId) params.set("trip_id", tripId);
+  if (city) params.set("city", city);
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "GET",
+    `/v1/reconnection-suggestions?${params.toString()}`,
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(
+      errData.error ?? "Failed to get reconnection suggestions",
+    );
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -3290,6 +3366,11 @@ async function dispatch(
           case "calendar.mark_outcome": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleMarkOutcome(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.get_reconnection_suggestions": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetReconnectionSuggestions(request, env.API, toolArgs);
             break;
           }
           default:

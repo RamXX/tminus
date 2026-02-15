@@ -1198,4 +1198,235 @@ describe("UserGraphDO relationship tracking integration", () => {
       expect(dObj.getDriftAlerts()).toHaveLength(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Reconnection suggestions (TM-4wb.5)
+  // -------------------------------------------------------------------------
+
+  describe("getReconnectionSuggestions", () => {
+    it("returns overdue relationships in the specified city", () => {
+      // Create relationships in different cities
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in SF",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        "America/Los_Angeles",
+        7, // weekly target
+      );
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob in NYC",
+        "COLLEAGUE",
+        0.6,
+        "New York",
+        "America/New_York",
+        14, // biweekly target
+      );
+
+      // Neither has been interacted with, so both are overdue
+      const sfSuggestions = dObj.getReconnectionSuggestions("San Francisco");
+      expect(sfSuggestions.city).toBe("San Francisco");
+      expect(sfSuggestions.suggestions.length).toBe(1);
+      expect(sfSuggestions.suggestions[0].display_name).toBe("Alice in SF");
+      expect(sfSuggestions.total_in_city).toBe(1);
+      expect(sfSuggestions.total_overdue_in_city).toBe(1);
+
+      const nycSuggestions = dObj.getReconnectionSuggestions("New York");
+      expect(nycSuggestions.city).toBe("New York");
+      expect(nycSuggestions.suggestions.length).toBe(1);
+      expect(nycSuggestions.suggestions[0].display_name).toBe("Bob in NYC");
+    });
+
+    it("city matching is case-insensitive", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions("san francisco");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice");
+    });
+
+    it("resolves city from trip constraint destination_city", () => {
+      // Create a trip constraint with destination_city
+      const tripConstraint = dObj.addConstraint(
+        "trip",
+        {
+          name: "SF Business Trip",
+          timezone: "America/Los_Angeles",
+          block_policy: "BUSY",
+          destination_city: "San Francisco",
+        },
+        "2026-04-01T00:00:00Z",
+        "2026-04-05T00:00:00Z",
+      );
+
+      // Create a relationship in SF
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in SF",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, tripConstraint.constraint_id);
+      expect(result.city).toBe("San Francisco");
+      expect(result.trip_id).toBe(tripConstraint.constraint_id);
+      expect(result.trip_name).toBe("SF Business Trip");
+      expect(result.trip_start).toBe("2026-04-01T00:00:00Z");
+      expect(result.trip_end).toBe("2026-04-05T00:00:00Z");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice in SF");
+    });
+
+    it("throws error when trip constraint has no destination_city and no city param", () => {
+      // Create a trip without destination_city
+      const tripConstraint = dObj.addConstraint(
+        "trip",
+        {
+          name: "Mystery Trip",
+          timezone: "UTC",
+          block_policy: "BUSY",
+        },
+        "2026-04-01T00:00:00Z",
+        "2026-04-05T00:00:00Z",
+      );
+
+      expect(() => {
+        dObj.getReconnectionSuggestions(null, tripConstraint.constraint_id);
+      }).toThrow("No city available");
+    });
+
+    it("throws error when trip_id does not exist", () => {
+      expect(() => {
+        dObj.getReconnectionSuggestions(null, "constraint_nonexistent");
+      }).toThrow("Trip constraint not found");
+    });
+
+    it("throws error when constraint is not a trip", () => {
+      // Create a working_hours constraint
+      const whConstraint = dObj.addConstraint(
+        "working_hours",
+        {
+          days: [1, 2, 3, 4, 5],
+          start_time: "09:00",
+          end_time: "17:00",
+          timezone: "UTC",
+        },
+        null,
+        null,
+      );
+
+      expect(() => {
+        dObj.getReconnectionSuggestions(null, whConstraint.constraint_id);
+      }).toThrow("not a trip");
+    });
+
+    it("throws error when neither city nor trip_id provided", () => {
+      expect(() => {
+        dObj.getReconnectionSuggestions(null, null);
+      }).toThrow("No city available");
+    });
+
+    it("returns empty suggestions when no relationships in city", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in NYC",
+        "FRIEND",
+        0.8,
+        "New York",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions("Chicago");
+      expect(result.city).toBe("Chicago");
+      expect(result.suggestions.length).toBe(0);
+      expect(result.total_in_city).toBe(0);
+      expect(result.total_overdue_in_city).toBe(0);
+    });
+
+    it("excludes relationships without frequency target from suggestions", () => {
+      // Relationship WITH frequency target (should appear)
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice tracked",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        null,
+        7, // has target
+      );
+
+      // Relationship WITHOUT frequency target (should NOT appear in suggestions)
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob untracked",
+        "COLLEAGUE",
+        0.6,
+        "San Francisco",
+        null,
+        null, // no target
+      );
+
+      const result = dObj.getReconnectionSuggestions("San Francisco");
+      expect(result.total_in_city).toBe(2); // both are in the city
+      expect(result.total_overdue_in_city).toBe(1); // only Alice is overdue (Bob has no target)
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice tracked");
+    });
+
+    it("city param takes precedence when both city and trip_id provided", () => {
+      // Trip with destination_city = NYC
+      const tripConstraint = dObj.addConstraint(
+        "trip",
+        {
+          name: "NYC Trip",
+          timezone: "America/New_York",
+          block_policy: "BUSY",
+          destination_city: "New York",
+        },
+        "2026-04-01T00:00:00Z",
+        "2026-04-05T00:00:00Z",
+      );
+
+      // Relationship in SF
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice SF",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        null,
+        7,
+      );
+
+      // When city is explicitly provided, it overrides the trip's destination_city
+      const result = dObj.getReconnectionSuggestions("San Francisco", tripConstraint.constraint_id);
+      expect(result.city).toBe("San Francisco");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice SF");
+      // trip_id still included in response context
+      expect(result.trip_id).toBe(tripConstraint.constraint_id);
+    });
+  });
 });

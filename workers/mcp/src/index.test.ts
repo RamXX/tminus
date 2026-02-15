@@ -3671,3 +3671,181 @@ describe("governance commitment tools registration", () => {
     expect(toolNames).toContain("calendar.tag_billable");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Relationship tools: tier gating (TM-4wb.5)
+// ---------------------------------------------------------------------------
+
+describe("checkTierAccess for relationship tools (enterprise-gated)", () => {
+  const relationshipTools = [
+    "calendar.add_relationship",
+    "calendar.get_drift_report",
+    "calendar.mark_outcome",
+    "calendar.get_reconnection_suggestions",
+  ];
+
+  for (const tool of relationshipTools) {
+    it(`free tier denied for ${tool}`, () => {
+      const result = checkTierAccess(tool, "free");
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) {
+        expect(result.required_tier).toBe("enterprise");
+      }
+    });
+
+    it(`premium tier denied for ${tool}`, () => {
+      const result = checkTierAccess(tool, "premium");
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) {
+        expect(result.required_tier).toBe("enterprise");
+      }
+    });
+
+    it(`enterprise tier allowed for ${tool}`, () => {
+      const result = checkTierAccess(tool, "enterprise");
+      expect(result.allowed).toBe(true);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Relationship tools: tool registration in TOOL_REGISTRY (TM-4wb.5)
+// ---------------------------------------------------------------------------
+
+describe("relationship tools in tools/list", () => {
+  it("tools/list includes all 4 relationship tools", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 600 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> };
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.add_relationship");
+    expect(toolNames).toContain("calendar.get_drift_report");
+    expect(toolNames).toContain("calendar.mark_outcome");
+    expect(toolNames).toContain("calendar.get_reconnection_suggestions");
+  });
+
+  it("calendar.get_reconnection_suggestions has correct schema", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 601 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      tools: Array<{
+        name: string;
+        inputSchema: { type: string; properties: Record<string, unknown>; required?: string[] };
+      }>;
+    };
+    const tool = resultData.tools.find((t) => t.name === "calendar.get_reconnection_suggestions");
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.type).toBe("object");
+    expect(tool!.inputSchema.properties).toHaveProperty("trip_id");
+    expect(tool!.inputSchema.properties).toHaveProperty("city");
+    // No required fields -- either trip_id or city can be provided
+    expect(tool!.inputSchema.required).toBeUndefined();
+  });
+
+  it("calendar.add_trip includes destination_city in schema", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 602 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as {
+      tools: Array<{
+        name: string;
+        inputSchema: { type: string; properties: Record<string, unknown> };
+      }>;
+    };
+    const tripTool = resultData.tools.find((t) => t.name === "calendar.add_trip");
+    expect(tripTool).toBeDefined();
+    expect(tripTool!.inputSchema.properties).toHaveProperty("destination_city");
+  });
+
+  it("total tool count is 26 (25 existing + 1 new reconnection tool)", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      { jsonrpc: "2.0", method: "tools/list", id: 603 },
+      authHeader,
+    );
+
+    const resultData = result.body.result as { tools: Array<{ name: string }> };
+    expect(resultData.tools.length).toBe(26);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateAddTripParams: destination_city pass-through (TM-4wb.5)
+// ---------------------------------------------------------------------------
+
+describe("validateAddTripParams with destination_city", () => {
+  it("includes destination_city in config_json when provided", () => {
+    const result = validateAddTripParams({
+      name: "NYC Trip",
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-20T00:00:00Z",
+      timezone: "America/New_York",
+      destination_city: "New York",
+    });
+    expect(result.config_json.destination_city).toBe("New York");
+  });
+
+  it("omits destination_city from config_json when not provided", () => {
+    const result = validateAddTripParams({
+      name: "Generic Trip",
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-20T00:00:00Z",
+      timezone: "America/New_York",
+    });
+    expect(result.config_json.destination_city).toBeUndefined();
+  });
+
+  it("trims destination_city whitespace", () => {
+    const result = validateAddTripParams({
+      name: "Trip",
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-20T00:00:00Z",
+      timezone: "America/New_York",
+      destination_city: "  San Francisco  ",
+    });
+    expect(result.config_json.destination_city).toBe("San Francisco");
+  });
+
+  it("ignores empty destination_city", () => {
+    const result = validateAddTripParams({
+      name: "Trip",
+      start: "2026-03-15T00:00:00Z",
+      end: "2026-03-20T00:00:00Z",
+      timezone: "America/New_York",
+      destination_city: "   ",
+    });
+    expect(result.config_json.destination_city).toBeUndefined();
+  });
+});

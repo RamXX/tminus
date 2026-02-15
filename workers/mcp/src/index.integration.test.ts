@@ -1812,7 +1812,8 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.add_relationship");
     expect(toolNames).toContain("calendar.get_drift_report");
     expect(toolNames).toContain("calendar.mark_outcome");
-    expect(resultData.tools.length).toBe(25);
+    expect(toolNames).toContain("calendar.get_reconnection_suggestions");
+    expect(resultData.tools.length).toBe(26);
   });
 });
 
@@ -3544,5 +3545,663 @@ describe("MCP integration: governance tools -- tools/list registration (TM-yke.6
     expect(toolNames).toContain("calendar.tag_billable");
     expect(toolNames).toContain("calendar.get_commitment_status");
     expect(toolNames).toContain("calendar.export_commitment_proof");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: relationship tools (TM-4wb.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a mock API Fetcher that simulates the relationship/drift API endpoints.
+ * Allows tests to verify the full MCP -> service binding -> API flow.
+ */
+function createMockRelationshipApi(options?: {
+  addRelationshipResponse?: unknown;
+  driftReportResponse?: unknown;
+  markOutcomeResponse?: unknown;
+  reconnectionResponse?: unknown;
+  addRelationshipStatus?: number;
+  driftReportStatus?: number;
+  markOutcomeStatus?: number;
+  reconnectionStatus?: number;
+}): Fetcher {
+  const defaultRelationship = {
+    ok: true,
+    data: {
+      relationship_id: "rel_test_001",
+      participant_hash: "abc123def456",
+      display_name: "Sarah Chen",
+      category: "FRIEND",
+      closeness_weight: 0.8,
+      city: "San Francisco",
+      timezone: "America/Los_Angeles",
+      interaction_frequency_target: 14,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  const defaultDriftReport = {
+    ok: true,
+    data: {
+      overdue: [
+        {
+          relationship_id: "rel_test_001",
+          participant_hash: "abc123def456",
+          display_name: "Sarah Chen",
+          category: "FRIEND",
+          closeness_weight: 0.8,
+          last_interaction_ts: "2026-01-01T00:00:00Z",
+          interaction_frequency_target: 14,
+          days_since_interaction: 45,
+          days_overdue: 31,
+          drift_ratio: 3.2,
+          urgency: 24.8,
+        },
+      ],
+      total_tracked: 5,
+      total_overdue: 1,
+      computed_at: new Date().toISOString(),
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  const defaultOutcome = {
+    ok: true,
+    data: {
+      ledger_id: "led_test_001",
+      participant_hash: "abc123def456",
+      canonical_event_id: null,
+      outcome: "ATTENDED",
+      weight: 1.0,
+      note: null,
+      ts: new Date().toISOString(),
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  const defaultReconnection = {
+    ok: true,
+    data: {
+      city: "San Francisco",
+      trip_id: null,
+      trip_name: null,
+      trip_start: null,
+      trip_end: null,
+      suggestions: [
+        {
+          relationship_id: "rel_test_002",
+          participant_hash: "def456ghi789",
+          display_name: "Mike Johnson",
+          category: "COLLEAGUE",
+          closeness_weight: 0.6,
+          last_interaction_ts: "2025-12-01T00:00:00Z",
+          interaction_frequency_target: 30,
+          days_since_interaction: 76,
+          days_overdue: 46,
+          drift_ratio: 2.5,
+          urgency: 27.6,
+        },
+      ],
+      total_in_city: 3,
+      total_overdue_in_city: 1,
+      computed_at: new Date().toISOString(),
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  return {
+    fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+      const url = typeof input === "string" ? input : input.url;
+      const method = init?.method ?? "GET";
+
+      // POST /v1/relationships -- create relationship
+      if (method === "POST" && url.includes("/v1/relationships") && !url.includes("/outcomes")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(options?.addRelationshipResponse ?? defaultRelationship),
+            {
+              status: options?.addRelationshipStatus ?? 201,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+
+      // GET /v1/drift-report
+      if (method === "GET" && url.includes("/v1/drift-report")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(options?.driftReportResponse ?? defaultDriftReport),
+            {
+              status: options?.driftReportStatus ?? 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+
+      // POST /v1/relationships/:id/outcomes
+      if (method === "POST" && url.includes("/outcomes")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(options?.markOutcomeResponse ?? defaultOutcome),
+            {
+              status: options?.markOutcomeStatus ?? 201,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+
+      // GET /v1/reconnection-suggestions
+      if (method === "GET" && url.includes("/v1/reconnection-suggestions")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(options?.reconnectionResponse ?? defaultReconnection),
+            {
+              status: options?.reconnectionStatus ?? 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: false, error: "Unknown endpoint" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    },
+    connect: vi.fn() as unknown as Fetcher["connect"],
+  } as unknown as Fetcher;
+}
+
+describe("MCP integration: calendar.add_relationship (TM-4wb.5)", () => {
+  it("creates a relationship via API service binding", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_relationship",
+          arguments: {
+            participant_email: "sarah@example.com",
+            display_name: "Sarah Chen",
+            category: "FRIEND",
+            closeness_weight: 0.8,
+            city: "San Francisco",
+            timezone: "America/Los_Angeles",
+            frequency_target: 14,
+          },
+        },
+        id: 700,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(resultData.content).toHaveLength(1);
+    expect(resultData.content[0].type).toBe("text");
+
+    const data = JSON.parse(resultData.content[0].text);
+    expect(data.relationship_id).toBe("rel_test_001");
+    expect(data.display_name).toBe("Sarah Chen");
+    expect(data.category).toBe("FRIEND");
+  });
+
+  it("hashes participant email before sending to API (SHA-256)", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    let capturedBody: Record<string, unknown> | null = null;
+    const api: Fetcher = {
+      fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.includes("/v1/relationships") && init?.method === "POST") {
+          capturedBody = JSON.parse(init?.body as string);
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                relationship_id: "rel_hash_test",
+                participant_hash: "hashed_value",
+                display_name: "Test",
+                category: "OTHER",
+              },
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn() as unknown as Fetcher["connect"],
+    } as unknown as Fetcher;
+
+    await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_relationship",
+          arguments: {
+            participant_email: "sarah@example.com",
+            display_name: "Test",
+            category: "OTHER",
+          },
+        },
+        id: 701,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(capturedBody).not.toBeNull();
+    // Must send participant_hash, NOT participant_email
+    expect(capturedBody!.participant_hash).toBeDefined();
+    expect(typeof capturedBody!.participant_hash).toBe("string");
+    expect((capturedBody!.participant_hash as string).length).toBe(64); // SHA-256 = 64 hex chars
+    // Must NOT send raw email
+    expect(capturedBody!.participant_email).toBeUndefined();
+  });
+
+  it("rejects free tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("free");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_relationship",
+          arguments: {
+            participant_email: "test@example.com",
+            display_name: "Test",
+            category: "OTHER",
+          },
+        },
+        id: 702,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
+  });
+
+  it("rejects premium tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.add_relationship",
+          arguments: {
+            participant_email: "test@example.com",
+            display_name: "Test",
+            category: "OTHER",
+          },
+        },
+        id: 703,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
+  });
+});
+
+describe("MCP integration: calendar.get_drift_report (TM-4wb.5)", () => {
+  it("returns drift report via API service binding", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_drift_report",
+          arguments: {},
+        },
+        id: 710,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const data = JSON.parse(resultData.content[0].text);
+    expect(data.overdue).toBeInstanceOf(Array);
+    expect(data.overdue.length).toBeGreaterThan(0);
+    expect(data.total_tracked).toBe(5);
+    expect(data.total_overdue).toBe(1);
+    expect(data.overdue[0].display_name).toBe("Sarah Chen");
+    expect(data.overdue[0].urgency).toBeGreaterThan(0);
+  });
+
+  it("rejects free tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("free");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_drift_report",
+          arguments: {},
+        },
+        id: 711,
+      },
+      authHeader,
+      api,
+    );
+
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
+  });
+});
+
+describe("MCP integration: calendar.mark_outcome (TM-4wb.5)", () => {
+  it("records outcome via API service binding", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.mark_outcome",
+          arguments: {
+            relationship_id: "rel_test_001",
+            outcome: "ATTENDED",
+            note: "Great meeting",
+          },
+        },
+        id: 720,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const data = JSON.parse(resultData.content[0].text);
+    expect(data.ledger_id).toBe("led_test_001");
+    expect(data.outcome).toBe("ATTENDED");
+  });
+
+  it("rejects premium tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.mark_outcome",
+          arguments: {
+            relationship_id: "rel_test_001",
+            outcome: "ATTENDED",
+          },
+        },
+        id: 721,
+      },
+      authHeader,
+      api,
+    );
+
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
+  });
+});
+
+describe("MCP integration: calendar.get_reconnection_suggestions (TM-4wb.5)", () => {
+  it("returns reconnection suggestions with city parameter", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: {
+            city: "San Francisco",
+          },
+        },
+        id: 730,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+
+    const resultData = result.body.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const data = JSON.parse(resultData.content[0].text);
+    expect(data.city).toBe("San Francisco");
+    expect(data.suggestions).toBeInstanceOf(Array);
+    expect(data.suggestions.length).toBeGreaterThan(0);
+    expect(data.total_in_city).toBe(3);
+    expect(data.total_overdue_in_city).toBe(1);
+    expect(data.suggestions[0].display_name).toBe("Mike Johnson");
+  });
+
+  it("accepts trip_id parameter for city resolution", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    let capturedUrl: string | null = null;
+    const api: Fetcher = {
+      fetch(input: RequestInfo): Promise<Response> {
+        capturedUrl = typeof input === "string" ? input : input.url;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                city: "New York",
+                trip_id: "constraint_trip123",
+                trip_name: "NYC Trip",
+                trip_start: "2026-04-01T00:00:00Z",
+                trip_end: "2026-04-05T00:00:00Z",
+                suggestions: [],
+                total_in_city: 0,
+                total_overdue_in_city: 0,
+                computed_at: new Date().toISOString(),
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn() as unknown as Fetcher["connect"],
+    } as unknown as Fetcher;
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: {
+            trip_id: "constraint_trip123",
+          },
+        },
+        id: 731,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+    // Verify the trip_id was passed as query parameter
+    expect(capturedUrl).toContain("trip_id=constraint_trip123");
+  });
+
+  it("passes both trip_id and city as query parameters", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    let capturedUrl: string | null = null;
+    const api: Fetcher = {
+      fetch(input: RequestInfo): Promise<Response> {
+        capturedUrl = typeof input === "string" ? input : input.url;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                city: "Boston",
+                trip_id: "constraint_trip456",
+                trip_name: null,
+                trip_start: null,
+                trip_end: null,
+                suggestions: [],
+                total_in_city: 0,
+                total_overdue_in_city: 0,
+                computed_at: new Date().toISOString(),
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn() as unknown as Fetcher["connect"],
+    } as unknown as Fetcher;
+
+    await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: {
+            trip_id: "constraint_trip456",
+            city: "Boston",
+          },
+        },
+        id: 732,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(capturedUrl).toContain("trip_id=constraint_trip456");
+    expect(capturedUrl).toContain("city=Boston");
+  });
+
+  it("returns error when neither trip_id nor city provided", async () => {
+    const authHeader = await makeAuthHeaderWithTier("enterprise");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: {},
+        },
+        id: 733,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.message).toContain("trip_id or city");
+  });
+
+  it("rejects free tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("free");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: { city: "Test" },
+        },
+        id: 734,
+      },
+      authHeader,
+      api,
+    );
+
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
+  });
+
+  it("rejects premium tier with TIER_REQUIRED error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockRelationshipApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_reconnection_suggestions",
+          arguments: { city: "Test" },
+        },
+        id: 735,
+      },
+      authHeader,
+      api,
+    );
+
+    const error = result.body.error as { code: number; data: { code: string; required_tier: string } };
+    expect(error).toBeDefined();
+    expect(error.data.code).toBe("TIER_REQUIRED");
+    expect(error.data.required_tier).toBe("enterprise");
   });
 });

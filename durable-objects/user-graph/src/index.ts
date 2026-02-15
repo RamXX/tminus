@@ -3796,7 +3796,7 @@ export class UserGraphDO {
     let tripStart: string | null = null;
     let tripEnd: string | null = null;
 
-    // If trip_id provided, resolve destination_city from trip constraint
+    // If trip_id provided, resolve trip context and fallback city
     if (tripId) {
       const constraint = this.getConstraint(tripId);
       if (!constraint) {
@@ -3806,7 +3806,8 @@ export class UserGraphDO {
         throw new Error(`Constraint ${tripId} is not a trip (kind: ${constraint.kind})`);
       }
       const config = constraint.config_json;
-      if (config.destination_city && typeof config.destination_city === "string") {
+      // Only use trip's destination_city if no explicit city was provided
+      if (!targetCity && config.destination_city && typeof config.destination_city === "string") {
         targetCity = config.destination_city;
       }
       tripName = typeof config.name === "string" ? config.name : null;
