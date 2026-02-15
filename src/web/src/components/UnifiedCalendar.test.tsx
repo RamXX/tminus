@@ -104,6 +104,16 @@ function createFailingFetch(errorMessage = "Network error") {
 describe("UnifiedCalendar", () => {
   const user = userEvent.setup();
 
+  // Pin "today" to Feb 14, 2026 so mock event dates are always in the visible week range
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-02-14T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   describe("rendering events", () => {
     it("renders events from the fetch function", async () => {
       const fetchFn = createMockFetch();
