@@ -17,7 +17,9 @@ import {
   addSecurityHeaders,
   addCorsHeaders,
   buildPreflightResponse,
+  computeProbabilisticAvailability,
 } from "@tminus/shared";
+import type { ProbabilisticEvent } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Env type (local to worker -- not exported)
@@ -200,7 +202,7 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
   {
     name: "calendar.get_availability",
     description:
-      "Get unified free/busy availability across all connected accounts for a time range. Returns time slots with status (free/busy/tentative) and conflict counts. Supports granularity selection and account filtering.",
+      "Get unified free/busy availability across all connected accounts for a time range. Returns time slots with status (free/busy/tentative) and conflict counts. Supports granularity selection, account filtering, and probabilistic mode for probability-weighted availability.",
     inputSchema: {
       type: "object",
       properties: {
@@ -225,6 +227,12 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
           enum: ["15m", "30m", "1h"],
           description:
             "Slot duration: '15m' (15 minutes), '30m' (30 minutes, default), or '1h' (1 hour).",
+        },
+        mode: {
+          type: "string",
+          enum: ["binary", "probabilistic"],
+          description:
+            "Availability mode: 'binary' (default) returns free/busy/tentative status per slot. 'probabilistic' returns a probability (0.0-1.0) of each slot being free, accounting for event likelihood (confirmed=0.95 busy, tentative=0.50 busy, recurring with cancellation history=adjusted).",
         },
       },
       required: ["start", "end"],
@@ -1745,6 +1753,7 @@ function validateGetAvailabilityParams(args: Record<string, unknown> | undefined
   end: string;
   accounts: string[] | null;
   granularity: AvailabilityGranularity;
+  mode: "binary" | "probabilistic";
 } {
   if (!args) {
     throw new InvalidParamsError("Missing required parameters: start, end");
@@ -1822,7 +1831,21 @@ function validateGetAvailabilityParams(args: Record<string, unknown> | undefined
     }
   }
 
-  return { start: args.start, end: args.end, accounts, granularity };
+  // Validate mode parameter
+  let mode: "binary" | "probabilistic" = "binary";
+  if (args.mode !== undefined) {
+    if (
+      typeof args.mode !== "string" ||
+      !["binary", "probabilistic"].includes(args.mode)
+    ) {
+      throw new InvalidParamsError(
+        "Parameter 'mode' must be one of: 'binary', 'probabilistic'",
+      );
+    }
+    mode = args.mode as "binary" | "probabilistic";
+  }
+
+  return { start: args.start, end: args.end, accounts, granularity, mode };
 }
 
 /**
@@ -1912,13 +1935,17 @@ function computeAvailabilitySlots(
 /**
  * Execute calendar.get_availability: query D1 for events in the time range,
  * compute availability slots, and return unified free/busy data.
+ *
+ * Supports two modes:
+ *   - 'binary' (default): slots are free/busy/tentative with conflict counts
+ *   - 'probabilistic': slots have a probability (0.0-1.0) of being free
  */
 async function handleGetAvailability(
   user: McpUserContext,
   db: D1Database,
   args?: Record<string, unknown>,
 ): Promise<unknown> {
-  const { start, end, accounts, granularity } =
+  const { start, end, accounts, granularity, mode } =
     validateGetAvailabilityParams(args);
 
   const startMs = new Date(start).getTime();
@@ -1927,19 +1954,22 @@ async function handleGetAvailability(
 
   // Query events in the time range.
   // We need events that OVERLAP the range: event.start < range.end AND event.end > range.start
+  // For probabilistic mode, we also include cancelled events (they contribute 0 probability).
+  // For binary mode, cancelled events are excluded.
+  const statusFilter = mode === "probabilistic"
+    ? ""
+    : " AND status != 'cancelled'";
+
   let result: { results: AvailabilityEventRow[] };
 
   if (accounts && accounts.length > 0) {
-    // Query all events in range, then filter by account in JS.
-    // This is simpler and safer than dynamic IN clause with D1.
     result = await db
       .prepare(
-        "SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3 AND status != 'cancelled'",
+        `SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3${statusFilter}`,
       )
       .bind(user.userId, end, start)
       .all<AvailabilityEventRow>();
 
-    // Filter by requested accounts
     const accountSet = new Set(accounts);
     result.results = (result.results ?? []).filter(
       (e) => e.account_id !== null && accountSet.has(e.account_id),
@@ -1947,7 +1977,7 @@ async function handleGetAvailability(
   } else {
     result = await db
       .prepare(
-        "SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3 AND status != 'cancelled'",
+        `SELECT start_ts, end_ts, status, account_id FROM mcp_events WHERE user_id = ?1 AND start_ts < ?2 AND end_ts > ?3${statusFilter}`,
       )
       .bind(user.userId, end, start)
       .all<AvailabilityEventRow>();
@@ -1955,10 +1985,30 @@ async function handleGetAvailability(
 
   const events = result.results ?? [];
 
-  // Generate time slots
-  const timeSlots = generateTimeSlots(startMs, endMs, granularityMs);
+  // Probabilistic mode: use probability-weighted computation
+  if (mode === "probabilistic") {
+    const granularityMinutes = granularityMs / (60 * 1000);
+    const probabilisticEvents: ProbabilisticEvent[] = events.map((e, i) => ({
+      event_id: `mcp_${i}`,
+      start: e.start_ts,
+      end: e.end_ts,
+      status: (e.status as "confirmed" | "tentative" | "cancelled") ?? "confirmed",
+      transparency: "opaque" as const,
+      origin_event_id: `mcp_${i}`,
+    }));
 
-  // Compute availability
+    const probabilisticResult = computeProbabilisticAvailability({
+      events: probabilisticEvents,
+      start,
+      end,
+      granularity_minutes: granularityMinutes,
+    });
+
+    return probabilisticResult;
+  }
+
+  // Binary mode (default): use existing free/busy/tentative computation
+  const timeSlots = generateTimeSlots(startMs, endMs, granularityMs);
   const slots = computeAvailabilitySlots(timeSlots, events);
 
   return { slots };

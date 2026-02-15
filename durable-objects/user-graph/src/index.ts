@@ -61,12 +61,14 @@ import {
   generateRiskRecommendations,
   getRiskLevel,
   classifyEventCategory,
+  computeProbabilisticAvailability,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
 import type { CognitiveLoadResult, ContextSwitchResult } from "@tminus/shared";
 import type { DeepWorkReport, DeepWorkImpact } from "@tminus/shared";
 import type { RiskScoreResult, CognitiveLoadHistoryEntry, CategoryAllocation } from "@tminus/shared";
+import type { ProbabilisticEvent, ProbabilisticAvailabilityResult, CancellationHistory } from "@tminus/shared";
 import type {
   SqlStorageLike,
   CanonicalEvent,
@@ -4894,6 +4896,20 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getProbabilisticAvailability": {
+          const body = (await request.json()) as {
+            start: string;
+            end: string;
+            granularity_minutes?: number;
+          };
+          const result = this.getProbabilisticAvailability(
+            body.start,
+            body.end,
+            body.granularity_minutes,
+          );
+          return Response.json(result);
+        }
+
         // ---------------------------------------------------------------
         // Constraint RPC endpoints
         // ---------------------------------------------------------------
@@ -6844,6 +6860,111 @@ export class UserGraphDO {
       allocations.push({ category, hours: Math.round(hours * 100) / 100 });
     }
     return allocations;
+  }
+
+  // -------------------------------------------------------------------------
+  // getProbabilisticAvailability -- probability-weighted availability
+  // -------------------------------------------------------------------------
+
+  /**
+   * Compute probabilistic availability for a time range.
+   *
+   * Instead of binary free/busy, each slot has a probability of being free
+   * (0.0 to 1.0) based on event status (confirmed=0.95, tentative=0.50),
+   * with adjustments for recurring events that historically get cancelled.
+   *
+   * Cancellation history is derived from the event_journal: for each
+   * recurring event series (identified by origin_event_id), we count
+   * the total occurrences and how many were cancelled (change_type='deleted'
+   * or patch_json containing status='cancelled').
+   */
+  getProbabilisticAvailability(
+    start: string,
+    end: string,
+    granularity_minutes?: number,
+  ): ProbabilisticAvailabilityResult {
+    this.ensureMigrated();
+
+    // Fetch canonical events for the period (including tentative)
+    const rows = this.sql
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
+         WHERE end_ts > ? AND start_ts < ?
+           AND all_day = 0
+           AND transparency = 'opaque'
+         ORDER BY start_ts ASC`,
+        start,
+        end,
+      )
+      .toArray();
+
+    // Convert rows to ProbabilisticEvent format
+    const events: ProbabilisticEvent[] = rows
+      .filter((r) => r.start_ts && r.end_ts)
+      .map((r) => ({
+        event_id: r.canonical_event_id,
+        start: r.start_ts,
+        end: r.end_ts,
+        status: r.status as "confirmed" | "tentative" | "cancelled",
+        transparency: r.transparency as "opaque" | "transparent",
+        recurrence_rule: r.recurrence_rule ?? undefined,
+        origin_event_id: r.origin_event_id,
+      }));
+
+    // Build cancellation history for recurring events from the journal.
+    // For each recurring event's origin_event_id, count how many
+    // distinct canonical_event_id entries had a 'deleted' change_type.
+    const recurringOriginIds = [
+      ...new Set(
+        events
+          .filter((e) => e.recurrence_rule)
+          .map((e) => e.origin_event_id),
+      ),
+    ];
+
+    const cancellation_history: CancellationHistory = {};
+
+    for (const originId of recurringOriginIds) {
+      // Count total events with this origin_event_id (including cancelled/deleted)
+      const totalRows = this.sql
+        .exec<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt FROM canonical_events
+           WHERE origin_event_id = ?`,
+          originId,
+        )
+        .toArray();
+
+      // Count journal entries that record cancellation/deletion for events
+      // with this origin_event_id
+      const cancelledRows = this.sql
+        .exec<{ cnt: number }>(
+          `SELECT COUNT(DISTINCT ej.canonical_event_id) as cnt
+           FROM event_journal ej
+           JOIN canonical_events ce ON ej.canonical_event_id = ce.canonical_event_id
+           WHERE ce.origin_event_id = ?
+             AND ej.change_type = 'deleted'`,
+          originId,
+        )
+        .toArray();
+
+      const total = totalRows[0]?.cnt ?? 0;
+      const cancelled = cancelledRows[0]?.cnt ?? 0;
+
+      if (total > 0) {
+        cancellation_history[originId] = {
+          total_occurrences: total,
+          cancelled_occurrences: cancelled,
+        };
+      }
+    }
+
+    return computeProbabilisticAvailability({
+      events,
+      start,
+      end,
+      granularity_minutes,
+      cancellation_history,
+    });
   }
 
   /** Convert a DB row to a CanonicalEvent domain object. */

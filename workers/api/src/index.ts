@@ -3039,6 +3039,134 @@ async function handleGetCognitiveLoad(
   }
 }
 
+// -- Probabilistic availability -----------------------------------------------
+
+async function handleGetAvailability(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get("mode");
+  const start = url.searchParams.get("start");
+  const end = url.searchParams.get("end");
+  const granularityParam = url.searchParams.get("granularity");
+
+  if (!start || !end) {
+    return jsonResponse(
+      errorEnvelope(
+        "start and end query parameters are required (ISO 8601 datetime)",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Validate ISO 8601 datetime format (basic check)
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  if (isNaN(startMs) || isNaN(endMs)) {
+    return jsonResponse(
+      errorEnvelope(
+        "start and end must be valid ISO 8601 datetimes",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (startMs >= endMs) {
+    return jsonResponse(
+      errorEnvelope(
+        "start must be before end",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Max 7 days to prevent excessively large responses
+  const MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+  if (endMs - startMs > MAX_RANGE_MS) {
+    return jsonResponse(
+      errorEnvelope(
+        "Time range must not exceed 7 days",
+        "VALIDATION_ERROR",
+      ),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  // Parse granularity (default 30 minutes)
+  let granularity_minutes = 30;
+  if (granularityParam) {
+    const parsed = parseInt(granularityParam, 10);
+    if (isNaN(parsed) || parsed <= 0 || parsed > 120) {
+      return jsonResponse(
+        errorEnvelope(
+          "granularity must be a positive integer (minutes, max 120)",
+          "VALIDATION_ERROR",
+        ),
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    granularity_minutes = parsed;
+  }
+
+  if (mode === "probabilistic") {
+    try {
+      const result = await callDO<{
+        slots: Array<{ start: string; end: string; probability: number }>;
+      }>(env.USER_GRAPH, auth.userId, "/getProbabilisticAvailability", {
+        start,
+        end,
+        granularity_minutes,
+      });
+
+      if (!result.ok) {
+        return jsonResponse(
+          errorEnvelope("Failed to compute probabilistic availability", "INTERNAL_ERROR"),
+          ErrorCode.INTERNAL_ERROR,
+        );
+      }
+
+      return jsonResponse(successEnvelope(result.data), 200);
+    } catch (err) {
+      console.error("Failed to compute probabilistic availability", err);
+      return jsonResponse(
+        errorEnvelope("Failed to compute probabilistic availability", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+  }
+
+  // Default mode: delegate to existing DO computeAvailability for binary free/busy
+  try {
+    const result = await callDO<{
+      busy_intervals: Array<{ start: string; end: string; account_ids: string[] }>;
+      free_intervals: Array<{ start: string; end: string }>;
+    }>(env.USER_GRAPH, auth.userId, "/computeAvailability", {
+      start,
+      end,
+    });
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to compute availability", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to compute availability", err);
+    return jsonResponse(
+      errorEnvelope("Failed to compute availability", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 // -- Context-switch cost estimation -------------------------------------------
 
 async function handleGetContextSwitches(
@@ -5727,6 +5855,10 @@ async function routeAuthenticatedRequest(
 
       if (method === "GET" && pathname === "/v1/intelligence/risk-scores") {
         return handleGetRiskScores(request, auth, env);
+      }
+
+      if (method === "GET" && pathname === "/v1/availability") {
+        return handleGetAvailability(request, auth, env);
       }
 
       // -- Temporal Graph API routes (TM-b3i.4) --------------------------------

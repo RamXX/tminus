@@ -417,3 +417,21 @@ export type {
   AccountLimitResult,
   MergedPolicies,
 } from "./policy-merge";
+
+// Re-export probabilistic availability modeling (scheduling intelligence)
+export {
+  computeEventBusyProbability,
+  computeSlotFreeProbability,
+  computeProbabilisticAvailability,
+  computeMultiParticipantProbability,
+  DEFAULT_CONFIRMED_BUSY_PROBABILITY,
+  DEFAULT_TENTATIVE_BUSY_PROBABILITY,
+} from "./probabilistic-availability";
+export type {
+  ProbabilisticEvent,
+  ProbabilisticSlot,
+  ProbabilisticAvailabilityInput,
+  ProbabilisticAvailabilityResult,
+  CancellationHistory,
+  CancellationHistoryEntry,
+} from "./probabilistic-availability";

@@ -14,6 +14,7 @@
  *   #/governance  -> Governance Dashboard (requires auth)
  *   #/relationships -> Relationships Dashboard (requires auth)
  *   #/reconnections -> Reconnections Dashboard (requires auth)
+ *   #/admin/:orgId  -> Admin Console (requires auth + enterprise)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -30,6 +31,7 @@ import { Scheduling } from "./pages/Scheduling";
 import { Governance } from "./pages/Governance";
 import { Relationships } from "./pages/Relationships";
 import { Reconnections } from "./pages/Reconnections";
+import { Admin } from "./pages/Admin";
 import {
   fetchSyncStatus,
   fetchAccounts,
@@ -62,11 +64,24 @@ import {
   fetchUpcomingMilestones,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
+import {
+  fetchOrgDetails,
+  fetchOrgMembers,
+  addOrgMember,
+  removeOrgMember,
+  changeOrgMemberRole,
+  fetchOrgPolicies,
+  createOrgPolicy,
+  updateOrgPolicy,
+  deleteOrgPolicy,
+  fetchOrgUsage,
+} from "./lib/admin";
 
 function Router() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [route, setRoute] = useState(window.location.hash || "#/");
   const [accountsCount, setAccountsCount] = useState(0);
+  const [userTier, setUserTier] = useState<string>("free");
 
   useEffect(() => {
     const handler = () => setRoute(window.location.hash || "#/");
@@ -137,6 +152,18 @@ function Router() {
       fetchAccounts(token).then(
         (accounts) => setAccountsCount(accounts.length),
         () => { /* non-critical */ },
+      );
+    }
+  }, [token, route]);
+
+  // Fetch billing tier for admin console enterprise gate
+  useEffect(() => {
+    if (!token) return;
+    const routePath = (window.location.hash || "#/").split("?")[0];
+    if (routePath.startsWith("#/admin/")) {
+      fetchBillingStatus(token).then(
+        (status) => setUserTier(status.tier),
+        () => { /* non-critical -- defaults to "free" which blocks access */ },
       );
     }
   }, [token, route]);
@@ -308,6 +335,87 @@ function Router() {
     return fetchUpcomingMilestones(token);
   }, [token]);
 
+  // Bound admin console functions -- injects current token
+  const boundFetchOrgDetails = useCallback(
+    async (orgId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchOrgDetails(token, orgId);
+    },
+    [token],
+  );
+
+  const boundFetchOrgMembers = useCallback(
+    async (orgId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchOrgMembers(token, orgId);
+    },
+    [token],
+  );
+
+  const boundAddOrgMember = useCallback(
+    async (orgId: string, userId: string, role: import("./lib/admin").OrgRole) => {
+      if (!token) throw new Error("Not authenticated");
+      await addOrgMember(token, orgId, { user_id: userId, role });
+    },
+    [token],
+  );
+
+  const boundRemoveOrgMember = useCallback(
+    async (orgId: string, userId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      await removeOrgMember(token, orgId, userId);
+    },
+    [token],
+  );
+
+  const boundChangeOrgMemberRole = useCallback(
+    async (orgId: string, userId: string, role: import("./lib/admin").OrgRole) => {
+      if (!token) throw new Error("Not authenticated");
+      await changeOrgMemberRole(token, orgId, userId, { role });
+    },
+    [token],
+  );
+
+  const boundFetchOrgPolicies = useCallback(
+    async (orgId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchOrgPolicies(token, orgId);
+    },
+    [token],
+  );
+
+  const boundCreateOrgPolicy = useCallback(
+    async (orgId: string, payload: import("./lib/admin").CreatePolicyPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      await createOrgPolicy(token, orgId, payload);
+    },
+    [token],
+  );
+
+  const boundUpdateOrgPolicy = useCallback(
+    async (orgId: string, policyId: string, payload: import("./lib/admin").UpdatePolicyPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      await updateOrgPolicy(token, orgId, policyId, payload);
+    },
+    [token],
+  );
+
+  const boundDeleteOrgPolicy = useCallback(
+    async (orgId: string, policyId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      await deleteOrgPolicy(token, orgId, policyId);
+    },
+    [token],
+  );
+
+  const boundFetchOrgUsage = useCallback(
+    async (orgId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchOrgUsage(token, orgId);
+    },
+    [token],
+  );
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -402,10 +510,34 @@ function Router() {
           fetchUpcomingMilestones={boundFetchUpcomingMilestones}
         />
       );
-    default:
+    default: {
+      // Dynamic route: #/admin/:orgId
+      if (routePath.startsWith("#/admin/")) {
+        const adminOrgId = decodeURIComponent(routePath.replace("#/admin/", ""));
+        if (adminOrgId && user) {
+          return (
+            <Admin
+              orgId={adminOrgId}
+              currentUserId={user.id}
+              userTier={userTier}
+              fetchOrgDetails={boundFetchOrgDetails}
+              fetchOrgMembers={boundFetchOrgMembers}
+              addOrgMember={boundAddOrgMember}
+              removeOrgMember={boundRemoveOrgMember}
+              changeOrgMemberRole={boundChangeOrgMemberRole}
+              fetchOrgPolicies={boundFetchOrgPolicies}
+              createOrgPolicy={boundCreateOrgPolicy}
+              updateOrgPolicy={boundUpdateOrgPolicy}
+              deleteOrgPolicy={boundDeleteOrgPolicy}
+              fetchOrgUsage={boundFetchOrgUsage}
+            />
+          );
+        }
+      }
       // Unknown route -- redirect to calendar if authenticated, login otherwise
       window.location.hash = token ? "#/calendar" : "#/login";
       return null;
+    }
   }
 }
 
