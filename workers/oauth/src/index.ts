@@ -40,6 +40,7 @@ import {
 } from "./microsoft";
 import { handleMarketplaceInstall } from "./marketplace";
 import { handlePrivacyPolicy, handleTermsOfService } from "./legal";
+import { handleSupportPage } from "./support";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -574,6 +575,8 @@ export function createHandler(fetchFn?: FetchFn) {
           return handlePrivacyPolicy();
         case "/legal/terms":
           return handleTermsOfService();
+        case "/support":
+          return handleSupportPage();
         default:
           return errorResponse("Not found", 404);
       }
