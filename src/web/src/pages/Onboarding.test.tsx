@@ -1048,6 +1048,163 @@ describe("Onboarding page", () => {
         expect.stringContaining("calendar"),
       );
     });
+
+    it("supports adding 5+ accounts sequentially without page reload (AC 5)", async () => {
+      // Define 5 distinct accounts: 1 Google (via OAuth callback), 4 Apple (via credential modal)
+      const accounts: Array<{
+        id: string;
+        email: string;
+        provider: "google" | "microsoft" | "apple";
+        calendarCount: number;
+      }> = [
+        { id: "acc-google-1", email: "alice@gmail.com", provider: "google", calendarCount: 3 },
+        { id: "acc-apple-1", email: "alice@icloud.com", provider: "apple", calendarCount: 1 },
+        { id: "acc-apple-2", email: "bob@icloud.com", provider: "apple", calendarCount: 2 },
+        { id: "acc-apple-3", email: "carol@icloud.com", provider: "apple", calendarCount: 4 },
+        { id: "acc-apple-4", email: "dave@icloud.com", provider: "apple", calendarCount: 1 },
+      ];
+
+      // Build sync statuses keyed by account_id
+      const syncStatusMap: Record<string, OnboardingSyncStatus> = {};
+      for (const acct of accounts) {
+        syncStatusMap[acct.id] = {
+          account_id: acct.id,
+          email: acct.email,
+          provider: acct.provider,
+          status: "active",
+          calendar_count: acct.calendarCount,
+          health: {
+            lastSyncTs: "2026-02-15T12:00:00Z",
+            lastSuccessTs: "2026-02-15T12:00:00Z",
+            fullSyncNeeded: false,
+          },
+        };
+      }
+
+      // fetchAccountStatus dispatches by account_id
+      const fetchAccountStatus = vi.fn(
+        async (accountId: string): Promise<OnboardingSyncStatus> => {
+          const status = syncStatusMap[accountId];
+          if (!status) throw new Error(`Unknown account: ${accountId}`);
+          return status;
+        },
+      );
+
+      // submitAppleCredentials returns different account_id per email
+      const emailToAccountId: Record<string, string> = {};
+      for (const acct of accounts) {
+        emailToAccountId[acct.email] = acct.id;
+      }
+      let appleCallCount = 0;
+      const appleAccounts = accounts.filter((a) => a.provider === "apple");
+      const submitAppleCredentials = vi.fn(
+        async (
+          _userId: string,
+          email: string,
+          _password: string,
+        ): Promise<{ account_id: string }> => {
+          const accountId = emailToAccountId[email];
+          if (!accountId) {
+            // Fallback: use sequential apple account IDs
+            const fallback = appleAccounts[appleCallCount];
+            appleCallCount++;
+            return { account_id: fallback?.id ?? `acc-apple-fallback-${appleCallCount}` };
+          }
+          return { account_id: accountId };
+        },
+      );
+
+      const fetchEvents = createMockFetchEvents([]);
+
+      // -- Account 1: Google via OAuth callback --
+      await renderOnboarding({
+        callbackAccountId: accounts[0].id,
+        fetchAccountStatus,
+        fetchEvents,
+        submitAppleCredentials,
+      });
+
+      // Wait for sync polling to complete
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // Verify account 1 connected
+      expect(screen.getByText(/1.*account.*connected/i)).toBeInTheDocument();
+      const email1Elements = screen.getAllByText(new RegExp(accounts[0].email, "i"));
+      expect(email1Elements.length).toBeGreaterThanOrEqual(1);
+
+      // -- Accounts 2-5: Apple via credential modal --
+      for (let i = 1; i < accounts.length; i++) {
+        const acct = accounts[i];
+
+        // Click "Add another account"
+        const addButton = screen.getByRole("button", { name: /add another account/i });
+        fireEvent.click(addButton);
+
+        // Progress should show current count
+        expect(
+          screen.getByText(new RegExp(`${i}.*account.*connected`, "i")),
+        ).toBeInTheDocument();
+
+        // Click "Connect Apple"
+        const appleButton = screen.getByRole("button", { name: /connect apple/i });
+        fireEvent.click(appleButton);
+
+        // Fill in Apple credential modal
+        const emailInput = screen.getByLabelText(/apple id email/i);
+        const passwordInput = screen.getByLabelText(/app-specific password/i);
+        const connectBtn = screen.getByRole("button", { name: /connect$/i });
+
+        fireEvent.change(emailInput, { target: { value: acct.email } });
+        fireEvent.change(passwordInput, { target: { value: "abcd-efgh-ijkl-mnop" } });
+        fireEvent.click(connectBtn);
+
+        // Wait for credential submission + sync polling
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200);
+        });
+
+        // Verify this account appears in the connected list
+        const accountCount = i + 1;
+        expect(
+          screen.getByText(new RegExp(`${accountCount}.*account.*connected`, "i")),
+        ).toBeInTheDocument();
+      }
+
+      // -- Verify all 5 accounts are visible with correct emails --
+      for (const acct of accounts) {
+        const emailMatches = screen.getAllByText(new RegExp(acct.email, "i"));
+        expect(emailMatches.length).toBeGreaterThanOrEqual(1);
+      }
+
+      // -- Verify "Add another" still works after 5 accounts --
+      const addButtonAfter5 = screen.getByRole("button", { name: /add another account/i });
+      expect(addButtonAfter5).toBeInTheDocument();
+      expect(addButtonAfter5).toBeEnabled();
+
+      // -- Click "Done" and verify completion screen shows all 5 --
+      const doneButton = screen.getByRole("button", { name: /done|finish|all set/i });
+      fireEvent.click(doneButton);
+
+      // Completion screen should show "You're all set"
+      expect(screen.getByText(/you.?re all set/i)).toBeInTheDocument();
+
+      // All 5 account emails should appear in the completion summary
+      for (const acct of accounts) {
+        const summaryEmails = screen.getAllByText(new RegExp(acct.email, "i"));
+        expect(summaryEmails.length).toBeGreaterThanOrEqual(1);
+      }
+
+      // Verify state management: fetchAccountStatus was called for each account
+      expect(fetchAccountStatus).toHaveBeenCalledWith(accounts[0].id);
+      for (let i = 1; i < accounts.length; i++) {
+        expect(fetchAccountStatus).toHaveBeenCalledWith(accounts[i].id);
+      }
+
+      // Verify Apple credentials were submitted 4 times (accounts 2-5)
+      expect(submitAppleCredentials).toHaveBeenCalledTimes(4);
+    });
   });
 
   // ---------------------------------------------------------------------------

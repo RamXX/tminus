@@ -877,7 +877,9 @@ describe("CalDavClient", () => {
     return vi.fn(async () => {
       const resp = responses[callIndex] ?? { status: 200, body: "" };
       callIndex++;
-      return new Response(resp.body, {
+      // 204 No Content must not have a body per HTTP spec
+      const responseBody = resp.status === 204 ? null : resp.body;
+      return new Response(responseBody, {
         status: resp.status,
         headers: {
           "Content-Type": "application/xml",
