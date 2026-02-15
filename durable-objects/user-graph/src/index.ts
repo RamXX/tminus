@@ -229,6 +229,11 @@ export interface MirrorStateUpdate {
   target_calendar_id?: string;
 }
 
+/** Result of a GDPR full-user deletion step. */
+export interface DeletionCounts {
+  readonly deleted: number;
+}
+
 // ---------------------------------------------------------------------------
 // UserGraphDO class
 // ---------------------------------------------------------------------------
@@ -1256,6 +1261,121 @@ export class UserGraphDO {
   // unlinkAccount -- Cascade deletion for account removal
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // GDPR Deletion Methods (full-user data erasure)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Delete ALL canonical events from this user's DO SQLite.
+   *
+   * Also deletes event_mirrors first (FK child rows) to satisfy
+   * referential integrity. Step 2 (deleteAllMirrors) becomes a
+   * safe no-op after this.
+   *
+   * Also deletes time_allocations which reference canonical_events.
+   *
+   * Idempotent: returns 0 if no events exist.
+   */
+  deleteAllEvents(): DeletionCounts {
+    this.ensureMigrated();
+    const count = this.sql
+      .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM canonical_events")
+      .toArray()[0].cnt;
+    // Delete FK children before parent rows
+    this.sql.exec("DELETE FROM time_allocations");
+    this.sql.exec("DELETE FROM event_mirrors");
+    this.sql.exec("DELETE FROM canonical_events");
+    return { deleted: count };
+  }
+
+  /**
+   * Delete ALL event mirrors from this user's DO SQLite.
+   * Idempotent: returns 0 if no mirrors exist.
+   */
+  deleteAllMirrors(): DeletionCounts {
+    this.ensureMigrated();
+    const count = this.sql
+      .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM event_mirrors")
+      .toArray()[0].cnt;
+    this.sql.exec("DELETE FROM event_mirrors");
+    return { deleted: count };
+  }
+
+  /**
+   * Delete ALL journal entries from this user's DO SQLite.
+   * Idempotent: returns 0 if no journal entries exist.
+   *
+   * Note: this removes the audit trail as required by GDPR right-to-erasure.
+   * The deletion certificate (generated separately) provides proof of deletion.
+   */
+  deleteJournal(): DeletionCounts {
+    this.ensureMigrated();
+    const count = this.sql
+      .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM event_journal")
+      .toArray()[0].cnt;
+    this.sql.exec("DELETE FROM event_journal");
+    return { deleted: count };
+  }
+
+  /**
+   * Delete ALL relationship, ledger, milestone, policy, calendar, constraint,
+   * and scheduling data from this user's DO SQLite.
+   *
+   * Covers Phase 3+ and Phase 4 tables plus core policy/calendar/constraint tables.
+   * Idempotent: returns total rows deleted across all tables.
+   */
+  deleteRelationshipData(): DeletionCounts {
+    this.ensureMigrated();
+
+    // Count all rows across relationship/supporting tables
+    let total = 0;
+    const tables = [
+      "relationships",
+      "interaction_ledger",
+      "milestones",
+      "vip_policies",
+      "time_allocations",
+      "time_commitments",
+      "commitment_reports",
+      "schedule_holds",
+      "schedule_candidates",
+      "schedule_sessions",
+      "constraints",
+      "policy_edges",
+      "policies",
+      "calendars",
+    ];
+
+    for (const table of tables) {
+      const count = this.sql
+        .exec<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${table}`)
+        .toArray()[0].cnt;
+      total += count;
+    }
+
+    // Delete in correct order (children before parents, respecting FK constraints)
+    this.sql.exec("DELETE FROM interaction_ledger");
+    this.sql.exec("DELETE FROM milestones");
+    this.sql.exec("DELETE FROM relationships");
+    this.sql.exec("DELETE FROM vip_policies");
+    this.sql.exec("DELETE FROM commitment_reports");
+    this.sql.exec("DELETE FROM time_commitments");
+    this.sql.exec("DELETE FROM time_allocations");
+    this.sql.exec("DELETE FROM schedule_holds");
+    this.sql.exec("DELETE FROM schedule_candidates");
+    this.sql.exec("DELETE FROM schedule_sessions");
+    this.sql.exec("DELETE FROM constraints");
+    this.sql.exec("DELETE FROM policy_edges");
+    this.sql.exec("DELETE FROM policies");
+    this.sql.exec("DELETE FROM calendars");
+
+    return { deleted: total };
+  }
+
+  // -------------------------------------------------------------------------
+  // Account unlinking (per-account, not full-user deletion)
+  // -------------------------------------------------------------------------
+
   /**
    * Remove all data associated with an account from the UserGraphDO.
    *
@@ -1806,6 +1926,30 @@ export class UserGraphDO {
         case "/unlinkAccount": {
           const body = (await request.json()) as { account_id: string };
           const result = await this.unlinkAccount(body.account_id);
+          return Response.json(result);
+        }
+
+        // ---------------------------------------------------------------
+        // GDPR Deletion RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/deleteAllEvents": {
+          const result = this.deleteAllEvents();
+          return Response.json(result);
+        }
+
+        case "/deleteAllMirrors": {
+          const result = this.deleteAllMirrors();
+          return Response.json(result);
+        }
+
+        case "/deleteJournal": {
+          const result = this.deleteJournal();
+          return Response.json(result);
+        }
+
+        case "/deleteRelationshipData": {
+          const result = this.deleteRelationshipData();
           return Response.json(result);
         }
 
