@@ -56,8 +56,8 @@ describe("isSupportedProvider", () => {
     expect(isSupportedProvider("microsoft")).toBe(true);
   });
 
-  it("returns false for 'caldav' (not yet implemented)", () => {
-    expect(isSupportedProvider("caldav")).toBe(false);
+  it("returns true for 'caldav'", () => {
+    expect(isSupportedProvider("caldav")).toBe(true);
   });
 
   it("returns false for arbitrary strings", () => {
@@ -68,14 +68,14 @@ describe("isSupportedProvider", () => {
 });
 
 describe("SUPPORTED_PROVIDERS", () => {
-  it("contains 'google' and 'microsoft'", () => {
-    expect(SUPPORTED_PROVIDERS).toEqual(["google", "microsoft"]);
+  it("contains 'google', 'microsoft', and 'caldav'", () => {
+    expect(SUPPORTED_PROVIDERS).toEqual(["google", "microsoft", "caldav"]);
   });
 
   it("is readonly (frozen at the type level)", () => {
     // TypeScript enforces readonly, but we can verify it's an array
     expect(Array.isArray(SUPPORTED_PROVIDERS)).toBe(true);
-    expect(SUPPORTED_PROVIDERS.length).toBe(2);
+    expect(SUPPORTED_PROVIDERS.length).toBe(3);
   });
 });
 
@@ -120,10 +120,10 @@ describe("getClassificationStrategy", () => {
     expect(typeof strategy.classify).toBe("function");
   });
 
-  it("throws for 'caldav' (unsupported in Phase 1)", () => {
-    expect(() => getClassificationStrategy("caldav" as ProviderType)).toThrow(
-      /no classification strategy/i,
-    );
+  it("returns caldavClassificationStrategy for 'caldav'", () => {
+    const strategy = getClassificationStrategy("caldav" as ProviderType);
+    expect(strategy).toBeDefined();
+    expect(typeof strategy.classify).toBe("function");
   });
 });
 
@@ -188,11 +188,20 @@ describe("normalizeProviderEvent", () => {
     expect(delta.origin_account_id).toBe(TEST_ACCOUNT_ID);
   });
 
-  it("throws for unsupported provider 'caldav'", () => {
-    const event = makeGoogleEvent();
-    expect(() =>
-      normalizeProviderEvent("caldav" as ProviderType, event, TEST_ACCOUNT_ID, "origin"),
-    ).toThrow(/no normalizer/i);
+  it("dispatches to CalDAV normalizer for provider='caldav'", () => {
+    // Use a minimal ParsedVEvent shape
+    const caldavEvent = {
+      uid: "caldav-evt-123@icloud.com",
+      summary: "Apple Calendar Meeting",
+      dtstart: "20250615T090000Z",
+      dtend: "20250615T093000Z",
+    };
+    const delta = normalizeProviderEvent("caldav", caldavEvent, TEST_ACCOUNT_ID, "origin");
+    expect(delta.type).toBe("updated");
+    expect(delta.origin_event_id).toBe("caldav-evt-123@icloud.com");
+    expect(delta.origin_account_id).toBe(TEST_ACCOUNT_ID);
+    expect(delta.event).toBeDefined();
+    expect(delta.event!.title).toBe("Apple Calendar Meeting");
   });
 });
 
@@ -239,10 +248,15 @@ describe("createCalendarProvider", () => {
     expect(typeof provider.listEvents).toBe("function");
   });
 
-  it("throws for unsupported provider 'caldav'", () => {
-    expect(() =>
-      createCalendarProvider("caldav" as ProviderType, "test-token"),
-    ).toThrow(/cannot create provider/i);
+  it("returns a CalDavClient for provider='caldav'", () => {
+    const config = JSON.stringify({
+      appleId: "test@icloud.com",
+      appSpecificPassword: "xxxx-xxxx-xxxx-xxxx",
+    });
+    const provider = createCalendarProvider("caldav", config);
+    expect(provider).toBeDefined();
+    expect(typeof provider.listCalendars).toBe("function");
+    expect(typeof provider.listEvents).toBe("function");
   });
 });
 

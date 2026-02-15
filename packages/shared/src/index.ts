@@ -67,6 +67,7 @@ export { compileProjection } from "./policy";
 
 // Re-export event classification (Invariants A & E, loop prevention)
 export { classifyEvent, classifyMicrosoftEvent } from "./classify";
+export { classifyCalDavEvent } from "./classify-caldav";
 
 // Re-export Google event normalization (provider -> ProviderDelta)
 export { normalizeGoogleEvent } from "./normalize";
@@ -75,12 +76,16 @@ export { normalizeGoogleEvent } from "./normalize";
 export { normalizeMicrosoftEvent } from "./normalize-microsoft";
 export type { MicrosoftGraphEvent } from "./normalize-microsoft";
 
+// Re-export CalDAV (Apple Calendar) event normalization
+export { normalizeCalDavEvent } from "./normalize-caldav";
+
 // Re-export provider-agnostic abstraction layer
 export {
   SUPPORTED_PROVIDERS,
   isSupportedProvider,
   googleClassificationStrategy,
   microsoftClassificationStrategy,
+  caldavClassificationStrategy,
   getClassificationStrategy,
   normalizeProviderEvent,
   createCalendarProvider,
@@ -102,6 +107,7 @@ export {
   ACCOUNT_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V3,
   ACCOUNT_DO_MIGRATION_V4,
+  ACCOUNT_DO_MIGRATION_V5,
   USER_GRAPH_DO_MIGRATIONS,
   ACCOUNT_DO_MIGRATIONS,
   applyMigrations,
@@ -137,6 +143,48 @@ export {
   TokenBucket,
 } from "./microsoft-api";
 export type { MicrosoftClientOptions } from "./microsoft-api";
+
+// Re-export CalDAV (Apple Calendar) API abstraction layer
+export {
+  CalDavClient,
+  CalDavApiError,
+  CalDavAuthError,
+  CalDavNotFoundError,
+  CalDavConflictError,
+} from "./caldav-client";
+export type {
+  CalDavCredentials,
+  CalDavCalendar,
+  CalDavCalendarSyncState,
+  CalDavEvent,
+  ParsedVEvent,
+  CalDavClientConfig,
+  CalDavWriteResult,
+} from "./caldav-types";
+
+// Re-export CalDAV XML builders and parsers
+export {
+  buildPrincipalPropfind,
+  buildCalendarHomePropfind,
+  buildCalendarListPropfind,
+  buildCalendarMultiget,
+  buildCalendarQuery,
+  buildEtagPropfind,
+  parsePrincipalResponse,
+  parseCalendarHomeResponse,
+  parseCalendarListResponse,
+  parseCalendarDataResponse,
+  parseEtagResponse,
+} from "./caldav-xml";
+
+// Re-export iCalendar parser (VEVENT -> ParsedVEvent)
+export {
+  parseVEvents,
+  unfoldLines,
+  unescapeText,
+  parsePropertyLine,
+  icalDateTimeToEventDateTime,
+} from "./ical-parse";
 
 // Re-export authentication utilities (JWT, password hashing)
 export {

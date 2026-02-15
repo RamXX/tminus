@@ -7,7 +7,8 @@
  *
  * This module is the single entry point for all provider-agnostic code.
  * Google-specific implementations are in google-api.ts, normalize.ts, etc.
- * Future providers (Microsoft, CalDAV) will follow the same pattern.
+ * Microsoft-specific implementations are in microsoft-api.ts, normalize-microsoft.ts.
+ * CalDAV (Apple Calendar) implementations are in caldav-client.ts, normalize-caldav.ts.
  */
 
 import type {
@@ -19,11 +20,15 @@ import type {
 import type { CalendarProvider, FetchFn } from "./google-api";
 import { GoogleCalendarClient } from "./google-api";
 import { MicrosoftCalendarClient } from "./microsoft-api";
+import { CalDavClient } from "./caldav-client";
 import { normalizeGoogleEvent } from "./normalize";
 import { normalizeMicrosoftEvent } from "./normalize-microsoft";
+import { normalizeCalDavEvent } from "./normalize-caldav";
 import type { MicrosoftGraphEvent } from "./normalize-microsoft";
+import type { ParsedVEvent } from "./caldav-types";
 import { classifyEvent as classifyGoogleEvent } from "./classify";
 import { classifyMicrosoftEvent } from "./classify";
+import { classifyCalDavEvent } from "./classify-caldav";
 
 // ---------------------------------------------------------------------------
 // Provider type
@@ -31,8 +36,7 @@ import { classifyMicrosoftEvent } from "./classify";
 
 /**
  * Supported calendar provider types.
- * 'google' is the only provider in Phase 1.
- * 'microsoft' and 'caldav' are reserved for Phase 5.
+ * 'google' (Phase 1), 'microsoft' (Phase 5), 'caldav' (Phase 6A).
  */
 export type ProviderType = "google" | "microsoft" | "caldav";
 
@@ -40,7 +44,7 @@ export type ProviderType = "google" | "microsoft" | "caldav";
  * All currently supported provider types.
  * Useful for validation and iteration.
  */
-export const SUPPORTED_PROVIDERS: readonly ProviderType[] = ["google", "microsoft"] as const;
+export const SUPPORTED_PROVIDERS: readonly ProviderType[] = ["google", "microsoft", "caldav"] as const;
 
 /**
  * Check if a string is a valid ProviderType.
@@ -92,6 +96,16 @@ export const microsoftClassificationStrategy: ClassificationStrategy = {
 };
 
 /**
+ * CalDAV (Apple Calendar) classification strategy.
+ * Uses X-TMINUS-MANAGED custom property to detect managed mirrors.
+ */
+export const caldavClassificationStrategy: ClassificationStrategy = {
+  classify(rawEvent: unknown): EventClassification {
+    return classifyCalDavEvent(rawEvent as ParsedVEvent);
+  },
+};
+
+/**
  * Get the ClassificationStrategy for a given provider type.
  * Throws if the provider is not supported.
  */
@@ -103,9 +117,11 @@ export function getClassificationStrategy(
       return googleClassificationStrategy;
     case "microsoft":
       return microsoftClassificationStrategy;
+    case "caldav":
+      return caldavClassificationStrategy;
     default:
       throw new Error(
-        `No classification strategy for provider: ${provider}. Only Google and Microsoft are supported.`,
+        `No classification strategy for provider: ${provider}. Only Google, Microsoft, and CalDAV are supported.`,
       );
   }
 }
@@ -146,9 +162,15 @@ export function normalizeProviderEvent(
         accountId,
         classification,
       );
+    case "caldav":
+      return normalizeCalDavEvent(
+        rawEvent as ParsedVEvent,
+        accountId,
+        classification,
+      );
     default:
       throw new Error(
-        `No normalizer for provider: ${provider}. Only Google and Microsoft are supported.`,
+        `No normalizer for provider: ${provider}. Only Google, Microsoft, and CalDAV are supported.`,
       );
   }
 }
@@ -161,7 +183,8 @@ export function normalizeProviderEvent(
  * Create a CalendarProvider for the given provider type.
  *
  * @param provider - The provider type
- * @param accessToken - OAuth access token for the provider
+ * @param accessToken - OAuth access token for Google/Microsoft, or JSON-encoded
+ *   CalDavClientConfig for CalDAV (e.g. `{"appleId":"...","appSpecificPassword":"..."}`)
  * @param fetchFn - Optional injectable fetch function (for testing)
  * @returns A CalendarProvider instance
  */
@@ -175,9 +198,18 @@ export function createCalendarProvider(
       return new GoogleCalendarClient(accessToken, fetchFn);
     case "microsoft":
       return new MicrosoftCalendarClient(accessToken, fetchFn);
+    case "caldav": {
+      // For CalDAV, accessToken is JSON-encoded CalDavClientConfig
+      const config = JSON.parse(accessToken) as {
+        appleId: string;
+        appSpecificPassword: string;
+        serverUrl?: string;
+      };
+      return new CalDavClient(config, fetchFn);
+    }
     default:
       throw new Error(
-        `Cannot create provider: ${provider}. Only Google and Microsoft are supported.`,
+        `Cannot create provider: ${provider}. Only Google, Microsoft, and CalDAV are supported.`,
       );
   }
 }

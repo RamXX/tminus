@@ -464,6 +464,22 @@ CREATE TABLE encryption_monitor (
 );
 ` as const;
 
+/**
+ * AccountDO migration v5: CalDAV sync state table.
+ *
+ * Stores per-calendar ctag and per-event etag data for CalDAV
+ * incremental sync. The ctag changes whenever any event in the
+ * calendar is modified, and etag changes per-event.
+ */
+export const ACCOUNT_DO_MIGRATION_V5 = `
+CREATE TABLE caldav_calendar_state (
+  calendar_href    TEXT PRIMARY KEY,
+  ctag             TEXT NOT NULL,
+  etags_json       TEXT NOT NULL DEFAULT '{}',
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+` as const;
+
 /** Ordered migrations for AccountDO. Apply sequentially. */
 export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -485,6 +501,11 @@ export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
     version: 4,
     sql: ACCOUNT_DO_MIGRATION_V4,
     description: "Encryption failure monitoring table for operational alerting",
+  },
+  {
+    version: 5,
+    sql: ACCOUNT_DO_MIGRATION_V5,
+    description: "CalDAV calendar sync state table for ctag/etag incremental sync",
   },
 ] as const;
 
