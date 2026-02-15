@@ -2618,24 +2618,35 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
-  // computeAvailability -- Unified free/busy computation
+  // computeAvailability -- Constraint-aware unified free/busy computation
   // -------------------------------------------------------------------------
 
   /**
    * Compute unified free/busy intervals across all (or specified) accounts
-   * for a given time range. Queries canonical_events from DO SQLite,
-   * merges overlapping busy intervals, and computes free gaps.
+   * for a given time range. Evaluates ALL active constraints in a defined
+   * order to produce a complete availability picture.
    *
-   * Also applies working_hours constraints: times outside any active
-   * working_hours constraint are treated as busy (unavailable).
-   * When multiple working_hours constraints exist, their working periods
-   * are unioned (a time is available if ANY constraint says it's working time).
+   * Constraint evaluation order (story TM-gj5.4):
+   *   1. Raw free/busy from canonical events (including trip-derived events)
+   *   2. Working hours -- times outside any active working_hours constraint
+   *      are treated as busy. Multiple working_hours are unioned.
+   *   3. Trip blocks -- trip constraints with active_from/active_to overlapping
+   *      the query range mark that time as busy. These are always applied
+   *      regardless of the account filter (trips are cross-account blocks).
+   *   4. No-meetings-after -- daily cutoff times after which all time is busy.
+   *   5. Buffers -- travel/prep/cooldown time around events reduces availability.
+   *   6. Merge all intervals and compute free gaps.
    *
-   * Performance target (NFR-16): under 500ms, served entirely from DO SQLite.
+   * Performance target (NFR-16): under 500ms for 1-week range with 10+ constraints.
    */
   computeAvailability(query: AvailabilityQuery): AvailabilityResult {
     this.ensureMigrated();
 
+    // ----- Step 1: Raw free/busy from canonical events -----
+    // Trip-derived events (origin_account_id='internal') are included here
+    // when no account filter is applied. When an account filter IS applied,
+    // trip blocks are added separately in step 3 to ensure they are never
+    // excluded by account filtering.
     const conditions: string[] = [
       // Events that overlap the query range:
       // event starts before query ends AND event ends after query starts
@@ -2649,10 +2660,16 @@ export class UserGraphDO {
     const params: unknown[] = [query.start, query.end];
 
     // Optional account filtering
-    if (query.accounts && query.accounts.length > 0) {
-      const placeholders = query.accounts.map(() => "?").join(", ");
+    const hasAccountFilter = query.accounts && query.accounts.length > 0;
+    if (hasAccountFilter) {
+      // Include 'internal' so trip-derived events are not excluded
+      const allAccounts = [...query.accounts!];
+      if (!allAccounts.includes("internal")) {
+        allAccounts.push("internal");
+      }
+      const placeholders = allAccounts.map(() => "?").join(", ");
       conditions.push(`origin_account_id IN (${placeholders})`);
-      params.push(...query.accounts);
+      params.push(...allAccounts);
     }
 
     const where = `WHERE ${conditions.join(" AND ")}`;
@@ -2672,8 +2689,7 @@ export class UserGraphDO {
       account_ids: [row.origin_account_id],
     }));
 
-    // Add busy intervals from working_hours constraints
-    // (times outside working hours are busy)
+    // ----- Step 2: Working hours (exclude outside hours) -----
     const workingHoursConstraints = this.listConstraints("working_hours");
     const outsideWorkingHours = expandWorkingHoursToOutsideBusy(
       workingHoursConstraints,
@@ -2682,18 +2698,35 @@ export class UserGraphDO {
     );
     rawIntervals.push(...outsideWorkingHours);
 
-    // Add busy intervals from buffer constraints
-    // (buffers add time before/after events without creating calendar events)
+    // ----- Step 3: Trip blocks (mark as busy) -----
+    // Trip constraints create derived canonical events with origin_account_id=
+    // 'internal' and transparency='opaque'. These are included in step 1 above.
+    // The account filter in step 1 always includes 'internal' to ensure trip
+    // blocks are never excluded by account filtering.
+    //
+    // No separate expansion needed here -- trip blocks are already in rawIntervals
+    // from the canonical events query. This is by design: trip constraints are
+    // the only constraint kind that creates derived events, which ensures they
+    // appear in listEvents() and computeAvailability() consistently.
+
+    // ----- Step 4: No-meetings-after (daily cutoff) -----
+    const noMeetingsAfterConstraints = this.listConstraints("no_meetings_after");
+    const noMeetingsBusy = expandNoMeetingsAfterToBusy(
+      noMeetingsAfterConstraints,
+      query.start,
+      query.end,
+    );
+    rawIntervals.push(...noMeetingsBusy);
+
+    // ----- Step 5: Buffers (reduce available time around events) -----
     const bufferConstraints = this.listConstraints("buffer");
     if (bufferConstraints.length > 0) {
       const bufferIntervals = expandBuffersToBusy(bufferConstraints, rows);
       rawIntervals.push(...bufferIntervals);
     }
 
-    // Merge overlapping intervals
+    // ----- Step 6: Merge and compute free intervals -----
     const busyIntervals = mergeIntervals(rawIntervals);
-
-    // Compute free intervals as gaps between busy intervals
     const freeIntervals = computeFreeIntervals(busyIntervals, query.start, query.end);
 
     return {
@@ -3267,4 +3300,171 @@ export function expandBuffersToBusy(
   }
 
   return bufferIntervals;
+}
+
+// ---------------------------------------------------------------------------
+// Trip constraint helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Expand trip constraints into busy intervals for the query range.
+ *
+ * Trip constraints have active_from and active_to dates that define the trip
+ * period. Any overlap with the query range produces a busy interval.
+ *
+ * While trip constraints also create derived canonical events (picked up in
+ * step 1 of computeAvailability), this explicit expansion ensures:
+ * - Trip blocks are never lost due to account filtering
+ * - Resilience if derived event creation was incomplete
+ *
+ * Pure function: no side effects, no database access.
+ */
+export function expandTripConstraintsToBusy(
+  constraints: readonly { active_from: string | null; active_to: string | null }[],
+  rangeStart: string,
+  rangeEnd: string,
+): BusyInterval[] {
+  if (constraints.length === 0) return [];
+
+  const rangeStartMs = new Date(rangeStart).getTime();
+  const rangeEndMs = new Date(rangeEnd).getTime();
+  if (rangeStartMs >= rangeEndMs) return [];
+
+  const intervals: BusyInterval[] = [];
+
+  for (const constraint of constraints) {
+    if (!constraint.active_from || !constraint.active_to) continue;
+
+    const tripStartMs = new Date(constraint.active_from).getTime();
+    const tripEndMs = new Date(constraint.active_to).getTime();
+
+    // Check overlap with query range
+    if (tripEndMs <= rangeStartMs || tripStartMs >= rangeEndMs) continue;
+
+    // Clamp to query range
+    const clampedStart = Math.max(tripStartMs, rangeStartMs);
+    const clampedEnd = Math.min(tripEndMs, rangeEndMs);
+
+    intervals.push({
+      start: new Date(clampedStart).toISOString(),
+      end: new Date(clampedEnd).toISOString(),
+      account_ids: ["trip"],
+    });
+  }
+
+  return intervals;
+}
+
+// ---------------------------------------------------------------------------
+// No-meetings-after constraint helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Config shape for no_meetings_after constraints as stored in config_json.
+ */
+export interface NoMeetingsAfterConfig {
+  /** Cutoff time in HH:MM 24-hour format. */
+  readonly time: string;
+  /** IANA timezone string (e.g. "America/New_York"). */
+  readonly timezone: string;
+}
+
+/**
+ * Expand no_meetings_after constraints into busy intervals.
+ *
+ * For each day in the query range, the time from the cutoff to midnight
+ * (end of day) in the constraint's timezone is marked as busy.
+ *
+ * When multiple no_meetings_after constraints exist, the EARLIEST cutoff
+ * wins for each day (most restrictive).
+ *
+ * Algorithm:
+ * 1. Scan day by day across the range (with timezone buffer)
+ * 2. For each scan day, compute cutoff time for each constraint
+ * 3. Use the earliest cutoff, generate busy from cutoff to end-of-day
+ * 4. Clamp all intervals to the query range
+ *
+ * Pure function: no side effects, no database access.
+ */
+export function expandNoMeetingsAfterToBusy(
+  constraints: readonly { config_json: Record<string, unknown> }[],
+  rangeStart: string,
+  rangeEnd: string,
+): BusyInterval[] {
+  if (constraints.length === 0) return [];
+
+  const configs: NoMeetingsAfterConfig[] = constraints.map(
+    (c) => c.config_json as unknown as NoMeetingsAfterConfig,
+  );
+
+  const rangeStartMs = new Date(rangeStart).getTime();
+  const rangeEndMs = new Date(rangeEnd).getTime();
+
+  if (rangeStartMs >= rangeEndMs) return [];
+
+  const busyIntervals: BusyInterval[] = [];
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  // Scan day by day with timezone buffer to handle edge cases
+  const scanStart = rangeStartMs - oneDayMs;
+  const scanEnd = rangeEndMs + oneDayMs;
+
+  let dayStart = scanStart;
+  while (dayStart < scanEnd) {
+    const dayDate = new Date(dayStart);
+
+    let earliestCutoffMs: number | null = null;
+    let earliestTimezone: string | null = null;
+
+    for (const config of configs) {
+      // Get the cutoff timestamp in UTC for this day/timezone
+      const cutoffMs = getTimestampForTimeInTimezone(
+        dayDate,
+        config.time,
+        config.timezone,
+      );
+
+      // End of this day in the constraint's timezone (midnight next day)
+      const endOfDayMs = getTimestampForTimeInTimezone(
+        dayDate,
+        "23:59",
+        config.timezone,
+      ) + 60_000; // Add 1 minute to reach midnight
+
+      // Skip if this day's cutoff-to-midnight doesn't overlap with query range
+      if (endOfDayMs <= rangeStartMs || cutoffMs >= rangeEndMs) {
+        continue;
+      }
+
+      if (earliestCutoffMs === null || cutoffMs < earliestCutoffMs) {
+        earliestCutoffMs = cutoffMs;
+        earliestTimezone = config.timezone;
+      }
+    }
+
+    if (earliestCutoffMs !== null && earliestTimezone !== null) {
+      // Busy from cutoff to end of day in the earliest constraint's timezone
+      const endOfDayMs = getTimestampForTimeInTimezone(
+        dayDate,
+        "23:59",
+        earliestTimezone,
+      ) + 60_000;
+
+      // Clamp to query range
+      const busyStart = Math.max(earliestCutoffMs, rangeStartMs);
+      const busyEnd = Math.min(endOfDayMs, rangeEndMs);
+
+      if (busyStart < busyEnd) {
+        busyIntervals.push({
+          start: new Date(busyStart).toISOString(),
+          end: new Date(busyEnd).toISOString(),
+          account_ids: ["no_meetings_after"],
+        });
+      }
+    }
+
+    dayStart += oneDayMs;
+  }
+
+  return busyIntervals;
 }

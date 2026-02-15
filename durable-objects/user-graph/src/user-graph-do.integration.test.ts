@@ -4298,4 +4298,538 @@ describe("UserGraphDO buffer constraints", () => {
       expect(result.free_intervals[1].end).toBe("2026-02-16T17:00:00.000Z");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Constraint-aware availability (TM-gj5.4)
+  // All constraint types combined in computeAvailability
+  // -------------------------------------------------------------------------
+
+  describe("constraint-aware availability (TM-gj5.4)", () => {
+    it("AC1/AC2: availability reflects all active constraints (working hours + trip + buffer)", async () => {
+      // Monday 2026-02-16
+      // Working hours: Mon-Fri 09:00-17:00 UTC
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // Trip: 14:00-16:00 UTC (2-hour meeting trip)
+      ug.addConstraint(
+        "trip",
+        { name: "Client Visit", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-16T14:00:00Z",
+        "2026-02-16T16:00:00Z",
+      );
+
+      // Buffer: 15 min travel before events
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Regular meeting at 10:00-11:00
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_all_constraints_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_all_constraints_1",
+          title: "Morning Standup",
+          start: { dateTime: "2026-02-16T10:00:00Z" },
+          end: { dateTime: "2026-02-16T11:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T00:00:00Z",
+        end: "2026-02-17T00:00:00Z",
+      });
+
+      // Expected busy intervals (after merging):
+      // 00:00-09:00 -- outside working hours
+      // 09:45-11:00 -- buffer (09:45-10:00) + meeting (10:00-11:00)
+      // 14:00-16:00 -- trip block (derived event)
+      // 17:00-00:00 -- outside working hours
+      //
+      // Expected free intervals:
+      // 09:00-09:45 -- between working hours start and buffer
+      // 11:00-14:00 -- between meeting end and trip start
+      // 16:00-17:00 -- between trip end and working hours end
+
+      expect(result.free_intervals.length).toBeGreaterThanOrEqual(3);
+
+      // Verify the three free gaps exist
+      const freeGap1 = result.free_intervals.find((f) =>
+        new Date(f.start).getTime() >= new Date("2026-02-16T09:00:00Z").getTime() &&
+        new Date(f.end).getTime() <= new Date("2026-02-16T10:00:00Z").getTime(),
+      );
+      expect(freeGap1).toBeDefined();
+      // Should end at buffer start (09:45)
+      expect(new Date(freeGap1!.end).getTime()).toBe(
+        new Date("2026-02-16T09:45:00.000Z").getTime(),
+      );
+
+      const freeGap2 = result.free_intervals.find((f) =>
+        new Date(f.start).getTime() >= new Date("2026-02-16T11:00:00Z").getTime() &&
+        new Date(f.end).getTime() <= new Date("2026-02-16T14:00:00Z").getTime(),
+      );
+      expect(freeGap2).toBeDefined();
+      // Should be 11:00 - 13:45 (free between meeting end and trip's travel buffer)
+      // Trip at 14:00 with 15min travel buffer starts the busy zone at 13:45
+      expect(new Date(freeGap2!.start).getTime()).toBe(
+        new Date("2026-02-16T11:00:00Z").getTime(),
+      );
+      expect(new Date(freeGap2!.end).getTime()).toBe(
+        new Date("2026-02-16T13:45:00.000Z").getTime(),
+      );
+
+      const freeGap3 = result.free_intervals.find((f) =>
+        new Date(f.start).getTime() >= new Date("2026-02-16T16:00:00Z").getTime() &&
+        new Date(f.end).getTime() <= new Date("2026-02-16T17:00:00Z").getTime(),
+      );
+      expect(freeGap3).toBeDefined();
+    });
+
+    it("AC3: constraint evaluation order is correct (working hours before trips before buffers)", async () => {
+      // This test verifies the ORDER matters:
+      // A buffer should apply to events BEFORE working hours restricts them
+      // but AFTER trips are placed.
+
+      // Monday 2026-02-16
+      // Working hours: 09:00-17:00 UTC
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // Buffer: 30 min cooldown after events
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 30, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // Meeting at 16:00-16:30 -- cooldown extends to 17:00, which is working hours end
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_order_test_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_order_test_1",
+          title: "Late Meeting",
+          start: { dateTime: "2026-02-16T16:00:00Z" },
+          end: { dateTime: "2026-02-16T16:30:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+      });
+
+      // Expected: 08:00-09:00 busy (outside working hours)
+      //           09:00-16:00 free
+      //           16:00-17:00 busy (meeting 16:00-16:30 + cooldown 16:30-17:00 merged)
+      //           17:00-18:00 busy (outside working hours, merges with cooldown)
+      // So free intervals: 09:00-16:00 only
+
+      const morningFree = result.free_intervals.find((f) =>
+        new Date(f.start).getTime() >= new Date("2026-02-16T09:00:00Z").getTime() &&
+        new Date(f.start).getTime() < new Date("2026-02-16T10:00:00Z").getTime(),
+      );
+      expect(morningFree).toBeDefined();
+      expect(new Date(morningFree!.start).getTime()).toBe(
+        new Date("2026-02-16T09:00:00.000Z").getTime(),
+      );
+      // Free period should extend to 16:00 (meeting start)
+      expect(new Date(morningFree!.end).getTime()).toBe(
+        new Date("2026-02-16T16:00:00Z").getTime(),
+      );
+    });
+
+    it("AC2: no_meetings_after constraint applied in availability", async () => {
+      // Monday 2026-02-16
+      // Working hours: 09:00-17:00 UTC
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // No meetings after 15:00 UTC
+      ug.addConstraint(
+        "no_meetings_after",
+        { time: "15:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+      });
+
+      // Expected:
+      // 08:00-09:00 busy (outside working hours)
+      // 09:00-15:00 free
+      // 15:00-17:00 busy (no_meetings_after overridden by working hours: merged)
+      // 17:00-18:00 busy (outside working hours)
+      //
+      // So the only free period should be 09:00-15:00
+
+      // All free intervals should be within 09:00-15:00
+      for (const f of result.free_intervals) {
+        expect(new Date(f.start).getTime()).toBeGreaterThanOrEqual(
+          new Date("2026-02-16T09:00:00Z").getTime(),
+        );
+        expect(new Date(f.end).getTime()).toBeLessThanOrEqual(
+          new Date("2026-02-16T15:00:00Z").getTime(),
+        );
+      }
+
+      // Should have exactly one free interval: 09:00-15:00
+      const mainFree = result.free_intervals.find((f) =>
+        new Date(f.start).getTime() <= new Date("2026-02-16T09:00:00Z").getTime() + 1000 &&
+        new Date(f.end).getTime() >= new Date("2026-02-16T15:00:00Z").getTime() - 1000,
+      );
+      expect(mainFree).toBeDefined();
+    });
+
+    it("AC5: integration test with multiple constraint types simultaneously", async () => {
+      // Full integration: working_hours + trip + buffer + no_meetings_after + events
+      // Wednesday 2026-02-18
+
+      // Working hours: 08:00-18:00 UTC
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "08:00", end_time: "18:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // Trip: 12:00-14:00 UTC (lunch meeting across town)
+      ug.addConstraint(
+        "trip",
+        { name: "Lunch Meeting", timezone: "UTC", block_policy: "TITLE" },
+        "2026-02-18T12:00:00Z",
+        "2026-02-18T14:00:00Z",
+      );
+
+      // Buffer: 10 min travel before, 5 min cooldown after
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 5, applies_to: "all" },
+        null,
+        null,
+      );
+
+      // No meetings after 17:00 UTC
+      ug.addConstraint(
+        "no_meetings_after",
+        { time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // Morning meeting 09:00-10:00
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_multi_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_multi_1",
+          title: "Morning Review",
+          start: { dateTime: "2026-02-18T09:00:00Z" },
+          end: { dateTime: "2026-02-18T10:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+
+      // Afternoon meeting 15:00-16:00
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_multi_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_multi_2",
+          title: "Code Review",
+          start: { dateTime: "2026-02-18T15:00:00Z" },
+          end: { dateTime: "2026-02-18T16:00:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta2]);
+
+      const result = ug.computeAvailability({
+        start: "2026-02-18T07:00:00Z",
+        end: "2026-02-18T19:00:00Z",
+      });
+
+      // Expected busy intervals (before merging):
+      // 07:00-08:00 -- outside working hours
+      // 08:50-10:05 -- buffer(08:50-09:00) + meeting(09:00-10:00) + cooldown(10:00-10:05)
+      // 11:50-14:05 -- buffer(11:50-12:00) + trip(12:00-14:00) + cooldown(14:00-14:05)
+      // 14:50-16:05 -- buffer(14:50-15:00) + meeting(15:00-16:00) + cooldown(16:00-16:05)
+      // 17:00-19:00 -- no_meetings_after(17:00-00:00) + outside_working_hours(18:00-19:00)
+      //
+      // Expected free intervals:
+      // 08:00-08:50  (between working hours start and morning meeting buffer)
+      // 10:05-11:50  (between morning meeting cooldown and trip buffer)
+      // 14:05-14:50  (between trip cooldown and afternoon meeting buffer)
+      // 16:05-17:00  (between afternoon cooldown and no_meetings_after)
+
+      // Verify multiple free intervals exist
+      expect(result.free_intervals.length).toBeGreaterThanOrEqual(3);
+
+      // All free intervals should be within working hours (08:00-17:00)
+      // and respect no_meetings_after (17:00)
+      for (const f of result.free_intervals) {
+        // Free time must be within working hours and before no-meetings-after cutoff
+        expect(new Date(f.start).getTime()).toBeGreaterThanOrEqual(
+          new Date("2026-02-18T08:00:00Z").getTime() - 1000,
+        );
+        expect(new Date(f.end).getTime()).toBeLessThanOrEqual(
+          new Date("2026-02-18T17:00:00Z").getTime() + 1000,
+        );
+      }
+
+      // Verify that the trip block is reflected (no free time 12:00-14:00)
+      for (const f of result.free_intervals) {
+        const freeStart = new Date(f.start).getTime();
+        const freeEnd = new Date(f.end).getTime();
+        const tripStart = new Date("2026-02-18T12:00:00Z").getTime();
+        const tripEnd = new Date("2026-02-18T14:00:00Z").getTime();
+        // No free interval should fully overlap with the trip
+        const overlapStart = Math.max(freeStart, tripStart);
+        const overlapEnd = Math.min(freeEnd, tripEnd);
+        if (overlapStart < overlapEnd) {
+          // This would mean there's free time during the trip -- should NOT happen
+          expect(overlapEnd - overlapStart).toBeLessThan(60_000); // Allow 1 min tolerance
+        }
+      }
+
+      // Verify that buffers are reflected (no free time at exact meeting boundaries)
+      // Morning meeting buffer: 08:50 should be busy
+      const freeAt0850 = result.free_intervals.find((f) => {
+        const s = new Date(f.start).getTime();
+        const e = new Date(f.end).getTime();
+        const t = new Date("2026-02-18T08:50:00Z").getTime();
+        return s <= t && e > t;
+      });
+      // 08:50 should be in a busy zone (travel buffer), so no free interval should contain it
+      expect(freeAt0850).toBeUndefined();
+    });
+
+    it("AC1: trip blocks survive account filtering", async () => {
+      // Trip constraint creates internal derived events
+      ug.addConstraint(
+        "trip",
+        { name: "NYC Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-16T10:00:00Z",
+        "2026-02-16T15:00:00Z",
+      );
+
+      // Regular event on a specific account
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_account_filter_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_account_filter_1",
+          title: "Team Meeting",
+          start: { dateTime: "2026-02-16T09:00:00Z" },
+          end: { dateTime: "2026-02-16T09:30:00Z" },
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Query with account filter -- trip should still appear
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T18:00:00Z",
+        accounts: [TEST_ACCOUNT_ID],
+      });
+
+      // Trip block at 10:00-15:00 should be in busy intervals
+      // (even though we filtered to TEST_ACCOUNT_ID only)
+      const tripBusy = result.busy_intervals.find((b) => {
+        const s = new Date(b.start).getTime();
+        const e = new Date(b.end).getTime();
+        return s <= new Date("2026-02-16T10:00:00Z").getTime() &&
+               e >= new Date("2026-02-16T15:00:00Z").getTime();
+      });
+      expect(tripBusy).toBeDefined();
+
+      // Also verify the regular meeting is busy
+      const meetingBusy = result.busy_intervals.find((b) => {
+        const s = new Date(b.start).getTime();
+        return s <= new Date("2026-02-16T09:00:00Z").getTime();
+      });
+      expect(meetingBusy).toBeDefined();
+    });
+
+    it("AC4: performance under 500ms for 1-week range with 10+ constraints", async () => {
+      // Create 10+ constraints of various types
+      ug.addConstraint(
+        "working_hours",
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "working_hours",
+        { days: [6], start_time: "10:00", end_time: "14:00", timezone: "UTC" },
+        null,
+        null,
+      );
+
+      // Add 3 trip constraints across the week
+      ug.addConstraint(
+        "trip",
+        { name: "Monday Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-16T14:00:00Z",
+        "2026-02-16T16:00:00Z",
+      );
+      ug.addConstraint(
+        "trip",
+        { name: "Wednesday Trip", timezone: "UTC", block_policy: "TITLE" },
+        "2026-02-18T10:00:00Z",
+        "2026-02-18T12:00:00Z",
+      );
+      ug.addConstraint(
+        "trip",
+        { name: "Friday Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-20T13:00:00Z",
+        "2026-02-20T15:00:00Z",
+      );
+
+      // Add 3 buffer constraints
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 15, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "cooldown", minutes: 10, applies_to: "all" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "buffer",
+        { type: "prep", minutes: 5, applies_to: "external" },
+        null,
+        null,
+      );
+
+      // Add 2 no_meetings_after constraints
+      ug.addConstraint(
+        "no_meetings_after",
+        { time: "18:00", timezone: "UTC" },
+        null,
+        null,
+      );
+      ug.addConstraint(
+        "no_meetings_after",
+        { time: "16:00", timezone: "America/New_York" },
+        null,
+        null,
+      );
+
+      // Add events across the week (20 events)
+      for (let day = 16; day <= 20; day++) {
+        for (let hour = 9; hour <= 12; hour++) {
+          const evtId = `evt_perf_${day}_${hour}`;
+          const delta = makeCreatedDelta({
+            origin_event_id: evtId,
+            event: {
+              ...makeCreatedDelta().event!,
+              origin_event_id: evtId,
+              title: `Meeting ${day}-${hour}`,
+              start: { dateTime: `2026-02-${day}T${hour.toString().padStart(2, "0")}:00:00Z` },
+              end: { dateTime: `2026-02-${day}T${hour.toString().padStart(2, "0")}:30:00Z` },
+            },
+          });
+          await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+        }
+      }
+
+      // Verify constraint count >= 10
+      const allConstraints = ug.listConstraints();
+      expect(allConstraints.length).toBeGreaterThanOrEqual(10);
+
+      // Measure performance: 1-week range
+      const startTime = performance.now();
+      const result = ug.computeAvailability({
+        start: "2026-02-16T00:00:00Z",
+        end: "2026-02-23T00:00:00Z",
+      });
+      const elapsed = performance.now() - startTime;
+
+      // AC4: Must complete in under 500ms
+      expect(elapsed).toBeLessThan(500);
+
+      // Verify results are non-empty (the computation actually ran)
+      expect(result.busy_intervals.length).toBeGreaterThan(0);
+      expect(result.free_intervals.length).toBeGreaterThan(0);
+
+      // Verify all constraint types contributed
+      // (busy intervals should exist from working hours, trips, buffers, events)
+      const totalBusyMs = result.busy_intervals.reduce((sum, b) =>
+        sum + (new Date(b.end).getTime() - new Date(b.start).getTime()), 0,
+      );
+      // A full week is 7 * 24 * 60 * 60 * 1000 = 604800000ms
+      // With working hours (only 5 weekdays * 8 hours = 40 hours working),
+      // most of the week should be busy. Total busy > 60% of the week.
+      expect(totalBusyMs).toBeGreaterThan(604800000 * 0.5);
+    });
+
+    it("AC3: buffers apply to trip-derived events", async () => {
+      // A trip creates a derived event. Buffers should apply around it.
+      ug.addConstraint(
+        "trip",
+        { name: "Office Trip", timezone: "UTC", block_policy: "BUSY" },
+        "2026-02-16T10:00:00Z",
+        "2026-02-16T14:00:00Z",
+      );
+
+      // 30 min travel buffer before all events
+      ug.addConstraint(
+        "buffer",
+        { type: "travel", minutes: 30, applies_to: "all" },
+        null,
+        null,
+      );
+
+      const result = ug.computeAvailability({
+        start: "2026-02-16T08:00:00Z",
+        end: "2026-02-16T16:00:00Z",
+      });
+
+      // Trip: 10:00-14:00. Travel buffer: 09:30-10:00.
+      // Merged: 09:30-14:00 busy.
+      // Free: 08:00-09:30, 14:00-16:00
+
+      const firstFree = result.free_intervals[0];
+      expect(firstFree).toBeDefined();
+      expect(new Date(firstFree.start).getTime()).toBe(
+        new Date("2026-02-16T08:00:00Z").getTime(),
+      );
+      // First free period should end at 09:30 (buffer start)
+      expect(new Date(firstFree.end).getTime()).toBe(
+        new Date("2026-02-16T09:30:00.000Z").getTime(),
+      );
+    });
+  });
 });
