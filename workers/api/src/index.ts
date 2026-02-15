@@ -27,6 +27,11 @@ import {
 } from "@tminus/shared";
 import type { RateLimitKV, RateLimitTier } from "@tminus/shared";
 import { createAuthRoutes } from "./routes/auth";
+import {
+  handleCreateDeletionRequest,
+  handleGetDeletionRequest,
+  handleCancelDeletionRequest,
+} from "./routes/privacy";
 import { generateApiKey, hashApiKey, isApiKeyFormat, extractPrefix } from "./api-keys";
 
 // ---------------------------------------------------------------------------
@@ -1394,6 +1399,20 @@ async function routeAuthenticatedRequest(
   auth: AuthContext,
   env: Env,
 ): Promise<Response> {
+      // -- Privacy / deletion request routes --------------------------------
+
+      if (pathname === "/v1/account/delete-request") {
+        if (method === "POST") {
+          return handleCreateDeletionRequest(request, auth, env);
+        }
+        if (method === "GET") {
+          return handleGetDeletionRequest(request, auth, env);
+        }
+        if (method === "DELETE") {
+          return handleCancelDeletionRequest(request, auth, env);
+        }
+      }
+
       // -- API key routes ---------------------------------------------------
 
       if (method === "POST" && pathname === "/v1/api-keys") {

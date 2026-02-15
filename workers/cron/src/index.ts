@@ -20,6 +20,7 @@ import {
   CRON_CHANNEL_RENEWAL,
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
+  CRON_DELETION_CHECK,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
@@ -311,6 +312,75 @@ async function handleReconciliation(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Deletion Check (every hour)
+// ---------------------------------------------------------------------------
+
+interface PendingDeletionRow {
+  readonly request_id: string;
+  readonly user_id: string;
+  readonly scheduled_at: string;
+}
+
+/**
+ * Query D1 for pending deletion requests whose grace period has expired
+ * (scheduled_at <= now). For each, update status to 'processing' and
+ * trigger the DeletionWorkflow.
+ *
+ * If the DELETION_WORKFLOW binding is not yet configured (the workflow
+ * is implemented in a separate story), we log a warning but still mark
+ * the request as processing so it does not get re-triggered.
+ */
+async function handleDeletionCheck(env: Env): Promise<void> {
+  const now = new Date().toISOString();
+
+  const { results } = await env.DB
+    .prepare(
+      `SELECT request_id, user_id, scheduled_at
+       FROM deletion_requests
+       WHERE status = ?1 AND scheduled_at <= ?2`,
+    )
+    .bind("pending", now)
+    .all<PendingDeletionRow>();
+
+  console.log(`Deletion check: found ${results.length} requests past grace period`);
+
+  for (const row of results) {
+    try {
+      // Mark as processing FIRST (idempotent -- prevents duplicate triggers)
+      await env.DB
+        .prepare(
+          "UPDATE deletion_requests SET status = 'processing' WHERE request_id = ?1 AND status = 'pending'",
+        )
+        .bind(row.request_id)
+        .run();
+
+      // Trigger DeletionWorkflow (if binding exists)
+      if (env.DELETION_WORKFLOW) {
+        await env.DELETION_WORKFLOW.create({
+          id: `deletion-${row.request_id}`,
+          params: {
+            request_id: row.request_id,
+            user_id: row.user_id,
+          },
+        });
+        console.log(
+          `DeletionWorkflow triggered for request ${row.request_id} (user ${row.user_id})`,
+        );
+      } else {
+        console.warn(
+          `DeletionWorkflow binding not configured. Request ${row.request_id} marked as processing but workflow not triggered.`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `Deletion check error for request ${row.request_id}:`,
+        err,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled handler dispatch
 // ---------------------------------------------------------------------------
 
@@ -336,6 +406,10 @@ async function handleScheduled(
 
     case CRON_RECONCILIATION:
       await handleReconciliation(env);
+      break;
+
+    case CRON_DELETION_CHECK:
+      await handleDeletionCheck(env);
       break;
 
     default:

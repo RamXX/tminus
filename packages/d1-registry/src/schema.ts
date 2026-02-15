@@ -128,6 +128,29 @@ ALTER TABLE users ADD COLUMN locked_until TEXT;
 ` as const;
 
 /**
+ * Migration 0005: Deletion requests table (GDPR Article 17).
+ *
+ * Tracks user account deletion requests with a 72-hour grace period.
+ * Status transitions: pending -> processing -> completed, or pending -> cancelled.
+ * Only one pending/processing request per user at a time (enforced by application logic).
+ */
+export const MIGRATION_0005_DELETION_REQUESTS = `
+-- GDPR deletion requests
+CREATE TABLE deletion_requests (
+  request_id    TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(user_id),
+  status        TEXT NOT NULL CHECK(status IN ('pending','processing','completed','cancelled')),
+  requested_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  scheduled_at  TEXT NOT NULL,
+  completed_at  TEXT,
+  cancelled_at  TEXT
+);
+
+CREATE INDEX idx_deletion_requests_user ON deletion_requests(user_id);
+CREATE INDEX idx_deletion_requests_status ON deletion_requests(status);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -136,4 +159,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0002_MS_SUBSCRIPTIONS,
   MIGRATION_0003_API_KEYS,
   MIGRATION_0004_AUTH_FIELDS,
+  MIGRATION_0005_DELETION_REQUESTS,
 ] as const;

@@ -12,6 +12,7 @@ import {
   MIGRATION_0001_INITIAL_SCHEMA,
   MIGRATION_0002_MS_SUBSCRIPTIONS,
   MIGRATION_0004_AUTH_FIELDS,
+  MIGRATION_0005_DELETION_REQUESTS,
   ALL_MIGRATIONS,
 } from "./schema";
 
@@ -191,5 +192,80 @@ describe("schema unit tests", () => {
     expect(lockedCol!.notnull).toBe(0);
 
     db.close();
+  });
+
+  it("MIGRATION_0005 creates deletion_requests table with status CHECK constraint", () => {
+    const db = new Database(":memory:");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
+    // Apply auth fields
+    const authStatements = MIGRATION_0004_AUTH_FIELDS.trim().split(";").filter(Boolean);
+    for (const stmt of authStatements) {
+      db.exec(stmt.trim() + ";");
+    }
+    // Apply deletion requests migration
+    expect(() => db.exec(MIGRATION_0005_DELETION_REQUESTS)).not.toThrow();
+
+    // Verify table exists
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain("deletion_requests");
+
+    // Verify columns
+    const columns = db.prepare("PRAGMA table_info(deletion_requests)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const columnNames = columns.map((c) => c.name);
+    expect(columnNames).toContain("request_id");
+    expect(columnNames).toContain("user_id");
+    expect(columnNames).toContain("status");
+    expect(columnNames).toContain("requested_at");
+    expect(columnNames).toContain("scheduled_at");
+    expect(columnNames).toContain("completed_at");
+    expect(columnNames).toContain("cancelled_at");
+
+    // Verify primary key
+    const pkCol = columns.find((c) => c.name === "request_id");
+    expect(pkCol!.pk).toBe(1);
+
+    // Verify indexes
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const indexNames = indexes.map((i) => i.name);
+    expect(indexNames).toContain("idx_deletion_requests_user");
+    expect(indexNames).toContain("idx_deletion_requests_status");
+
+    // Verify CHECK constraint: valid statuses should INSERT without error
+    const orgId = "org_test";
+    const userId = "usr_test";
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(orgId, "Test Org");
+    db.prepare("INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)").run(userId, orgId, "test@test.com");
+
+    for (const status of ["pending", "processing", "completed", "cancelled"]) {
+      expect(() => {
+        db.prepare(
+          "INSERT INTO deletion_requests (request_id, user_id, status, requested_at, scheduled_at) VALUES (?, ?, ?, ?, ?)",
+        ).run(`delreq_${status}`, userId, status, "2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z");
+      }).not.toThrow();
+    }
+
+    // Invalid status should throw (CHECK constraint)
+    expect(() => {
+      db.prepare(
+        "INSERT INTO deletion_requests (request_id, user_id, status, requested_at, scheduled_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("delreq_invalid", userId, "invalid_status", "2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z");
+    }).toThrow();
+
+    db.close();
+  });
+
+  it("ALL_MIGRATIONS includes MIGRATION_0005_DELETION_REQUESTS", () => {
+    expect(ALL_MIGRATIONS).toContain(MIGRATION_0005_DELETION_REQUESTS);
+    expect(ALL_MIGRATIONS.length).toBe(5);
   });
 });

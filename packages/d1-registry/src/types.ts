@@ -70,6 +70,20 @@ export interface ApiKeyRow {
 /** Valid entity types for the `deletion_certificates.entity_type` column. */
 export type DeletionEntityType = "user" | "account" | "event";
 
+/** Valid status values for the `deletion_requests.status` column. */
+export type DeletionRequestStatus = "pending" | "processing" | "completed" | "cancelled";
+
+/** Row shape for the `deletion_requests` table (GDPR Article 17). */
+export interface DeletionRequestRow {
+  readonly request_id: string;
+  readonly user_id: string;
+  readonly status: DeletionRequestStatus;
+  readonly requested_at: string;
+  readonly scheduled_at: string;
+  readonly completed_at: string | null;
+  readonly cancelled_at: string | null;
+}
+
 /** Row shape for the `deletion_certificates` table. */
 export interface DeletionCertificateRow {
   readonly cert_id: string;

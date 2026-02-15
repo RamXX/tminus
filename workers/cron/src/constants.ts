@@ -19,6 +19,9 @@ export const CRON_TOKEN_HEALTH = "0 */12 * * *";
 /** Drift reconciliation: daily at 03:00 UTC. */
 export const CRON_RECONCILIATION = "0 3 * * *";
 
+/** Deletion check: every hour, checks for pending deletions past grace period. */
+export const CRON_DELETION_CHECK = "0 * * * *";
+
 // ---------------------------------------------------------------------------
 // Renewal thresholds
 // ---------------------------------------------------------------------------
