@@ -31,7 +31,11 @@ import {
   matchEventParticipants,
   computeReputation,
   enrichSuggestionsWithTimeWindows,
+  enrichWithTimezoneWindows,
   matchCity,
+  matchCityWithAliases,
+  cityToTimezone,
+  suggestMeetingWindow,
   assembleBriefing,
   extractTopics,
   summarizeLastInteraction,
@@ -3800,14 +3804,17 @@ export class UserGraphDO {
   /**
    * Get reconnection suggestions: overdue relationships in a specific city.
    *
-   * Combines drift computation with city filtering. If trip_id is provided,
-   * resolves the trip constraint's destination_city first. If city is provided
-   * directly, uses that. Returns overdue contacts in the target city sorted
-   * by urgency.
+   * Combines drift computation with city filtering (alias-aware, TM-xwn.3).
+   * If trip_id is provided, resolves the trip constraint's destination_city
+   * first. If city is provided directly, uses that. Returns overdue contacts
+   * in the target city sorted by urgency, with timezone-aware meeting windows.
    *
-   * @param city - City to filter relationships by (case-insensitive)
+   * City matching uses matchCityWithAliases: NYC matches "New York",
+   * Bombay matches "Mumbai", etc. Falls back to case-insensitive exact match.
+   *
+   * @param city - City to filter relationships by (alias-aware)
    * @param tripId - Optional trip constraint ID to resolve city from
-   * @returns Reconnection suggestions with city and trip context
+   * @returns Reconnection suggestions with city, trip, and timezone context
    */
   getReconnectionSuggestions(
     city?: string | null,
@@ -3819,6 +3826,7 @@ export class UserGraphDO {
     let tripName: string | null = null;
     let tripStart: string | null = null;
     let tripEnd: string | null = null;
+    let tripTimezone: string | null = null;
 
     // If trip_id provided, resolve trip context and fallback city
     if (tripId) {
@@ -3837,16 +3845,17 @@ export class UserGraphDO {
       tripName = typeof config.name === "string" ? config.name : null;
       tripStart = constraint.active_from;
       tripEnd = constraint.active_to;
+      tripTimezone = typeof config.timezone === "string" ? config.timezone : null;
     }
 
     if (!targetCity) {
       throw new Error("No city available. Provide city parameter or use a trip with destination_city set.");
     }
 
-    // Get all relationships in the target city (case-insensitive via matchCity)
+    // Get all relationships in the target city (alias-aware via matchCityWithAliases, TM-xwn.3)
     const allRelationships = this.listRelationships();
     const cityRelationships = allRelationships.filter(
-      (r) => matchCity(r.city, targetCity),
+      (r) => matchCityWithAliases(r.city, targetCity),
     );
 
     // Compute drift for city-filtered relationships
@@ -3860,13 +3869,36 @@ export class UserGraphDO {
       tripEnd,
     );
 
+    // Layer timezone-aware meeting windows on top (TM-xwn.3)
+    // User timezone = trip timezone (where the traveler will be) or look up from city
+    const userTimezone = tripTimezone || cityToTimezone(targetCity);
+
+    // Build contact timezone map from relationship data
+    const contactTimezones = new Map<string, string | null>();
+    for (const rel of cityRelationships) {
+      // Use relationship's stored timezone, or look up from city
+      contactTimezones.set(
+        rel.relationship_id,
+        rel.timezone || cityToTimezone(rel.city) || null,
+      );
+    }
+
+    const tzEnriched = enrichWithTimezoneWindows(
+      enriched,
+      tripStart,
+      tripEnd,
+      userTimezone,
+      contactTimezones,
+      suggestMeetingWindow,
+    );
+
     return {
       city: targetCity,
       trip_id: tripId ?? null,
       trip_name: tripName,
       trip_start: tripStart,
       trip_end: tripEnd,
-      suggestions: enriched,
+      suggestions: tzEnriched,
       total_in_city: cityRelationships.length,
       total_overdue_in_city: driftReport.total_overdue,
       computed_at: driftReport.computed_at,

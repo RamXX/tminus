@@ -203,6 +203,7 @@ export {
   matchCity,
   categoryDurationMinutes,
   enrichSuggestionsWithTimeWindows,
+  enrichWithTimezoneWindows,
 } from "./drift";
 export type {
   DriftInput,
@@ -235,6 +236,19 @@ export type {
   EventBriefing,
 } from "./briefing";
 
+// Re-export excuse generator (Phase 4C)
+export {
+  EXCUSE_TEMPLATES,
+  buildExcusePrompt,
+  parseExcuseResponse,
+} from "./excuse";
+export type {
+  ExcuseTone,
+  TruthLevel,
+  ExcuseContext,
+  ExcuseOutput,
+} from "./excuse";
+
 // Re-export milestone tracking (Phase 4B)
 export {
   MILESTONE_KINDS,
@@ -249,6 +263,21 @@ export type {
   Milestone,
   UpcomingMilestone,
 } from "./milestones";
+
+// Re-export geo-matching engine (Phase 4B: reconnection intelligence)
+export {
+  resolveCity,
+  matchCityWithAliases,
+  cityToTimezone,
+  computeWorkingHoursOverlap,
+  suggestMeetingWindow,
+  CITY_ALIASES,
+  CITY_TIMEZONES,
+} from "./geo";
+export type {
+  WorkingHoursOverlap,
+  TimezoneAwareMeetingWindow,
+} from "./geo";
 
 // Re-export CORS middleware
 export {

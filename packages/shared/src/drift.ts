@@ -9,6 +9,8 @@
  * Urgency is weighted by closeness_weight: higher weight = more urgent.
  */
 
+import type { TimezoneAwareMeetingWindow } from "./geo";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -264,6 +266,12 @@ export interface ReconnectionSuggestion extends DriftEntry {
    * Null when no trip context is available.
    */
   readonly suggested_time_window: SuggestedTimeWindow | null;
+  /**
+   * Timezone-aware meeting window with working hours overlap info.
+   * Null when timezone data is unavailable or no trip context.
+   * Added by TM-xwn.3 geo-matching engine.
+   */
+  readonly timezone_meeting_window?: TimezoneAwareMeetingWindow | null;
 }
 
 /**
@@ -337,5 +345,48 @@ export function enrichSuggestionsWithTimeWindows(
     suggested_time_window: hasWindow
       ? { earliest: tripStart!, latest: tripEnd! }
       : null,
+  }));
+}
+
+/**
+ * Enrich reconnection suggestions with timezone-aware meeting windows.
+ *
+ * Layers timezone intelligence on top of existing suggestions. For each
+ * suggestion, computes working hours overlap between the user's timezone
+ * and the contact's timezone, and adds a timezone_meeting_window field.
+ *
+ * Pure function: no side effects. Preserves ordering.
+ *
+ * @param suggestions - Already-enriched reconnection suggestions
+ * @param tripStart - ISO 8601 trip start, or null
+ * @param tripEnd - ISO 8601 trip end, or null
+ * @param userTimezone - IANA timezone of the traveler
+ * @param contactTimezones - Map of relationship_id -> IANA timezone
+ * @param suggestMeetingWindowFn - Injected for testability; uses geo.suggestMeetingWindow
+ * @returns Suggestions with timezone_meeting_window field added
+ */
+export function enrichWithTimezoneWindows(
+  suggestions: readonly ReconnectionSuggestion[],
+  tripStart: string | null,
+  tripEnd: string | null,
+  userTimezone: string | null,
+  contactTimezones: ReadonlyMap<string, string | null>,
+  suggestMeetingWindowFn: (
+    tripStart: string | null,
+    tripEnd: string | null,
+    userTz: string | null | undefined,
+    contactTz: string | null | undefined,
+    duration: number,
+  ) => TimezoneAwareMeetingWindow | null,
+): ReconnectionSuggestion[] {
+  return suggestions.map((s) => ({
+    ...s,
+    timezone_meeting_window: suggestMeetingWindowFn(
+      tripStart,
+      tripEnd,
+      userTimezone,
+      contactTimezones.get(s.relationship_id) ?? null,
+      s.suggested_duration_minutes,
+    ),
   }));
 }

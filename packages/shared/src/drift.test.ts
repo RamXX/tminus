@@ -7,8 +7,10 @@ import {
   matchCity,
   categoryDurationMinutes,
   enrichSuggestionsWithTimeWindows,
+  enrichWithTimezoneWindows,
 } from "./drift";
-import type { DriftInput, DriftEntry } from "./drift";
+import type { DriftInput, DriftEntry, ReconnectionSuggestion } from "./drift";
+import type { TimezoneAwareMeetingWindow } from "./geo";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -535,5 +537,155 @@ describe("enrichSuggestionsWithTimeWindows", () => {
       null,
     );
     expect(suggestions[0].suggested_time_window).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enrichWithTimezoneWindows (TM-xwn.3)
+// ---------------------------------------------------------------------------
+
+describe("enrichWithTimezoneWindows", () => {
+  const baseSuggestion: ReconnectionSuggestion = {
+    relationship_id: "rel_01HXY000000000000000000E01",
+    participant_hash: "abc",
+    display_name: "Alice in Berlin",
+    category: "FRIEND",
+    closeness_weight: 0.8,
+    last_interaction_ts: "2026-01-01T12:00:00Z",
+    interaction_frequency_target: 7,
+    days_since_interaction: 45,
+    days_overdue: 38,
+    drift_ratio: 6.43,
+    urgency: 30.4,
+    suggested_duration_minutes: 60,
+    suggested_time_window: {
+      earliest: "2026-04-01T00:00:00Z",
+      latest: "2026-04-05T00:00:00Z",
+    },
+  };
+
+  // Mock suggestMeetingWindow for isolated testing
+  const mockSuggestMeetingWindow = (
+    tripStart: string | null,
+    tripEnd: string | null,
+    userTz: string | null | undefined,
+    contactTz: string | null | undefined,
+    duration: number,
+  ): TimezoneAwareMeetingWindow | null => {
+    if (!tripStart || !tripEnd) return null;
+    return {
+      earliest: tripStart,
+      latest: tripEnd,
+      suggested_start_hour_utc: userTz && contactTz ? 14 : null,
+      suggested_end_hour_utc: userTz && contactTz ? 17 : null,
+      user_timezone: userTz ?? null,
+      contact_timezone: contactTz ?? null,
+    };
+  };
+
+  it("adds timezone_meeting_window to each suggestion", () => {
+    const contactTimezones = new Map<string, string | null>([
+      ["rel_01HXY000000000000000000E01", "Europe/Berlin"],
+    ]);
+
+    const result = enrichWithTimezoneWindows(
+      [baseSuggestion],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+      "America/New_York",
+      contactTimezones,
+      mockSuggestMeetingWindow,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].timezone_meeting_window).toBeDefined();
+    expect(result[0].timezone_meeting_window!.user_timezone).toBe("America/New_York");
+    expect(result[0].timezone_meeting_window!.contact_timezone).toBe("Europe/Berlin");
+    expect(result[0].timezone_meeting_window!.suggested_start_hour_utc).toBe(14);
+    expect(result[0].timezone_meeting_window!.suggested_end_hour_utc).toBe(17);
+  });
+
+  it("preserves all original suggestion fields", () => {
+    const contactTimezones = new Map<string, string | null>([
+      ["rel_01HXY000000000000000000E01", "Europe/Berlin"],
+    ]);
+
+    const result = enrichWithTimezoneWindows(
+      [baseSuggestion],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+      "America/New_York",
+      contactTimezones,
+      mockSuggestMeetingWindow,
+    );
+
+    const s = result[0];
+    expect(s.relationship_id).toBe(baseSuggestion.relationship_id);
+    expect(s.display_name).toBe(baseSuggestion.display_name);
+    expect(s.suggested_duration_minutes).toBe(baseSuggestion.suggested_duration_minutes);
+    expect(s.suggested_time_window).toBe(baseSuggestion.suggested_time_window);
+    expect(s.drift_ratio).toBe(baseSuggestion.drift_ratio);
+    expect(s.urgency).toBe(baseSuggestion.urgency);
+  });
+
+  it("returns null timezone window when no trip dates", () => {
+    const contactTimezones = new Map<string, string | null>([
+      ["rel_01HXY000000000000000000E01", "Europe/Berlin"],
+    ]);
+
+    const result = enrichWithTimezoneWindows(
+      [baseSuggestion],
+      null,
+      null,
+      "America/New_York",
+      contactTimezones,
+      mockSuggestMeetingWindow,
+    );
+
+    expect(result[0].timezone_meeting_window).toBeNull();
+  });
+
+  it("passes null for contact timezone when not in map", () => {
+    const emptyMap = new Map<string, string | null>();
+
+    const result = enrichWithTimezoneWindows(
+      [baseSuggestion],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+      "America/New_York",
+      emptyMap,
+      mockSuggestMeetingWindow,
+    );
+
+    expect(result[0].timezone_meeting_window).toBeDefined();
+    expect(result[0].timezone_meeting_window!.contact_timezone).toBeNull();
+    // No working hours overlap when contact timezone unknown
+    expect(result[0].timezone_meeting_window!.suggested_start_hour_utc).toBeNull();
+  });
+
+  it("handles multiple suggestions with different contact timezones", () => {
+    const secondSuggestion: ReconnectionSuggestion = {
+      ...baseSuggestion,
+      relationship_id: "rel_02",
+      display_name: "Bob in Tokyo",
+    };
+
+    const contactTimezones = new Map<string, string | null>([
+      ["rel_01HXY000000000000000000E01", "Europe/Berlin"],
+      ["rel_02", "Asia/Tokyo"],
+    ]);
+
+    const result = enrichWithTimezoneWindows(
+      [baseSuggestion, secondSuggestion],
+      "2026-04-01T00:00:00Z",
+      "2026-04-05T00:00:00Z",
+      "America/New_York",
+      contactTimezones,
+      mockSuggestMeetingWindow,
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result[0].timezone_meeting_window!.contact_timezone).toBe("Europe/Berlin");
+    expect(result[1].timezone_meeting_window!.contact_timezone).toBe("Asia/Tokyo");
   });
 });

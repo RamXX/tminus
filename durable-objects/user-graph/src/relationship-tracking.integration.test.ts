@@ -1610,6 +1610,365 @@ describe("UserGraphDO relationship tracking integration", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Geo-Matching Engine integration tests (TM-xwn.3)
+// ---------------------------------------------------------------------------
+
+describe("UserGraphDO geo-matching engine integration", () => {
+  let db: DatabaseType;
+  let sql: SqlStorageLike;
+  let queue: MockQueue;
+  let dObj: UserGraphDO;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    sql = createSqlStorageAdapter(db);
+    queue = new MockQueue();
+    dObj = new UserGraphDO(sql, queue);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  describe("city alias matching (TM-xwn.3 AC1, AC4)", () => {
+    it("resolves NYC alias: contact with city=NYC matches trip to New York", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in NYC",
+        "FRIEND",
+        0.8,
+        "NYC",         // stored as NYC alias
+        "America/New_York",
+        7,
+      );
+
+      // Query with canonical name "New York" -- should find Alice via alias resolution
+      const result = dObj.getReconnectionSuggestions("New York");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice in NYC");
+      expect(result.total_in_city).toBe(1);
+    });
+
+    it("resolves alias in reverse: trip to NYC finds contact with city=New York", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in New York",
+        "FRIEND",
+        0.8,
+        "New York",
+        "America/New_York",
+        7,
+      );
+
+      // Query with alias "NYC" -- should find Alice
+      const result = dObj.getReconnectionSuggestions("NYC");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice in New York");
+    });
+
+    it("resolves Manhattan -> New York alias for cross-alias matching", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in Manhattan",
+        "FRIEND",
+        0.8,
+        "Manhattan",
+        "America/New_York",
+        7,
+      );
+
+      // Both "Manhattan" and "NYC" resolve to "New York"
+      const result = dObj.getReconnectionSuggestions("NYC");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Alice in Manhattan");
+    });
+
+    it("resolves Bombay -> Mumbai alias", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Raj in Bombay",
+        "COLLEAGUE",
+        0.6,
+        "Bombay",
+        "Asia/Kolkata",
+        14,
+      );
+
+      const result = dObj.getReconnectionSuggestions("Mumbai");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Raj in Bombay");
+    });
+
+    it("falls back to case-insensitive exact match for unknown cities (AC4)", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Contact in Smallville",
+        "OTHER",
+        0.3,
+        "Smallville",
+        null,
+        30,
+      );
+
+      const result = dObj.getReconnectionSuggestions("smallville");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].display_name).toBe("Contact in Smallville");
+    });
+
+    it("does not match different cities after alias resolution", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in Berlin",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        "Europe/Berlin",
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions("NYC");
+      expect(result.suggestions.length).toBe(0);
+      expect(result.total_in_city).toBe(0);
+    });
+  });
+
+  describe("timezone-aware meeting suggestions (TM-xwn.3 AC2, AC3)", () => {
+    it("includes timezone_meeting_window in suggestions when trip context available", () => {
+      // Create a trip to Berlin
+      const trip = dObj.addConstraint(
+        "trip",
+        {
+          name: "Berlin Trip",
+          timezone: "Europe/Berlin",
+          block_policy: "BUSY",
+          destination_city: "Berlin",
+        },
+        "2026-04-10T00:00:00Z",
+        "2026-04-15T00:00:00Z",
+      );
+
+      // Create a contact in Berlin
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Hans in Berlin",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        "Europe/Berlin",
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, trip.constraint_id);
+      expect(result.suggestions.length).toBe(1);
+
+      const s = result.suggestions[0];
+      // Should have timezone_meeting_window with timezone info
+      expect(s.timezone_meeting_window).toBeDefined();
+      expect(s.timezone_meeting_window).not.toBeNull();
+      expect(s.timezone_meeting_window!.user_timezone).toBe("Europe/Berlin");
+      expect(s.timezone_meeting_window!.contact_timezone).toBe("Europe/Berlin");
+      // Same timezone = full overlap, should have hour suggestions
+      expect(s.timezone_meeting_window!.suggested_start_hour_utc).toBeDefined();
+      expect(s.timezone_meeting_window!.suggested_end_hour_utc).toBeDefined();
+    });
+
+    it("respects working hours of both parties (AC3): NY traveler meeting London contact", () => {
+      // Create a trip to London
+      const trip = dObj.addConstraint(
+        "trip",
+        {
+          name: "London Trip",
+          timezone: "America/New_York", // Traveler's home timezone
+          block_policy: "BUSY",
+          destination_city: "London",
+        },
+        "2026-04-10T00:00:00Z",
+        "2026-04-15T00:00:00Z",
+      );
+
+      // Contact is in London
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "James in London",
+        "COLLEAGUE",
+        0.7,
+        "London",
+        "Europe/London",
+        14,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, trip.constraint_id);
+      expect(result.suggestions.length).toBe(1);
+
+      const s = result.suggestions[0];
+      expect(s.timezone_meeting_window).not.toBeNull();
+
+      // Traveler tz is from trip config (America/New_York)
+      // Contact tz is from relationship or city lookup (Europe/London)
+      expect(s.timezone_meeting_window!.user_timezone).toBe("America/New_York");
+      expect(s.timezone_meeting_window!.contact_timezone).toBe("Europe/London");
+
+      // Working hours overlap should exist (NY and London have ~3-5h overlap)
+      expect(s.timezone_meeting_window!.suggested_start_hour_utc).not.toBeNull();
+      expect(s.timezone_meeting_window!.suggested_end_hour_utc).not.toBeNull();
+    });
+
+    it("looks up contact timezone from city when not stored in relationship", () => {
+      // Create a trip to Berlin
+      const trip = dObj.addConstraint(
+        "trip",
+        {
+          name: "Berlin Trip",
+          timezone: "Europe/Berlin",
+          block_policy: "BUSY",
+          destination_city: "Berlin",
+        },
+        "2026-04-10T00:00:00Z",
+        "2026-04-15T00:00:00Z",
+      );
+
+      // Contact in Berlin with NO stored timezone
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Hans",
+        "FRIEND",
+        0.8,
+        "Berlin",
+        null,   // no timezone stored
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, trip.constraint_id);
+      expect(result.suggestions.length).toBe(1);
+
+      // Should have looked up Europe/Berlin from the city name
+      const s = result.suggestions[0];
+      expect(s.timezone_meeting_window).not.toBeNull();
+      expect(s.timezone_meeting_window!.contact_timezone).toBe("Europe/Berlin");
+    });
+
+    it("returns null hour suggestions when contact city has no known timezone", () => {
+      // Contact in unknown city
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Contact in Smallville",
+        "OTHER",
+        0.3,
+        "Smallville",
+        null,
+        30,
+      );
+
+      // Query by city (no trip context)
+      const result = dObj.getReconnectionSuggestions("Smallville");
+      expect(result.suggestions.length).toBe(1);
+
+      const s = result.suggestions[0];
+      // No trip context means no timezone_meeting_window at all
+      expect(s.timezone_meeting_window).toBeNull();
+    });
+
+    it("full pipeline: NYC trip -> finds Manhattan contact -> timezone-aware window (TM-xwn.3)", () => {
+      // Trip to NYC
+      const trip = dObj.addConstraint(
+        "trip",
+        {
+          name: "NYC Business Trip",
+          timezone: "America/New_York",
+          block_policy: "BUSY",
+          destination_city: "New York",
+        },
+        "2026-05-01T00:00:00Z",
+        "2026-05-07T00:00:00Z",
+      );
+
+      // Contact stored as "Manhattan" should match via alias resolution
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice (Manhattan, FRIEND)",
+        "FRIEND",
+        0.9,
+        "Manhattan",
+        "America/New_York",
+        7,
+      );
+
+      // Contact stored as "NYC" should also match
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob (NYC, INVESTOR)",
+        "INVESTOR",
+        0.5,
+        "NYC",
+        null, // no stored timezone -- will be looked up
+        30,
+      );
+
+      // Contact in Berlin should NOT match
+      const berlinRelId = "rel_01HXY00000000000000BERLIN";
+      const berlinHash = "sha256_berlin_contact_hash_0000000000000000000000000000000000";
+      dObj.createRelationship(
+        berlinRelId,
+        berlinHash,
+        "Hans (Berlin, wrong city)",
+        "COLLEAGUE",
+        0.7,
+        "Berlin",
+        "Europe/Berlin",
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions(null, trip.constraint_id);
+
+      // Only NYC/Manhattan contacts returned
+      expect(result.city).toBe("New York");
+      expect(result.total_in_city).toBe(2);
+      expect(result.suggestions.length).toBe(2);
+
+      // Verify alias-matched contacts
+      const alice = result.suggestions.find((s) => s.display_name === "Alice (Manhattan, FRIEND)");
+      const bob = result.suggestions.find((s) => s.display_name === "Bob (NYC, INVESTOR)");
+      expect(alice).toBeDefined();
+      expect(bob).toBeDefined();
+
+      // Verify timezone-aware windows
+      expect(alice!.timezone_meeting_window).not.toBeNull();
+      expect(alice!.timezone_meeting_window!.user_timezone).toBe("America/New_York");
+      expect(alice!.timezone_meeting_window!.contact_timezone).toBe("America/New_York");
+      // Same timezone = full working hours overlap
+      expect(alice!.timezone_meeting_window!.suggested_start_hour_utc).not.toBeNull();
+
+      // Bob's timezone looked up from "NYC" -> "New York" -> "America/New_York"
+      expect(bob!.timezone_meeting_window).not.toBeNull();
+      expect(bob!.timezone_meeting_window!.contact_timezone).toBe("America/New_York");
+
+      // Verify enrichment preserves standard fields
+      expect(alice!.suggested_duration_minutes).toBe(60); // FRIEND
+      expect(bob!.suggested_duration_minutes).toBe(30);   // INVESTOR
+      expect(alice!.suggested_time_window).toBeDefined();
+      expect(alice!.suggested_time_window!.earliest).toBe("2026-05-01T00:00:00Z");
+      expect(alice!.suggested_time_window!.latest).toBe("2026-05-07T00:00:00Z");
+
+      // Verify Berlin contact excluded
+      const hans = result.suggestions.find((s) => s.display_name?.includes("Berlin"));
+      expect(hans).toBeUndefined();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Milestone CRUD integration tests (TM-xwn.2)
 // ---------------------------------------------------------------------------
 

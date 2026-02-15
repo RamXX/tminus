@@ -811,6 +811,32 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["participant_user_ids", "title", "window", "duration_minutes"],
     },
   },
+  {
+    name: "calendar.generate_excuse",
+    description:
+      "Generate a draft cancellation or rescheduling message for a calendar event. Uses relationship context and AI to produce a tone-appropriate excuse. NEVER auto-sends -- always returns a draft that requires explicit user confirmation before sending (BR-17). Supports formal, casual, and apologetic tones with full, vague, or white_lie truth levels.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event_id: {
+          type: "string",
+          description:
+            "The canonical event ID to generate an excuse for. Use event IDs from calendar.list_events.",
+        },
+        tone: {
+          type: "string",
+          enum: ["formal", "casual", "apologetic"],
+          description: "Tone of the excuse message. 'formal' for professional contexts, 'casual' for informal, 'apologetic' for situations requiring extra remorse.",
+        },
+        truth_level: {
+          type: "string",
+          enum: ["full", "vague", "white_lie"],
+          description: "How truthful the excuse should be. 'full' mentions a conflicting commitment, 'vague' says something came up, 'white_lie' generates a plausible reason.",
+        },
+      },
+      required: ["event_id", "tone", "truth_level"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -879,6 +905,7 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.list_milestones": "enterprise",
   "calendar.upcoming_milestones": "enterprise",
   "calendar.propose_group_times": "premium",
+  "calendar.generate_excuse": "enterprise",
 };
 
 /**
@@ -3276,6 +3303,58 @@ async function handleGetEventBriefing(
 }
 
 /**
+ * Execute calendar.generate_excuse: validate input and forward to the API
+ * worker to generate a draft cancellation/rescheduling message.
+ * BR-17: Never auto-sends -- always returns a draft.
+ */
+async function handleGenerateExcuseMCP(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (!args || typeof args.event_id !== "string" || args.event_id.trim().length === 0) {
+    throw new InvalidParamsError("event_id is required");
+  }
+
+  const validTones = ["formal", "casual", "apologetic"];
+  const validTruthLevels = ["full", "vague", "white_lie"];
+
+  if (typeof args.tone !== "string" || !validTones.includes(args.tone)) {
+    throw new InvalidParamsError(
+      `tone is required and must be one of: ${validTones.join(", ")}`,
+    );
+  }
+
+  if (typeof args.truth_level !== "string" || !validTruthLevels.includes(args.truth_level)) {
+    throw new InvalidParamsError(
+      `truth_level is required and must be one of: ${validTruthLevels.join(", ")}`,
+    );
+  }
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const result = await callConstraintApi(
+    api,
+    jwt,
+    "POST",
+    `/v1/events/${encodeURIComponent(args.event_id)}/excuse`,
+    {
+      tone: args.tone,
+      truth_level: args.truth_level,
+    },
+  );
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(errData.error ?? "Failed to generate excuse");
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
  * Execute calendar.add_milestone: validate input and forward to the API
  * worker to create a milestone for a relationship contact.
  */
@@ -3676,6 +3755,11 @@ async function dispatch(
           case "calendar.get_event_briefing": {
             if (!env.API) throw new ApiBindingMissingError();
             result = await handleGetEventBriefing(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.generate_excuse": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGenerateExcuseMCP(request, env.API, toolArgs);
             break;
           }
           case "calendar.add_milestone": {

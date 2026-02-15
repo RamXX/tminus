@@ -53,6 +53,11 @@ id = "placeholder-sessions-id"  # Replace with real ID after `wrangler kv namesp
 binding = "RATE_LIMITS"
 id = "placeholder-rate-limits-id"  # Replace with real ID after `wrangler kv namespace create tminus-rate-limits`
 
+# --- Workers AI ---------------------------------------------------------------
+
+[ai]
+binding = "AI"
+
 # --- R2 buckets ---------------------------------------------------------------
 
 [[r2_buckets]]

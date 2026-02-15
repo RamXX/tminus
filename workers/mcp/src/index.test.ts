@@ -3797,7 +3797,7 @@ describe("relationship tools in tools/list", () => {
     );
 
     const resultData = result.body.result as { tools: Array<{ name: string }> };
-    expect(resultData.tools.length).toBe(31);
+    expect(resultData.tools.length).toBe(32);
   });
 });
 

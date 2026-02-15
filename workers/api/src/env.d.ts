@@ -12,6 +12,7 @@
  * - JWT_SECRET: Secret for API auth JWT signing
  * - STRIPE_SECRET_KEY: Stripe API secret key for billing operations
  * - STRIPE_WEBHOOK_SECRET: Stripe webhook signing secret for HMAC verification
+ * - AI: Workers AI binding for LLM inference (excuse generator, etc.)
  */
 interface Env {
   DB: D1Database;
@@ -32,4 +33,6 @@ interface Env {
   STRIPE_WEBHOOK_SECRET?: string;
   /** R2 bucket for storing commitment proof exports (PDF/CSV). */
   PROOF_BUCKET?: R2Bucket;
+  /** Workers AI binding for LLM inference (excuse generator, tone adjustment). */
+  AI?: Ai;
 }
