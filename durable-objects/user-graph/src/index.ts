@@ -3350,12 +3350,19 @@ export class UserGraphDO {
       client_id: this.getEventClientId(r.canonical_event_id),
     }));
 
-    // Fetch all constraints
+    // Fetch all constraints and normalize config for simulation engine.
+    // The DO stores working_hours as { start_time: "HH:MM", end_time: "HH:MM", ... }
+    // but the simulation engine expects { start_hour: number, end_hour: number }.
     const constraintRows = this.listConstraints();
-    const constraints: SimulationConstraint[] = constraintRows.map((c) => ({
-      kind: c.kind,
-      config_json: c.config_json,
-    }));
+    const constraints: SimulationConstraint[] = constraintRows.map((c) => {
+      let configJson = c.config_json;
+      if (c.kind === "working_hours" && typeof configJson.start_time === "string") {
+        const startHour = parseInt((configJson.start_time as string).split(":")[0], 10);
+        const endHour = parseInt((configJson.end_time as string).split(":")[0], 10);
+        configJson = { ...configJson, start_hour: startHour, end_hour: endHour };
+      }
+      return { kind: c.kind, config_json: configJson };
+    });
 
     // Fetch all commitments
     const commitmentRows = this.listCommitments();

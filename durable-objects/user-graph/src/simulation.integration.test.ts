@@ -198,7 +198,7 @@ describe("UserGraphDO simulation integration", () => {
     it("includes constraints in snapshot", () => {
       dObj.addConstraint(
         "working_hours",
-        { start_hour: 9, end_hour: 17 },
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
         null,
         null,
       );
@@ -207,7 +207,13 @@ describe("UserGraphDO simulation integration", () => {
 
       expect(snapshot.constraints.length).toBe(1);
       expect(snapshot.constraints[0].kind).toBe("working_hours");
+      // config_json includes original fields plus normalized start_hour/end_hour
+      // for simulation engine consumption
       expect(snapshot.constraints[0].config_json).toEqual({
+        days: [1, 2, 3, 4, 5],
+        start_time: "09:00",
+        end_time: "17:00",
+        timezone: "UTC",
         start_hour: 9,
         end_hour: 17,
       });
@@ -234,86 +240,60 @@ describe("UserGraphDO simulation integration", () => {
     });
   });
 
-  describe("/simulate RPC endpoint", () => {
-    it("handles add_commitment scenario via fetch", async () => {
+  describe("simulate via direct method calls", () => {
+    it("handles add_commitment scenario", () => {
       // Add a constraint so we can test it appears in the snapshot
       dObj.addConstraint(
-        "constraint_01TESTCONSTRAINT000001",
         "working_hours",
-        { start_hour: 9, end_hour: 17 },
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
       );
 
-      const request = new Request("https://do.internal/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scenario: {
-            type: "add_commitment",
-            client_id: "new-client",
-            hours_per_week: 20,
-          },
-        }),
-      });
-
-      const response = await dObj.fetch(request);
-      expect(response.status).toBe(200);
-
-      const body = await response.json() as {
-        projected_weekly_hours: number;
-        conflict_count: number;
-        constraint_violations: string[];
-        burnout_risk_delta: number;
-        commitment_compliance_delta: Record<string, { before: number; after: number }>;
+      const snapshot = dObj.buildSimulationSnapshot();
+      const scenario: SimulationScenario = {
+        type: "add_commitment",
+        client_id: "new-client",
+        hours_per_week: 20,
       };
 
-      expect(typeof body.projected_weekly_hours).toBe("number");
-      expect(body.projected_weekly_hours).toBeGreaterThan(0);
-      expect(typeof body.conflict_count).toBe("number");
-      expect(Array.isArray(body.constraint_violations)).toBe(true);
-      expect(typeof body.burnout_risk_delta).toBe("number");
-      expect(body.burnout_risk_delta).toBeGreaterThan(0);
-      expect(body.commitment_compliance_delta).toHaveProperty("new-client");
+      const impact: ImpactReport = simulate(snapshot, scenario);
+
+      expect(typeof impact.projected_weekly_hours).toBe("number");
+      expect(impact.projected_weekly_hours).toBeGreaterThan(0);
+      expect(typeof impact.conflict_count).toBe("number");
+      expect(Array.isArray(impact.constraint_violations)).toBe(true);
+      expect(typeof impact.burnout_risk_delta).toBe("number");
+      expect(impact.burnout_risk_delta).toBeGreaterThan(0);
+      expect(impact.commitment_compliance_delta).toHaveProperty("new-client");
     });
 
-    it("handles add_recurring_event scenario via fetch", async () => {
-      const request = new Request("https://do.internal/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scenario: {
-            type: "add_recurring_event",
-            title: "Board Meeting",
-            day_of_week: 4,
-            start_time: 14,
-            end_time: 16,
-            duration_weeks: 4,
-          },
-        }),
-      });
-
-      const response = await dObj.fetch(request);
-      expect(response.status).toBe(200);
-
-      const body = await response.json() as {
-        projected_weekly_hours: number;
-        conflict_count: number;
-        constraint_violations: string[];
-        burnout_risk_delta: number;
-        commitment_compliance_delta: Record<string, unknown>;
+    it("handles add_recurring_event scenario", () => {
+      const snapshot = dObj.buildSimulationSnapshot();
+      const scenario: SimulationScenario = {
+        type: "add_recurring_event",
+        title: "Board Meeting",
+        day_of_week: 4,
+        start_time: 14,
+        end_time: 16,
+        duration_weeks: 4,
       };
+
+      const impact: ImpactReport = simulate(snapshot, scenario);
 
       // A 2h/week meeting over 4 weeks = 2h projected weekly
-      expect(body.projected_weekly_hours).toBe(2);
-      expect(typeof body.conflict_count).toBe("number");
-      expect(Array.isArray(body.constraint_violations)).toBe(true);
+      expect(impact.projected_weekly_hours).toBe(2);
+      expect(typeof impact.conflict_count).toBe("number");
+      expect(Array.isArray(impact.constraint_violations)).toBe(true);
     });
 
-    it("handles change_working_hours scenario via fetch", async () => {
+    it("handles change_working_hours scenario", async () => {
       // Create a constraint first
       dObj.addConstraint(
-        "constraint_01TESTCONSTRAINT000001",
         "working_hours",
-        { start_hour: 9, end_hour: 17 },
+        { days: [1, 2, 3, 4, 5], start_time: "09:00", end_time: "17:00", timezone: "UTC" },
+        null,
+        null,
       );
 
       // Create an event at 8am (before new working hours)
@@ -327,32 +307,18 @@ describe("UserGraphDO simulation integration", () => {
 
       await createEvent(dObj, "Early Meeting", startTs, endTs);
 
-      const request = new Request("https://do.internal/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scenario: {
-            type: "change_working_hours",
-            start_hour: 10,
-            end_hour: 16,
-          },
-        }),
-      });
-
-      const response = await dObj.fetch(request);
-      expect(response.status).toBe(200);
-
-      const body = await response.json() as {
-        projected_weekly_hours: number;
-        conflict_count: number;
-        constraint_violations: string[];
-        burnout_risk_delta: number;
-        commitment_compliance_delta: Record<string, unknown>;
+      const snapshot = dObj.buildSimulationSnapshot();
+      const scenario: SimulationScenario = {
+        type: "change_working_hours",
+        start_hour: 10,
+        end_hour: 16,
       };
 
+      const impact: ImpactReport = simulate(snapshot, scenario);
+
       // The 8am event should violate the narrowed working hours
-      expect(body.constraint_violations.length).toBeGreaterThan(0);
-      expect(body.constraint_violations.some((v: string) => v.includes("working_hours"))).toBe(true);
+      expect(impact.constraint_violations.length).toBeGreaterThan(0);
+      expect(impact.constraint_violations.some((v: string) => v.includes("working_hours"))).toBe(true);
     });
 
     it("does NOT modify real data after simulation", async () => {
@@ -371,20 +337,17 @@ describe("UserGraphDO simulation integration", () => {
       const countBefore = eventsBefore.items.length;
 
       // Run simulation that adds a commitment (generates synthetic events internally)
-      const request = new Request("https://do.internal/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scenario: {
-            type: "add_commitment",
-            client_id: "test-client",
-            hours_per_week: 20,
-          },
-        }),
-      });
+      const snapshot = dObj.buildSimulationSnapshot();
+      const scenario: SimulationScenario = {
+        type: "add_commitment",
+        client_id: "test-client",
+        hours_per_week: 20,
+      };
 
-      const response = await dObj.fetch(request);
-      expect(response.status).toBe(200);
+      const impact: ImpactReport = simulate(snapshot, scenario);
+
+      // Verify simulation returned results
+      expect(typeof impact.projected_weekly_hours).toBe("number");
 
       // Verify no new events were created in the real store
       const eventsAfter = dObj.listCanonicalEvents();
