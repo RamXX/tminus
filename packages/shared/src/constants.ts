@@ -60,6 +60,8 @@ export const ID_PREFIXES = {
   hold: "hld_",
   vip: "vip_",
   allocation: "alc_",
+  commitment: "cmt_",
+  report: "rpt_",
 } as const;
 
 // ---------------------------------------------------------------------------

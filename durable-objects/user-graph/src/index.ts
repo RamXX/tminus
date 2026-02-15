@@ -127,6 +127,32 @@ interface VipPolicyRow {
   created_at: string;
 }
 
+interface CommitmentRow {
+  [key: string]: unknown;
+  commitment_id: string;
+  client_id: string;
+  client_name: string | null;
+  window_type: string;
+  target_hours: number;
+  rolling_window_weeks: number;
+  hard_minimum: number;
+  proof_required: number;
+  created_at: string;
+}
+
+interface CommitmentReportRow {
+  [key: string]: unknown;
+  report_id: string;
+  commitment_id: string;
+  window_start: string;
+  window_end: string;
+  actual_hours: number;
+  expected_hours: number;
+  status: string;
+  proof_hash: string | null;
+  created_at: string;
+}
+
 interface PolicyRow {
   [key: string]: unknown;
   policy_id: string;
@@ -283,6 +309,53 @@ export interface TimeAllocation {
   readonly rate: number | null;
   readonly confidence: string;
   readonly locked: boolean;
+  readonly created_at: string;
+}
+
+/** Valid window types for time commitments. */
+export const WINDOW_TYPES = ["WEEKLY", "MONTHLY"] as const;
+export type WindowType = (typeof WINDOW_TYPES)[number];
+
+/** A time commitment as returned by commitment CRUD methods. */
+export interface TimeCommitment {
+  readonly commitment_id: string;
+  readonly client_id: string;
+  readonly client_name: string | null;
+  readonly window_type: WindowType;
+  readonly target_hours: number;
+  readonly rolling_window_weeks: number;
+  readonly hard_minimum: boolean;
+  readonly proof_required: boolean;
+  readonly created_at: string;
+}
+
+/** Compliance status for a commitment in its rolling window. */
+export type CommitmentComplianceStatus = "compliant" | "under" | "over";
+
+/** Result of evaluating commitment compliance. */
+export interface CommitmentStatus {
+  readonly commitment_id: string;
+  readonly client_id: string;
+  readonly client_name: string | null;
+  readonly window_type: WindowType;
+  readonly target_hours: number;
+  readonly actual_hours: number;
+  readonly status: CommitmentComplianceStatus;
+  readonly window_start: string;
+  readonly window_end: string;
+  readonly rolling_window_weeks: number;
+}
+
+/** A commitment report as stored in the database. */
+export interface CommitmentReport {
+  readonly report_id: string;
+  readonly commitment_id: string;
+  readonly window_start: string;
+  readonly window_end: string;
+  readonly actual_hours: number;
+  readonly expected_hours: number;
+  readonly status: string;
+  readonly proof_hash: string | null;
   readonly created_at: string;
 }
 
@@ -2730,6 +2803,283 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
+  // Commitment tracking (Phase 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a time commitment for a client.
+   *
+   * Defines target hours per rolling window for a given client_id.
+   * Window types: WEEKLY (7 days) or MONTHLY (28 days).
+   * The rolling_window_weeks determines how far back the window extends.
+   */
+  createCommitment(
+    commitmentId: string,
+    clientId: string,
+    targetHours: number,
+    windowType: string = "WEEKLY",
+    clientName: string | null = null,
+    rollingWindowWeeks: number = 4,
+    hardMinimum: boolean = false,
+    proofRequired: boolean = false,
+  ): TimeCommitment {
+    this.ensureMigrated();
+
+    // Validate window type
+    if (!WINDOW_TYPES.includes(windowType as WindowType)) {
+      throw new Error(
+        `Invalid window_type: ${windowType}. Must be one of: ${WINDOW_TYPES.join(", ")}`,
+      );
+    }
+
+    // Validate target_hours
+    if (typeof targetHours !== "number" || targetHours <= 0) {
+      throw new Error("target_hours must be a positive number");
+    }
+
+    // Validate rolling_window_weeks
+    if (
+      typeof rollingWindowWeeks !== "number" ||
+      rollingWindowWeeks < 1 ||
+      !Number.isInteger(rollingWindowWeeks)
+    ) {
+      throw new Error("rolling_window_weeks must be a positive integer");
+    }
+
+    // Validate client_id
+    if (!clientId || typeof clientId !== "string" || clientId.trim().length === 0) {
+      throw new Error("client_id is required");
+    }
+
+    // Check for duplicate commitment for same client
+    const existing = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM time_commitments WHERE client_id = ?",
+        clientId,
+      )
+      .toArray();
+
+    if (existing[0].cnt > 0) {
+      throw new Error(
+        `Commitment already exists for client ${clientId}. Delete it first to create a new one.`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO time_commitments (commitment_id, client_id, client_name, window_type, target_hours, rolling_window_weeks, hard_minimum, proof_required, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      commitmentId,
+      clientId,
+      clientName,
+      windowType,
+      targetHours,
+      rollingWindowWeeks,
+      hardMinimum ? 1 : 0,
+      proofRequired ? 1 : 0,
+      now,
+    );
+
+    return {
+      commitment_id: commitmentId,
+      client_id: clientId,
+      client_name: clientName,
+      window_type: windowType as WindowType,
+      target_hours: targetHours,
+      rolling_window_weeks: rollingWindowWeeks,
+      hard_minimum: hardMinimum,
+      proof_required: proofRequired,
+      created_at: now,
+    };
+  }
+
+  /**
+   * Get a single commitment by ID.
+   * Returns null if not found.
+   */
+  getCommitment(commitmentId: string): TimeCommitment | null {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<CommitmentRow>(
+        `SELECT commitment_id, client_id, client_name, window_type, target_hours, rolling_window_weeks, hard_minimum, proof_required, created_at
+         FROM time_commitments WHERE commitment_id = ?`,
+        commitmentId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      commitment_id: row.commitment_id,
+      client_id: row.client_id,
+      client_name: row.client_name,
+      window_type: row.window_type as WindowType,
+      target_hours: row.target_hours,
+      rolling_window_weeks: row.rolling_window_weeks,
+      hard_minimum: row.hard_minimum === 1,
+      proof_required: row.proof_required === 1,
+      created_at: row.created_at,
+    };
+  }
+
+  /**
+   * List all commitments for this user.
+   * Returns all commitments ordered by created_at descending.
+   */
+  listCommitments(): TimeCommitment[] {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<CommitmentRow>(
+        `SELECT commitment_id, client_id, client_name, window_type, target_hours, rolling_window_weeks, hard_minimum, proof_required, created_at
+         FROM time_commitments ORDER BY created_at DESC`,
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      commitment_id: row.commitment_id,
+      client_id: row.client_id,
+      client_name: row.client_name,
+      window_type: row.window_type as WindowType,
+      target_hours: row.target_hours,
+      rolling_window_weeks: row.rolling_window_weeks,
+      hard_minimum: row.hard_minimum === 1,
+      proof_required: row.proof_required === 1,
+      created_at: row.created_at,
+    }));
+  }
+
+  /**
+   * Delete a commitment by ID.
+   * Also deletes associated commitment_reports (FK cascade is not enforced
+   * by SQLite by default in all configs, so we delete explicitly).
+   * Returns true if a row was deleted, false if not found.
+   */
+  deleteCommitment(commitmentId: string): boolean {
+    this.ensureMigrated();
+
+    const before = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM time_commitments WHERE commitment_id = ?",
+        commitmentId,
+      )
+      .toArray()[0].cnt;
+
+    if (before === 0) return false;
+
+    // Delete child reports first (respecting FK constraint)
+    this.sql.exec(
+      "DELETE FROM commitment_reports WHERE commitment_id = ?",
+      commitmentId,
+    );
+    this.sql.exec(
+      "DELETE FROM time_commitments WHERE commitment_id = ?",
+      commitmentId,
+    );
+    return true;
+  }
+
+  /**
+   * Compute the compliance status for a commitment.
+   *
+   * Calculates actual hours from time_allocations for the commitment's
+   * client_id within the rolling window, then compares to target.
+   *
+   * Rolling window: rolling_window_weeks * 7 days backward from `asOf`
+   * (defaults to current time).
+   *
+   * Status determination:
+   * - "over": actual > target * 1.2
+   * - "compliant": actual >= target
+   * - "under": actual < target
+   *
+   * Also generates and stores a commitment_report.
+   */
+  getCommitmentStatus(
+    commitmentId: string,
+    asOf?: string,
+  ): CommitmentStatus | null {
+    this.ensureMigrated();
+
+    const commitment = this.getCommitment(commitmentId);
+    if (!commitment) return null;
+
+    const now = asOf ? new Date(asOf) : new Date();
+    const windowDays = commitment.rolling_window_weeks * 7;
+    const windowStart = new Date(
+      now.getTime() - windowDays * 24 * 60 * 60 * 1000,
+    );
+
+    const windowStartIso = windowStart.toISOString();
+    const windowEndIso = now.toISOString();
+
+    // Query actual hours from time_allocations joined with canonical_events.
+    // Hours = sum of (end_ts - start_ts) in hours for all events with
+    // matching client_id allocations within the window.
+    const rows = this.sql
+      .exec<{ total_hours: number }>(
+        `SELECT COALESCE(
+           SUM(
+             (julianday(ce.end_ts) - julianday(ce.start_ts)) * 24.0
+           ), 0.0
+         ) as total_hours
+         FROM time_allocations ta
+         JOIN canonical_events ce ON ta.canonical_event_id = ce.canonical_event_id
+         WHERE ta.client_id = ?
+           AND ce.start_ts >= ?
+           AND ce.start_ts < ?`,
+        commitment.client_id,
+        windowStartIso,
+        windowEndIso,
+      )
+      .toArray();
+
+    const actualHours = Math.round(rows[0].total_hours * 100) / 100;
+
+    // Determine status
+    let status: CommitmentComplianceStatus;
+    if (actualHours > commitment.target_hours * 1.2) {
+      status = "over";
+    } else if (actualHours >= commitment.target_hours) {
+      status = "compliant";
+    } else {
+      status = "under";
+    }
+
+    // Store a commitment report
+    const reportId = generateId("report");
+    const reportNow = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO commitment_reports (report_id, commitment_id, window_start, window_end, actual_hours, expected_hours, status, proof_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      reportId,
+      commitmentId,
+      windowStartIso,
+      windowEndIso,
+      actualHours,
+      commitment.target_hours,
+      status,
+      null,
+      reportNow,
+    );
+
+    return {
+      commitment_id: commitment.commitment_id,
+      client_id: commitment.client_id,
+      client_name: commitment.client_name,
+      window_type: commitment.window_type,
+      target_hours: commitment.target_hours,
+      actual_hours: actualHours,
+      status,
+      window_start: windowStartIso,
+      window_end: windowEndIso,
+      rolling_window_weeks: commitment.rolling_window_weeks,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
 
@@ -3216,6 +3566,63 @@ export class UserGraphDO {
           const body = (await request.json()) as { vip_id: string };
           const deleted = this.deleteVipPolicy(body.vip_id);
           return Response.json({ deleted });
+        }
+
+        // ---------------------------------------------------------------
+        // Commitment tracking RPC endpoints
+        // ---------------------------------------------------------------
+
+        case "/createCommitment": {
+          const body = (await request.json()) as {
+            commitment_id: string;
+            client_id: string;
+            target_hours: number;
+            window_type?: string;
+            client_name?: string | null;
+            rolling_window_weeks?: number;
+            hard_minimum?: boolean;
+            proof_required?: boolean;
+          };
+          const commitment = this.createCommitment(
+            body.commitment_id,
+            body.client_id,
+            body.target_hours,
+            body.window_type ?? "WEEKLY",
+            body.client_name ?? null,
+            body.rolling_window_weeks ?? 4,
+            body.hard_minimum ?? false,
+            body.proof_required ?? false,
+          );
+          return Response.json(commitment);
+        }
+
+        case "/getCommitment": {
+          const body = (await request.json()) as { commitment_id: string };
+          const commitment = this.getCommitment(body.commitment_id);
+          return Response.json(commitment);
+        }
+
+        case "/listCommitments": {
+          const items = this.listCommitments();
+          return Response.json({ items });
+        }
+
+        case "/deleteCommitment": {
+          const body = (await request.json()) as { commitment_id: string };
+          const deleted = this.deleteCommitment(body.commitment_id);
+          return Response.json({ deleted });
+        }
+
+        case "/getCommitmentStatus": {
+          const body = (await request.json()) as {
+            commitment_id: string;
+            as_of?: string;
+          };
+          const status = this.getCommitmentStatus(
+            body.commitment_id,
+            body.as_of,
+          );
+          return Response.json(status);
         }
 
         default:

@@ -545,6 +545,41 @@ const TOOL_REGISTRY: McpToolDefinition[] = [
       required: ["event_id", "client", "category"],
     },
   },
+  {
+    name: "calendar.get_commitment_status",
+    description:
+      "Get commitment compliance status. If a client identifier is provided, returns compliance for that specific client. Otherwise returns compliance for all tracked commitments. Includes hours committed, hours delivered, and compliance percentage. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        client: {
+          type: "string",
+          description:
+            "Optional client identifier to filter commitment status. If omitted, returns all commitments.",
+        },
+      },
+    },
+  },
+  {
+    name: "calendar.export_commitment_proof",
+    description:
+      "Export a commitment proof document for a specific client. Generates a verifiable proof (PDF/CSV) with SHA-256 hash, stored in R2. Returns a download URL. Requires Premium+ subscription.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        commitment_id: {
+          type: "string",
+          description: "The commitment ID to export proof for.",
+        },
+        format: {
+          type: "string",
+          enum: ["pdf", "csv"],
+          description: "Export format: 'pdf' or 'csv'. Default: 'pdf'.",
+        },
+      },
+      required: ["commitment_id"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -602,6 +637,8 @@ const TOOL_TIERS: Record<string, string> = {
   "calendar.delete_vip": "premium",
   "calendar.override": "premium",
   "calendar.tag_billable": "premium",
+  "calendar.get_commitment_status": "premium",
+  "calendar.export_commitment_proof": "premium",
 };
 
 /**
@@ -2094,6 +2131,82 @@ function validateCommitCandidateParams(
 }
 
 // ---------------------------------------------------------------------------
+// Governance tool schemas and validators (commitment status + proof export)
+// ---------------------------------------------------------------------------
+
+/**
+ * Zod schema for calendar.get_commitment_status input.
+ *
+ * Validates:
+ * - client: optional non-empty string (filter by client)
+ */
+const GetCommitmentStatusSchema = z.object({
+  client: z.string().min(1, "client must be a non-empty string").optional(),
+});
+
+/** Inferred type for get_commitment_status validated input. */
+type GetCommitmentStatusInput = z.infer<typeof GetCommitmentStatusSchema>;
+
+/**
+ * Zod schema for calendar.export_commitment_proof input.
+ *
+ * Validates:
+ * - commitment_id: required non-empty string
+ * - format: optional enum ("pdf" or "csv"), defaults to "pdf"
+ */
+const ExportCommitmentProofSchema = z.object({
+  commitment_id: z.string().min(1, "commitment_id is required"),
+  format: z.enum(["pdf", "csv"]).optional().default("pdf"),
+});
+
+/** Inferred type for export_commitment_proof validated input. */
+type ExportCommitmentProofInput = z.infer<typeof ExportCommitmentProofSchema>;
+
+/**
+ * Validate get_commitment_status input using Zod schema.
+ * Throws InvalidParamsError with structured Zod error messages on failure.
+ */
+function validateGetCommitmentStatusParams(
+  args: Record<string, unknown> | undefined,
+): GetCommitmentStatusInput {
+  // No required params, so empty/undefined args is valid
+  const result = GetCommitmentStatusSchema.safeParse(args ?? {});
+  if (!result.success) {
+    const messages = result.error.issues.map(
+      (issue) => `${issue.path.join(".")}: ${issue.message}`,
+    );
+    throw new InvalidParamsError(
+      `Invalid parameters: ${messages.join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+/**
+ * Validate export_commitment_proof input using Zod schema.
+ * Throws InvalidParamsError with structured Zod error messages on failure.
+ */
+function validateExportCommitmentProofParams(
+  args: Record<string, unknown> | undefined,
+): ExportCommitmentProofInput {
+  if (!args) {
+    throw new InvalidParamsError(
+      "Missing required parameters: commitment_id",
+    );
+  }
+  const result = ExportCommitmentProofSchema.safeParse(args);
+  if (!result.success) {
+    const messages = result.error.issues.map(
+      (issue) => `${issue.path.join(".")}: ${issue.message}`,
+    );
+    throw new InvalidParamsError(
+      `Invalid parameters: ${messages.join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+// ---------------------------------------------------------------------------
 // Scheduling tool error types
 // ---------------------------------------------------------------------------
 
@@ -2643,6 +2756,75 @@ async function handleTagBillable(
   throw new InvalidParamsError(errData.error ?? "Failed to tag event as billable");
 }
 
+/**
+ * Execute calendar.get_commitment_status: retrieve compliance status for
+ * commitments. Optionally filter by client identifier.
+ *
+ * Routes through GET /v1/commitments/status (all) or
+ * GET /v1/commitments/status?client=<client> on the API worker.
+ */
+async function handleGetCommitmentStatus(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateGetCommitmentStatusParams(args);
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  let apiPath = "/v1/commitments/status";
+  if (validated.client) {
+    apiPath += `?client=${encodeURIComponent(validated.client)}`;
+  }
+
+  const result = await callConstraintApi(api, jwt, "GET", apiPath);
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(
+      errData.error ?? "Failed to get commitment status",
+    );
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
+/**
+ * Execute calendar.export_commitment_proof: generate a proof document
+ * (PDF or CSV) for a specific commitment, stored in R2 with SHA-256 hash.
+ * Returns a download URL.
+ *
+ * Routes through POST /v1/commitments/:id/export on the API worker.
+ */
+async function handleExportCommitmentProof(
+  request: Request,
+  api: Fetcher,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const validated = validateExportCommitmentProofParams(args);
+
+  const jwt = extractRawJwt(request);
+  if (!jwt) throw new Error("JWT not available for API forwarding");
+
+  const apiPath = `/v1/commitments/${encodeURIComponent(validated.commitment_id)}/export`;
+
+  const result = await callConstraintApi(api, jwt, "POST", apiPath, {
+    format: validated.format,
+  });
+
+  if (!result.ok) {
+    const errData = result.data as { error?: string };
+    throw new InvalidParamsError(
+      errData.error ?? "Failed to export commitment proof",
+    );
+  }
+
+  const envelope = result.data as { ok: boolean; data: unknown };
+  return envelope.data;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -2869,6 +3051,16 @@ async function dispatch(
             result = await handleTagBillable(request, env.API, toolArgs);
             break;
           }
+          case "calendar.get_commitment_status": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleGetCommitmentStatus(request, env.API, toolArgs);
+            break;
+          }
+          case "calendar.export_commitment_proof": {
+            if (!env.API) throw new ApiBindingMissingError();
+            result = await handleExportCommitmentProof(request, env.API, toolArgs);
+            break;
+          }
           default:
             return makeErrorResponse(
               rpcReq.id,
@@ -3093,4 +3285,6 @@ export {
   validateListConstraintsParams,
   validateProposeTimesParams,
   validateCommitCandidateParams,
+  validateGetCommitmentStatusParams,
+  validateExportCommitmentProofParams,
 };
