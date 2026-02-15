@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Developers - T-Minus</title>
+  <meta name="description" content="T-Minus developer documentation: REST API, MCP tools, edge architecture, and self-hosting guide." />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: {
+              primary: '#0a0a0f',
+              secondary: '#0e0e16',
+              tertiary: '#12121a',
+              card: '#14141e',
+            },
+            accent: {
+              cyan: '#00d4ff',
+              cyanDim: '#00a8cc',
+              cyanGlow: 'rgba(0, 212, 255, 0.15)',
+            },
+            text: {
+              primary: '#e8e8ef',
+              secondary: '#9898a8',
+              muted: '#68687a',
+            },
+            border: {
+              subtle: '#1e1e2a',
+              accent: 'rgba(0, 212, 255, 0.2)',
+            },
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+    body { background: #0a0a0f; }
+
+    .glow-line {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+    }
+
+    .feature-card {
+      background: linear-gradient(135deg, #14141e 0%, #0e0e16 100%);
+      border: 1px solid #1e1e2a;
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+    .feature-card:hover {
+      border-color: rgba(0, 212, 255, 0.3);
+      box-shadow: 0 0 30px rgba(0, 212, 255, 0.06);
+    }
+
+    .section-divider {
+      position: relative;
+      height: 1px;
+      background: #1e1e2a;
+    }
+    .section-divider::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+    }
+
+    .nav-link {
+      color: #9898a8;
+      transition: color 0.2s ease;
+    }
+    .nav-link:hover {
+      color: #00d4ff;
+    }
+    .nav-link.active {
+      color: #00d4ff;
+    }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #00d4ff, #00a8cc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 10px;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-radius: 9999px;
+      border: 1px solid rgba(0, 212, 255, 0.25);
+      color: #00d4ff;
+      background: rgba(0, 212, 255, 0.06);
+    }
+
+    /* Code block styling */
+    .code-block {
+      background: #12121a;
+      border: 1px solid #1e1e2a;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .code-header {
+      background: #0e0e16;
+      border-bottom: 1px solid #1e1e2a;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .code-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .code-body {
+      padding: 20px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.825rem;
+      line-height: 1.7;
+      color: #9898a8;
+    }
+
+    /* Syntax highlighting */
+    .syn-keyword { color: #c792ea; }
+    .syn-string { color: #c3e88d; }
+    .syn-comment { color: #546e7a; }
+    .syn-function { color: #82aaff; }
+    .syn-number { color: #f78c6c; }
+    .syn-operator { color: #89ddff; }
+    .syn-property { color: #e8e8ef; }
+    .syn-type { color: #ffcb6b; }
+    .syn-param { color: #f07178; }
+    .syn-bracket { color: #68687a; }
+    .syn-constant { color: #00d4ff; }
+
+    /* API table */
+    .api-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+    .api-table th {
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #68687a;
+      border-bottom: 1px solid #1e1e2a;
+      background: #0e0e16;
+    }
+    .api-table td {
+      padding: 12px 16px;
+      font-size: 0.875rem;
+      border-bottom: 1px solid #1e1e2a;
+      color: #9898a8;
+    }
+    .api-table tr:last-child td {
+      border-bottom: none;
+    }
+    .api-table tr:hover td {
+      background: rgba(0, 212, 255, 0.03);
+    }
+
+    .method-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 0.7rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 500;
+      border-radius: 4px;
+      letter-spacing: 0.03em;
+    }
+    .method-get {
+      background: rgba(76, 175, 80, 0.12);
+      color: #81c784;
+      border: 1px solid rgba(76, 175, 80, 0.25);
+    }
+    .method-post {
+      background: rgba(0, 212, 255, 0.1);
+      color: #00d4ff;
+      border: 1px solid rgba(0, 212, 255, 0.25);
+    }
+
+    /* Architecture diagram */
+    .arch-tier {
+      border: 1px solid #1e1e2a;
+      border-radius: 12px;
+      padding: 20px;
+      background: #0e0e16;
+    }
+    .arch-node {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      font-family: 'JetBrains Mono', monospace;
+      border-radius: 6px;
+      border: 1px solid #1e1e2a;
+      background: #14141e;
+      color: #e8e8ef;
+      transition: border-color 0.2s;
+    }
+    .arch-node:hover {
+      border-color: rgba(0, 212, 255, 0.3);
+    }
+    .arch-node-accent {
+      border-color: rgba(0, 212, 255, 0.2);
+      background: rgba(0, 212, 255, 0.05);
+      color: #00d4ff;
+    }
+
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      background: rgba(0, 212, 255, 0.08);
+      border: 1px solid rgba(0, 212, 255, 0.15);
+      color: #00d4ff;
+      font-size: 1.25rem;
+      flex-shrink: 0;
+    }
+
+    .mcp-category {
+      border-left: 2px solid rgba(0, 212, 255, 0.2);
+      padding-left: 16px;
+    }
+  </style>
+</head>
+<body class="font-sans text-text-primary antialiased">
+
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 border-b border-border-subtle" style="background: rgba(10, 10, 15, 0.85); backdrop-filter: blur(16px);">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="index.html" class="flex items-center gap-2 text-lg font-bold tracking-tight">
+        <span class="gradient-text">T</span><span class="text-text-primary">-Minus</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8">
+        <a href="index.html" class="nav-link text-sm">Home</a>
+        <a href="features.html" class="nav-link text-sm">Features</a>
+        <a href="pricing.html" class="nav-link text-sm">Pricing</a>
+        <a href="developers.html" class="nav-link active text-sm">Developers</a>
+      </div>
+      <div class="md:hidden">
+        <button id="mobile-menu-btn" class="text-text-secondary hover:text-accent-cyan transition-colors" aria-label="Menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="mobile-menu" class="hidden md:hidden border-t border-border-subtle">
+      <div class="px-6 py-4 flex flex-col gap-4">
+        <a href="index.html" class="nav-link text-sm">Home</a>
+        <a href="features.html" class="nav-link text-sm">Features</a>
+        <a href="pricing.html" class="nav-link text-sm">Pricing</a>
+        <a href="developers.html" class="nav-link active text-sm">Developers</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="pt-32 pb-20 px-6">
+    <div class="max-w-4xl mx-auto text-center">
+      <h1 class="text-4xl md:text-6xl font-bold tracking-tight leading-tight mb-6">
+        Build on top of<br />
+        <span class="gradient-text">time.</span>
+      </h1>
+      <p class="text-lg md:text-xl text-text-secondary max-w-2xl mx-auto leading-relaxed">
+        REST API. MCP server. Edge-native architecture. Everything you need to
+        integrate temporal intelligence into your applications.
+      </p>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-md mx-auto mb-20"></div>
+
+  <!-- API Reference -->
+  <section id="api" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <span class="tag mb-4">API</span>
+      <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">API Reference</h2>
+      <p class="text-text-secondary text-lg leading-relaxed mb-12 max-w-3xl">
+        A RESTful API over HTTPS. JSON request and response bodies. Authentication
+        via JWT bearer tokens or API keys. Rate limits vary by subscription tier.
+      </p>
+
+      <!-- Auth & Base -->
+      <div class="grid md:grid-cols-3 gap-6 mb-12">
+        <div class="feature-card rounded-xl p-6">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-3">Base URL</h3>
+          <code class="font-mono text-accent-cyan text-sm">https://api.tminus.dev/v1</code>
+        </div>
+        <div class="feature-card rounded-xl p-6">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-3">Authentication</h3>
+          <p class="text-text-secondary text-sm">JWT bearer tokens (short-lived) or API keys (long-lived, scoped)</p>
+        </div>
+        <div class="feature-card rounded-xl p-6">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-3">Rate Limits</h3>
+          <div class="space-y-1 text-sm text-text-secondary">
+            <p><span class="text-text-primary font-medium">Free:</span> 60 req/min</p>
+            <p><span class="text-text-primary font-medium">Pro:</span> 600 req/min</p>
+            <p><span class="text-text-primary font-medium">Enterprise:</span> Custom</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Endpoints Table -->
+      <div class="feature-card rounded-2xl overflow-hidden mb-8">
+        <div class="p-6 border-b border-border-subtle">
+          <h3 class="font-semibold text-text-primary">Endpoints</h3>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="api-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Endpoint</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/auth/login</code></td>
+                <td>Authenticate and receive JWT token pair</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/auth/refresh</code></td>
+                <td>Refresh an expired access token</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/events</code></td>
+                <td>List canonical events (filterable by date range, calendar, status)</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/events</code></td>
+                <td>Create a new event with automatic policy projection</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/availability</code></td>
+                <td>Query availability (<code class="font-mono text-xs">mode=binary|probabilistic</code>)</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/relationships</code></td>
+                <td>List contact graph with drift scores and categories</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/relationships</code></td>
+                <td>Add or update a relationship in the contact graph</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/drift-report</code></td>
+                <td>Full drift report: fading relationships with severity</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/drift-alerts</code></td>
+                <td>Active drift alerts requiring attention</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/commitments</code></td>
+                <td>Create a time commitment (e.g., 20h/week for Client A)</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/commitments/:id/status</code></td>
+                <td>Compliance status: compliant, under, or over threshold</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/scheduling/propose</code></td>
+                <td>Propose meeting times with constraint satisfaction</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/scheduling/commit</code></td>
+                <td>Commit a scheduling candidate to all calendars</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/constraints</code></td>
+                <td>List active constraints (buffers, working hours, etc.)</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code class="font-mono text-sm text-text-primary">/v1/constraints</code></td>
+                <td>Create or update a scheduling constraint</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- MCP Tools -->
+  <section id="mcp" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <span class="tag mb-4">MCP</span>
+      <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">MCP Tools</h2>
+      <p class="text-text-secondary text-lg leading-relaxed mb-6 max-w-3xl">
+        The Model Context Protocol is an open standard that lets AI assistants
+        interact with external tools. T-Minus exposes 26 tools through its MCP
+        server, giving any compatible AI agent full access to your temporal
+        intelligence engine.
+      </p>
+      <p class="text-text-secondary leading-relaxed mb-12 max-w-3xl">
+        Point Claude, GPT, or any MCP-compatible assistant at
+        <code class="font-mono text-accent-cyan text-sm">https://mcp.tminus.dev</code>
+        and it can read your calendar, propose meeting times, track relationships,
+        and manage scheduling constraints -- all through natural language.
+      </p>
+
+      <!-- Tool Categories -->
+      <div class="grid md:grid-cols-2 gap-8 mb-16">
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Account Management</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">list_accounts</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Connected calendar accounts</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_sync_status</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Last sync time, health, errors</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Event Operations</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">list_events</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Query canonical events by range</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">create_event</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Create with auto-projection</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_event_briefing</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Pre-meeting context + history</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Availability</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_availability</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Binary or probabilistic mode</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Scheduling</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">propose_times</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Constraint-aware time proposals</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">commit_candidate</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Book a proposed candidate</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Relationships</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">add_relationship</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Add to contact graph</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">mark_outcome</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Log interaction outcome</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_drift_report</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Fading relationships</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_reconnection_suggestions</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Geo-aware reconnection ops</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Governance</h3>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_commitment_status</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Real-time compliance check</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">export_commitment_proof</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">SHA-256 verified proof doc</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mcp-category space-y-3 md:col-span-2">
+          <h3 class="text-sm font-semibold text-text-primary uppercase tracking-wider">Policy Management</h3>
+          <div class="flex flex-wrap gap-x-8 gap-y-2">
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">get_policies</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">List active sync/projection policies</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="font-mono text-xs text-accent-cyan">update_policy</code>
+              <span class="text-text-muted text-xs">&#x2014;</span>
+              <span class="text-text-secondary text-sm">Modify projection rules and detail levels</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Code Example -->
+      <h3 class="text-xl font-semibold text-text-primary mb-6">Example: Claude MCP Interaction</h3>
+      <div class="code-block mb-8">
+        <div class="code-header">
+          <span class="code-dot" style="background: #ff5f57;"></span>
+          <span class="code-dot" style="background: #febc2e;"></span>
+          <span class="code-dot" style="background: #28c840;"></span>
+          <span class="text-text-muted text-xs ml-2 font-mono">claude-conversation.txt</span>
+        </div>
+        <div class="code-body">
+<span class="syn-comment">// User asks Claude to find meeting time with a drifting contact</span>
+
+<span class="syn-type">User</span><span class="syn-operator">:</span> <span class="syn-string">"I need to catch up with Sarah Chen. We haven't met in a while.</span>
+<span class="syn-string">       Find a good time next week."</span>
+
+<span class="syn-comment">// Claude calls T-Minus MCP tools automatically:</span>
+
+<span class="syn-comment">// Step 1: Check relationship status</span>
+<span class="syn-function">get_drift_report</span><span class="syn-bracket">()</span>
+<span class="syn-operator">-></span> <span class="syn-bracket">{</span>
+     <span class="syn-property">contact</span><span class="syn-operator">:</span> <span class="syn-string">"Sarah Chen"</span><span class="syn-operator">,</span>
+     <span class="syn-property">category</span><span class="syn-operator">:</span> <span class="syn-string">"investor"</span><span class="syn-operator">,</span>
+     <span class="syn-property">last_interaction</span><span class="syn-operator">:</span> <span class="syn-string">"2025-11-14"</span><span class="syn-operator">,</span>
+     <span class="syn-property">drift_severity</span><span class="syn-operator">:</span> <span class="syn-string">"high"</span><span class="syn-operator">,</span>
+     <span class="syn-property">days_since_contact</span><span class="syn-operator">:</span> <span class="syn-number">93</span>
+   <span class="syn-bracket">}</span>
+
+<span class="syn-comment">// Step 2: Get briefing context</span>
+<span class="syn-function">get_event_briefing</span><span class="syn-bracket">(</span><span class="syn-property">contact</span><span class="syn-operator">:</span> <span class="syn-string">"Sarah Chen"</span><span class="syn-bracket">)</span>
+<span class="syn-operator">-></span> <span class="syn-bracket">{</span>
+     <span class="syn-property">last_topics</span><span class="syn-operator">:</span> <span class="syn-bracket">[</span><span class="syn-string">"Series A timeline"</span><span class="syn-operator">,</span> <span class="syn-string">"board composition"</span><span class="syn-bracket">]</span><span class="syn-operator">,</span>
+     <span class="syn-property">reliability_score</span><span class="syn-operator">:</span> <span class="syn-number">0.94</span><span class="syn-operator">,</span>
+     <span class="syn-property">upcoming_milestones</span><span class="syn-operator">:</span> <span class="syn-bracket">[</span><span class="syn-string">"Fund III closing (March)"</span><span class="syn-bracket">]</span>
+   <span class="syn-bracket">}</span>
+
+<span class="syn-comment">// Step 3: Find available time</span>
+<span class="syn-function">propose_times</span><span class="syn-bracket">(</span>
+  <span class="syn-property">duration</span><span class="syn-operator">:</span> <span class="syn-number">45</span><span class="syn-operator">,</span>
+  <span class="syn-property">range</span><span class="syn-operator">:</span> <span class="syn-string">"next_week"</span><span class="syn-operator">,</span>
+  <span class="syn-property">preferences</span><span class="syn-operator">:</span> <span class="syn-bracket">{</span> <span class="syn-property">avoid_deep_work</span><span class="syn-operator">:</span> <span class="syn-constant">true</span> <span class="syn-bracket">}</span>
+<span class="syn-bracket">)</span>
+<span class="syn-operator">-></span> <span class="syn-bracket">[</span>
+     <span class="syn-bracket">{</span> <span class="syn-property">start</span><span class="syn-operator">:</span> <span class="syn-string">"Tue 2:00 PM"</span><span class="syn-operator">,</span> <span class="syn-property">score</span><span class="syn-operator">:</span> <span class="syn-number">0.92</span><span class="syn-operator">,</span> <span class="syn-property">impact</span><span class="syn-operator">:</span> <span class="syn-string">"low"</span> <span class="syn-bracket">}</span><span class="syn-operator">,</span>
+     <span class="syn-bracket">{</span> <span class="syn-property">start</span><span class="syn-operator">:</span> <span class="syn-string">"Thu 10:00 AM"</span><span class="syn-operator">,</span> <span class="syn-property">score</span><span class="syn-operator">:</span> <span class="syn-number">0.87</span><span class="syn-operator">,</span> <span class="syn-property">impact</span><span class="syn-operator">:</span> <span class="syn-string">"low"</span> <span class="syn-bracket">}</span><span class="syn-operator">,</span>
+     <span class="syn-bracket">{</span> <span class="syn-property">start</span><span class="syn-operator">:</span> <span class="syn-string">"Fri 3:30 PM"</span><span class="syn-operator">,</span> <span class="syn-property">score</span><span class="syn-operator">:</span> <span class="syn-number">0.81</span><span class="syn-operator">,</span> <span class="syn-property">impact</span><span class="syn-operator">:</span> <span class="syn-string">"medium"</span> <span class="syn-bracket">}</span>
+   <span class="syn-bracket">]</span>
+
+<span class="syn-type">Claude</span><span class="syn-operator">:</span> <span class="syn-string">"It's been 93 days since you last met with Sarah Chen --</span>
+<span class="syn-string">        that's flagged as high drift. Your best option is Tuesday</span>
+<span class="syn-string">        at 2 PM: low schedule impact, no deep work disruption.</span>
+<span class="syn-string">        Last time you discussed Series A timeline and board</span>
+<span class="syn-string">        composition. Her Fund III is closing in March -- might</span>
+<span class="syn-string">        be worth mentioning. Want me to book it?"</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Architecture -->
+  <section id="architecture" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <span class="tag mb-4">Architecture</span>
+      <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Zero servers. Pure edge.</h2>
+      <p class="text-text-secondary text-lg leading-relaxed mb-12 max-w-3xl">
+        T-Minus runs entirely on Cloudflare's global edge network. No origin
+        servers, no containers, no orchestration. Compute and storage are colocated
+        at the Durable Object level, giving each user a dedicated isolated runtime
+        with zero network hop on the hot path.
+      </p>
+
+      <!-- Architecture Diagram -->
+      <div class="space-y-6 mb-16">
+        <!-- Workers Tier -->
+        <div class="arch-tier">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-4">Workers &mdash; Edge Compute</h3>
+          <div class="flex flex-wrap gap-3">
+            <span class="arch-node arch-node-accent">API</span>
+            <span class="arch-node arch-node-accent">OAuth</span>
+            <span class="arch-node arch-node-accent">Webhook</span>
+            <span class="arch-node arch-node-accent">Sync Consumer</span>
+            <span class="arch-node arch-node-accent">Write Consumer</span>
+            <span class="arch-node arch-node-accent">MCP</span>
+            <span class="arch-node arch-node-accent">Cron</span>
+            <span class="arch-node arch-node-accent">Push</span>
+          </div>
+        </div>
+
+        <!-- Arrow -->
+        <div class="flex justify-center text-text-muted text-xl">&#x2193; &#x2193; &#x2193;</div>
+
+        <!-- Durable Objects Tier -->
+        <div class="arch-tier">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-4">Durable Objects &mdash; Stateful Coordination</h3>
+          <div class="flex flex-wrap gap-3">
+            <span class="arch-node">UserGraphDO <span class="text-text-muted text-xs ml-1">(per-user)</span></span>
+            <span class="arch-node">AccountDO <span class="text-text-muted text-xs ml-1">(per-account)</span></span>
+            <span class="arch-node">GroupScheduleDO <span class="text-text-muted text-xs ml-1">(per-session)</span></span>
+          </div>
+          <p class="text-text-muted text-xs mt-3">Each DO instance has its own SQLite database -- 10 GB per user, colocated compute + storage</p>
+        </div>
+
+        <!-- Arrow -->
+        <div class="flex justify-center text-text-muted text-xl">&#x2193; &#x2193; &#x2193;</div>
+
+        <!-- Storage Tier -->
+        <div class="arch-tier">
+          <h3 class="text-xs uppercase tracking-widest text-text-muted mb-4">Storage & Messaging</h3>
+          <div class="flex flex-wrap gap-3">
+            <span class="arch-node">D1 <span class="text-text-muted text-xs ml-1">(registry)</span></span>
+            <span class="arch-node">R2 <span class="text-text-muted text-xs ml-1">(proofs &amp; audit)</span></span>
+            <span class="arch-node">Queues <span class="text-text-muted text-xs ml-1">(async processing)</span></span>
+            <span class="arch-node">Workflows <span class="text-text-muted text-xs ml-1">(multi-step)</span></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Architecture Details -->
+      <div class="grid md:grid-cols-2 gap-8">
+        <div class="feature-card rounded-2xl p-8">
+          <h3 class="font-semibold text-text-primary mb-4">Per-User Isolation</h3>
+          <p class="text-text-secondary text-sm leading-relaxed mb-4">
+            Each user gets a dedicated <code class="font-mono text-accent-cyan text-xs">UserGraphDO</code>
+            instance with its own SQLite database. All per-user data -- events,
+            policies, relationships, commitments -- lives in that single colocated
+            store. No cross-tenant data leakage. No shared database bottlenecks.
+          </p>
+          <div class="space-y-2 text-sm text-text-secondary">
+            <p><span class="text-accent-cyan">&#x2192;</span> 10 GB storage per user</p>
+            <p><span class="text-accent-cyan">&#x2192;</span> Zero network hop for reads/writes</p>
+            <p><span class="text-accent-cyan">&#x2192;</span> Natural tenant isolation</p>
+            <p><span class="text-accent-cyan">&#x2192;</span> No cross-user contention</p>
+          </div>
+        </div>
+        <div class="feature-card rounded-2xl p-8">
+          <h3 class="font-semibold text-text-primary mb-4">Event-Sourced Journal</h3>
+          <p class="text-text-secondary text-sm leading-relaxed mb-4">
+            Every mutation to the canonical event store produces an append-only
+            journal entry recording the actor, change type, JSON patch, and reason.
+            This powers audit trails, commitment compliance proofs, and temporal
+            versioning.
+          </p>
+          <div class="code-block">
+            <div class="code-body text-xs" style="padding: 12px 16px;">
+<span class="syn-bracket">{</span>
+  <span class="syn-property">"actor"</span><span class="syn-operator">:</span> <span class="syn-string">"sync-consumer"</span><span class="syn-operator">,</span>
+  <span class="syn-property">"change_type"</span><span class="syn-operator">:</span> <span class="syn-string">"UPDATE"</span><span class="syn-operator">,</span>
+  <span class="syn-property">"canonical_event_id"</span><span class="syn-operator">:</span> <span class="syn-string">"evt_01HX..."</span><span class="syn-operator">,</span>
+  <span class="syn-property">"patch"</span><span class="syn-operator">:</span> <span class="syn-bracket">{</span> <span class="syn-property">"start"</span><span class="syn-operator">:</span> <span class="syn-string">"..."</span> <span class="syn-bracket">}</span><span class="syn-operator">,</span>
+  <span class="syn-property">"reason"</span><span class="syn-operator">:</span> <span class="syn-string">"provider_delta"</span><span class="syn-operator">,</span>
+  <span class="syn-property">"timestamp"</span><span class="syn-operator">:</span> <span class="syn-string">"2026-02-15T..."</span>
+<span class="syn-bracket">}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Self-Hosting -->
+  <section id="self-hosting" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <span class="tag mb-4">Deployment</span>
+      <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Self-Hosting</h2>
+      <p class="text-text-secondary text-lg leading-relaxed mb-12 max-w-3xl">
+        T-Minus is designed for Cloudflare deployment. A single
+        <code class="font-mono text-accent-cyan">wrangler deploy</code> pushes
+        everything to the edge. Environment configuration is straightforward.
+      </p>
+
+      <div class="grid md:grid-cols-2 gap-8">
+        <div>
+          <h3 class="font-semibold text-text-primary mb-6">Deployment Workflow</h3>
+          <div class="code-block mb-6">
+            <div class="code-header">
+              <span class="code-dot" style="background: #ff5f57;"></span>
+              <span class="code-dot" style="background: #febc2e;"></span>
+              <span class="code-dot" style="background: #28c840;"></span>
+              <span class="text-text-muted text-xs ml-2 font-mono">terminal</span>
+            </div>
+            <div class="code-body text-xs">
+<span class="syn-comment"># Clone and install</span>
+<span class="syn-function">git</span> clone https://github.com/tminus-dev/tminus.git
+<span class="syn-function">cd</span> tminus
+<span class="syn-function">npm</span> install
+
+<span class="syn-comment"># Configure environment</span>
+<span class="syn-function">cp</span> .env.example .env.production
+<span class="syn-comment"># Edit .env.production with your secrets</span>
+
+<span class="syn-comment"># Deploy to Cloudflare</span>
+<span class="syn-function">npx</span> wrangler deploy --env production
+
+<span class="syn-comment"># Verify</span>
+<span class="syn-function">curl</span> https://your-domain.com/v1/health
+<span class="syn-operator">-></span> <span class="syn-bracket">{</span> <span class="syn-property">"status"</span><span class="syn-operator">:</span> <span class="syn-string">"ok"</span> <span class="syn-bracket">}</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h3 class="font-semibold text-text-primary mb-6">Environment Configuration</h3>
+          <div class="space-y-4">
+            <div class="feature-card rounded-xl p-5">
+              <div class="flex items-center gap-3 mb-2">
+                <span class="w-2 h-2 rounded-full bg-green-400"></span>
+                <h4 class="text-sm font-semibold text-text-primary">Development</h4>
+              </div>
+              <p class="text-text-secondary text-sm">
+                Local dev with <code class="font-mono text-accent-cyan text-xs">wrangler dev</code>.
+                Uses local D1/R2/DO emulation. Hot reload for all workers.
+              </p>
+            </div>
+            <div class="feature-card rounded-xl p-5">
+              <div class="flex items-center gap-3 mb-2">
+                <span class="w-2 h-2 rounded-full bg-yellow-400"></span>
+                <h4 class="text-sm font-semibold text-text-primary">Staging</h4>
+              </div>
+              <p class="text-text-secondary text-sm">
+                Full Cloudflare deployment with staging credentials. Separate D1
+                databases, R2 buckets, and queue bindings from production.
+              </p>
+            </div>
+            <div class="feature-card rounded-xl p-5">
+              <div class="flex items-center gap-3 mb-2">
+                <span class="w-2 h-2 rounded-full bg-accent-cyan"></span>
+                <h4 class="text-sm font-semibold text-text-primary">Production</h4>
+              </div>
+              <p class="text-text-secondary text-sm">
+                Production secrets via <code class="font-mono text-accent-cyan text-xs">wrangler secret</code>.
+                Separate OAuth client IDs, encryption keys, and API configurations.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-20 px-6">
+    <div class="max-w-3xl mx-auto text-center">
+      <div class="feature-card rounded-2xl p-12">
+        <h2 class="text-2xl md:text-3xl font-bold tracking-tight mb-4">
+          Start building.
+        </h2>
+        <p class="text-text-secondary mb-8 max-w-lg mx-auto">
+          Explore the full feature set or dive straight into the API.
+          T-Minus gives you programmatic control over temporal intelligence.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+          <a href="features.html" class="inline-flex items-center justify-center px-6 py-3 bg-accent-cyan text-bg-primary font-semibold rounded-lg hover:bg-accent-cyanDim transition-colors">
+            Explore Features <span class="ml-2">&#x2192;</span>
+          </a>
+          <a href="index.html" class="inline-flex items-center justify-center px-6 py-3 border border-border-accent text-accent-cyan font-semibold rounded-lg hover:bg-accent-cyanGlow transition-colors">
+            Back to Home
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-border-subtle py-12 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+      <div class="flex items-center gap-2 text-sm text-text-muted">
+        <span class="gradient-text font-bold">T-Minus</span>
+        <span>&middot;</span>
+        <span>Temporal & Relational Intelligence Engine</span>
+      </div>
+      <div class="flex items-center gap-6">
+        <a href="index.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Home</a>
+        <a href="features.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Features</a>
+        <a href="pricing.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Pricing</a>
+        <a href="developers.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Developers</a>
+      </div>
+      <p class="text-sm text-text-muted">Built on Cloudflare. Zero servers.</p>
+    </div>
+  </footer>
+
+  <script>
+    document.getElementById('mobile-menu-btn').addEventListener('click', function () {
+      document.getElementById('mobile-menu').classList.toggle('hidden');
+    });
+  </script>
+</body>
+</html>

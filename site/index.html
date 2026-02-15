@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>T-Minus | Calendar Intelligence Platform</title>
+  <meta name="description" content="T-Minus federates your calendars, scores cognitive load, tracks relationships, and gives your AI assistant 26 tools to manage your time. Built on Cloudflare's edge.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: {
+              900: '#0a0a0f',
+              800: '#0d0d14',
+              700: '#12121c',
+              600: '#181824',
+              500: '#1e1e2e',
+              400: '#252538',
+            },
+            accent: {
+              DEFAULT: '#00d4ff',
+              dim: '#00a8cc',
+              glow: '#00d4ff33',
+            },
+            amber: {
+              warm: '#ffb347',
+              dim: '#cc8f39',
+            },
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    /* ── Base ── */
+    body {
+      background-color: #0a0a0f;
+      color: #e2e2e8;
+    }
+
+    ::selection {
+      background: #00d4ff33;
+      color: #fff;
+    }
+
+    /* ── Gradient mesh hero background ── */
+    .hero-gradient {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      z-index: 0;
+    }
+
+    .hero-gradient::before {
+      content: '';
+      position: absolute;
+      top: -40%;
+      left: -20%;
+      width: 80%;
+      height: 80%;
+      background: radial-gradient(ellipse at center, #00d4ff0a 0%, transparent 70%);
+      animation: drift-1 18s ease-in-out infinite;
+    }
+
+    .hero-gradient::after {
+      content: '';
+      position: absolute;
+      bottom: -30%;
+      right: -10%;
+      width: 70%;
+      height: 70%;
+      background: radial-gradient(ellipse at center, #ffb34708 0%, transparent 70%);
+      animation: drift-2 22s ease-in-out infinite;
+    }
+
+    @keyframes drift-1 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33% { transform: translate(5%, 8%) scale(1.05); }
+      66% { transform: translate(-3%, 4%) scale(0.97); }
+    }
+
+    @keyframes drift-2 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-6%, -4%) scale(1.08); }
+    }
+
+    /* ── Grid pattern overlay ── */
+    .grid-pattern {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: radial-gradient(ellipse at 50% 30%, black 20%, transparent 70%);
+      -webkit-mask-image: radial-gradient(ellipse at 50% 30%, black 20%, transparent 70%);
+    }
+
+    /* ── Scroll fade-in ── */
+    .fade-section {
+      opacity: 0;
+      transform: translateY(32px);
+      transition: opacity 0.7s ease-out, transform 0.7s ease-out;
+    }
+
+    .fade-section.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ── Accent glow line ── */
+    .glow-line {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #00d4ff44, transparent);
+    }
+
+    /* ── Card hover ── */
+    .feature-card {
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .feature-card:hover {
+      border-color: #00d4ff22;
+      box-shadow: 0 0 40px #00d4ff08;
+    }
+
+    /* ── Pricing card highlight ── */
+    .pricing-popular {
+      position: relative;
+    }
+
+    .pricing-popular::before {
+      content: '';
+      position: absolute;
+      inset: -1px;
+      border-radius: 1rem;
+      padding: 1px;
+      background: linear-gradient(180deg, #00d4ff44, transparent 60%);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask-composite: exclude;
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      pointer-events: none;
+    }
+
+    /* ── Code block ── */
+    .code-block {
+      background: #0d0d14;
+      border: 1px solid #1e1e2e;
+      overflow-x: auto;
+    }
+
+    .code-block .keyword { color: #c792ea; }
+    .code-block .string { color: #c3e88d; }
+    .code-block .comment { color: #546e7a; }
+    .code-block .property { color: #82aaff; }
+    .code-block .punct { color: #89ddff; }
+    .code-block .number { color: #f78c6c; }
+    .code-block .fn { color: #82aaff; }
+
+    /* ── Architecture diagram ── */
+    .arch-box {
+      border: 1px solid #252538;
+      background: #12121c;
+      transition: border-color 0.3s ease;
+    }
+
+    .arch-box:hover {
+      border-color: #00d4ff33;
+    }
+
+    .arch-connector {
+      background: linear-gradient(180deg, #00d4ff33, #00d4ff0a);
+      width: 1px;
+    }
+
+    .arch-connector-h {
+      background: linear-gradient(90deg, #00d4ff33, #00d4ff0a);
+      height: 1px;
+    }
+
+    /* ── Nav blur ── */
+    nav {
+      transition: background-color 0.3s ease, backdrop-filter 0.3s ease;
+    }
+
+    /* ── Step numbers ── */
+    .step-number {
+      width: 56px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #00d4ff33;
+      border-radius: 50%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #00d4ff;
+      flex-shrink: 0;
+    }
+
+    /* ── Smooth scroll offset for fixed nav ── */
+    section[id] {
+      scroll-margin-top: 80px;
+    }
+
+    /* ── Button hover effects ── */
+    .btn-primary {
+      background: #00d4ff;
+      color: #0a0a0f;
+      transition: background-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .btn-primary:hover {
+      background: #33ddff;
+      box-shadow: 0 0 24px #00d4ff33;
+    }
+
+    .btn-ghost {
+      border: 1px solid #ffffff22;
+      color: #e2e2e8;
+      transition: border-color 0.2s ease, color 0.2s ease;
+    }
+
+    .btn-ghost:hover {
+      border-color: #00d4ff44;
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body class="font-sans antialiased">
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       NAVIGATION
+       ════════════════════════════════════════════════════════════════════ -->
+  <nav id="main-nav" class="fixed top-0 left-0 right-0 z-50 bg-transparent">
+    <div class="max-w-7xl mx-auto px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16 lg:h-20">
+        <!-- Logo -->
+        <a href="#" class="flex items-center gap-0.5 text-xl font-bold tracking-tight">
+          <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span>
+        </a>
+
+        <!-- Desktop links -->
+        <div class="hidden md:flex items-center gap-8 text-sm text-gray-400">
+          <a href="#features" class="hover:text-white transition-colors">Features</a>
+          <a href="#intelligence" class="hover:text-white transition-colors">Intelligence</a>
+          <a href="#pricing" class="hover:text-white transition-colors">Pricing</a>
+          <a href="#developers" class="hover:text-white transition-colors">Developers</a>
+        </div>
+
+        <!-- CTA -->
+        <div class="flex items-center gap-4">
+          <a href="#pricing" class="hidden sm:inline-block btn-primary px-5 py-2 rounded-lg text-sm font-semibold">
+            Get Early Access
+          </a>
+          <!-- Mobile menu button -->
+          <button id="mobile-menu-btn" class="md:hidden text-gray-400 hover:text-white" aria-label="Menu">
+            <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Mobile menu -->
+      <div id="mobile-menu" class="md:hidden hidden pb-6 border-t border-surface-400">
+        <div class="flex flex-col gap-4 pt-4 text-sm text-gray-400">
+          <a href="#features" class="hover:text-white transition-colors">Features</a>
+          <a href="#intelligence" class="hover:text-white transition-colors">Intelligence</a>
+          <a href="#pricing" class="hover:text-white transition-colors">Pricing</a>
+          <a href="#developers" class="hover:text-white transition-colors">Developers</a>
+          <a href="#pricing" class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold text-center mt-2">
+            Get Early Access
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       HERO
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="relative min-h-screen flex items-center justify-center overflow-hidden">
+    <div class="hero-gradient"></div>
+    <div class="grid-pattern"></div>
+
+    <div class="relative z-10 max-w-5xl mx-auto px-6 text-center pt-20 pb-32">
+      <!-- Eyebrow -->
+      <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-surface-400 text-xs text-gray-400 font-medium mb-8 tracking-wide">
+        <span class="w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>
+        Now in private beta
+      </div>
+
+      <h1 class="text-4xl sm:text-5xl md:text-7xl font-extrabold text-white leading-[1.08] tracking-tight mb-6">
+        Your calendar is<br>
+        <span class="bg-gradient-to-r from-accent to-cyan-300 bg-clip-text text-transparent">lying to you.</span>
+      </h1>
+
+      <p class="max-w-2xl mx-auto text-lg sm:text-xl text-gray-400 leading-relaxed mb-10">
+        T-Minus federates every calendar you own into one canonical view, scores cognitive load in real time,
+        and gives your AI assistant the tools to take over scheduling. Built entirely on Cloudflare's edge.
+      </p>
+
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+        <a href="#pricing" class="btn-primary px-8 py-3.5 rounded-xl text-sm font-semibold tracking-wide">
+          Get Early Access
+        </a>
+        <a href="#how-it-works" class="btn-ghost px-8 py-3.5 rounded-xl text-sm font-semibold tracking-wide">
+          See How It Works &darr;
+        </a>
+      </div>
+
+      <!-- Social proof hint -->
+      <p class="mt-16 text-xs text-gray-600 tracking-wide uppercase">
+        Trusted by founders managing 3&ndash;5 calendar accounts daily
+      </p>
+    </div>
+
+    <!-- Bottom fade -->
+    <div class="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-surface-900 to-transparent"></div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       THE PROBLEM
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="problem" class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">The Calendar Problem</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight">
+          You manage your time blind.
+        </h2>
+        <p class="mt-4 max-w-2xl mx-auto text-gray-400 text-lg">
+          Your calendar shows <em>what</em>. It never shows <em>what it costs you</em>.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-6 lg:gap-8">
+        <!-- Card 1 -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8">
+          <div class="text-3xl text-accent mb-4 font-mono">&#x29C9;</div>
+          <h3 class="text-lg font-semibold text-white mb-3">Fragmented Visibility</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">
+            Three to five calendar accounts across Google and Microsoft.
+            No unified view. Conflicts hide in the gaps between tabs.
+          </p>
+        </div>
+
+        <!-- Card 2 -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8">
+          <div class="text-3xl text-amber-warm mb-4 font-mono">&#x26A0;</div>
+          <h3 class="text-lg font-semibold text-white mb-3">Invisible Costs</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">
+            Context switches erode deep work. Back-to-back meetings accumulate
+            cognitive debt. Burnout creeps in without a signal.
+          </p>
+        </div>
+
+        <!-- Card 3 -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8">
+          <div class="text-3xl text-gray-500 mb-4 font-mono">&#x21C6;</div>
+          <h3 class="text-lg font-semibold text-white mb-3">Relationship Drift</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">
+            Important contacts fade quietly. By the time you notice, the
+            relationship has cooled. No system catches this.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FEATURES -- CALENDAR FEDERATION
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="features" class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+        <div>
+          <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Calendar Federation</p>
+          <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-6">
+            Every account.<br>One truth.
+          </h2>
+          <p class="text-gray-400 leading-relaxed mb-6">
+            Connect Google Workspace, Microsoft 365, and CalDAV accounts.
+            T-Minus builds a canonical event store with real-time incremental sync,
+            conflict resolution, and per-user encryption.
+          </p>
+          <ul class="space-y-3 text-sm text-gray-300">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Real-time push sync via Google &amp; Microsoft webhooks
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Canonical event deduplication across accounts
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Busy-overlay calendars for cross-account visibility
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Encrypted at rest in per-user Durable Object SQLite
+            </li>
+          </ul>
+        </div>
+
+        <!-- Visual: Account cards -->
+        <div class="relative">
+          <div class="space-y-4">
+            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-500 flex items-center justify-center">
+                <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 001 12c0 1.77.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+              </div>
+              <div class="flex-1">
+                <p class="text-white text-sm font-medium">Google Workspace</p>
+                <p class="text-gray-500 text-xs">3 calendars &middot; synced 4s ago</p>
+              </div>
+              <span class="text-xs text-green-400 font-mono">&#x25CF; live</span>
+            </div>
+
+            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-500 flex items-center justify-center">
+                <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                  <path d="M11.4 24H0V12.6h11.4V24z" fill="#F25022"/>
+                  <path d="M24 24H12.6V12.6H24V24z" fill="#FFB900"/>
+                  <path d="M11.4 11.4H0V0h11.4v11.4z" fill="#00A4EF"/>
+                  <path d="M24 11.4H12.6V0H24v11.4z" fill="#7FBA00"/>
+                </svg>
+              </div>
+              <div class="flex-1">
+                <p class="text-white text-sm font-medium">Microsoft 365</p>
+                <p class="text-gray-500 text-xs">2 calendars &middot; synced 12s ago</p>
+              </div>
+              <span class="text-xs text-green-400 font-mono">&#x25CF; live</span>
+            </div>
+
+            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4 opacity-50">
+              <div class="w-10 h-10 rounded-lg bg-surface-500 flex items-center justify-center text-gray-500 font-mono text-sm">
+                DAV
+              </div>
+              <div class="flex-1">
+                <p class="text-gray-400 text-sm font-medium">CalDAV Server</p>
+                <p class="text-gray-600 text-xs">Coming in Phase 5</p>
+              </div>
+              <span class="text-xs text-gray-600 font-mono">&#x25CB; soon</span>
+            </div>
+          </div>
+
+          <!-- Decorative glow -->
+          <div class="absolute -top-8 -right-8 w-40 h-40 bg-accent/5 rounded-full blur-3xl pointer-events-none"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FEATURES -- SCHEDULING INTELLIGENCE
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="intelligence" class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+        <!-- Visual: Intelligence metrics -->
+        <div class="order-2 lg:order-1">
+          <div class="rounded-2xl border border-surface-400 bg-surface-700 p-6 lg:p-8">
+            <div class="flex items-center justify-between mb-6">
+              <p class="text-sm font-medium text-white">Today's Intelligence</p>
+              <span class="text-xs text-gray-500 font-mono">Tue, Feb 15</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4 mb-6">
+              <div class="rounded-xl bg-surface-800 p-4">
+                <p class="text-xs text-gray-500 mb-1">Cognitive Load</p>
+                <p class="text-2xl font-bold text-amber-warm">7.2</p>
+                <p class="text-xs text-amber-warm/70 mt-1">&#x25B2; High &mdash; 3 context switches</p>
+              </div>
+              <div class="rounded-xl bg-surface-800 p-4">
+                <p class="text-xs text-gray-500 mb-1">Deep Work</p>
+                <p class="text-2xl font-bold text-accent">2.5h</p>
+                <p class="text-xs text-accent/70 mt-1">&#x25BC; Below target (4h)</p>
+              </div>
+              <div class="rounded-xl bg-surface-800 p-4">
+                <p class="text-xs text-gray-500 mb-1">Burnout Risk</p>
+                <p class="text-2xl font-bold text-green-400">Low</p>
+                <p class="text-xs text-green-400/70 mt-1">&#x2192; 3-day trend stable</p>
+              </div>
+              <div class="rounded-xl bg-surface-800 p-4">
+                <p class="text-xs text-gray-500 mb-1">Context Switches</p>
+                <p class="text-2xl font-bold text-white">8</p>
+                <p class="text-xs text-gray-500 mt-1">&#x2192; Avg: 6 / day</p>
+              </div>
+            </div>
+
+            <div class="rounded-xl bg-surface-800 p-4">
+              <p class="text-xs text-gray-500 mb-2">What-If: Cancel 2pm standup</p>
+              <div class="flex items-center gap-4 text-xs">
+                <span class="text-accent">Deep work +1.5h</span>
+                <span class="text-gray-600">|</span>
+                <span class="text-green-400">Load &#x2192; 5.1</span>
+                <span class="text-gray-600">|</span>
+                <span class="text-amber-warm">Switches -2</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="order-1 lg:order-2">
+          <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Scheduling Intelligence</p>
+          <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-6">
+            Your calendar has a cognitive cost.<br>
+            <span class="text-gray-500">Now you can see it.</span>
+          </h2>
+          <p class="text-gray-400 leading-relaxed mb-6">
+            Every meeting carries hidden weight. T-Minus computes cognitive load scores,
+            detects deep work erosion, quantifies context-switch costs, and alerts you
+            to burnout risk before you feel it.
+          </p>
+          <ul class="space-y-3 text-sm text-gray-300">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Per-day and per-week cognitive load scoring
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Deep work block detection and protection
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Context-switch cost analysis between meetings
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              What-if simulation for schedule changes
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FEATURES -- RELATIONSHIP GRAPH
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+        <div>
+          <p class="text-amber-warm text-sm font-semibold tracking-widest uppercase mb-4">Relationship Graph</p>
+          <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-6">
+            Never let an important<br>relationship fade.
+          </h2>
+          <p class="text-gray-400 leading-relaxed mb-6">
+            T-Minus tracks interaction frequency across all your calendars,
+            detects social drift, and surfaces reconnection opportunities before
+            relationships go cold.
+          </p>
+          <ul class="space-y-3 text-sm text-gray-300">
+            <li class="flex items-start gap-3">
+              <span class="text-amber-warm mt-0.5">&#x2713;</span>
+              Drift detection with configurable thresholds per contact
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-warm mt-0.5">&#x2713;</span>
+              Reputation scoring based on meeting behavior
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-warm mt-0.5">&#x2713;</span>
+              Reconnection intelligence and nudges
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-amber-warm mt-0.5">&#x2713;</span>
+              Pre-meeting briefings with relationship context
+            </li>
+          </ul>
+        </div>
+
+        <!-- Visual: Drift cards -->
+        <div class="space-y-4">
+          <div class="rounded-xl border border-amber-warm/20 bg-surface-700 p-5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full bg-amber-warm/10 flex items-center justify-center text-amber-warm text-sm font-semibold">SL</div>
+                <div>
+                  <p class="text-white text-sm font-medium">Sarah Lin</p>
+                  <p class="text-gray-500 text-xs">Investor &middot; Board Member</p>
+                </div>
+              </div>
+              <span class="text-xs text-amber-warm font-mono px-2 py-1 rounded-md bg-amber-warm/10">&#x25B2; drifting</span>
+            </div>
+            <p class="text-xs text-gray-400">Last meeting: 47 days ago. Usual cadence: bi-weekly. Suggest: coffee next week.</p>
+          </div>
+
+          <div class="rounded-xl border border-surface-400 bg-surface-700 p-5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full bg-accent/10 flex items-center justify-center text-accent text-sm font-semibold">MK</div>
+                <div>
+                  <p class="text-white text-sm font-medium">Marcus Kim</p>
+                  <p class="text-gray-500 text-xs">CTO &middot; Acme Corp</p>
+                </div>
+              </div>
+              <span class="text-xs text-green-400 font-mono px-2 py-1 rounded-md bg-green-400/10">&#x25CF; active</span>
+            </div>
+            <p class="text-xs text-gray-400">3 meetings this month. Reliability score: 94%. On track for Q1 review.</p>
+          </div>
+
+          <div class="rounded-xl border border-red-500/20 bg-surface-700 p-5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full bg-red-500/10 flex items-center justify-center text-red-400 text-sm font-semibold">JP</div>
+                <div>
+                  <p class="text-white text-sm font-medium">James Park</p>
+                  <p class="text-gray-500 text-xs">Co-founder &middot; Former colleague</p>
+                </div>
+              </div>
+              <span class="text-xs text-red-400 font-mono px-2 py-1 rounded-md bg-red-400/10">&#x25B2; cold</span>
+            </div>
+            <p class="text-xs text-gray-400">Last contact: 93 days ago. Relationship cooling rapidly. Action recommended.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FEATURES -- COMMITMENT COMPLIANCE
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+        <!-- Visual -->
+        <div class="order-2 lg:order-1">
+          <div class="rounded-2xl border border-surface-400 bg-surface-700 p-6 lg:p-8">
+            <div class="flex items-center justify-between mb-6">
+              <p class="text-sm font-medium text-white">Commitment Report</p>
+              <span class="text-xs text-gray-500 font-mono">Jan 2026</span>
+            </div>
+
+            <div class="space-y-4 mb-6">
+              <div>
+                <div class="flex items-center justify-between text-sm mb-2">
+                  <span class="text-gray-400">Acme Corp &mdash; Advisory</span>
+                  <span class="text-white font-mono">18.5h / 20h</span>
+                </div>
+                <div class="h-2 bg-surface-800 rounded-full overflow-hidden">
+                  <div class="h-full bg-accent rounded-full" style="width: 92%"></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex items-center justify-between text-sm mb-2">
+                  <span class="text-gray-400">Board Meetings</span>
+                  <span class="text-white font-mono">6h / 6h</span>
+                </div>
+                <div class="h-2 bg-surface-800 rounded-full overflow-hidden">
+                  <div class="h-full bg-green-400 rounded-full" style="width: 100%"></div>
+                </div>
+              </div>
+              <div>
+                <div class="flex items-center justify-between text-sm mb-2">
+                  <span class="text-gray-400">Startup X &mdash; Consulting</span>
+                  <span class="text-white font-mono">11h / 15h</span>
+                </div>
+                <div class="h-2 bg-surface-800 rounded-full overflow-hidden">
+                  <div class="h-full bg-amber-warm rounded-full" style="width: 73%"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-3 text-xs text-gray-500 border-t border-surface-400 pt-4">
+              <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+              </svg>
+              <span>SHA-256 verified &middot; <span class="text-accent font-mono">f4a8c3...b91e</span> &middot; Exportable PDF</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="order-1 lg:order-2">
+          <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Commitment Compliance</p>
+          <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-6">
+            Prove where your<br>time went.
+          </h2>
+          <p class="text-gray-400 leading-relaxed mb-6">
+            Advisors, consultants, and board members need auditable records.
+            T-Minus tracks billable time against commitments and generates
+            proof documents with cryptographic verification.
+          </p>
+          <ul class="space-y-3 text-sm text-gray-300">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Automatic time tracking against defined commitments
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              SHA-256 hash verification for audit trails
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Exportable PDF and JSON reports
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Compliance alerts before deadlines
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FEATURES -- AI-NATIVE
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">AI-Native</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
+          Your AI assistant's new superpower.
+        </h2>
+        <p class="max-w-2xl mx-auto text-gray-400 text-lg">
+          26 MCP tools give Claude, GPT, or any AI assistant deep access to your
+          temporal graph. Schedule, analyze, and optimize through natural language.
+        </p>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">check_availability</p>
+          <p class="text-sm text-gray-400">Find open slots across all federated calendars</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">get_cognitive_load</p>
+          <p class="text-sm text-gray-400">Score any day's cognitive burden in real time</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">find_deep_work_slots</p>
+          <p class="text-sm text-gray-400">Locate and protect uninterrupted focus time</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">get_drift_alerts</p>
+          <p class="text-sm text-gray-400">Surface relationships that need attention</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">simulate_change</p>
+          <p class="text-sm text-gray-400">Model the impact of adding or moving a meeting</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <p class="font-mono text-xs text-accent mb-2">create_event</p>
+          <p class="text-sm text-gray-400">Schedule across any connected account</p>
+        </div>
+      </div>
+
+      <p class="text-center text-sm text-gray-500 mt-8">
+        &hellip; and 20 more tools including commitment tracking, meeting prep, schedule optimization, and conflict resolution.
+      </p>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       HOW IT WORKS
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="how-it-works" class="py-24 lg:py-32">
+    <div class="max-w-4xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">How It Works</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight">
+          Three steps. Zero configuration.
+        </h2>
+      </div>
+
+      <div class="space-y-12 lg:space-y-16">
+        <div class="flex items-start gap-6 lg:gap-10">
+          <div class="step-number">1</div>
+          <div>
+            <h3 class="text-xl font-semibold text-white mb-2">Connect your calendars</h3>
+            <p class="text-gray-400 leading-relaxed">
+              OAuth into Google Workspace, Microsoft 365, or any CalDAV server.
+              T-Minus requests read/write access and begins incremental sync immediately.
+            </p>
+          </div>
+        </div>
+
+        <div class="flex items-start gap-6 lg:gap-10">
+          <div class="step-number">2</div>
+          <div>
+            <h3 class="text-xl font-semibold text-white mb-2">T-Minus builds your temporal graph</h3>
+            <p class="text-gray-400 leading-relaxed">
+              Events from every account are deduplicated, enriched, and stored in your
+              personal Durable Object. Relationships, patterns, and commitments emerge
+              from the data automatically.
+            </p>
+          </div>
+        </div>
+
+        <div class="flex items-start gap-6 lg:gap-10">
+          <div class="step-number">3</div>
+          <div>
+            <h3 class="text-xl font-semibold text-white mb-2">Intelligence emerges automatically</h3>
+            <p class="text-gray-400 leading-relaxed">
+              Cognitive load scores, drift alerts, deep work analysis, and commitment
+              tracking activate without configuration. Your AI assistant gains 26 tools
+              to manage it all.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       ARCHITECTURE / TECH CREDIBILITY
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Architecture</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
+          Built on the edge.<br>No servers. No limits.
+        </h2>
+        <p class="max-w-2xl mx-auto text-gray-400 text-lg">
+          Every request runs within milliseconds of the user. Per-user data isolation
+          is architectural, not just policy. There is no central database to breach.
+        </p>
+      </div>
+
+      <!-- Architecture diagram -->
+      <div class="max-w-3xl mx-auto">
+        <!-- Top: Client layer -->
+        <div class="grid grid-cols-3 gap-4 mb-4">
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-gray-500 mb-1">Client</p>
+            <p class="text-sm font-medium text-white">iOS App</p>
+          </div>
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-gray-500 mb-1">Client</p>
+            <p class="text-sm font-medium text-white">MCP Server</p>
+          </div>
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-gray-500 mb-1">Client</p>
+            <p class="text-sm font-medium text-white">REST API</p>
+          </div>
+        </div>
+
+        <!-- Connectors -->
+        <div class="flex justify-center gap-4 mb-4">
+          <div class="arch-connector h-8"></div>
+          <div class="arch-connector h-8"></div>
+          <div class="arch-connector h-8"></div>
+        </div>
+
+        <!-- Middle: Workers -->
+        <div class="arch-box rounded-xl p-6 mb-4">
+          <p class="text-xs text-accent font-mono mb-3 tracking-wider">CLOUDFLARE WORKERS</p>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div class="rounded-lg bg-surface-800 p-3 text-center">
+              <p class="text-xs text-gray-300 font-mono">api</p>
+            </div>
+            <div class="rounded-lg bg-surface-800 p-3 text-center">
+              <p class="text-xs text-gray-300 font-mono">oauth</p>
+            </div>
+            <div class="rounded-lg bg-surface-800 p-3 text-center">
+              <p class="text-xs text-gray-300 font-mono">webhook</p>
+            </div>
+            <div class="rounded-lg bg-surface-800 p-3 text-center">
+              <p class="text-xs text-gray-300 font-mono">sync</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Connectors -->
+        <div class="flex justify-center gap-4 mb-4">
+          <div class="arch-connector h-8"></div>
+        </div>
+
+        <!-- Bottom: Data layer -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-accent/60 mb-1">Per-User</p>
+            <p class="text-sm font-medium text-white font-mono">DO SQLite</p>
+          </div>
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-accent/60 mb-1">Registry</p>
+            <p class="text-sm font-medium text-white font-mono">D1</p>
+          </div>
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-accent/60 mb-1">Async</p>
+            <p class="text-sm font-medium text-white font-mono">Queues</p>
+          </div>
+          <div class="arch-box rounded-lg p-4 text-center">
+            <p class="text-xs text-accent/60 mb-1">Storage</p>
+            <p class="text-sm font-medium text-white font-mono">R2</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Trust badges -->
+      <div class="flex flex-wrap items-center justify-center gap-6 mt-16 text-xs text-gray-500">
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          Encrypted at rest
+        </span>
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          GDPR compliant
+        </span>
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          Per-user isolation
+        </span>
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          Edge-native (&lt;50ms p99)
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       PRICING
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="pricing" class="py-24 lg:py-32">
+    <div class="max-w-5xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Pricing</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
+          Start free. Scale when ready.
+        </h2>
+        <p class="max-w-xl mx-auto text-gray-400">
+          No credit card required for Free tier. Upgrade as your calendar complexity grows.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-6 lg:gap-8">
+        <!-- Free -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8">
+          <p class="text-sm font-semibold text-gray-400 mb-1">Free</p>
+          <div class="flex items-baseline gap-1 mb-6">
+            <span class="text-4xl font-bold text-white">$0</span>
+            <span class="text-gray-500 text-sm">/month</span>
+          </div>
+          <ul class="space-y-3 text-sm text-gray-400 mb-8">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              2 calendar accounts
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Basic sync &amp; federation
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Binary availability (free/busy)
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              MCP server (read-only)
+            </li>
+          </ul>
+          <a href="#" class="block w-full btn-ghost py-3 rounded-xl text-sm font-semibold text-center">
+            Get Started
+          </a>
+        </div>
+
+        <!-- Premium -->
+        <div class="pricing-popular rounded-2xl bg-surface-700 p-8 relative">
+          <div class="absolute -top-3 left-1/2 -translate-x-1/2">
+            <span class="bg-accent text-surface-900 text-xs font-bold px-3 py-1 rounded-full">Most Popular</span>
+          </div>
+          <p class="text-sm font-semibold text-accent mb-1">Premium</p>
+          <div class="flex items-baseline gap-1 mb-6">
+            <span class="text-4xl font-bold text-white">$12</span>
+            <span class="text-gray-500 text-sm">/month</span>
+          </div>
+          <ul class="space-y-3 text-sm text-gray-300 mb-8">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              5 calendar accounts
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Scheduling intelligence
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Cognitive load scoring
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Deep work analysis
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Commitment tracking
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Full MCP server (26 tools)
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              iOS app &amp; Apple Watch
+            </li>
+          </ul>
+          <a href="#" class="block w-full btn-primary py-3 rounded-xl text-sm font-bold text-center">
+            Get Early Access
+          </a>
+        </div>
+
+        <!-- Enterprise -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8">
+          <p class="text-sm font-semibold text-gray-400 mb-1">Enterprise</p>
+          <div class="flex items-baseline gap-1 mb-6">
+            <span class="text-4xl font-bold text-white">$29</span>
+            <span class="text-gray-500 text-sm">/seat/month</span>
+          </div>
+          <ul class="space-y-3 text-sm text-gray-400 mb-8">
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Unlimited accounts
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Everything in Premium
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Relationship graph
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Org-wide policies &amp; RBAC
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Audit trails &amp; compliance
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-accent mt-0.5">&#x2713;</span>
+              Priority support &amp; SLA
+            </li>
+          </ul>
+          <a href="#" class="block w-full btn-ghost py-3 rounded-xl text-sm font-semibold text-center">
+            Contact Sales
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       DEVELOPERS
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="developers" class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-start">
+        <div>
+          <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">For Developers</p>
+          <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-6">
+            Built for developers.<br>
+            <span class="text-gray-500">Powered by AI.</span>
+          </h2>
+          <p class="text-gray-400 leading-relaxed mb-8">
+            T-Minus exposes your temporal graph through three interfaces. Pick the one
+            that fits your workflow &mdash; or use all three.
+          </p>
+
+          <div class="space-y-6">
+            <div class="flex items-start gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-600 flex items-center justify-center text-accent flex-shrink-0">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+              </div>
+              <div>
+                <h4 class="text-white font-semibold mb-1">MCP Server &mdash; 26 Tools</h4>
+                <p class="text-sm text-gray-400">
+                  Model Context Protocol for Claude, GPT, and any MCP-compatible AI.
+                  Natural language calendar management.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-600 flex items-center justify-center text-accent flex-shrink-0">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+              </div>
+              <div>
+                <h4 class="text-white font-semibold mb-1">REST API &mdash; JWT Auth</h4>
+                <p class="text-sm text-gray-400">
+                  Full CRUD with filtering, pagination, and real-time intelligence
+                  endpoints. OpenAPI spec included.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-600 flex items-center justify-center text-accent flex-shrink-0">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+              </div>
+              <div>
+                <h4 class="text-white font-semibold mb-1">CalDAV Feed</h4>
+                <p class="text-sm text-gray-400">
+                  Standard CalDAV endpoint for any compatible client.
+                  Subscribe from Apple Calendar, Thunderbird, or any CalDAV app.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Code example -->
+        <div>
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-xs text-gray-500 font-mono">MCP Tool Call Example</span>
+          </div>
+          <div class="code-block rounded-xl p-6 font-mono text-sm leading-relaxed overflow-x-auto">
+<pre><span class="comment">// Ask your AI assistant:</span>
+<span class="comment">// "Find me a 90-minute focus block tomorrow"</span>
+
+<span class="comment">// T-Minus MCP tool invocation:</span>
+{
+  <span class="property">"tool"</span><span class="punct">:</span> <span class="string">"find_deep_work_slots"</span><span class="punct">,</span>
+  <span class="property">"arguments"</span><span class="punct">:</span> {
+    <span class="property">"date"</span><span class="punct">:</span> <span class="string">"2026-02-16"</span><span class="punct">,</span>
+    <span class="property">"min_duration_minutes"</span><span class="punct">:</span> <span class="number">90</span><span class="punct">,</span>
+    <span class="property">"protect"</span><span class="punct">:</span> <span class="keyword">true</span>
+  }
+}
+
+<span class="comment">// Response:</span>
+{
+  <span class="property">"slots"</span><span class="punct">:</span> [
+    {
+      <span class="property">"start"</span><span class="punct">:</span> <span class="string">"09:00"</span><span class="punct">,</span>
+      <span class="property">"end"</span><span class="punct">:</span> <span class="string">"11:30"</span><span class="punct">,</span>
+      <span class="property">"quality_score"</span><span class="punct">:</span> <span class="number">0.94</span><span class="punct">,</span>
+      <span class="property">"context_switches_before"</span><span class="punct">:</span> <span class="number">0</span><span class="punct">,</span>
+      <span class="property">"cognitive_load_impact"</span><span class="punct">:</span> <span class="number">-1.2</span>
+    }
+  ]<span class="punct">,</span>
+  <span class="property">"recommendation"</span><span class="punct">:</span> <span class="string">"9:00-11:30 is optimal.</span>
+<span class="string">    No prior meetings. Load drops 1.2 points."</span>
+}</pre>
+          </div>
+
+          <div class="code-block rounded-xl p-6 font-mono text-sm leading-relaxed overflow-x-auto mt-4">
+<pre><span class="comment"># REST API</span>
+<span class="keyword">curl</span> -H <span class="string">"Authorization: Bearer $TOKEN"</span> \
+  https://api.tminus.dev/v1/intelligence/load \
+  <span class="punct">-d</span> <span class="string">'{"date": "2026-02-16"}'</span>
+
+<span class="comment"># Returns cognitive load score, breakdown,</span>
+<span class="comment"># deep work hours, and optimization suggestions</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FINAL CTA
+       ════════════════════════════════════════════════════════════════════ -->
+  <section class="py-24 lg:py-32">
+    <div class="max-w-3xl mx-auto px-6 text-center fade-section">
+      <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-6">
+        Stop guessing where<br>your time goes.
+      </h2>
+      <p class="text-lg text-gray-400 mb-10 max-w-xl mx-auto">
+        Join the private beta. Connect your calendars in under two minutes.
+        See what your schedule actually costs you.
+      </p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+        <a href="#pricing" class="btn-primary px-10 py-4 rounded-xl text-sm font-bold tracking-wide">
+          Get Early Access &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FOOTER
+       ════════════════════════════════════════════════════════════════════ -->
+  <footer class="border-t border-surface-400 py-16">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-10 mb-12">
+        <!-- Brand -->
+        <div class="sm:col-span-2 lg:col-span-1">
+          <a href="#" class="flex items-center gap-0.5 text-xl font-bold tracking-tight mb-3">
+            <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span>
+          </a>
+          <p class="text-sm text-gray-500 leading-relaxed">
+            Calendar intelligence for people<br>who take their time seriously.
+          </p>
+        </div>
+
+        <!-- Product -->
+        <div>
+          <p class="text-sm font-semibold text-white mb-4">Product</p>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li><a href="#features" class="hover:text-gray-300 transition-colors">Features</a></li>
+            <li><a href="#intelligence" class="hover:text-gray-300 transition-colors">Intelligence</a></li>
+            <li><a href="#pricing" class="hover:text-gray-300 transition-colors">Pricing</a></li>
+            <li><a href="#developers" class="hover:text-gray-300 transition-colors">Developers</a></li>
+          </ul>
+        </div>
+
+        <!-- Resources -->
+        <div>
+          <p class="text-sm font-semibold text-white mb-4">Resources</p>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Documentation</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">API Reference</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">GitHub</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Changelog</a></li>
+          </ul>
+        </div>
+
+        <!-- Legal -->
+        <div>
+          <p class="text-sm font-semibold text-white mb-4">Company</p>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Privacy Policy</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Terms of Service</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Security</a></li>
+            <li><a href="#" class="hover:text-gray-300 transition-colors">Status</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Bottom bar -->
+      <div class="flex flex-col sm:flex-row items-center justify-between pt-8 border-t border-surface-400 gap-4">
+        <p class="text-xs text-gray-600">
+          &copy; 2026 T-Minus. All rights reserved.
+        </p>
+        <div class="flex items-center gap-2 text-xs text-gray-600">
+          <span>Built on</span>
+          <svg class="h-4" viewBox="0 0 100 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <text x="0" y="15" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#f48120">Cloudflare</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       MINIMAL JAVASCRIPT
+       Intersection Observer for fade-in + nav background + mobile menu
+       ════════════════════════════════════════════════════════════════════ -->
+  <script>
+    // Fade-in on scroll
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.08, rootMargin: '0px 0px -40px 0px' }
+    );
+
+    document.querySelectorAll('.fade-section').forEach((el) => observer.observe(el));
+
+    // Nav background on scroll
+    const nav = document.getElementById('main-nav');
+    let lastScroll = 0;
+
+    window.addEventListener('scroll', () => {
+      const scrollY = window.scrollY;
+      if (scrollY > 60) {
+        nav.style.backgroundColor = 'rgba(10, 10, 15, 0.85)';
+        nav.style.backdropFilter = 'blur(12px)';
+        nav.style.webkitBackdropFilter = 'blur(12px)';
+      } else {
+        nav.style.backgroundColor = 'transparent';
+        nav.style.backdropFilter = 'none';
+        nav.style.webkitBackdropFilter = 'none';
+      }
+      lastScroll = scrollY;
+    }, { passive: true });
+
+    // Mobile menu toggle
+    const menuBtn = document.getElementById('mobile-menu-btn');
+    const mobileMenu = document.getElementById('mobile-menu');
+
+    menuBtn.addEventListener('click', () => {
+      mobileMenu.classList.toggle('hidden');
+    });
+
+    // Close mobile menu on link click
+    mobileMenu.querySelectorAll('a').forEach((link) => {
+      link.addEventListener('click', () => {
+        mobileMenu.classList.add('hidden');
+      });
+    });
+  </script>
+
+</body>
+</html>

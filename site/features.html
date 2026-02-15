@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Features - T-Minus</title>
+  <meta name="description" content="Deep dive into T-Minus features: calendar federation, scheduling intelligence, relationship awareness, commitment governance, and developer platform." />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: {
+              primary: '#0a0a0f',
+              secondary: '#0e0e16',
+              tertiary: '#12121a',
+              card: '#14141e',
+            },
+            accent: {
+              cyan: '#00d4ff',
+              cyanDim: '#00a8cc',
+              cyanGlow: 'rgba(0, 212, 255, 0.15)',
+            },
+            text: {
+              primary: '#e8e8ef',
+              secondary: '#9898a8',
+              muted: '#68687a',
+            },
+            border: {
+              subtle: '#1e1e2a',
+              accent: 'rgba(0, 212, 255, 0.2)',
+            },
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+    body { background: #0a0a0f; }
+
+    .glow-line {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+    }
+
+    .feature-card {
+      background: linear-gradient(135deg, #14141e 0%, #0e0e16 100%);
+      border: 1px solid #1e1e2a;
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+    .feature-card:hover {
+      border-color: rgba(0, 212, 255, 0.3);
+      box-shadow: 0 0 30px rgba(0, 212, 255, 0.06);
+    }
+
+    .section-divider {
+      position: relative;
+      height: 1px;
+      background: #1e1e2a;
+    }
+    .section-divider::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+    }
+
+    .bullet-marker {
+      color: #00d4ff;
+      font-weight: 600;
+    }
+
+    .nav-link {
+      color: #9898a8;
+      transition: color 0.2s ease;
+    }
+    .nav-link:hover {
+      color: #00d4ff;
+    }
+    .nav-link.active {
+      color: #00d4ff;
+    }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #00d4ff, #00a8cc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 10px;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-radius: 9999px;
+      border: 1px solid rgba(0, 212, 255, 0.25);
+      color: #00d4ff;
+      background: rgba(0, 212, 255, 0.06);
+    }
+
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      background: rgba(0, 212, 255, 0.08);
+      border: 1px solid rgba(0, 212, 255, 0.15);
+      color: #00d4ff;
+      font-size: 1.25rem;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body class="font-sans text-text-primary antialiased">
+
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 border-b border-border-subtle" style="background: rgba(10, 10, 15, 0.85); backdrop-filter: blur(16px);">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="index.html" class="flex items-center gap-2 text-lg font-bold tracking-tight">
+        <span class="gradient-text">T</span><span class="text-text-primary">-Minus</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8">
+        <a href="index.html" class="nav-link text-sm">Home</a>
+        <a href="features.html" class="nav-link active text-sm">Features</a>
+        <a href="pricing.html" class="nav-link text-sm">Pricing</a>
+        <a href="developers.html" class="nav-link text-sm">Developers</a>
+      </div>
+      <div class="md:hidden">
+        <button id="mobile-menu-btn" class="text-text-secondary hover:text-accent-cyan transition-colors" aria-label="Menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="mobile-menu" class="hidden md:hidden border-t border-border-subtle">
+      <div class="px-6 py-4 flex flex-col gap-4">
+        <a href="index.html" class="nav-link text-sm">Home</a>
+        <a href="features.html" class="nav-link active text-sm">Features</a>
+        <a href="pricing.html" class="nav-link text-sm">Pricing</a>
+        <a href="developers.html" class="nav-link text-sm">Developers</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="pt-32 pb-20 px-6">
+    <div class="max-w-4xl mx-auto text-center">
+      <h1 class="text-4xl md:text-6xl font-bold tracking-tight leading-tight mb-6">
+        Everything your calendar<br />
+        <span class="gradient-text">should have been.</span>
+      </h1>
+      <p class="text-lg md:text-xl text-text-secondary max-w-2xl mx-auto leading-relaxed">
+        T-Minus goes beyond sync. It understands your time, your relationships, and
+        your commitments -- then gives you the intelligence to make better decisions
+        about all three.
+      </p>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-md mx-auto mb-20"></div>
+
+  <!-- Feature 1: Calendar Federation -->
+  <section id="federation" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div>
+          <span class="tag mb-4">Foundation</span>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Calendar Federation</h2>
+          <p class="text-text-secondary text-lg leading-relaxed mb-8">
+            Connect every calendar you use into a single canonical store. Events flow
+            in via real-time webhooks, get classified and deduplicated, then project
+            outward based on your policies.
+          </p>
+          <div class="space-y-5">
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x21C4;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Multi-Provider Sync</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Google Calendar API v3 and Microsoft Graph integration. Each external
+                  account gets a dedicated Durable Object for serialized token refresh,
+                  cursor management, and per-account rate limiting.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x26A1;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Webhook-Driven Real-Time Updates</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Push notifications arrive at the edge, get validated, and trigger
+                  incremental sync within seconds. Daily drift reconciliation catches
+                  anything webhooks miss -- because they will.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x1F512;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Envelope Encryption</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  OAuth tokens are encrypted at rest using AES-256-GCM with per-account
+                  data encryption keys, wrapped by a master key. Token refresh is
+                  serialized through AccountDO to prevent races.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2699;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Policy-Based Projections</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Define how events flow between accounts: busy overlays (default),
+                  detail mirroring, or custom projections. Loop prevention via
+                  <code class="font-mono text-accent-cyan text-xs">extendedProperties</code>
+                  markers ensures managed events are never re-ingested as origin.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="feature-card rounded-2xl p-8">
+          <h4 class="text-xs uppercase tracking-widest text-text-muted mb-6">How it works</h4>
+          <div class="space-y-4">
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">01</span>
+              <p class="text-text-secondary text-sm">Webhook fires from Google Calendar. Edge worker validates channel ID and resource state.</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">02</span>
+              <p class="text-text-secondary text-sm">Sync message enqueued. Consumer pulls incremental delta via syncToken from AccountDO.</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">03</span>
+              <p class="text-text-secondary text-sm">Events classified: origin, managed mirror, or foreign. Origins get canonical IDs (ULIDs).</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">04</span>
+              <p class="text-text-secondary text-sm">Policy compiler computes projections. Stable hash comparison skips unchanged mirrors.</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">05</span>
+              <p class="text-text-secondary text-sm">Write jobs enqueued with idempotency keys. Consumer executes Calendar API writes.</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-accent-cyan font-mono text-sm mt-0.5">06</span>
+              <p class="text-text-secondary text-sm">Append-only journal records every mutation with actor, change type, patch, and reason.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Feature 2: Scheduling Intelligence -->
+  <section id="scheduling" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div class="lg:order-2">
+          <span class="tag mb-4">Intelligence</span>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Scheduling Intelligence</h2>
+          <p class="text-text-secondary text-lg leading-relaxed mb-8">
+            Your calendar is not just a list of events. T-Minus computes cognitive
+            load, quantifies context switch costs, and scores temporal risk -- so you
+            can protect your time before it is gone.
+          </p>
+          <div class="space-y-5">
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2261;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Cognitive Load Engine</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Meeting density, fragmentation score, and aggregate daily/weekly
+                  metrics give you a quantified picture of how loaded your schedule
+                  actually is -- not just how full it looks.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x21C6;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Context Switch Cost Matrix</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Events are categorized -- engineering, sales, admin, hiring, deep work --
+                  and transition costs between categories are quantified. Back-to-back
+                  deep-work-to-sales is expensive. You should know that before it happens.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x25A0;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Deep Work Detection</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Finds uninterrupted blocks, suggests optimizations, and measures the
+                  impact of proposed changes on your focus time before you commit.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x26A0;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Temporal Risk Scoring</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Burnout risk from overwork patterns, travel overload from trip frequency,
+                  and strategic drift when time allocation diverges from stated intentions.
+                  Measured. Scored. Surfaced before it is too late.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="lg:order-1 feature-card rounded-2xl p-8">
+          <h4 class="text-xs uppercase tracking-widest text-text-muted mb-6">Capabilities</h4>
+          <div class="space-y-6">
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">What-If Simulation</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Model the impact of adding a commitment before you say yes. See how
+                a new weekly meeting affects your deep work blocks, context switch
+                frequency, and cognitive load score.
+              </p>
+            </div>
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">Probabilistic Availability</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Tentative events are weighted by historical cancellation rates. A
+                "maybe" from someone who cancels 40% of meetings is very different
+                from a "maybe" from someone who never does.
+              </p>
+            </div>
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">Constraint System</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Buffer policies, working hours, no-meetings-after rules, and VIP
+                overrides. Constraints compose and resolve to produce a schedule
+                that respects your boundaries.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Feature 3: Relationship Intelligence -->
+  <section id="relationships" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div>
+          <span class="tag mb-4">Awareness</span>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Relationship Intelligence</h2>
+          <p class="text-text-secondary text-lg leading-relaxed mb-8">
+            Your calendar is a graph of human relationships. T-Minus tracks who you
+            meet, how often, and whether those connections are thriving or fading --
+            then helps you do something about it.
+          </p>
+          <div class="space-y-5">
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2B21;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Contact Graph</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Categorized relationships -- colleague, friend, family, investor, client,
+                  board member -- with full interaction history. Know who matters and how
+                  much time you are actually spending with them.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2696;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Reputation Scoring</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Reliability scores with recency decay. Reciprocity tracking with
+                  asymmetry detection. An interaction ledger tracking 7 outcome types
+                  with weighted scoring builds a picture you can trust.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x21E3;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Social Drift Detection</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Daily computation, severity badges, and proactive alerts when
+                  relationships are fading. "You haven't met with Sarah in 3 months"
+                  is not a notification -- it is a signal.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2691;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Reconnection Suggestions</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  "You are in SF next week -- here are contacts you have not seen in
+                  6 months." Geo-aware, context-aware, priority-weighted reconnection
+                  opportunities surfaced when they are actionable.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="feature-card rounded-2xl p-8">
+          <h4 class="text-xs uppercase tracking-widest text-text-muted mb-6">More capabilities</h4>
+          <div class="space-y-6">
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">Milestone Tracking</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Birthdays, work anniversaries, important dates. Never miss a milestone
+                for someone who matters. Proactive reminders surface at the right time.
+              </p>
+            </div>
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">Pre-Meeting Briefings</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Before every meeting: topic extraction from the invite, summary of your
+                last interaction, relationship health score, and any recent milestones.
+                Walk in prepared.
+              </p>
+            </div>
+            <div class="p-4 rounded-lg bg-bg-primary border border-border-subtle">
+              <h5 class="text-sm font-semibold text-text-primary mb-2">Excuse Generator</h5>
+              <p class="text-text-secondary text-sm leading-relaxed">
+                Tone-aware, truth-level-adjustable decline messages. From "politely
+                vague" to "transparently honest." Because sometimes no is the right
+                answer, and the wording should not take 20 minutes.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Feature 4: Commitment & Governance -->
+  <section id="governance" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="grid lg:grid-cols-2 gap-16 items-start">
+        <div class="lg:order-2">
+          <span class="tag mb-4">Governance</span>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Commitment & Governance</h2>
+          <p class="text-text-secondary text-lg leading-relaxed mb-8">
+            Track where your time actually goes. Define commitments, monitor compliance,
+            and produce verifiable proof -- for yourself, your clients, or your board.
+          </p>
+          <div class="space-y-5">
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2630;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Time Allocation Tagging</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Tag events with billable categories per client. Track time at the
+                  granularity that matters: by project, by client, by function.
+                  Automatic categorization from event metadata.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2714;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Commitment Tracking</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Rolling windows -- weekly and monthly -- with real-time compliance
+                  status. Compliant, under, or over threshold. Know before the period
+                  ends, not after.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2318;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Exportable Proof Documents</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  PDF and CSV exports with SHA-256 hash verification. Stored in R2
+                  with 7-year retention. When someone asks "how much time did you
+                  spend on X?" you have a cryptographically verifiable answer.
+                </p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="feature-icon">
+                <span>&#x2692;</span>
+              </div>
+              <div>
+                <h3 class="font-semibold text-text-primary mb-1">Policy Merge</h3>
+                <p class="text-text-secondary text-sm leading-relaxed">
+                  Org-level policy merge for enterprises: organization overrides compose
+                  with user preferences. VIP priority policies ensure the right people
+                  always get through.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="lg:order-1 feature-card rounded-2xl p-8">
+          <h4 class="text-xs uppercase tracking-widest text-text-muted mb-6">Compliance flow</h4>
+          <div class="space-y-3">
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">1</span>
+              <span class="text-text-secondary text-sm">Define commitment: "20h/week for Client A"</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">2</span>
+              <span class="text-text-secondary text-sm">Events auto-tagged by calendar, title pattern, or manual override</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">3</span>
+              <span class="text-text-secondary text-sm">Rolling window tracks hours: real-time compliance status</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">4</span>
+              <span class="text-text-secondary text-sm">Alerts fire when you are trending under or over threshold</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">5</span>
+              <span class="text-text-secondary text-sm">End of period: export proof document (PDF/CSV)</span>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-bg-primary border border-border-subtle">
+              <span class="text-accent-cyan font-mono text-xs w-6 text-center">6</span>
+              <span class="text-text-secondary text-sm">SHA-256 digest computed, document stored in R2 (7-year retention)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-6xl mx-auto"></div>
+
+  <!-- Feature 5: Platform & Integration -->
+  <section id="platform" class="py-20 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="text-center mb-16">
+        <span class="tag mb-4">Platform</span>
+        <h2 class="text-3xl md:text-4xl font-bold tracking-tight mt-4 mb-4">Platform & Integration</h2>
+        <p class="text-text-secondary text-lg leading-relaxed max-w-2xl mx-auto">
+          T-Minus meets you where you are. REST API, MCP server for AI assistants,
+          CalDAV for legacy clients, native mobile, and a full web dashboard.
+        </p>
+      </div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x2730;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">MCP Server</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            26 tools for AI assistants. Let Claude, GPT, or any MCP-compatible agent
+            read your calendar, propose times, manage relationships, and run scheduling
+            workflows -- all through natural language.
+          </p>
+        </div>
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x2194;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">REST API</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            Full API with JWT and API key authentication. Every feature is accessible
+            programmatically. Rate limiting per tier, CORS support, and comprehensive
+            security headers.
+          </p>
+        </div>
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x29C9;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">CalDAV Feed</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            Standard CalDAV endpoint for clients that speak the protocol. Thunderbird,
+            macOS Calendar, and any CalDAV-compatible application can subscribe to
+            your unified view.
+          </p>
+        </div>
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x25C7;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">iOS App</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            Unified calendar view, push notifications, Today widget, and Apple Watch
+            complication. Your federated calendar in your pocket, with glanceable
+            intelligence on your wrist.
+          </p>
+        </div>
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x25A3;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">Web Dashboard</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            11 pages covering every feature: unified calendar, account management,
+            policies, scheduling, relationships, governance, reconnections, briefings,
+            admin controls, and billing.
+          </p>
+        </div>
+        <div class="feature-card rounded-2xl p-6">
+          <div class="feature-icon mb-4">
+            <span>&#x2617;</span>
+          </div>
+          <h3 class="font-semibold text-text-primary mb-2">Security & Rate Limiting</h3>
+          <p class="text-text-secondary text-sm leading-relaxed">
+            Per-tier rate limits, envelope encryption for credentials, CORS policies,
+            CSP headers, and per-user tenant isolation. Enterprise-grade security
+            from the edge.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-20 px-6">
+    <div class="max-w-3xl mx-auto text-center">
+      <div class="feature-card rounded-2xl p-12">
+        <h2 class="text-2xl md:text-3xl font-bold tracking-tight mb-4">
+          Ready to take control of your time?
+        </h2>
+        <p class="text-text-secondary mb-8 max-w-lg mx-auto">
+          T-Minus is built for people who work across multiple organizations and
+          need their calendars to be as smart as they are.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+          <a href="developers.html" class="inline-flex items-center justify-center px-6 py-3 bg-accent-cyan text-bg-primary font-semibold rounded-lg hover:bg-accent-cyanDim transition-colors">
+            View the API <span class="ml-2">&#x2192;</span>
+          </a>
+          <a href="index.html" class="inline-flex items-center justify-center px-6 py-3 border border-border-accent text-accent-cyan font-semibold rounded-lg hover:bg-accent-cyanGlow transition-colors">
+            Back to Home
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-border-subtle py-12 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+      <div class="flex items-center gap-2 text-sm text-text-muted">
+        <span class="gradient-text font-bold">T-Minus</span>
+        <span>&middot;</span>
+        <span>Temporal & Relational Intelligence Engine</span>
+      </div>
+      <div class="flex items-center gap-6">
+        <a href="index.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Home</a>
+        <a href="features.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Features</a>
+        <a href="pricing.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Pricing</a>
+        <a href="developers.html" class="text-sm text-text-muted hover:text-accent-cyan transition-colors">Developers</a>
+      </div>
+      <p class="text-sm text-text-muted">Built on Cloudflare. Zero servers.</p>
+    </div>
+  </footer>
+
+  <script>
+    document.getElementById('mobile-menu-btn').addEventListener('click', function () {
+      document.getElementById('mobile-menu').classList.toggle('hidden');
+    });
+  </script>
+</body>
+</html>
