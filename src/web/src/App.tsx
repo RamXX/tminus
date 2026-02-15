@@ -12,6 +12,7 @@
  *   #/billing     -> Billing & Subscription (requires auth)
  *   #/scheduling  -> Scheduling Dashboard (requires auth)
  *   #/governance  -> Governance Dashboard (requires auth)
+ *   #/relationships -> Relationships Dashboard (requires auth)
  *   default       -> redirects to login or calendar based on auth state
  */
 
@@ -26,6 +27,7 @@ import { ErrorRecovery } from "./pages/ErrorRecovery";
 import { Billing } from "./pages/Billing";
 import { Scheduling } from "./pages/Scheduling";
 import { Governance } from "./pages/Governance";
+import { Relationships } from "./pages/Relationships";
 import {
   fetchSyncStatus,
   fetchAccounts,
@@ -45,6 +47,15 @@ import {
   addVip,
   removeVip,
   exportCommitmentProof,
+  fetchRelationships,
+  createRelationship,
+  fetchRelationship,
+  updateRelationship,
+  deleteRelationship,
+  fetchReputation,
+  fetchOutcomes,
+  createOutcome,
+  fetchDriftReport,
 } from "./lib/api";
 import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
 
@@ -215,6 +226,73 @@ function Router() {
     [token],
   );
 
+  // Bound relationship functions -- injects current token
+  const boundFetchRelationships = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchRelationships(token);
+  }, [token]);
+
+  const boundCreateRelationship = useCallback(
+    async (payload: import("./lib/relationships").CreateRelationshipPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      return createRelationship(token, payload);
+    },
+    [token],
+  );
+
+  const boundFetchRelationship = useCallback(
+    async (id: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchRelationship(token, id);
+    },
+    [token],
+  );
+
+  const boundUpdateRelationship = useCallback(
+    async (id: string, payload: import("./lib/relationships").UpdateRelationshipPayload) => {
+      if (!token) throw new Error("Not authenticated");
+      return updateRelationship(token, id, payload);
+    },
+    [token],
+  );
+
+  const boundDeleteRelationship = useCallback(
+    async (id: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return deleteRelationship(token, id);
+    },
+    [token],
+  );
+
+  const boundFetchReputation = useCallback(
+    async (id: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchReputation(token, id);
+    },
+    [token],
+  );
+
+  const boundFetchOutcomes = useCallback(
+    async (relationshipId: string) => {
+      if (!token) throw new Error("Not authenticated");
+      return fetchOutcomes(token, relationshipId);
+    },
+    [token],
+  );
+
+  const boundCreateOutcome = useCallback(
+    async (relationshipId: string, payload: import("./lib/relationships").CreateOutcomePayload) => {
+      if (!token) throw new Error("Not authenticated");
+      return createOutcome(token, relationshipId, payload);
+    },
+    [token],
+  );
+
+  const boundFetchDriftReport = useCallback(async () => {
+    if (!token) throw new Error("Not authenticated");
+    return fetchDriftReport(token);
+  }, [token]);
+
   // Redirect logic based on auth state
   if (!token && route !== "#/login") {
     window.location.hash = "#/login";
@@ -286,6 +364,20 @@ function Router() {
           addVip={boundAddVip}
           removeVip={boundRemoveVip}
           exportProof={boundExportProof}
+        />
+      );
+    case "#/relationships":
+      return (
+        <Relationships
+          fetchRelationships={boundFetchRelationships}
+          createRelationship={boundCreateRelationship}
+          fetchRelationship={boundFetchRelationship}
+          updateRelationship={boundUpdateRelationship}
+          deleteRelationship={boundDeleteRelationship}
+          fetchReputation={boundFetchReputation}
+          fetchOutcomes={boundFetchOutcomes}
+          createOutcome={boundCreateOutcome}
+          fetchDriftReport={boundFetchDriftReport}
         />
       );
     default:

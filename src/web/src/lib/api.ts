@@ -430,3 +430,128 @@ export async function exportCommitmentProof(
     { method: "POST", token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Relationships
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/relationships -- list all relationships. */
+export async function fetchRelationships(
+  token: string,
+  sort?: string,
+): Promise<import("./relationships").Relationship[]> {
+  const qs = sort ? `?sort=${encodeURIComponent(sort)}` : "";
+  return apiFetch<import("./relationships").Relationship[]>(
+    `/v1/relationships${qs}`,
+    { token },
+  );
+}
+
+/** POST /api/v1/relationships -- create a new relationship. */
+export async function createRelationship(
+  token: string,
+  payload: import("./relationships").CreateRelationshipPayload,
+): Promise<import("./relationships").Relationship> {
+  return apiFetch<import("./relationships").Relationship>(
+    "/v1/relationships",
+    { method: "POST", body: payload, token },
+  );
+}
+
+/** GET /api/v1/relationships/:id -- get a single relationship. */
+export async function fetchRelationship(
+  token: string,
+  id: string,
+): Promise<import("./relationships").Relationship> {
+  return apiFetch<import("./relationships").Relationship>(
+    `/v1/relationships/${encodeURIComponent(id)}`,
+    { token },
+  );
+}
+
+/** PUT /api/v1/relationships/:id -- update a relationship. */
+export async function updateRelationship(
+  token: string,
+  id: string,
+  payload: import("./relationships").UpdateRelationshipPayload,
+): Promise<import("./relationships").Relationship> {
+  return apiFetch<import("./relationships").Relationship>(
+    `/v1/relationships/${encodeURIComponent(id)}`,
+    { method: "PUT", body: payload, token },
+  );
+}
+
+/** DELETE /api/v1/relationships/:id -- delete a relationship. */
+export async function deleteRelationship(
+  token: string,
+  id: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/v1/relationships/${encodeURIComponent(id)}`,
+    { method: "DELETE", token },
+  );
+}
+
+/** GET /api/v1/relationships/:id/reputation -- get reputation scores. */
+export async function fetchReputation(
+  token: string,
+  id: string,
+): Promise<import("./relationships").ReputationScores> {
+  return apiFetch<import("./relationships").ReputationScores>(
+    `/v1/relationships/${encodeURIComponent(id)}/reputation`,
+    { token },
+  );
+}
+
+/** POST /api/v1/relationships/:id/outcomes -- record an outcome. */
+export async function createOutcome(
+  token: string,
+  relationshipId: string,
+  payload: import("./relationships").CreateOutcomePayload,
+): Promise<import("./relationships").Outcome> {
+  return apiFetch<import("./relationships").Outcome>(
+    `/v1/relationships/${encodeURIComponent(relationshipId)}/outcomes`,
+    { method: "POST", body: payload, token },
+  );
+}
+
+/** GET /api/v1/relationships/:id/outcomes -- list outcomes. */
+export async function fetchOutcomes(
+  token: string,
+  relationshipId: string,
+): Promise<import("./relationships").Outcome[]> {
+  return apiFetch<import("./relationships").Outcome[]>(
+    `/v1/relationships/${encodeURIComponent(relationshipId)}/outcomes`,
+    { token },
+  );
+}
+
+/** GET /api/v1/drift-report -- get drift report. */
+export async function fetchDriftReport(
+  token: string,
+): Promise<import("./relationships").DriftReport> {
+  return apiFetch<import("./relationships").DriftReport>(
+    "/v1/drift-report",
+    { token },
+  );
+}
+
+/** GET /api/v1/drift-alerts -- get drift alerts. */
+export async function fetchDriftAlerts(
+  token: string,
+): Promise<import("./relationships").DriftAlert[]> {
+  return apiFetch<import("./relationships").DriftAlert[]>(
+    "/v1/drift-alerts",
+    { token },
+  );
+}
+
+/** GET /api/v1/reconnection-suggestions -- get reconnection suggestions. */
+export async function fetchReconnectionSuggestions(
+  token: string,
+): Promise<import("./relationships").ReconnectionSuggestion[]> {
+  return apiFetch<import("./relationships").ReconnectionSuggestion[]>(
+    "/v1/reconnection-suggestions",
+    { token },
+  );
+}
