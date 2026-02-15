@@ -34,6 +34,8 @@ import {
   validateAddTripParams,
   validateAddConstraintParams,
   validateListConstraintsParams,
+  validateGetCommitmentStatusParams,
+  validateExportCommitmentProofParams,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -3372,5 +3374,300 @@ describe("scheduling tools with missing API binding", () => {
     expect(error).toBeDefined();
     expect(error.code).toBe(-32603);
     expect(error.message).toContain("service binding");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance tools: Zod validation for calendar.get_commitment_status
+// ---------------------------------------------------------------------------
+
+describe("validateGetCommitmentStatusParams", () => {
+  it("accepts empty args (no filter)", () => {
+    const result = validateGetCommitmentStatusParams(undefined);
+    expect(result).toEqual({});
+  });
+
+  it("accepts empty object (no filter)", () => {
+    const result = validateGetCommitmentStatusParams({});
+    expect(result).toEqual({});
+  });
+
+  it("accepts valid client filter", () => {
+    const result = validateGetCommitmentStatusParams({ client: "acme-corp" });
+    expect(result.client).toBe("acme-corp");
+  });
+
+  it("rejects empty string client", () => {
+    expect(() =>
+      validateGetCommitmentStatusParams({ client: "" }),
+    ).toThrow("client must be a non-empty string");
+  });
+
+  it("strips unknown fields", () => {
+    const result = validateGetCommitmentStatusParams({
+      client: "acme",
+      unknown_field: 123,
+    });
+    expect(result.client).toBe("acme");
+    expect((result as Record<string, unknown>)["unknown_field"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance tools: Zod validation for calendar.export_commitment_proof
+// ---------------------------------------------------------------------------
+
+describe("validateExportCommitmentProofParams", () => {
+  it("accepts valid commitment_id with default format", () => {
+    const result = validateExportCommitmentProofParams({
+      commitment_id: "cmt_01abc",
+    });
+    expect(result.commitment_id).toBe("cmt_01abc");
+    expect(result.format).toBe("pdf");
+  });
+
+  it("accepts valid commitment_id with pdf format", () => {
+    const result = validateExportCommitmentProofParams({
+      commitment_id: "cmt_01abc",
+      format: "pdf",
+    });
+    expect(result.commitment_id).toBe("cmt_01abc");
+    expect(result.format).toBe("pdf");
+  });
+
+  it("accepts valid commitment_id with csv format", () => {
+    const result = validateExportCommitmentProofParams({
+      commitment_id: "cmt_01abc",
+      format: "csv",
+    });
+    expect(result.commitment_id).toBe("cmt_01abc");
+    expect(result.format).toBe("csv");
+  });
+
+  it("rejects missing args (undefined)", () => {
+    expect(() =>
+      validateExportCommitmentProofParams(undefined),
+    ).toThrow("Missing required parameters: commitment_id");
+  });
+
+  it("rejects empty commitment_id", () => {
+    expect(() =>
+      validateExportCommitmentProofParams({ commitment_id: "" }),
+    ).toThrow("commitment_id is required");
+  });
+
+  it("rejects missing commitment_id", () => {
+    expect(() =>
+      validateExportCommitmentProofParams({}),
+    ).toThrow("commitment_id");
+  });
+
+  it("rejects invalid format", () => {
+    expect(() =>
+      validateExportCommitmentProofParams({
+        commitment_id: "cmt_01abc",
+        format: "docx",
+      }),
+    ).toThrow("Invalid");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance tools: checkTierAccess for commitment tools
+// ---------------------------------------------------------------------------
+
+describe("checkTierAccess for governance commitment tools", () => {
+  const GOVERNANCE_PREMIUM_TOOLS = [
+    "calendar.get_commitment_status",
+    "calendar.export_commitment_proof",
+  ];
+
+  for (const tool of GOVERNANCE_PREMIUM_TOOLS) {
+    it(`free user is denied ${tool}`, () => {
+      const result = checkTierAccess(tool, "free");
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) {
+        expect(result.required_tier).toBe("premium");
+        expect(result.current_tier).toBe("free");
+        expect(result.tool).toBe(tool);
+      }
+    });
+
+    it(`premium user is allowed ${tool}`, () => {
+      const result = checkTierAccess(tool, "premium");
+      expect(result.allowed).toBe(true);
+    });
+
+    it(`enterprise user is allowed ${tool}`, () => {
+      const result = checkTierAccess(tool, "enterprise");
+      expect(result.allowed).toBe(true);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Governance tools: tier gating via MCP dispatch
+// ---------------------------------------------------------------------------
+
+describe("tier gating for governance commitment tools via MCP dispatch", () => {
+  it("free user calling calendar.get_commitment_status returns TIER_REQUIRED", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader(); // free tier
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: {},
+        },
+        id: 501,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string; data?: Record<string, unknown> };
+    expect(error).toBeDefined();
+    expect(error.message).toContain("premium");
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+  });
+
+  it("free user calling calendar.export_commitment_proof returns TIER_REQUIRED", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader(); // free tier
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_01abc" },
+        },
+        id: 502,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string; data?: Record<string, unknown> };
+    expect(error).toBeDefined();
+    expect(error.message).toContain("premium");
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+  });
+
+  it("premium user calling calendar.get_commitment_status without API binding returns service binding error", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv(); // no API binding
+    const token = await generateJWT(
+      {
+        sub: TEST_USER_ID,
+        email: TEST_EMAIL,
+        tier: "premium",
+        pwd_ver: 1,
+      },
+      JWT_SECRET,
+      3600,
+    );
+    const authHeader = `Bearer ${token}`;
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: {},
+        },
+        id: 503,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toContain("service binding");
+  });
+
+  it("premium user calling calendar.export_commitment_proof without API binding returns service binding error", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv(); // no API binding
+    const token = await generateJWT(
+      {
+        sub: TEST_USER_ID,
+        email: TEST_EMAIL,
+        tier: "premium",
+        pwd_ver: 1,
+      },
+      JWT_SECRET,
+      3600,
+    );
+    const authHeader = `Bearer ${token}`;
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_01abc" },
+        },
+        id: 504,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const error = result.body.error as { code: number; message: string };
+    expect(error).toBeDefined();
+    expect(error.code).toBe(-32603);
+    expect(error.message).toContain("service binding");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance tools: tools/list registration
+// ---------------------------------------------------------------------------
+
+describe("governance commitment tools registration", () => {
+  it("tools/list includes calendar.get_commitment_status and calendar.export_commitment_proof", async () => {
+    const handler = createMcpHandler();
+    const env = createMinimalEnv();
+    const authHeader = await makeAuthHeader();
+
+    const result = await sendMcpRequest(
+      handler,
+      env,
+      {
+        jsonrpc: "2.0",
+        method: "tools/list",
+        id: 510,
+      },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.error).toBeUndefined();
+    const resultData = result.body.result as { tools: Array<{ name: string }> };
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.get_commitment_status");
+    expect(toolNames).toContain("calendar.export_commitment_proof");
+    // Also verify existing governance tools are still registered
+    expect(toolNames).toContain("calendar.set_vip");
+    expect(toolNames).toContain("calendar.tag_billable");
   });
 });

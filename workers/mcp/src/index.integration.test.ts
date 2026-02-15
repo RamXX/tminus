@@ -1791,7 +1791,7 @@ describe("MCP integration: calendar.get_availability", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: tools/list includes policy management tools", () => {
-  it("returns all 15 tools including policy, constraint, and scheduling management tools", async () => {
+  it("returns all 22 tools including policy, constraint, scheduling, and governance tools", async () => {
     const authHeader = await makeAuthHeader();
     const result = await sendMcpRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 200 },
@@ -1809,7 +1809,7 @@ describe("MCP integration: tools/list includes policy management tools", () => {
     expect(toolNames).toContain("calendar.list_constraints");
     expect(toolNames).toContain("calendar.propose_times");
     expect(toolNames).toContain("calendar.commit_candidate");
-    expect(resultData.tools.length).toBe(15);
+    expect(resultData.tools.length).toBe(22);
   });
 });
 
@@ -3149,5 +3149,397 @@ describe("MCP integration: scheduling tools -- tools/list registration (TM-946.5
     const toolNames = resultData.tools.map((t) => t.name);
     expect(toolNames).toContain("calendar.propose_times");
     expect(toolNames).toContain("calendar.commit_candidate");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance commitment tools (TM-yke.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mock API Fetcher for governance commitment endpoints.
+ *
+ * Simulates:
+ * - GET /v1/commitments/status -> returns commitment compliance list
+ * - GET /v1/commitments/status?client=X -> returns filtered compliance
+ * - POST /v1/commitments/:id/export -> returns proof download URL
+ */
+function createMockGovernanceApi(options?: {
+  statusResponse?: unknown;
+  exportResponse?: unknown;
+  statusCode?: number;
+  exportCode?: number;
+}): Fetcher {
+  const statusData = options?.statusResponse ?? {
+    ok: true,
+    data: {
+      commitments: [
+        {
+          commitment_id: "cmt_01abc",
+          client: "acme-corp",
+          hours_committed: 40,
+          hours_delivered: 38.5,
+          compliance_pct: 96.25,
+          window_start: "2026-02-01T00:00:00Z",
+          window_end: "2026-02-28T23:59:59Z",
+          status: "on_track",
+        },
+        {
+          commitment_id: "cmt_02def",
+          client: "globex",
+          hours_committed: 20,
+          hours_delivered: 12,
+          compliance_pct: 60.0,
+          window_start: "2026-02-01T00:00:00Z",
+          window_end: "2026-02-28T23:59:59Z",
+          status: "at_risk",
+        },
+      ],
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  const exportData = options?.exportResponse ?? {
+    ok: true,
+    data: {
+      commitment_id: "cmt_01abc",
+      format: "pdf",
+      download_url: "https://r2.tminus.ink/proofs/cmt_01abc/proof-2026-02-15.pdf",
+      sha256: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      generated_at: "2026-02-15T12:00:00Z",
+    },
+    meta: { request_id: "req_test", timestamp: new Date().toISOString() },
+  };
+
+  return {
+    fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+      const url = typeof input === "string" ? input : input.url;
+      const method = init?.method ?? "GET";
+
+      // GET /v1/commitments/status (with optional ?client= query param)
+      if (method === "GET" && url.includes("/v1/commitments/status")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(statusData), {
+            status: options?.statusCode ?? 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+
+      // POST /v1/commitments/:id/export
+      if (method === "POST" && url.includes("/export")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(exportData), {
+            status: options?.exportCode ?? 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: false, error: "Unknown endpoint" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    },
+    connect: vi.fn() as unknown as Fetcher["connect"],
+  } as unknown as Fetcher;
+}
+
+describe("MCP integration: governance commitment tools (TM-yke.6)", () => {
+  // -- calendar.get_commitment_status: success path --
+  it("calendar.get_commitment_status returns compliance for all commitments", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockGovernanceApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: {},
+        },
+        id: 801,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data.commitments).toBeDefined();
+    expect(Array.isArray(data.commitments)).toBe(true);
+    expect(data.commitments.length).toBe(2);
+    expect(data.commitments[0].client).toBe("acme-corp");
+    expect(data.commitments[0].compliance_pct).toBe(96.25);
+  });
+
+  it("calendar.get_commitment_status with client filter passes query param", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    let capturedUrl = "";
+    const api = {
+      fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        capturedUrl = typeof input === "string" ? input : input.url;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                commitments: [
+                  {
+                    commitment_id: "cmt_01abc",
+                    client: "acme-corp",
+                    hours_committed: 40,
+                    hours_delivered: 38.5,
+                    compliance_pct: 96.25,
+                    status: "on_track",
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn() as unknown as Fetcher["connect"],
+    } as unknown as Fetcher;
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: { client: "acme-corp" },
+        },
+        id: 802,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    expect(capturedUrl).toContain("/v1/commitments/status");
+    expect(capturedUrl).toContain("client=acme-corp");
+  });
+
+  // -- calendar.export_commitment_proof: success path --
+  it("calendar.export_commitment_proof returns download URL", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockGovernanceApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_01abc" },
+        },
+        id: 803,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    expect(result.body.result).toBeDefined();
+    const content = (result.body.result as { content: Array<{ text: string }> }).content;
+    const data = JSON.parse(content[0].text);
+    expect(data.download_url).toContain("https://");
+    expect(data.sha256).toBeDefined();
+    expect(data.commitment_id).toBe("cmt_01abc");
+  });
+
+  it("calendar.export_commitment_proof with csv format routes correctly", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    let capturedBody: Record<string, unknown> = {};
+    const api = {
+      fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        if (init?.body) {
+          capturedBody = JSON.parse(init.body as string);
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                commitment_id: "cmt_01abc",
+                format: "csv",
+                download_url: "https://r2.tminus.ink/proofs/cmt_01abc/proof-2026-02-15.csv",
+                sha256: "abcdef1234567890",
+                generated_at: "2026-02-15T12:00:00Z",
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      connect: vi.fn() as unknown as Fetcher["connect"],
+    } as unknown as Fetcher;
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_01abc", format: "csv" },
+        },
+        id: 804,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeUndefined();
+    expect(capturedBody.format).toBe("csv");
+  });
+
+  // -- Tier enforcement: free user denied --
+  it("free user calling calendar.get_commitment_status is denied", async () => {
+    const authHeader = await makeAuthHeaderWithTier("free");
+    const api = createMockGovernanceApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: {},
+        },
+        id: 805,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeDefined();
+    const error = result.body.error as { data?: { code?: string } };
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+  });
+
+  it("free user calling calendar.export_commitment_proof is denied", async () => {
+    const authHeader = await makeAuthHeaderWithTier("free");
+    const api = createMockGovernanceApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_01abc" },
+        },
+        id: 806,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeDefined();
+    const error = result.body.error as { data?: { code?: string } };
+    expect(error.data?.code).toBe("TIER_REQUIRED");
+  });
+
+  // -- API error forwarding --
+  it("calendar.get_commitment_status forwards API error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockGovernanceApi({
+      statusResponse: { ok: false, error: "Service temporarily unavailable" },
+      statusCode: 503,
+    });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.get_commitment_status",
+          arguments: {},
+        },
+        id: 807,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeDefined();
+    const error = result.body.error as { message: string };
+    expect(error.message).toContain("Service temporarily unavailable");
+  });
+
+  it("calendar.export_commitment_proof forwards API error", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockGovernanceApi({
+      exportResponse: { ok: false, error: "Commitment not found" },
+      exportCode: 404,
+    });
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: { commitment_id: "cmt_nonexistent" },
+        },
+        id: 808,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeDefined();
+    const error = result.body.error as { message: string };
+    expect(error.message).toContain("Commitment not found");
+  });
+
+  // -- Validation errors (bad input) --
+  it("calendar.export_commitment_proof rejects missing commitment_id", async () => {
+    const authHeader = await makeAuthHeaderWithTier("premium");
+    const api = createMockGovernanceApi();
+
+    const result = await sendMcpRequestWithApi(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "calendar.export_commitment_proof",
+          arguments: {},
+        },
+        id: 809,
+      },
+      authHeader,
+      api,
+    );
+
+    expect(result.body.error).toBeDefined();
+    const error = result.body.error as { code: number; message: string };
+    expect(error.code).toBe(-32602); // RPC_INVALID_PARAMS
+    expect(error.message).toContain("commitment_id");
+  });
+});
+
+describe("MCP integration: governance tools -- tools/list registration (TM-yke.6)", () => {
+  it("tools/list includes all governance tools", async () => {
+    const authHeader = await makeAuthHeader();
+    const result = await sendMcpRequest(
+      { jsonrpc: "2.0", method: "tools/list", id: 810 },
+      authHeader,
+    );
+
+    expect(result.status).toBe(200);
+    const resultData = result.body.result as { tools: Array<{ name: string }> };
+    const toolNames = resultData.tools.map((t) => t.name);
+    expect(toolNames).toContain("calendar.set_vip");
+    expect(toolNames).toContain("calendar.tag_billable");
+    expect(toolNames).toContain("calendar.get_commitment_status");
+    expect(toolNames).toContain("calendar.export_commitment_proof");
   });
 });
