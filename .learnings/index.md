@@ -10,6 +10,9 @@ Accumulated insights from epic retrospectives. Organized by category.
 | TM-852 | Walking Skeleton: Webhook to Busy Overlay | 2026-02-14 | [TM-852-retro.md](TM-852-retro.md) |
 | TM-as6 | Phase 2A: Production Deployment & Auth | 2026-02-14 | [TM-as6-retro.md](TM-as6-retro.md) |
 | TM-4qw | Phase 2B: MCP Server | 2026-02-14 | [TM-4qw-retro.md](TM-4qw-retro.md) |
+| TM-nyj | Phase 2C: Web Calendar UI | 2026-02-14 | [TM-nyj-retro.md](TM-nyj-retro.md) |
+| TM-gj5 | Phase 2D: Trip & Constraint System | 2026-02-14 | [TM-gj5-retro.md](TM-gj5-retro.md) |
+| TM-9ue | Phase 3C: Billing | 2026-02-15 | [TM-9ue-retro.md](TM-9ue-retro.md) |
 
 ## Categories
 
@@ -23,7 +26,7 @@ Accumulated insights from epic retrospectives. Organized by category.
 - [External Dependencies](external-deps.md) - Third-party libraries, platform constraints, API quirks
 
 ## Epic Retrospectives
-- [Epic TM-nyj Retro](TM-nyj-retro.md) - Phase 2C: Web Calendar UI (2026-02-14)
 
-## Epic Retrospectives
-- [Epic TM-gj5 Retro](TM-gj5-retro.md) - Phase 2D Trip & Constraint System - 2026-02-14
+- [Epic TM-nyj Retro](TM-nyj-retro.md) - Phase 2C: Web Calendar UI (2026-02-14)
+- [Epic TM-gj5 Retro](TM-gj5-retro.md) - Phase 2D: Trip & Constraint System (2026-02-14)
+- [Epic TM-9ue Retro](TM-9ue-retro.md) - Phase 3C: Billing (2026-02-15)

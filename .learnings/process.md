@@ -122,3 +122,22 @@ Sr. PM can then decide whether to collapse stories or keep them separate. The ke
 
 **Source stories:** TM-nyj.2
 
+---
+
+## [Added from Epic TM-9ue retro - 2026-02-15]
+
+### Update Story Template for Integration Test Execution
+
+**Priority:** Important
+
+**Context:** TM-jfs.2 and TM-jfs.3 both had verification failures due to confusion about integration test execution. The vitest workspace config excludes `*.integration.test.ts` files, requiring explicit `--config vitest.integration.config.ts` flag.
+
+**Recommendation:**
+1. Sr. PM should add to all API story templates: "Run integration tests with: `vitest --config vitest.integration.config.ts`"
+2. Include this in ACs for stories that add integration tests
+3. Consider updating the project README with clear test execution commands
+
+**Applies to:** All future API stories with integration tests
+
+**Source stories:** TM-jfs.2, TM-jfs.3
+

@@ -28,6 +28,25 @@ Insights related to system design, patterns, and technical decisions.
 
 **Source stories:** TM-gj5.2
 
+---
+
+## [Added from Epic TM-9ue retro - 2026-02-15]
+
+### Feature Lifecycle Needs Operational Enforcement Stories
+
+**Priority:** Important
+
+**Context:** TM-jfs.3 implemented grace_period_end column and state transitions, but there's no cron job to actually enforce grace period expiration. Users in grace period will stay there indefinitely until manual intervention.
+
+**Recommendation:**
+1. When designing features with time-based state transitions (grace periods, trials, expiration), ALWAYS include a corresponding cron/operational story in the epic
+2. Sr. PM should validate that lifecycle features have enforcement mechanisms during D&F
+3. For this specific case, create a follow-up story: "Cron job to enforce grace period expiration and downgrade users"
+
+**Applies to:** All features with time-based state machines (trials, grace periods, scheduled actions)
+
+**Source stories:** TM-jfs.3
+
 ## Nice-to-have Insights
 
 ---

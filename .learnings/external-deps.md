@@ -22,3 +22,22 @@ For the typical case (2-5 accounts, <100 events), this is negligible overhead. D
 **Applies to:** All D1 queries with multi-ID filters (account_id, event_id, policy_id)
 
 **Source stories:** TM-4qw.4
+
+---
+
+## [Added from Epic TM-9ue retro - 2026-02-15]
+
+### Spell-Check External API Mappings
+
+**Priority:** Important
+
+**Context:** Stripe uses "canceled" (American spelling) but T-Minus DB schema uses "cancelled" (British spelling). This required explicit statusMap mapping in handleSubscriptionUpdated. Easy to miss if not careful.
+
+**Recommendation:**
+1. When integrating external APIs (Stripe, Google, etc.), explicitly document spelling differences in code comments
+2. Create a mapping layer (like statusMap) rather than storing raw API values directly
+3. Add integration tests that verify the mapping (e.g., Stripe "canceled" → DB "cancelled")
+
+**Applies to:** All stories integrating external APIs with enum/status fields
+
+**Source stories:** TM-jfs.3
