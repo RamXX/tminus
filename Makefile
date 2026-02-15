@@ -70,6 +70,13 @@ test-e2e-phase3a: install
 test-e2e-phase4b: install
 	npx vitest run --config vitest.e2e.phase4b.config.ts
 
+# ---- Phase 4C E2E validation ----
+# Context and communication pipeline: briefing + excuse generation + commitment proof.
+# Uses real SQLite + real UserGraphDO + real pure functions (no HTTP server).
+
+test-e2e-phase4c: install
+	npx vitest run --config vitest.e2e.phase4c.config.ts
+
 lint: install
 	pnpm run lint
 
