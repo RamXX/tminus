@@ -33,6 +33,13 @@ import {
   MIN_HOLD_TIMEOUT_MS,
 } from "./holds";
 import type { Hold, HoldStatus, CreateHoldParams, HoldWriteMessage, HoldDeleteMessage } from "./holds";
+import {
+  GreedySolverAdapter,
+  ExternalSolver,
+  selectSolver,
+  createSolverFromEnv,
+} from "./external-solver";
+import type { Solver, SolverResult } from "./external-solver";
 
 // Re-export solver types and constants for consumers
 export { greedySolver, CONSTRAINT_SCORES } from "./solver";
@@ -42,6 +49,16 @@ export type {
   NoMeetingsAfterConstraint, VipOverrideConstraint, OverrideConstraint,
 } from "./solver";
 export { scoreVipOverride } from "./solver";
+
+// Re-export external solver types and functions for consumers (TM-82s.2)
+export {
+  GreedySolverAdapter,
+  ExternalSolver,
+  selectSolver,
+  createSolverFromEnv,
+  EXTERNAL_SOLVER_TIMEOUT_MS,
+} from "./external-solver";
+export type { Solver, SolverResult } from "./external-solver";
 
 // Re-export holds types and helpers for consumers
 export {
@@ -65,6 +82,8 @@ export interface SchedulingEnv {
   USER_GRAPH: DurableObjectNamespace;
   ACCOUNT: DurableObjectNamespace;
   WRITE_QUEUE: Queue;
+  /** Optional: URL of external constraint solver service (TM-82s.2). */
+  SOLVER_ENDPOINT?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +146,17 @@ export interface StoredCandidate {
 
 export class SchedulingWorkflow {
   private readonly env: SchedulingEnv;
+  private readonly solver: Solver;
+  private readonly externalSolver: Solver | null;
 
   constructor(env: SchedulingEnv) {
     this.env = env;
+    // Always have a greedy solver ready (default + fallback)
+    this.solver = new GreedySolverAdapter();
+    // Create external solver only if endpoint is configured
+    this.externalSolver = env.SOLVER_ENDPOINT
+      ? createSolverFromEnv(env.SOLVER_ENDPOINT)
+      : null;
   }
 
   /**
@@ -161,7 +188,8 @@ export class SchedulingWorkflow {
     // Merge VIP override constraints into the constraint list
     const allConstraints: SolverConstraint[] = [...constraints, ...vipConstraints];
 
-    // Step 3: Run greedy solver with constraint-aware + VIP-aware scoring
+    // Step 3: Run solver with constraint-aware + VIP-aware scoring.
+    // Uses pluggable solver: external for complex cases, greedy as default + fallback.
     const solverInput: SolverInput = {
       windowStart: params.windowStart,
       windowEnd: params.windowEnd,
@@ -171,7 +199,9 @@ export class SchedulingWorkflow {
       constraints: allConstraints,
       participantHashes: params.participantHashes,
     };
-    const rawCandidates = greedySolver(solverInput, params.maxCandidates ?? 5);
+    const maxCandidates = params.maxCandidates ?? 5;
+    const solverResult = await this.runSolverWithFallback(solverInput, maxCandidates);
+    const rawCandidates = solverResult.candidates;
 
     // Step 4: Store session and candidates in UserGraphDO
     const candidates: StoredCandidate[] = rawCandidates.map((c) => ({
@@ -418,6 +448,51 @@ export class SchedulingWorkflow {
     } catch {
       // Non-fatal: VIP policies enhance scoring but are not required
       return [];
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Solver execution with fallback (TM-82s.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Run the appropriate solver for the given input, with automatic fallback.
+   *
+   * Decision logic:
+   * 1. If no external solver is configured, always use greedy solver.
+   * 2. If external solver IS configured, use selectSolver() to decide.
+   * 3. If external solver is selected but fails (timeout, error), fall back
+   *    to greedy solver (log warning, do not throw).
+   *
+   * This ensures scheduling always produces results, even if the external
+   * solver service is unavailable.
+   */
+  private async runSolverWithFallback(
+    input: SolverInput,
+    maxCandidates: number,
+  ): Promise<SolverResult> {
+    // If no external solver configured, always use greedy
+    if (!this.externalSolver) {
+      return this.solver.solve(input, maxCandidates);
+    }
+
+    // Determine which solver to use based on problem complexity
+    const selection = selectSolver(input);
+
+    if (selection === "greedy") {
+      return this.solver.solve(input, maxCandidates);
+    }
+
+    // Try external solver with fallback to greedy
+    try {
+      return await this.externalSolver.solve(input, maxCandidates);
+    } catch (err) {
+      // External solver failed -- fall back to greedy solver
+      // This is expected behavior when the external service is unavailable
+      console.warn(
+        `External solver failed, falling back to greedy: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.solver.solve(input, maxCandidates);
     }
   }
 

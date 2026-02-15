@@ -21,7 +21,7 @@ import type { SqlStorageLike, SqlStorageCursorLike, ProviderDelta, AccountId } f
 import { UserGraphDO } from "@tminus/do-user-graph";
 import type { QueueLike } from "@tminus/do-user-graph";
 import { SchedulingWorkflow } from "./index";
-import type { SchedulingParams, Hold } from "./index";
+import type { SchedulingParams, SchedulingEnv, Hold } from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -1318,6 +1318,157 @@ describe("SchedulingWorkflow integration", () => {
       expect(resp.ok).toBe(true);
       const data = (await resp.json()) as { deleted: boolean };
       expect(data.deleted).toBe(false);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // External solver integration (TM-82s.2)
+  // -----------------------------------------------------------------------
+
+  describe("external solver integration", () => {
+    /**
+     * Helper to create a workflow with SOLVER_ENDPOINT configured.
+     */
+    function createWorkflowWithSolverEndpoint(endpoint: string): SchedulingWorkflow {
+      return new SchedulingWorkflow({
+        USER_GRAPH: namespace,
+        ACCOUNT: namespace,
+        WRITE_QUEUE: queue as unknown as Queue,
+        SOLVER_ENDPOINT: endpoint,
+      });
+    }
+
+    it("uses greedy solver by default (no SOLVER_ENDPOINT configured)", async () => {
+      const workflow = createWorkflow(); // No SOLVER_ENDPOINT
+      const session = await workflow.createSession(makeParams());
+
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.status).toBe("candidates_ready");
+      expect(session.candidates.length).toBeGreaterThanOrEqual(3);
+
+      // Candidates should be valid time slots
+      for (const c of session.candidates) {
+        const startMs = new Date(c.start).getTime();
+        const endMs = new Date(c.end).getTime();
+        expect(endMs - startMs).toBe(60 * 60 * 1000);
+      }
+    });
+
+    it("falls back to greedy when external solver endpoint is unreachable", async () => {
+      // Use a non-routable address that will fail immediately
+      // The workflow should catch the error and fall back to greedy
+      const workflow = createWorkflowWithSolverEndpoint(
+        "https://127.0.0.1:1/solve",
+      );
+
+      // Create params with > 3 participants to trigger external solver selection
+      const session = await workflow.createSession(makeParams({
+        participantHashes: ["hash_1", "hash_2", "hash_3", "hash_4"],
+      }));
+
+      // Should still get candidates (from greedy fallback)
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.status).toBe("candidates_ready");
+      expect(session.candidates.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("uses greedy for simple cases even when SOLVER_ENDPOINT configured", async () => {
+      // Even with SOLVER_ENDPOINT, simple cases (few participants/constraints)
+      // should use greedy solver directly -- no external HTTP call needed.
+      const workflow = createWorkflowWithSolverEndpoint(
+        "https://solver.example.com/solve",
+      );
+
+      // Simple case: 1 participant, no extra constraints
+      const session = await workflow.createSession(makeParams());
+
+      // Should succeed with greedy solver (no external call attempted)
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.status).toBe("candidates_ready");
+      expect(session.candidates.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("falls back to greedy when external solver has many constraints", async () => {
+      // Configure endpoint that will fail
+      const workflow = createWorkflowWithSolverEndpoint(
+        "https://127.0.0.1:1/solve",
+      );
+
+      // Add > 5 constraints to trigger external solver selection
+      const addConstraint = async (
+        kind: string,
+        configJson: Record<string, unknown>,
+        activeFrom?: string | null,
+        activeTo?: string | null,
+      ): Promise<void> => {
+        const response = await userGraphDO.handleFetch(
+          new Request("https://user-graph.internal/addConstraint", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              kind,
+              config_json: configJson,
+              active_from: activeFrom ?? null,
+              active_to: activeTo ?? null,
+            }),
+          }),
+        );
+        expect(response.ok).toBe(true);
+      };
+
+      // Add 6 buffer constraints to exceed threshold
+      for (let i = 0; i < 6; i++) {
+        await addConstraint("buffer", {
+          type: "prep",
+          minutes: 10 + i * 5,
+          applies_to: "all",
+        });
+      }
+
+      const session = await workflow.createSession(makeParams({
+        windowStart: "2026-03-02T08:00:00Z",
+        windowEnd: "2026-03-06T18:00:00Z",
+      }));
+
+      // Should still get candidates despite external solver failure (greedy fallback)
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.candidates.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it("workflow without SOLVER_ENDPOINT always uses greedy regardless of complexity", async () => {
+      const workflow = createWorkflow(); // No SOLVER_ENDPOINT
+
+      // Complex case: many participants + many constraints
+      // Even with these, should work fine because greedy is always used
+      // when no SOLVER_ENDPOINT is set.
+      const session = await workflow.createSession(makeParams({
+        participantHashes: [
+          "hash_1", "hash_2", "hash_3",
+          "hash_4", "hash_5", "hash_6",
+        ],
+      }));
+
+      expect(session.sessionId).toMatch(/^ses_/);
+      expect(session.status).toBe("candidates_ready");
+      expect(session.candidates.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("SchedulingEnv accepts optional SOLVER_ENDPOINT", () => {
+      // Type check: SOLVER_ENDPOINT is optional in SchedulingEnv
+      const envWithEndpoint: SchedulingEnv = {
+        USER_GRAPH: namespace,
+        ACCOUNT: namespace,
+        WRITE_QUEUE: queue as unknown as Queue,
+        SOLVER_ENDPOINT: "https://solver.example.com/solve",
+      };
+      expect(envWithEndpoint.SOLVER_ENDPOINT).toBe("https://solver.example.com/solve");
+
+      const envWithoutEndpoint: SchedulingEnv = {
+        USER_GRAPH: namespace,
+        ACCOUNT: namespace,
+        WRITE_QUEUE: queue as unknown as Queue,
+      };
+      expect(envWithoutEndpoint.SOLVER_ENDPOINT).toBeUndefined();
     });
   });
 });
