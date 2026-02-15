@@ -81,6 +81,11 @@ import {
   handleDeleteOrgPolicy,
 } from "./routes/orgs";
 import {
+  handleListOrgUsers,
+  handleDeactivateOrg,
+  handleGetOrgInstallStatus,
+} from "./routes/org-admin";
+import {
   handleUpdateSeats,
   enforceSeatLimit,
 } from "./routes/enterprise-billing";
@@ -6500,6 +6505,22 @@ async function routeAuthenticatedRequest(
         if (method === "GET") {
           return handleListOrgPolicies(request, auth, env.DB, pOrgId);
         }
+      }
+
+      // -- Org admin controls (TM-ga8.4): Marketplace org-level install --
+      match = matchRoute(pathname, "/v1/orgs/:id/install-users");
+      if (match && method === "GET") {
+        return handleListOrgUsers(request, auth, env.DB, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/deactivate");
+      if (match && method === "POST") {
+        return handleDeactivateOrg(request, auth, env.DB, match.params[0]);
+      }
+
+      match = matchRoute(pathname, "/v1/orgs/:id/install-status");
+      if (match && method === "GET") {
+        return handleGetOrgInstallStatus(request, auth, env.DB, match.params[0]);
       }
 
       match = matchRoute(pathname, "/v1/orgs/:id");

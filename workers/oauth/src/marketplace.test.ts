@@ -115,10 +115,10 @@ describe("createMarketplaceManifest", () => {
     expect(manifest.short_description.length).toBeLessThanOrEqual(80);
   });
 
-  it("enables individual install but not admin install (Phase 6B walking skeleton)", () => {
+  it("enables both individual install and admin install (Phase 6B org-level)", () => {
     const manifest = createMarketplaceManifest("https://oauth.tminus.ink", TEST_CLIENT_ID);
     expect(manifest.individual_install).toBe(true);
-    expect(manifest.admin_install).toBe(false);
+    expect(manifest.admin_install).toBe(true);
   });
 
   it("category is Productivity", () => {

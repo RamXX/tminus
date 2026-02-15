@@ -70,6 +70,7 @@ export const ID_PREFIXES = {
   schedHist: "shx_",
   org: "org_",
   onboardSession: "obs_",
+  orgInstall: "oin_",
 } as const;
 
 // ---------------------------------------------------------------------------

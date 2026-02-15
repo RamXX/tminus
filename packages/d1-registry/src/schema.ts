@@ -502,6 +502,36 @@ ALTER TABLE accounts ADD COLUMN feed_event_sequences_json TEXT;
 ` as const;
 
 /**
+ * Migration 0021: Organization-level Marketplace installations.
+ *
+ * Stores org-level installation state when a Google Workspace admin
+ * installs T-Minus for their entire organization from the admin console.
+ * Tracks the installing admin, granted scopes, and active/inactive status.
+ * Users in the org can then activate without individual OAuth consent.
+ *
+ * Business rules (from TM-ga8.4):
+ * - BR-1: Org install does NOT auto-sync all user calendars (opt-in via visit)
+ * - BR-2: Admin deactivation disconnects all org users and removes credentials
+ * - BR-3: Individual users can still disconnect their own account
+ */
+export const MIGRATION_0021_ORG_INSTALLATIONS = `
+CREATE TABLE org_installations (
+  install_id         TEXT PRIMARY KEY,
+  google_customer_id TEXT NOT NULL UNIQUE,
+  org_id             TEXT,
+  admin_email        TEXT NOT NULL,
+  admin_google_sub   TEXT NOT NULL,
+  scopes_granted     TEXT,
+  status             TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
+  installed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  deactivated_at     TEXT
+);
+
+CREATE INDEX idx_org_installations_org ON org_installations(org_id);
+CREATE INDEX idx_org_installations_status ON org_installations(status);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -526,4 +556,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0018_ORG_SEAT_BILLING,
   MIGRATION_0019_DEVICE_TOKENS,
   MIGRATION_0020_FEED_REFRESH,
+  MIGRATION_0021_ORG_INSTALLATIONS,
 ] as const;

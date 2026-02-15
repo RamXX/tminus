@@ -39,6 +39,7 @@ import {
   MS_CALLBACK_PATH,
 } from "./microsoft";
 import { handleMarketplaceInstall } from "./marketplace";
+import { handleAdminInstall, handleOrgUserActivation } from "./marketplace-admin";
 import { handlePrivacyPolicy, handleTermsOfService } from "./legal";
 import { handleSupportPage } from "./support";
 
@@ -571,6 +572,10 @@ export function createHandler(fetchFn?: FetchFn) {
           return handleMicrosoftCallback(request, env, fetchFn);
         case "/marketplace/install":
           return handleMarketplaceInstall(request, env, fetchFn);
+        case "/marketplace/admin-install":
+          return handleAdminInstall(request, env, fetchFn);
+        case "/marketplace/org-activate":
+          return handleOrgUserActivation(request, env, fetchFn);
         case "/legal/privacy":
           return handlePrivacyPolicy();
         case "/legal/terms":

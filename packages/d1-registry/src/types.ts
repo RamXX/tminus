@@ -249,6 +249,30 @@ export interface OrgPolicyRow {
 // Device tokens (Migration 0019)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Org installations (Migration 0021)
+// ---------------------------------------------------------------------------
+
+/** Valid status values for org-level Marketplace installations. */
+export type OrgInstallationStatus = "active" | "inactive";
+
+/** Row shape for the `org_installations` table. */
+export interface OrgInstallationRow {
+  readonly install_id: string;
+  readonly google_customer_id: string;
+  readonly org_id: string | null;
+  readonly admin_email: string;
+  readonly admin_google_sub: string;
+  readonly scopes_granted: string | null;
+  readonly status: OrgInstallationStatus;
+  readonly installed_at: string;
+  readonly deactivated_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Device tokens (Migration 0019)
+// ---------------------------------------------------------------------------
+
 /** Valid platform values for device tokens. */
 export type DeviceTokenPlatform = "ios" | "android" | "web";
 

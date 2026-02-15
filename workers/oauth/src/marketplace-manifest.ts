@@ -94,6 +94,6 @@ export function createMarketplaceManifest(
     support_url: `${baseUrl}/support`,
     category: "Productivity",
     individual_install: true,
-    admin_install: false, // Phase TM-ga8.4 will enable admin install
+    admin_install: true, // Enabled in TM-ga8.4: org-level admin install
   };
 }
