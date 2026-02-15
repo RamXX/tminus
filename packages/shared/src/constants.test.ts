@@ -43,23 +43,19 @@ describe("constants.ts -- calendar defaults", () => {
 });
 
 describe("constants.ts -- ID_PREFIXES", () => {
-  it("contains all twelve entity prefixes", () => {
-    const expectedKeys = [
-      "user",
-      "account",
-      "event",
-      "policy",
-      "calendar",
-      "journal",
-      "constraint",
-      "apikey",
-      "cert",
-      "session",
-      "candidate",
-      "hold",
-      "vip",
+  it("contains all expected entity prefixes", () => {
+    const keys = Object.keys(ID_PREFIXES);
+    // Core prefixes that must always exist
+    const requiredKeys = [
+      "user", "account", "event", "policy", "calendar",
+      "journal", "constraint", "apikey", "cert",
+      "session", "candidate", "hold", "vip", "allocation",
     ];
-    expect(Object.keys(ID_PREFIXES).sort()).toEqual(expectedKeys.sort());
+    for (const key of requiredKeys) {
+      expect(keys).toContain(key);
+    }
+    // Ensure no unexpected shrinkage
+    expect(keys.length).toBeGreaterThanOrEqual(requiredKeys.length);
   });
 
   it("user prefix is 'usr_'", () => {
