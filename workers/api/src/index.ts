@@ -5948,9 +5948,989 @@ function buildAdminDeps(
   return deps;
 }
 
+// ---------------------------------------------------------------------------
+// Route group type -- each group handles a subset of authenticated routes.
+// Returns a Response if matched, or null to delegate to the next group.
+// ---------------------------------------------------------------------------
+
+type RouteGroupHandler = (
+  request: Request,
+  method: string,
+  pathname: string,
+  auth: AuthContext,
+  env: Env,
+) => Promise<Response | null>;
+
+// ---------------------------------------------------------------------------
+// Route group: Privacy / deletion request
+// ---------------------------------------------------------------------------
+
+const routePrivacyRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (pathname === "/v1/account/delete-request") {
+    if (method === "POST") {
+      return handleCreateDeletionRequest(request, auth, env);
+    }
+    if (method === "GET") {
+      return handleGetDeletionRequest(request, auth, env);
+    }
+    if (method === "DELETE") {
+      return handleCancelDeletionRequest(request, auth, env);
+    }
+  }
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: API keys
+// ---------------------------------------------------------------------------
+
+const routeApiKeyRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/api-keys") {
+    return handleCreateApiKey(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/api-keys") {
+    return handleListApiKeys(request, auth, env);
+  }
+
+  const match = matchRoute(pathname, "/v1/api-keys/:id");
+  if (match && method === "DELETE") {
+    return handleRevokeApiKey(request, auth, env, match.params[0]);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Account management
+// ---------------------------------------------------------------------------
+
+const routeAccountRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/accounts/link") {
+    // Enforce account limit before allowing new account linking
+    const accountLimited = await enforceAccountLimit(auth.userId, env.DB);
+    if (accountLimited) return accountLimited;
+    return handleAccountLink(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/accounts") {
+    return handleListAccounts(request, auth, env);
+  }
+
+  // Account sub-routes (reconnect, sync-history) must match before generic :id
+  let match = matchRoute(pathname, "/v1/accounts/:id/reconnect");
+  if (match && method === "POST") {
+    return handleReconnectAccount(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/accounts/:id/sync-history");
+  if (match && method === "GET") {
+    return handleGetSyncHistory(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/accounts/:id");
+  if (match) {
+    if (method === "GET") {
+      return handleGetAccount(request, auth, env, match.params[0]);
+    }
+    if (method === "DELETE") {
+      return handleDeleteAccount(request, auth, env, match.params[0]);
+    }
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Onboarding sessions
+// ---------------------------------------------------------------------------
+
+const routeOnboardingRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/onboarding/session") {
+    return handleCreateOnboardingSession(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/onboarding/session") {
+    return handleGetOnboardingSession(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/onboarding/status") {
+    return handleGetOnboardingStatus(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/onboarding/session/account") {
+    return handleAddOnboardingAccount(request, auth, env);
+  }
+
+  if (method === "PATCH" && pathname === "/v1/onboarding/session/account") {
+    return handleUpdateOnboardingAccountStatus(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/onboarding/session/complete") {
+    return handleCompleteOnboardingSession(request, auth, env);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: ICS feeds (Phase 6C: zero-auth onboarding)
+// ---------------------------------------------------------------------------
+
+const routeFeedRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/feeds") {
+    return handleImportFeed(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/feeds") {
+    return handleListFeeds(request, auth, env);
+  }
+
+  // Feed-specific routes: /v1/feeds/:id/config, /v1/feeds/:id/health
+  const feedConfigMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/config$/);
+  if (method === "PATCH" && feedConfigMatch) {
+    let body: { refreshIntervalMs?: number };
+    try {
+      body = await request.json() as { refreshIntervalMs?: number };
+    } catch {
+      return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return handleUpdateFeedConfig(request, auth, env, feedConfigMatch[1], body);
+  }
+
+  const feedHealthMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/health$/);
+  if (method === "GET" && feedHealthMatch) {
+    return handleGetFeedHealth(request, auth, env, feedHealthMatch[1]);
+  }
+
+  // Feed upgrade/downgrade routes (TM-d17.5: OAuth Upgrade Flow)
+  const feedUpgradeMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/upgrade$/);
+  if (method === "POST" && feedUpgradeMatch) {
+    return handleUpgradeFeed(request, auth, env, feedUpgradeMatch[1]);
+  }
+
+  const feedProviderMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/provider$/);
+  if (method === "GET" && feedProviderMatch) {
+    return handleDetectFeedProvider(request, auth, env, feedProviderMatch[1]);
+  }
+
+  if (method === "POST" && pathname === "/v1/feeds/downgrade") {
+    return handleDowngradeFeed(request, auth, env);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Events (CRUD + allocation + briefing + excuse)
+// ---------------------------------------------------------------------------
+
+const routeEventRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "GET" && pathname === "/v1/events") {
+    return handleListEvents(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/events") {
+    return handleCreateEvent(request, auth, env);
+  }
+
+  // Time allocation routes -- must match before generic /v1/events/:id
+  let match = matchRoute(pathname, "/v1/events/:id/allocation");
+  if (match) {
+    const allocEventId = match.params[0];
+    if (method === "POST") {
+      return handleSetAllocation(request, auth, env, allocEventId);
+    }
+    if (method === "GET") {
+      return handleGetAllocation(request, auth, env, allocEventId);
+    }
+    if (method === "PUT") {
+      return handleUpdateAllocation(request, auth, env, allocEventId);
+    }
+    if (method === "DELETE") {
+      return handleDeleteAllocation(request, auth, env, allocEventId);
+    }
+  }
+
+  // Pre-meeting context briefing
+  match = matchRoute(pathname, "/v1/events/:id/briefing");
+  if (match && method === "GET") {
+    return handleGetEventBriefing(request, auth, env, match.params[0]);
+  }
+
+  // Excuse generator (BR-17: draft only, never auto-send)
+  match = matchRoute(pathname, "/v1/events/:id/excuse");
+  if (match && method === "POST") {
+    return handleGenerateExcuse(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/events/:id");
+  if (match) {
+    if (method === "GET") {
+      return handleGetEvent(request, auth, env, match.params[0]);
+    }
+    if (method === "PATCH") {
+      return handleUpdateEvent(request, auth, env, match.params[0]);
+    }
+    if (method === "DELETE") {
+      return handleDeleteEvent(request, auth, env, match.params[0]);
+    }
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Policies + Constraints
+// ---------------------------------------------------------------------------
+
+const routePolicyRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "GET" && pathname === "/v1/policies") {
+    return handleListPolicies(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/policies") {
+    return handleCreatePolicy(request, auth, env);
+  }
+
+  let match = matchRoute(pathname, "/v1/policies/:id/edges");
+  if (match && method === "PUT") {
+    return handleSetPolicyEdges(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/policies/:id");
+  if (match && method === "GET") {
+    return handleGetPolicy(request, auth, env, match.params[0]);
+  }
+
+  // -- Constraint routes (Premium+) --
+
+  if (method === "POST" && pathname === "/v1/constraints") {
+    const constraintGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (constraintGate) return constraintGate;
+    return handleCreateConstraint(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/constraints") {
+    // Listing constraints is read-only, allowed for all tiers
+    return handleListConstraints(request, auth, env);
+  }
+
+  match = matchRoute(pathname, "/v1/constraints/:id");
+  if (match) {
+    if (method === "GET") {
+      // Reading a single constraint is read-only, allowed for all tiers
+      return handleGetConstraint(request, auth, env, match.params[0]);
+    }
+    if (method === "PUT") {
+      const updateGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+      if (updateGate) return updateGate;
+      return handleUpdateConstraint(request, auth, env, match.params[0]);
+    }
+    if (method === "DELETE") {
+      const deleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+      if (deleteGate) return deleteGate;
+      return handleDeleteConstraint(request, auth, env, match.params[0]);
+    }
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Sync status and journal
+// ---------------------------------------------------------------------------
+
+const routeSyncRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "GET" && pathname === "/v1/sync/status") {
+    return handleAggregateStatus(request, auth, env);
+  }
+
+  const match = matchRoute(pathname, "/v1/sync/status/:id");
+  if (match && method === "GET") {
+    return handleAccountStatus(request, auth, env, match.params[0]);
+  }
+
+  if (method === "GET" && pathname === "/v1/sync/journal") {
+    return handleJournal(request, auth, env);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Scheduling (individual + group sessions)
+// ---------------------------------------------------------------------------
+
+const routeSchedulingRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/scheduling/override") {
+    const overrideGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (overrideGate) return overrideGate;
+    return handleCreateSchedulingOverride(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/scheduling/sessions") {
+    return handleCreateSchedulingSession(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/scheduling/sessions") {
+    return handleListSchedulingSessions(request, auth, env);
+  }
+
+  let match = matchRoute(pathname, "/v1/scheduling/sessions/:id/candidates");
+  if (match && method === "GET") {
+    return handleGetSchedulingCandidates(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/scheduling/sessions/:id/commit");
+  if (match && method === "POST") {
+    return handleCommitSchedulingCandidate(request, auth, env, match.params[0]);
+  }
+
+  // TM-82s.4: Hold extension route
+  match = matchRoute(pathname, "/v1/scheduling/sessions/:id/extend-hold");
+  if (match && method === "POST") {
+    return handleExtendHold(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/scheduling/sessions/:id");
+  if (match) {
+    if (method === "GET") {
+      return handleGetSchedulingSession(request, auth, env, match.params[0]);
+    }
+    if (method === "DELETE") {
+      return handleCancelSchedulingSession(request, auth, env, match.params[0]);
+    }
+  }
+
+  // -- Group scheduling routes (Phase 4D) --
+
+  if (method === "POST" && pathname === "/v1/scheduling/group-sessions") {
+    return handleCreateGroupSession(request, auth, env);
+  }
+
+  match = matchRoute(pathname, "/v1/scheduling/group-sessions/:id/commit");
+  if (match && method === "POST") {
+    return handleCommitGroupSession(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/scheduling/group-sessions/:id");
+  if (match && method === "GET") {
+    return handleGetGroupSession(request, auth, env, match.params[0]);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Relationships (CRUD + outcomes + milestones + reputation +
+//              drift + reconnection suggestions + trips)
+// ---------------------------------------------------------------------------
+
+const routeRelationshipRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/relationships") {
+    return handleCreateRelationship(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/relationships") {
+    // Check for ?sort=reliability_desc to return relationships with reputation
+    const urlCheck = new URL(request.url);
+    if (urlCheck.searchParams.get("sort") === "reliability_desc") {
+      return handleListRelationshipsWithReputation(request, auth, env);
+    }
+    return handleListRelationships(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/drift-report") {
+    return handleGetDriftReport(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/drift-alerts") {
+    return handleGetDriftAlerts(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/reconnection-suggestions") {
+    return handleGetReconnectionSuggestions(request, auth, env);
+  }
+
+  let match = matchRoute(pathname, "/v1/trips/:id/reconnections");
+  if (match && method === "GET") {
+    return handleGetTripReconnections(request, auth, env, match.params[0]);
+  }
+
+  // -- Interaction ledger (outcomes) --
+  // Must match before /v1/relationships/:id since it has more segments
+  match = matchRoute(pathname, "/v1/relationships/:id/outcomes");
+  if (match) {
+    const relId = match.params[0];
+    if (method === "POST") {
+      return handleMarkOutcome(request, auth, env, relId);
+    }
+    if (method === "GET") {
+      return handleListOutcomes(request, auth, env, relId);
+    }
+  }
+
+  // -- Milestone routes --
+  // Must match before /v1/relationships/:id since they have more segments
+
+  // DELETE /v1/relationships/:id/milestones/:mid
+  match = matchRoute(pathname, "/v1/relationships/:id/milestones/:mid");
+  if (match && method === "DELETE") {
+    return handleDeleteMilestone(request, auth, env, match.params[0], match.params[1]);
+  }
+
+  // POST/GET /v1/relationships/:id/milestones
+  match = matchRoute(pathname, "/v1/relationships/:id/milestones");
+  if (match) {
+    const relId = match.params[0];
+    if (method === "POST") {
+      return handleCreateMilestone(request, auth, env, relId);
+    }
+    if (method === "GET") {
+      return handleListMilestones(request, auth, env, relId);
+    }
+  }
+
+  // GET /v1/milestones/upcoming?days=30
+  if (method === "GET" && pathname === "/v1/milestones/upcoming") {
+    return handleListUpcomingMilestones(request, auth, env);
+  }
+
+  // -- Reputation scoring --
+  // Must match before /v1/relationships/:id since it has more segments
+  match = matchRoute(pathname, "/v1/relationships/:id/reputation");
+  if (match && method === "GET") {
+    return handleGetReputation(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/relationships/:id");
+  if (match) {
+    const relId = match.params[0];
+    if (method === "GET") {
+      return handleGetRelationship(request, auth, env, relId);
+    }
+    if (method === "PUT") {
+      return handleUpdateRelationship(request, auth, env, relId);
+    }
+    if (method === "DELETE") {
+      return handleDeleteRelationship(request, auth, env, relId);
+    }
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: VIP policies (Premium+)
+// ---------------------------------------------------------------------------
+
+const routeVipRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/vip-policies") {
+    const vipGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (vipGate) return vipGate;
+    return handleCreateVipPolicy(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/vip-policies") {
+    return handleListVipPolicies(request, auth, env);
+  }
+
+  const match = matchRoute(pathname, "/v1/vip-policies/:id");
+  if (match && method === "DELETE") {
+    const vipDeleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (vipDeleteGate) return vipDeleteGate;
+    return handleDeleteVipPolicy(request, auth, env, match.params[0]);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Commitments + Simulation + Proofs (Premium+)
+// ---------------------------------------------------------------------------
+
+const routeCommitmentRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/commitments") {
+    const commitGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (commitGate) return commitGate;
+    return handleCreateCommitment(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/commitments") {
+    return handleListCommitments(request, auth, env);
+  }
+
+  let match = matchRoute(pathname, "/v1/commitments/:id/status");
+  if (match && method === "GET") {
+    return handleGetCommitmentStatus(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/commitments/:id/export");
+  if (match && method === "POST") {
+    const exportGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (exportGate) return exportGate;
+    return handleExportCommitmentProof(request, auth, env, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/commitments/:id");
+  if (match && method === "DELETE") {
+    const commitDeleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (commitDeleteGate) return commitDeleteGate;
+    return handleDeleteCommitment(request, auth, env, match.params[0]);
+  }
+
+  // -- What-If Simulation route (Premium+) --
+
+  if (method === "POST" && pathname === "/v1/simulation") {
+    const simGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
+    if (simGate) return simGate;
+    return handleSimulation(request, auth, env);
+  }
+
+  // -- Proof verification and download routes --
+
+  match = matchRoute(pathname, "/v1/proofs/:id/verify");
+  if (match && method === "GET") {
+    return handleVerifyProof(request, auth, env, match.params[0]);
+  }
+
+  if (method === "GET" && pathname.startsWith("/v1/proofs/")) {
+    const r2Key = decodeURIComponent(pathname.slice("/v1/proofs/".length));
+    return handleDownloadProof(request, auth, env, r2Key);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Billing (Stripe checkout, status, portal, events)
+// ---------------------------------------------------------------------------
+
+const routeBillingRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/billing/checkout") {
+    if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
+      return jsonResponse(
+        errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+    return handleCreateCheckoutSession(request, auth.userId, env as unknown as BillingEnv);
+  }
+
+  if (method === "GET" && pathname === "/v1/billing/status") {
+    return handleGetBillingStatus(auth.userId, env as unknown as BillingEnv);
+  }
+
+  if (method === "POST" && pathname === "/v1/billing/portal") {
+    if (!env.STRIPE_SECRET_KEY) {
+      return jsonResponse(
+        errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+    return handleCreatePortalSession(auth.userId, env as unknown as BillingEnv);
+  }
+
+  if (method === "GET" && pathname === "/v1/billing/events") {
+    return handleGetBillingEvents(auth.userId, env as unknown as BillingEnv);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: CalDAV feeds (Phase 5A)
+// ---------------------------------------------------------------------------
+
+const routeCalDavRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  const match = matchRoute(pathname, "/v1/caldav/:user_id/calendar.ics");
+  if (match && method === "GET") {
+    return handleCalDavFeed(request, auth, env, match.params[0]);
+  }
+
+  if (method === "GET" && pathname === "/v1/caldav/subscription-url") {
+    const baseUrl = new URL(request.url);
+    const subscriptionUrl = `${baseUrl.protocol}//${baseUrl.host}/v1/caldav/${auth.userId}/calendar.ics`;
+    return jsonResponse(
+      successEnvelope({
+        subscription_url: subscriptionUrl,
+        content_type: "text/calendar",
+        instructions: "Add this URL as a calendar subscription in your calendar app (Apple Calendar, Google Calendar, Outlook, etc.).",
+      }),
+      200,
+    );
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Intelligence (cognitive load, context switches, deep work,
+//              risk scores, availability)
+// ---------------------------------------------------------------------------
+
+const routeIntelligenceRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "GET" && pathname === "/v1/intelligence/cognitive-load") {
+    return handleGetCognitiveLoad(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/intelligence/context-switches") {
+    return handleGetContextSwitches(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/intelligence/deep-work") {
+    return handleGetDeepWork(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/intelligence/risk-scores") {
+    return handleGetRiskScores(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/availability") {
+    return handleGetAvailability(request, auth, env);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Temporal Graph API (TM-b3i.4)
+// ---------------------------------------------------------------------------
+
+const routeGraphRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "GET" && pathname === "/v1/graph/events") {
+    return handleGraphEvents(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/graph/relationships") {
+    return handleGraphRelationships(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/graph/timeline") {
+    return handleGraphTimeline(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/graph/openapi.json") {
+    return handleGraphOpenApi();
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Domain-wide delegation (Phase 6D: TM-9iu.1, TM-9iu.4, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rate limit check for org delegation endpoints (TM-9iu.5).
+ * Applies sliding-window rate limiting per-org on the "api" bucket.
+ * Returns a 429 Response if rate limited, null if allowed.
+ */
+async function checkDelegationRateLimit(db: D1Database, orgId: string): Promise<Response | null> {
+  const rlStore = new D1OrgRateLimitStore(db);
+  const rlConfig = (await rlStore.getOrgConfig(orgId)) ?? DEFAULT_ORG_RATE_LIMITS;
+  const rlResult = await checkOrgRateLimit(rlStore, orgId, "api", rlConfig);
+  if (!rlResult.allowed) {
+    return buildOrgRateLimitResponse(rlResult);
+  }
+  return null;
+}
+
+const routeDelegationRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/orgs/register") {
+    const delegationStore = new D1DelegationStore(env.DB);
+    return handleOrgRegister(request, auth, { store: delegationStore, MASTER_KEY: env.MASTER_KEY });
+  }
+
+  let match = matchRoute(pathname, "/v1/orgs/delegation/calendars/:email");
+  if (match && method === "GET") {
+    const targetEmail = match.params[0];
+    const delegationStore = new D1DelegationStore(env.DB);
+    const response = await handleDelegationCalendars(
+      request,
+      auth,
+      { store: delegationStore, MASTER_KEY: env.MASTER_KEY },
+      targetEmail,
+    );
+
+    // AC#4: Log impersonation to compliance audit log (hash chain)
+    // Fire-and-forget: audit logging must not block the response
+    try {
+      const emailDomain = targetEmail.includes("@") ? targetEmail.split("@")[1]?.toLowerCase() : null;
+      if (emailDomain) {
+        const delegation = await delegationStore.getDelegation(emailDomain);
+        if (delegation) {
+          const complianceStore = new D1ComplianceAuditStore(env.DB);
+          const auditInput: ComplianceAuditInput = {
+            entryId: generateId("audit"),
+            orgId: delegation.delegationId,
+            timestamp: new Date().toISOString(),
+            actor: auth.userId,
+            action: "token_issued",
+            target: targetEmail,
+            result: response.ok ? "success" : "failure",
+            ipAddress: request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown",
+            userAgent: request.headers.get("User-Agent") ?? "unknown",
+            details: JSON.stringify({
+              service: "delegation_calendars",
+              http_status: response.status,
+            }),
+          };
+          await appendComplianceAuditEntry(complianceStore, auditInput);
+        }
+      }
+    } catch {
+      // Audit log failure must not affect the user-facing response
+    }
+
+    return response;
+  }
+
+  // -- Delegation admin dashboard routes (Phase 6D: TM-9iu.4) --
+
+  // PUT/GET /v1/orgs/:id/discovery/config (must match before shorter patterns)
+  match = matchRoute(pathname, "/v1/orgs/:id/discovery/config");
+  if (match && (method === "PUT" || method === "GET")) {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    if (method === "GET") {
+      return handleGetDiscoveryConfig(request, adminAuth, orgId, deps);
+    }
+    return handleUpdateDiscoveryConfig(request, adminAuth, orgId, deps);
+  }
+
+  // GET /v1/orgs/:id/delegation/health
+  match = matchRoute(pathname, "/v1/orgs/:id/delegation/health");
+  if (match && method === "GET") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    return handleDelegationHealth(request, adminAuth, orgId, deps);
+  }
+
+  // POST /v1/orgs/:id/delegation/rotate
+  match = matchRoute(pathname, "/v1/orgs/:id/delegation/rotate");
+  if (match && method === "POST") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    return handleDelegationRotate(request, adminAuth, orgId, deps);
+  }
+
+  // GET /v1/orgs/:id/dashboard
+  match = matchRoute(pathname, "/v1/orgs/:id/dashboard");
+  if (match && method === "GET") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env, { includeQuotaReport: true });
+    return handleOrgDashboard(request, adminAuth, orgId, deps);
+  }
+
+  // POST /v1/orgs/:id/audit-log/export (AC#6: audit log export)
+  match = matchRoute(pathname, "/v1/orgs/:id/audit-log/export");
+  if (match && method === "POST") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const complianceStore = new D1ComplianceAuditStore(env.DB);
+    return handleAuditLogExport(request, adminAuth, orgId, complianceStore);
+  }
+
+  // GET /v1/orgs/:id/audit
+  match = matchRoute(pathname, "/v1/orgs/:id/audit");
+  if (match && method === "GET") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    return handleAuditLog(request, adminAuth, orgId, deps);
+  }
+
+  // PATCH/GET /v1/orgs/:id/users/:uid
+  match = matchRoute(pathname, "/v1/orgs/:id/users/:uid");
+  if (match && (method === "PATCH" || method === "GET")) {
+    const orgId = match.params[0];
+    const userId = match.params[1];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    if (method === "PATCH") {
+      return handleUpdateDiscoveredUser(request, adminAuth, orgId, userId, deps);
+    }
+    return handleGetDiscoveredUser(request, adminAuth, orgId, userId, deps);
+  }
+
+  // GET /v1/orgs/:id/users (list discovered users)
+  match = matchRoute(pathname, "/v1/orgs/:id/users");
+  if (match && method === "GET") {
+    const orgId = match.params[0];
+    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+    if (rlBlock) return rlBlock;
+    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+    const deps = buildAdminDeps(env);
+    return handleListDiscoveredUsers(request, adminAuth, orgId, deps);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group: Organizations (Enterprise CRUD, members, policies, admin controls)
+// ---------------------------------------------------------------------------
+
+const routeOrgRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
+  if (method === "POST" && pathname === "/v1/orgs") {
+    const orgGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+    if (orgGate) return orgGate;
+    return handleCreateOrg(request, auth, env.DB);
+  }
+
+  // -- Org billing: seat management (must match before /v1/orgs/:id/members) --
+  let match = matchRoute(pathname, "/v1/orgs/:id/billing/seats");
+  if (match && method === "POST") {
+    if (!env.STRIPE_SECRET_KEY) {
+      return jsonResponse(
+        errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+    const seatGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+    if (seatGate) return seatGate;
+    return handleUpdateSeats(request, auth.userId, env.DB, match.params[0], env.STRIPE_SECRET_KEY);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/members/:uid/role");
+  if (match && method === "PUT") {
+    return handleChangeRole(request, auth, env.DB, match.params[0], match.params[1]);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/members/:uid");
+  if (match && method === "DELETE") {
+    return handleRemoveMember(request, auth, env.DB, match.params[0], match.params[1]);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/members");
+  if (match) {
+    if (method === "POST") {
+      // Enforce seat limit before adding member (AC#3)
+      const seatDenied = await enforceSeatLimit(match.params[0], env.DB);
+      if (seatDenied) return seatDenied;
+      return handleAddMember(request, auth, env.DB, match.params[0]);
+    }
+    if (method === "GET") {
+      return handleListMembers(request, auth, env.DB, match.params[0]);
+    }
+  }
+
+  // -- Org policy routes (Enterprise, admin for write, member for read) --
+
+  match = matchRoute(pathname, "/v1/orgs/:id/policies/:pid");
+  if (match) {
+    const pOrgId = match.params[0];
+    const pPolicyId = match.params[1];
+    const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+    if (policyGate) return policyGate;
+    if (method === "PUT") {
+      return handleUpdateOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
+    }
+    if (method === "DELETE") {
+      return handleDeleteOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
+    }
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/policies");
+  if (match) {
+    const pOrgId = match.params[0];
+    const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
+    if (policyGate) return policyGate;
+    if (method === "POST") {
+      return handleCreateOrgPolicy(request, auth, env.DB, pOrgId);
+    }
+    if (method === "GET") {
+      return handleListOrgPolicies(request, auth, env.DB, pOrgId);
+    }
+  }
+
+  // -- Org admin controls (TM-ga8.4): Marketplace org-level install --
+  match = matchRoute(pathname, "/v1/orgs/:id/install-users");
+  if (match && method === "GET") {
+    return handleListOrgUsers(request, auth, env.DB, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/deactivate");
+  if (match && method === "POST") {
+    return handleDeactivateOrg(request, auth, env.DB, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id/install-status");
+  if (match && method === "GET") {
+    return handleGetOrgInstallStatus(request, auth, env.DB, match.params[0]);
+  }
+
+  match = matchRoute(pathname, "/v1/orgs/:id");
+  if (match && method === "GET") {
+    return handleGetOrg(request, auth, env.DB, match.params[0]);
+  }
+
+  return null;
+};
+
+// ---------------------------------------------------------------------------
+// Route group registry -- ordered list of all route groups.
+// The dispatcher tries each group in order until one returns a Response.
+//
+// IMPORTANT: Order matters! More-specific path prefixes must come before
+// less-specific ones (e.g., delegation routes before org routes, since both
+// match /v1/orgs/* patterns).
+// ---------------------------------------------------------------------------
+
+const routeGroups: RouteGroupHandler[] = [
+  routePrivacyRoutes,
+  routeApiKeyRoutes,
+  routeAccountRoutes,
+  routeOnboardingRoutes,
+  routeFeedRoutes,
+  routeEventRoutes,
+  routePolicyRoutes,
+  routeSyncRoutes,
+  routeSchedulingRoutes,
+  routeRelationshipRoutes,
+  routeVipRoutes,
+  routeCommitmentRoutes,
+  routeBillingRoutes,
+  routeCalDavRoutes,
+  routeIntelligenceRoutes,
+  routeGraphRoutes,
+  routeDelegationRoutes, // Must come before routeOrgRoutes (both match /v1/orgs/*)
+  routeOrgRoutes,
+];
+
+// ---------------------------------------------------------------------------
+// Authenticated request dispatcher
+// ---------------------------------------------------------------------------
+
 /**
  * Route an authenticated request to the appropriate handler.
- * Extracted to allow the fetch handler to wrap responses with rate limit headers.
+ *
+ * Iterates through route groups in order. Each group returns a Response if
+ * it handles the route, or null to delegate to the next group. If no group
+ * handles the request, returns 404 Not Found.
  */
 async function routeAuthenticatedRequest(
   request: Request,
@@ -5959,842 +6939,16 @@ async function routeAuthenticatedRequest(
   auth: AuthContext,
   env: Env,
 ): Promise<Response> {
-      // -- Privacy / deletion request routes --------------------------------
-
-      if (pathname === "/v1/account/delete-request") {
-        if (method === "POST") {
-          return handleCreateDeletionRequest(request, auth, env);
-        }
-        if (method === "GET") {
-          return handleGetDeletionRequest(request, auth, env);
-        }
-        if (method === "DELETE") {
-          return handleCancelDeletionRequest(request, auth, env);
-        }
-      }
-
-      // -- API key routes ---------------------------------------------------
-
-      if (method === "POST" && pathname === "/v1/api-keys") {
-        return handleCreateApiKey(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/api-keys") {
-        return handleListApiKeys(request, auth, env);
-      }
-
-      let match = matchRoute(pathname, "/v1/api-keys/:id");
-      if (match && method === "DELETE") {
-        return handleRevokeApiKey(request, auth, env, match.params[0]);
-      }
-
-      // -- Account routes ---------------------------------------------------
-
-      if (method === "POST" && pathname === "/v1/accounts/link") {
-        // Enforce account limit before allowing new account linking
-        const accountLimited = await enforceAccountLimit(auth.userId, env.DB);
-        if (accountLimited) return accountLimited;
-        return handleAccountLink(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/accounts") {
-        return handleListAccounts(request, auth, env);
-      }
-
-      // Account sub-routes (reconnect, sync-history) must match before generic :id
-      match = matchRoute(pathname, "/v1/accounts/:id/reconnect");
-      if (match && method === "POST") {
-        return handleReconnectAccount(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/accounts/:id/sync-history");
-      if (match && method === "GET") {
-        return handleGetSyncHistory(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/accounts/:id");
-      if (match) {
-        if (method === "GET") {
-          return handleGetAccount(request, auth, env, match.params[0]);
-        }
-        if (method === "DELETE") {
-          return handleDeleteAccount(request, auth, env, match.params[0]);
-        }
-      }
-
-      // -- Onboarding session routes -----------------------------------------
-
-      if (method === "POST" && pathname === "/v1/onboarding/session") {
-        return handleCreateOnboardingSession(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/onboarding/session") {
-        return handleGetOnboardingSession(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/onboarding/status") {
-        return handleGetOnboardingStatus(request, auth, env);
-      }
-
-      if (method === "POST" && pathname === "/v1/onboarding/session/account") {
-        return handleAddOnboardingAccount(request, auth, env);
-      }
-
-      if (method === "PATCH" && pathname === "/v1/onboarding/session/account") {
-        return handleUpdateOnboardingAccountStatus(request, auth, env);
-      }
-
-      if (method === "POST" && pathname === "/v1/onboarding/session/complete") {
-        return handleCompleteOnboardingSession(request, auth, env);
-      }
-
-      // -- ICS feed routes (Phase 6C: zero-auth onboarding) ------------------
-
-      if (method === "POST" && pathname === "/v1/feeds") {
-        return handleImportFeed(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/feeds") {
-        return handleListFeeds(request, auth, env);
-      }
-
-      // Feed-specific routes: /v1/feeds/:id/config, /v1/feeds/:id/health
-      const feedConfigMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/config$/);
-      if (method === "PATCH" && feedConfigMatch) {
-        let body: { refreshIntervalMs?: number };
-        try {
-          body = await request.json() as { refreshIntervalMs?: number };
-        } catch {
-          return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body" }), {
-            status: 400,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return handleUpdateFeedConfig(request, auth, env, feedConfigMatch[1], body);
-      }
-
-      const feedHealthMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/health$/);
-      if (method === "GET" && feedHealthMatch) {
-        return handleGetFeedHealth(request, auth, env, feedHealthMatch[1]);
-      }
-
-      // Feed upgrade/downgrade routes (TM-d17.5: OAuth Upgrade Flow)
-      const feedUpgradeMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/upgrade$/);
-      if (method === "POST" && feedUpgradeMatch) {
-        return handleUpgradeFeed(request, auth, env, feedUpgradeMatch[1]);
-      }
-
-      const feedProviderMatch = pathname.match(/^\/v1\/feeds\/([^/]+)\/provider$/);
-      if (method === "GET" && feedProviderMatch) {
-        return handleDetectFeedProvider(request, auth, env, feedProviderMatch[1]);
-      }
-
-      if (method === "POST" && pathname === "/v1/feeds/downgrade") {
-        return handleDowngradeFeed(request, auth, env);
-      }
-
-      // -- Event routes -----------------------------------------------------
-
-      if (method === "GET" && pathname === "/v1/events") {
-        return handleListEvents(request, auth, env);
-      }
-
-      if (method === "POST" && pathname === "/v1/events") {
-        return handleCreateEvent(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/events/:id");
-      if (match) {
-        if (method === "GET") {
-          return handleGetEvent(request, auth, env, match.params[0]);
-        }
-        if (method === "PATCH") {
-          return handleUpdateEvent(request, auth, env, match.params[0]);
-        }
-        if (method === "DELETE") {
-          return handleDeleteEvent(request, auth, env, match.params[0]);
-        }
-      }
-
-      // -- Policy routes ----------------------------------------------------
-
-      if (method === "GET" && pathname === "/v1/policies") {
-        return handleListPolicies(request, auth, env);
-      }
-
-      if (method === "POST" && pathname === "/v1/policies") {
-        return handleCreatePolicy(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/policies/:id");
-      if (match && method === "GET") {
-        return handleGetPolicy(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/policies/:id/edges");
-      if (match && method === "PUT") {
-        return handleSetPolicyEdges(request, auth, env, match.params[0]);
-      }
-
-      // -- Constraint routes (Premium+) ----------------------------------------
-
-      if (method === "POST" && pathname === "/v1/constraints") {
-        const constraintGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (constraintGate) return constraintGate;
-        return handleCreateConstraint(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/constraints") {
-        // Listing constraints is read-only, allowed for all tiers
-        return handleListConstraints(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/constraints/:id");
-      if (match) {
-        if (method === "GET") {
-          // Reading a single constraint is read-only, allowed for all tiers
-          return handleGetConstraint(request, auth, env, match.params[0]);
-        }
-        if (method === "PUT") {
-          const updateGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-          if (updateGate) return updateGate;
-          return handleUpdateConstraint(request, auth, env, match.params[0]);
-        }
-        if (method === "DELETE") {
-          const deleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-          if (deleteGate) return deleteGate;
-          return handleDeleteConstraint(request, auth, env, match.params[0]);
-        }
-      }
-
-      // -- Sync status routes -----------------------------------------------
-
-      if (method === "GET" && pathname === "/v1/sync/status") {
-        return handleAggregateStatus(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/sync/status/:id");
-      if (match && method === "GET") {
-        return handleAccountStatus(request, auth, env, match.params[0]);
-      }
-
-      if (method === "GET" && pathname === "/v1/sync/journal") {
-        return handleJournal(request, auth, env);
-      }
-
-      // -- Scheduling routes ------------------------------------------------
-
-      if (method === "POST" && pathname === "/v1/scheduling/override") {
-        const overrideGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (overrideGate) return overrideGate;
-        return handleCreateSchedulingOverride(request, auth, env);
-      }
-
-      if (method === "POST" && pathname === "/v1/scheduling/sessions") {
-        return handleCreateSchedulingSession(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/scheduling/sessions") {
-        return handleListSchedulingSessions(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/candidates");
-      if (match && method === "GET") {
-        return handleGetSchedulingCandidates(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/commit");
-      if (match && method === "POST") {
-        return handleCommitSchedulingCandidate(request, auth, env, match.params[0]);
-      }
-
-      // TM-82s.4: Hold extension route
-      match = matchRoute(pathname, "/v1/scheduling/sessions/:id/extend-hold");
-      if (match && method === "POST") {
-        return handleExtendHold(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/scheduling/sessions/:id");
-      if (match) {
-        if (method === "GET") {
-          return handleGetSchedulingSession(request, auth, env, match.params[0]);
-        }
-        if (method === "DELETE") {
-          return handleCancelSchedulingSession(request, auth, env, match.params[0]);
-        }
-      }
-
-      // -- Group scheduling routes (Phase 4D) ------------------------------------
-
-      if (method === "POST" && pathname === "/v1/scheduling/group-sessions") {
-        return handleCreateGroupSession(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/scheduling/group-sessions/:id/commit");
-      if (match && method === "POST") {
-        return handleCommitGroupSession(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/scheduling/group-sessions/:id");
-      if (match && method === "GET") {
-        return handleGetGroupSession(request, auth, env, match.params[0]);
-      }
-
-      // -- Time allocation routes -----------------------------------------------
-
-      match = matchRoute(pathname, "/v1/events/:id/allocation");
-      if (match) {
-        const allocEventId = match.params[0];
-        if (method === "POST") {
-          return handleSetAllocation(request, auth, env, allocEventId);
-        }
-        if (method === "GET") {
-          return handleGetAllocation(request, auth, env, allocEventId);
-        }
-        if (method === "PUT") {
-          return handleUpdateAllocation(request, auth, env, allocEventId);
-        }
-        if (method === "DELETE") {
-          return handleDeleteAllocation(request, auth, env, allocEventId);
-        }
-      }
-
-      // -- Pre-meeting context briefing routes -----------------------------------
-
-      match = matchRoute(pathname, "/v1/events/:id/briefing");
-      if (match && method === "GET") {
-        return handleGetEventBriefing(request, auth, env, match.params[0]);
-      }
-
-      // -- Excuse generator routes (BR-17: draft only, never auto-send) ---------
-
-      match = matchRoute(pathname, "/v1/events/:id/excuse");
-      if (match && method === "POST") {
-        return handleGenerateExcuse(request, auth, env, match.params[0]);
-      }
-
-      // -- Relationship tracking routes -----------------------------------------
-
-      if (method === "POST" && pathname === "/v1/relationships") {
-        return handleCreateRelationship(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/relationships") {
-        // Check for ?sort=reliability_desc to return relationships with reputation
-        const urlCheck = new URL(request.url);
-        if (urlCheck.searchParams.get("sort") === "reliability_desc") {
-          return handleListRelationshipsWithReputation(request, auth, env);
-        }
-        return handleListRelationships(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/drift-report") {
-        return handleGetDriftReport(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/drift-alerts") {
-        return handleGetDriftAlerts(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/reconnection-suggestions") {
-        return handleGetReconnectionSuggestions(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/trips/:id/reconnections");
-      if (match && method === "GET") {
-        return handleGetTripReconnections(request, auth, env, match.params[0]);
-      }
-
-      // -- Interaction ledger (outcomes) routes ---------------------------------
-      // Must match before /v1/relationships/:id since it has more segments
-
-      match = matchRoute(pathname, "/v1/relationships/:id/outcomes");
-      if (match) {
-        const relId = match.params[0];
-        if (method === "POST") {
-          return handleMarkOutcome(request, auth, env, relId);
-        }
-        if (method === "GET") {
-          return handleListOutcomes(request, auth, env, relId);
-        }
-      }
-
-      // -- Milestone routes ---------------------------------------------------------
-      // Must match before /v1/relationships/:id since they have more segments
-
-      // DELETE /v1/relationships/:id/milestones/:mid
-      match = matchRoute(pathname, "/v1/relationships/:id/milestones/:mid");
-      if (match && method === "DELETE") {
-        return handleDeleteMilestone(request, auth, env, match.params[0], match.params[1]);
-      }
-
-      // POST/GET /v1/relationships/:id/milestones
-      match = matchRoute(pathname, "/v1/relationships/:id/milestones");
-      if (match) {
-        const relId = match.params[0];
-        if (method === "POST") {
-          return handleCreateMilestone(request, auth, env, relId);
-        }
-        if (method === "GET") {
-          return handleListMilestones(request, auth, env, relId);
-        }
-      }
-
-      // GET /v1/milestones/upcoming?days=30
-      if (method === "GET" && pathname === "/v1/milestones/upcoming") {
-        return handleListUpcomingMilestones(request, auth, env);
-      }
-
-      // -- Reputation scoring routes ----------------------------------------------
-      // Must match before /v1/relationships/:id since it has more segments
-
-      match = matchRoute(pathname, "/v1/relationships/:id/reputation");
-      if (match && method === "GET") {
-        return handleGetReputation(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/relationships/:id");
-      if (match) {
-        const relId = match.params[0];
-        if (method === "GET") {
-          return handleGetRelationship(request, auth, env, relId);
-        }
-        if (method === "PUT") {
-          return handleUpdateRelationship(request, auth, env, relId);
-        }
-        if (method === "DELETE") {
-          return handleDeleteRelationship(request, auth, env, relId);
-        }
-      }
-
-      // -- VIP policy routes (Premium+) ----------------------------------------
-
-      if (method === "POST" && pathname === "/v1/vip-policies") {
-        const vipGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (vipGate) return vipGate;
-        return handleCreateVipPolicy(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/vip-policies") {
-        return handleListVipPolicies(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/vip-policies/:id");
-      if (match && method === "DELETE") {
-        const vipDeleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (vipDeleteGate) return vipDeleteGate;
-        return handleDeleteVipPolicy(request, auth, env, match.params[0]);
-      }
-
-      // -- Commitment tracking routes (Premium+) --------------------------------
-
-      if (method === "POST" && pathname === "/v1/commitments") {
-        const commitGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (commitGate) return commitGate;
-        return handleCreateCommitment(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/commitments") {
-        return handleListCommitments(request, auth, env);
-      }
-
-      match = matchRoute(pathname, "/v1/commitments/:id/status");
-      if (match && method === "GET") {
-        return handleGetCommitmentStatus(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/commitments/:id/export");
-      if (match && method === "POST") {
-        const exportGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (exportGate) return exportGate;
-        return handleExportCommitmentProof(request, auth, env, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/commitments/:id");
-      if (match && method === "DELETE") {
-        const commitDeleteGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (commitDeleteGate) return commitDeleteGate;
-        return handleDeleteCommitment(request, auth, env, match.params[0]);
-      }
-
-      // -- What-If Simulation route (Premium+) -----------------------------------
-
-      if (method === "POST" && pathname === "/v1/simulation") {
-        const simGate = await enforceFeatureGate(auth.userId, "premium", env.DB);
-        if (simGate) return simGate;
-        return handleSimulation(request, auth, env);
-      }
-
-      // -- Proof verification and download routes --------------------------------
-
-      match = matchRoute(pathname, "/v1/proofs/:id/verify");
-      if (match && method === "GET") {
-        return handleVerifyProof(request, auth, env, match.params[0]);
-      }
-
-      if (method === "GET" && pathname.startsWith("/v1/proofs/")) {
-        const r2Key = decodeURIComponent(pathname.slice("/v1/proofs/".length));
-        return handleDownloadProof(request, auth, env, r2Key);
-      }
-
-      // -- Billing routes ---------------------------------------------------
-
-      if (method === "POST" && pathname === "/v1/billing/checkout") {
-        if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
-          return jsonResponse(
-            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
-            ErrorCode.INTERNAL_ERROR,
-          );
-        }
-        return handleCreateCheckoutSession(request, auth.userId, env as unknown as BillingEnv);
-      }
-
-      if (method === "GET" && pathname === "/v1/billing/status") {
-        return handleGetBillingStatus(auth.userId, env as unknown as BillingEnv);
-      }
-
-      if (method === "POST" && pathname === "/v1/billing/portal") {
-        if (!env.STRIPE_SECRET_KEY) {
-          return jsonResponse(
-            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
-            ErrorCode.INTERNAL_ERROR,
-          );
-        }
-        return handleCreatePortalSession(auth.userId, env as unknown as BillingEnv);
-      }
-
-      if (method === "GET" && pathname === "/v1/billing/events") {
-        return handleGetBillingEvents(auth.userId, env as unknown as BillingEnv);
-      }
-
-      // -- CalDAV feed routes (Phase 5A) ------------------------------------
-
-      match = matchRoute(pathname, "/v1/caldav/:user_id/calendar.ics");
-      if (match && method === "GET") {
-        return handleCalDavFeed(request, auth, env, match.params[0]);
-      }
-
-      // -- Subscription URL info route --------------------------------------
-
-      if (method === "GET" && pathname === "/v1/caldav/subscription-url") {
-        const baseUrl = new URL(request.url);
-        const subscriptionUrl = `${baseUrl.protocol}//${baseUrl.host}/v1/caldav/${auth.userId}/calendar.ics`;
-        return jsonResponse(
-          successEnvelope({
-            subscription_url: subscriptionUrl,
-            content_type: "text/calendar",
-            instructions: "Add this URL as a calendar subscription in your calendar app (Apple Calendar, Google Calendar, Outlook, etc.).",
-          }),
-          200,
-        );
-      }
-
-      // -- Intelligence routes -------------------------------------------------
-
-      if (method === "GET" && pathname === "/v1/intelligence/cognitive-load") {
-        return handleGetCognitiveLoad(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/intelligence/context-switches") {
-        return handleGetContextSwitches(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/intelligence/deep-work") {
-        return handleGetDeepWork(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/intelligence/risk-scores") {
-        return handleGetRiskScores(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/availability") {
-        return handleGetAvailability(request, auth, env);
-      }
-
-      // -- Temporal Graph API routes (TM-b3i.4) --------------------------------
-
-      if (method === "GET" && pathname === "/v1/graph/events") {
-        return handleGraphEvents(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/graph/relationships") {
-        return handleGraphRelationships(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/graph/timeline") {
-        return handleGraphTimeline(request, auth, env);
-      }
-
-      if (method === "GET" && pathname === "/v1/graph/openapi.json") {
-        return handleGraphOpenApi();
-      }
-
-      // -- Domain-wide delegation routes (Phase 6D: TM-9iu.1) ----------------
-
-      // Rate limit check helper for org delegation endpoints (TM-9iu.5).
-      // Applies sliding-window rate limiting per-org on the "api" bucket.
-      // Returns a 429 Response if rate limited, null if allowed.
-      // Also attaches rate limit headers to the eventual response.
-      const checkDelegationRateLimit = async (orgId: string): Promise<Response | null> => {
-        const rlStore = new D1OrgRateLimitStore(env.DB);
-        const rlConfig = (await rlStore.getOrgConfig(orgId)) ?? DEFAULT_ORG_RATE_LIMITS;
-        const rlResult = await checkOrgRateLimit(rlStore, orgId, "api", rlConfig);
-        if (!rlResult.allowed) {
-          return buildOrgRateLimitResponse(rlResult);
-        }
-        return null;
-      };
-
-      if (method === "POST" && pathname === "/v1/orgs/register") {
-        const delegationStore = new D1DelegationStore(env.DB);
-        return handleOrgRegister(request, auth, { store: delegationStore, MASTER_KEY: env.MASTER_KEY });
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/delegation/calendars/:email");
-      if (match && method === "GET") {
-        const targetEmail = match.params[0];
-        const delegationStore = new D1DelegationStore(env.DB);
-        const response = await handleDelegationCalendars(
-          request,
-          auth,
-          { store: delegationStore, MASTER_KEY: env.MASTER_KEY },
-          targetEmail,
-        );
-
-        // AC#4: Log impersonation to compliance audit log (hash chain)
-        // Fire-and-forget: audit logging must not block the response
-        try {
-          const emailDomain = targetEmail.includes("@") ? targetEmail.split("@")[1]?.toLowerCase() : null;
-          if (emailDomain) {
-            const delegation = await delegationStore.getDelegation(emailDomain);
-            if (delegation) {
-              const complianceStore = new D1ComplianceAuditStore(env.DB);
-              const auditInput: ComplianceAuditInput = {
-                entryId: generateId("audit"),
-                orgId: delegation.delegationId,
-                timestamp: new Date().toISOString(),
-                actor: auth.userId,
-                action: "token_issued",
-                target: targetEmail,
-                result: response.ok ? "success" : "failure",
-                ipAddress: request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown",
-                userAgent: request.headers.get("User-Agent") ?? "unknown",
-                details: JSON.stringify({
-                  service: "delegation_calendars",
-                  http_status: response.status,
-                }),
-              };
-              await appendComplianceAuditEntry(complianceStore, auditInput);
-            }
-          }
-        } catch {
-          // Audit log failure must not affect the user-facing response
-        }
-
-        return response;
-      }
-
-      // -- Delegation admin dashboard routes (Phase 6D: TM-9iu.4) -----------
-      // Helper: build AdminDeps and AdminAuthContext for delegation admin handlers.
-      // Uses MASTER_KEY for DelegationService credential encryption.
-      // Admin status determined by org_members role lookup.
-
-      // PUT /v1/orgs/:id/discovery/config (must match before shorter patterns)
-      match = matchRoute(pathname, "/v1/orgs/:id/discovery/config");
-      if (match && (method === "PUT" || method === "GET")) {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        if (method === "GET") {
-          return handleGetDiscoveryConfig(request, adminAuth, orgId, deps);
-        }
-        return handleUpdateDiscoveryConfig(request, adminAuth, orgId, deps);
-      }
-
-      // GET /v1/orgs/:id/delegation/health
-      match = matchRoute(pathname, "/v1/orgs/:id/delegation/health");
-      if (match && method === "GET") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        return handleDelegationHealth(request, adminAuth, orgId, deps);
-      }
-
-      // POST /v1/orgs/:id/delegation/rotate
-      match = matchRoute(pathname, "/v1/orgs/:id/delegation/rotate");
-      if (match && method === "POST") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        return handleDelegationRotate(request, adminAuth, orgId, deps);
-      }
-
-      // GET /v1/orgs/:id/dashboard
-      match = matchRoute(pathname, "/v1/orgs/:id/dashboard");
-      if (match && method === "GET") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env, { includeQuotaReport: true });
-        return handleOrgDashboard(request, adminAuth, orgId, deps);
-      }
-
-      // POST /v1/orgs/:id/audit-log/export (AC#6: audit log export)
-      match = matchRoute(pathname, "/v1/orgs/:id/audit-log/export");
-      if (match && method === "POST") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const complianceStore = new D1ComplianceAuditStore(env.DB);
-        return handleAuditLogExport(request, adminAuth, orgId, complianceStore);
-      }
-
-      // GET /v1/orgs/:id/audit
-      match = matchRoute(pathname, "/v1/orgs/:id/audit");
-      if (match && method === "GET") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        return handleAuditLog(request, adminAuth, orgId, deps);
-      }
-
-      // PATCH /v1/orgs/:id/users/:uid (must match before GET /v1/orgs/:id/users/:uid)
-      match = matchRoute(pathname, "/v1/orgs/:id/users/:uid");
-      if (match && (method === "PATCH" || method === "GET")) {
-        const orgId = match.params[0];
-        const userId = match.params[1];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        if (method === "PATCH") {
-          return handleUpdateDiscoveredUser(request, adminAuth, orgId, userId, deps);
-        }
-        return handleGetDiscoveredUser(request, adminAuth, orgId, userId, deps);
-      }
-
-      // GET /v1/orgs/:id/users (list discovered users)
-      match = matchRoute(pathname, "/v1/orgs/:id/users");
-      if (match && method === "GET") {
-        const orgId = match.params[0];
-        const rlBlock = await checkDelegationRateLimit(orgId);
-        if (rlBlock) return rlBlock;
-        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-        const deps = buildAdminDeps(env);
-        return handleListDiscoveredUsers(request, adminAuth, orgId, deps);
-      }
-
-      // -- Organization routes (Enterprise) -----------------------------------
-
-      if (method === "POST" && pathname === "/v1/orgs") {
-        const orgGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
-        if (orgGate) return orgGate;
-        return handleCreateOrg(request, auth, env.DB);
-      }
-
-      // -- Org billing: seat management (must match before /v1/orgs/:id/members) --
-      match = matchRoute(pathname, "/v1/orgs/:id/billing/seats");
-      if (match && method === "POST") {
-        if (!env.STRIPE_SECRET_KEY) {
-          return jsonResponse(
-            errorEnvelope("Billing not configured", "INTERNAL_ERROR"),
-            ErrorCode.INTERNAL_ERROR,
-          );
-        }
-        const seatGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
-        if (seatGate) return seatGate;
-        return handleUpdateSeats(request, auth.userId, env.DB, match.params[0], env.STRIPE_SECRET_KEY);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/members/:uid/role");
-      if (match && method === "PUT") {
-        return handleChangeRole(request, auth, env.DB, match.params[0], match.params[1]);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/members/:uid");
-      if (match && method === "DELETE") {
-        return handleRemoveMember(request, auth, env.DB, match.params[0], match.params[1]);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/members");
-      if (match) {
-        if (method === "POST") {
-          // Enforce seat limit before adding member (AC#3)
-          const seatDenied = await enforceSeatLimit(match.params[0], env.DB);
-          if (seatDenied) return seatDenied;
-          return handleAddMember(request, auth, env.DB, match.params[0]);
-        }
-        if (method === "GET") {
-          return handleListMembers(request, auth, env.DB, match.params[0]);
-        }
-      }
-
-      // -- Org policy routes (Enterprise, admin for write, member for read) ----
-
-      match = matchRoute(pathname, "/v1/orgs/:id/policies/:pid");
-      if (match) {
-        const pOrgId = match.params[0];
-        const pPolicyId = match.params[1];
-        const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
-        if (policyGate) return policyGate;
-        if (method === "PUT") {
-          return handleUpdateOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
-        }
-        if (method === "DELETE") {
-          return handleDeleteOrgPolicy(request, auth, env.DB, pOrgId, pPolicyId);
-        }
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/policies");
-      if (match) {
-        const pOrgId = match.params[0];
-        const policyGate = await enforceFeatureGate(auth.userId, "enterprise", env.DB);
-        if (policyGate) return policyGate;
-        if (method === "POST") {
-          return handleCreateOrgPolicy(request, auth, env.DB, pOrgId);
-        }
-        if (method === "GET") {
-          return handleListOrgPolicies(request, auth, env.DB, pOrgId);
-        }
-      }
-
-      // -- Org admin controls (TM-ga8.4): Marketplace org-level install --
-      match = matchRoute(pathname, "/v1/orgs/:id/install-users");
-      if (match && method === "GET") {
-        return handleListOrgUsers(request, auth, env.DB, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/deactivate");
-      if (match && method === "POST") {
-        return handleDeactivateOrg(request, auth, env.DB, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id/install-status");
-      if (match && method === "GET") {
-        return handleGetOrgInstallStatus(request, auth, env.DB, match.params[0]);
-      }
-
-      match = matchRoute(pathname, "/v1/orgs/:id");
-      if (match && method === "GET") {
-        return handleGetOrg(request, auth, env.DB, match.params[0]);
-      }
-
-      // -- Fallback ---------------------------------------------------------
-
-      return jsonResponse(
-        errorEnvelope("Not Found", "NOT_FOUND"),
-        ErrorCode.NOT_FOUND,
-      );
+  for (const group of routeGroups) {
+    const response = await group(request, method, pathname, auth, env);
+    if (response) return response;
+  }
+
+  // -- Fallback ---------------------------------------------------------
+  return jsonResponse(
+    errorEnvelope("Not Found", "NOT_FOUND"),
+    ErrorCode.NOT_FOUND,
+  );
 }
 
 // ---------------------------------------------------------------------------
