@@ -119,6 +119,10 @@ describe("constants.ts -- ID_PREFIXES", () => {
     expect(ID_PREFIXES.relationship).toBe("rel_");
   });
 
+  it("delegation prefix is 'dlg_'", () => {
+    expect(ID_PREFIXES.delegation).toBe("dlg_");
+  });
+
   it("all prefixes are exactly 4 characters", () => {
     for (const [, prefix] of Object.entries(ID_PREFIXES)) {
       expect(prefix).toHaveLength(4);

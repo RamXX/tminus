@@ -248,7 +248,7 @@ export async function handleOrgRegister(
   const encryptedKey = await encryptServiceAccountKey(masterKey, serviceAccountKey);
 
   // Store the delegation record
-  const delegationId = generateId("dlg");
+  const delegationId = generateId("delegation");
   const now = new Date().toISOString();
 
   try {
