@@ -12,7 +12,7 @@
  * parameter using AES-256-GCM, eliminating the need for KV or cookie storage.
  */
 
-import { generateId } from "@tminus/shared";
+import { generateId, buildHealthResponse } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Workflow class re-export (required by wrangler for Workflow hosting)
@@ -555,7 +555,21 @@ export function createHandler(fetchFn?: FetchFn) {
 
       // Health check -- no auth, no method restriction
       if (url.pathname === "/health") {
-        return new Response("OK", { status: 200 });
+        const healthBody = buildHealthResponse(
+          "tminus-oauth",
+          "0.0.1",
+          env.ENVIRONMENT ?? "development",
+          [
+            { name: "DB", type: "d1", available: !!env.DB },
+            { name: "USER_GRAPH", type: "do", available: !!env.USER_GRAPH },
+            { name: "ACCOUNT", type: "do", available: !!env.ACCOUNT },
+            { name: "ONBOARDING_WORKFLOW", type: "workflow", available: !!env.ONBOARDING_WORKFLOW },
+          ],
+        );
+        return new Response(JSON.stringify(healthBody), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       // POST /marketplace/uninstall -- webhook from Google (must be before GET-only check)

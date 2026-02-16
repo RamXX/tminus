@@ -18,6 +18,7 @@ import {
   addCorsHeaders,
   buildPreflightResponse,
   computeProbabilisticAvailability,
+  buildHealthResponse,
 } from "@tminus/shared";
 import type { ProbabilisticEvent } from "@tminus/shared";
 
@@ -4430,9 +4431,18 @@ function createMcpHandler() {
 
       // Health check -- no auth required
       if (method === "GET" && pathname === "/health") {
+        const healthBody = buildHealthResponse(
+          "tminus-mcp",
+          "0.0.1",
+          environment,
+          [
+            { name: "DB", type: "d1", available: !!env.DB },
+            { name: "API", type: "service", available: !!env.API },
+          ],
+        );
         return finalize(
           new Response(
-            JSON.stringify({ ok: true, status: "healthy" }),
+            JSON.stringify(healthBody),
             {
               status: 200,
               headers: { "Content-Type": "application/json" },

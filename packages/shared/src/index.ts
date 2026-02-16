@@ -780,3 +780,11 @@ export type {
   ComplianceReport,
   ComplianceAnomaly,
 } from "./compliance-audit-log";
+
+// Re-export health check response builder (TM-z02d: enhanced health checks)
+export { buildHealthResponse } from "./health";
+export type {
+  BindingStatus,
+  HealthCheckData,
+  HealthCheckResponse,
+} from "./health";

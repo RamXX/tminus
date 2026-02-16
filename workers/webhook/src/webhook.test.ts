@@ -521,7 +521,7 @@ describe("POST /webhook/microsoft", () => {
 // ---------------------------------------------------------------------------
 
 describe("Worker routing", () => {
-  it("GET /health returns 200", async () => {
+  it("GET /health returns 200 with enriched health data", async () => {
     const { env } = createMockEnv();
     const handler = createHandler();
 
@@ -531,6 +531,29 @@ describe("Worker routing", () => {
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
+    const body = await response.json() as {
+      ok: boolean;
+      data: {
+        status: string;
+        version: string;
+        worker: string;
+        environment: string;
+        bindings: Array<{ name: string; type: string; available: boolean }>;
+      };
+      error: null;
+      meta: { timestamp: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBeDefined();
+    expect(body.data.version).toBe("0.0.1");
+    expect(body.data.worker).toBe("tminus-webhook");
+    expect(body.data.environment).toBe("development");
+    expect(Array.isArray(body.data.bindings)).toBe(true);
+    const bindingNames = body.data.bindings.map((b) => b.name);
+    expect(bindingNames).toContain("DB");
+    expect(bindingNames).toContain("SYNC_QUEUE");
+    expect(body.error).toBeNull();
+    expect(body.meta.timestamp).toBeTruthy();
   });
 
   it("unknown routes return 404", async () => {

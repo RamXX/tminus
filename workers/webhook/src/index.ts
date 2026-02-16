@@ -19,6 +19,7 @@
  */
 
 import type { SyncIncrementalMessage, AccountId } from "@tminus/shared";
+import { buildHealthResponse } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Google webhook header names
@@ -269,7 +270,19 @@ export function createHandler() {
 
       // GET /health -- health check
       if (method === "GET" && pathname === "/health") {
-        return new Response("OK", { status: 200 });
+        const healthBody = buildHealthResponse(
+          "tminus-webhook",
+          "0.0.1",
+          env.ENVIRONMENT ?? "development",
+          [
+            { name: "DB", type: "d1", available: !!env.DB },
+            { name: "SYNC_QUEUE", type: "queue", available: !!env.SYNC_QUEUE },
+          ],
+        );
+        return new Response(JSON.stringify(healthBody), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       // Everything else -- 404

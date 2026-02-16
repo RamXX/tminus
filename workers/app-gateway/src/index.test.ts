@@ -81,15 +81,46 @@ describe("app-gateway worker", () => {
   });
 
   describe("GET /health", () => {
-    it("returns 200 with status ok", async () => {
-      const env = makeEnv();
+    it("returns 200 with enriched health data", async () => {
+      const mockApi = createMockApi();
+      const env = makeEnv({ API: mockApi });
       const req = new Request("https://app.tminus.ink/health");
       const res = await app.fetch(req, env);
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { status: string; timestamp: string };
-      expect(body.status).toBe("ok");
-      expect(body.timestamp).toBeTruthy();
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.ok).toBe(true);
+      const data = body.data as Record<string, unknown>;
+      expect(data.status).toBe("healthy");
+      expect(data.version).toBe("0.0.1");
+      expect(data.environment).toBe("development");
+      expect(data.worker).toBe("tminus-app-gateway");
+      expect(Array.isArray(data.bindings)).toBe(true);
+      expect(body.meta).toBeTruthy();
+    });
+
+    it("reports ASSETS binding availability", async () => {
+      const mockApi = createMockApi();
+      const env = makeEnv({ API: mockApi });
+      const req = new Request("https://app.tminus.ink/health");
+      const res = await app.fetch(req, env);
+
+      const body = await res.json() as Record<string, unknown>;
+      const data = body.data as Record<string, unknown>;
+      const bindings = data.bindings as Array<{ name: string; available: boolean }>;
+      const assetsBinding = bindings.find((b) => b.name === "ASSETS");
+      expect(assetsBinding?.available).toBe(true);
+    });
+
+    it("reports degraded when API service binding is missing", async () => {
+      const env = makeEnv({ API: undefined });
+      const req = new Request("https://app.tminus.ink/health");
+      const res = await app.fetch(req, env);
+
+      const body = await res.json() as Record<string, unknown>;
+      const data = body.data as Record<string, unknown>;
+      // API binding is optional and undefined by default in dev, so degraded
+      expect(data.status).toBe("degraded");
     });
 
     it("sets Cache-Control no-store", async () => {

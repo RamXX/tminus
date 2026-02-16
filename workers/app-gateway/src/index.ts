@@ -14,6 +14,7 @@
  */
 
 import { Hono } from "hono";
+import { buildHealthResponse } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Env bindings
@@ -80,7 +81,16 @@ function createApp(): Hono<{ Bindings: AppGatewayEnv }> {
   // Health check
   app.get("/health", (c) => {
     c.header("Cache-Control", "no-store");
-    return c.json({ status: "ok", timestamp: new Date().toISOString() });
+    const healthBody = buildHealthResponse(
+      "tminus-app-gateway",
+      "0.0.1",
+      c.env.ENVIRONMENT ?? "development",
+      [
+        { name: "ASSETS", type: "assets", available: !!c.env.ASSETS },
+        { name: "API", type: "service", available: !!c.env.API },
+      ],
+    );
+    return c.json(healthBody);
   });
 
   // API proxy: forward /api/* to the api-worker

@@ -9,4 +9,6 @@ interface Env {
   DB: D1Database;
   SYNC_QUEUE: Queue;
   MS_WEBHOOK_CLIENT_STATE: string;
+  /** Deployment environment: "production", "staging", or "development" (default). */
+  ENVIRONMENT?: string;
 }

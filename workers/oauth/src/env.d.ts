@@ -32,4 +32,7 @@ interface Env {
 
   /** Symmetric key for encrypting state parameter (hex-encoded 32 bytes). */
   JWT_SECRET: string;
+
+  /** Deployment environment: "production", "staging", or "development" (default). */
+  ENVIRONMENT?: string;
 }

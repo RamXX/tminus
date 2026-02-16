@@ -16,6 +16,7 @@ import {
   addSecurityHeaders,
   addCorsHeaders,
   buildPreflightResponse,
+  buildHealthResponse,
 } from "@tminus/shared";
 import type { RateLimitKV, RateLimitTier } from "@tminus/shared";
 import { createAuthRoutes } from "./routes/auth";
@@ -355,18 +356,22 @@ export function createHandler() {
 
       // Health check -- no auth required
       if (method === "GET" && pathname === "/health") {
+        const healthBody = buildHealthResponse(
+          "tminus-api",
+          API_VERSION,
+          environment,
+          [
+            { name: "DB", type: "d1", available: !!env.DB },
+            { name: "USER_GRAPH", type: "do", available: !!env.USER_GRAPH },
+            { name: "ACCOUNT", type: "do", available: !!env.ACCOUNT },
+            { name: "SYNC_QUEUE", type: "queue", available: !!env.SYNC_QUEUE },
+            { name: "WRITE_QUEUE", type: "queue", available: !!env.WRITE_QUEUE },
+            { name: "SESSIONS", type: "kv", available: !!env.SESSIONS },
+            { name: "RATE_LIMITS", type: "kv", available: !!env.RATE_LIMITS },
+          ],
+        );
         return finalize(new Response(
-          JSON.stringify({
-            ok: true,
-            data: {
-              status: "healthy",
-              version: API_VERSION,
-            },
-            error: null,
-            meta: {
-              timestamp: new Date().toISOString(),
-            },
-          }),
+          JSON.stringify(healthBody),
           {
             status: 200,
             headers: { "Content-Type": "application/json" },

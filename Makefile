@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
 
 # ---- Core targets ----
 
@@ -235,6 +235,16 @@ smoke-test:
 
 smoke-test-staging:
 	node scripts/smoke-test.mjs --env staging
+
+# ---- Deployment validation ----
+# Verify all workers are healthy and reachable via their /health endpoints.
+# Returns exit code 0 only if ALL workers pass.
+
+validate-deployment:
+	bash scripts/validate-deployment.sh --env production --verbose
+
+validate-deployment-staging:
+	bash scripts/validate-deployment.sh --env staging --verbose
 
 # ---- Secrets management ----
 # Dedicated secrets setup for all workers across environments.

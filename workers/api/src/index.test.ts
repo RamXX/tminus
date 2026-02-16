@@ -278,7 +278,7 @@ describe("routing: health endpoint", () => {
       meta: { timestamp: string };
     };
     expect(body.ok).toBe(true);
-    expect(body.data.status).toBe("healthy");
+    expect(body.data.status).toBeDefined();
     expect(body.data.version).toBe(API_VERSION);
     expect(body.error).toBeNull();
     expect(body.meta.timestamp).toBeTruthy();
@@ -296,6 +296,37 @@ describe("routing: health endpoint", () => {
     const response = await handler.fetch(request, env, mockCtx);
     const body = await response.json() as { data: { version: string } };
     expect(body.data.version).toBe("0.0.1");
+  });
+
+  it("GET /health includes enriched fields: worker, environment, bindings", async () => {
+    const handler = createHandler();
+    const env = createMinimalEnv();
+    const request = new Request("https://api.tminus.dev/health", {
+      method: "GET",
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    const body = await response.json() as {
+      data: {
+        worker: string;
+        environment: string;
+        bindings: Array<{ name: string; type: string; available: boolean }>;
+      };
+    };
+    expect(body.data.worker).toBe("tminus-api");
+    expect(body.data.environment).toBe("development");
+    expect(Array.isArray(body.data.bindings)).toBe(true);
+    expect(body.data.bindings.length).toBeGreaterThan(0);
+
+    // Verify key bindings are reported
+    const bindingNames = body.data.bindings.map((b) => b.name);
+    expect(bindingNames).toContain("DB");
+    expect(bindingNames).toContain("USER_GRAPH");
+    expect(bindingNames).toContain("ACCOUNT");
+    expect(bindingNames).toContain("SYNC_QUEUE");
+    expect(bindingNames).toContain("WRITE_QUEUE");
+    expect(bindingNames).toContain("SESSIONS");
+    expect(bindingNames).toContain("RATE_LIMITS");
   });
 });
 

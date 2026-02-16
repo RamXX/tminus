@@ -152,7 +152,7 @@ describe("MCP worker module shape", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /health", () => {
-  it("returns 200 with ok: true", async () => {
+  it("returns 200 with enriched health data", async () => {
     const handler = createMcpHandler();
     const env = createMinimalEnv();
     const request = new Request("https://mcp.tminus.ink/health", {
@@ -161,9 +161,29 @@ describe("GET /health", () => {
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as Record<string, unknown>;
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        status: string;
+        version: string;
+        worker: string;
+        environment: string;
+        bindings: Array<{ name: string; type: string; available: boolean }>;
+      };
+      error: null;
+      meta: { timestamp: string };
+    };
     expect(body.ok).toBe(true);
-    expect(body.status).toBe("healthy");
+    expect(body.data.status).toBeDefined();
+    expect(body.data.version).toBe("0.0.1");
+    expect(body.data.worker).toBe("tminus-mcp");
+    expect(body.data.environment).toBe("development");
+    expect(Array.isArray(body.data.bindings)).toBe(true);
+    const bindingNames = body.data.bindings.map((b) => b.name);
+    expect(bindingNames).toContain("DB");
+    expect(bindingNames).toContain("API");
+    expect(body.error).toBeNull();
+    expect(body.meta.timestamp).toBeTruthy();
   });
 
   it("includes Content-Type application/json header", async () => {
