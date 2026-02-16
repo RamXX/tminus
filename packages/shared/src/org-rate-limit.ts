@@ -278,16 +278,24 @@ export function buildOrgRateLimitHeaders(
 
 /**
  * Build a 429 Too Many Requests response for org rate limiting.
+ *
+ * Uses the canonical error envelope format: flat `error` (string) + `error_code`
+ * (string), matching the shared.ts apiErrorResponse() pattern used by
+ * feature-gate.ts, auth.ts, and buildRateLimitResponse() in rate-limit.ts.
+ *
+ * Constructed inline to avoid a cross-package dependency (this module lives
+ * in packages/shared, apiErrorResponse lives in workers/api).
+ *
+ * @param result - The org rate limit check result
+ * @returns A Response object with 429 status, rate limit headers, and envelope body
  */
 export function buildOrgRateLimitResponse(result: OrgRateLimitResult): Response {
   const headers = buildOrgRateLimitHeaders(result);
 
   const body = JSON.stringify({
     ok: false,
-    error: {
-      code: "RATE_LIMITED",
-      message: `Rate limit exceeded for ${result.bucket} bucket. Please try again later.`,
-    },
+    error: `Rate limit exceeded for ${result.bucket} bucket. Please try again later.`,
+    error_code: "RATE_LIMITED",
     meta: {
       request_id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date().toISOString(),

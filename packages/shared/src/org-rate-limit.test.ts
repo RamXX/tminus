@@ -372,7 +372,7 @@ describe("buildOrgRateLimitResponse", () => {
     expect(response.headers.get("Content-Type")).toBe("application/json");
   });
 
-  it("body includes RATE_LIMITED error code and bucket info", async () => {
+  it("body follows canonical envelope format (flat error + error_code strings)", async () => {
     const result: OrgRateLimitResult = {
       allowed: false,
       limit: 60,
@@ -387,11 +387,13 @@ describe("buildOrgRateLimitResponse", () => {
 
     expect(body).toMatchObject({
       ok: false,
-      error: {
-        code: "RATE_LIMITED",
-      },
+      error: "Rate limit exceeded for impersonation bucket. Please try again later.",
+      error_code: "RATE_LIMITED",
     });
-    expect(body.error.message).toContain("impersonation");
+    // Verify canonical format: error is a string, not a nested object
+    expect(typeof body.error).toBe("string");
+    expect(typeof body.error_code).toBe("string");
+    expect(body.error).toContain("impersonation");
     expect(body.meta.bucket).toBe("impersonation");
     expect(body.meta.retry_after).toBe(25);
   });
