@@ -84,6 +84,8 @@ import type {
   MirrorState,
   BillingCategory,
 } from "@tminus/shared";
+import { OnboardingSessionMixin } from "./onboarding-session-mixin";
+export type { OnboardingSessionRow, OnboardingAccount } from "./onboarding-session-mixin";
 
 // ---------------------------------------------------------------------------
 // Queue interface (minimal, matches Cloudflare Queue API surface we use)
@@ -198,18 +200,9 @@ interface LedgerRow {
   ts: string;
 }
 
-/** Row shape for onboarding_sessions table. */
-interface OnboardingSessionRow {
-  [key: string]: unknown;
-  session_id: string;
-  user_id: string;
-  step: string;
-  accounts_json: string;
-  session_token: string;
-  created_at: string;
-  updated_at: string;
-  completed_at: string | null;
-}
+// OnboardingSessionRow is now defined in onboarding-session-mixin.ts
+// and re-exported from this module.
+import type { OnboardingSessionRow } from "./onboarding-session-mixin";
 
 interface DriftAlertRow {
   [key: string]: unknown;
@@ -534,10 +527,12 @@ export class UserGraphDO {
   private readonly sql: SqlStorageLike;
   private readonly writeQueue: QueueLike;
   private migrated = false;
+  private readonly onboarding: OnboardingSessionMixin;
 
   constructor(sql: SqlStorageLike, writeQueue: QueueLike) {
     this.sql = sql;
     this.writeQueue = writeQueue;
+    this.onboarding = new OnboardingSessionMixin(sql, () => this.ensureMigrated());
   }
 
   // -------------------------------------------------------------------------
@@ -7289,89 +7284,25 @@ export class UserGraphDO {
 
   // -------------------------------------------------------------------------
   // Onboarding session management (Phase 6A)
+  // Delegated to OnboardingSessionMixin -- see onboarding-session-mixin.ts
   // -------------------------------------------------------------------------
 
-  /**
-   * Create a new onboarding session for a user.
-   * BR-1: Session is per-user, stored in UserGraphDO.
-   */
   createOnboardingSession(
     sessionId: string,
     userId: string,
     sessionToken: string,
   ): OnboardingSessionRow {
-    this.ensureMigrated();
-    const now = new Date().toISOString();
-
-    this.sql.exec<Record<string, unknown>>(
-      `INSERT INTO onboarding_sessions
-         (session_id, user_id, step, accounts_json, session_token, created_at, updated_at)
-       VALUES (?1, ?2, 'welcome', '[]', ?3, ?4, ?4)`,
-      sessionId,
-      userId,
-      sessionToken,
-      now,
-    );
-
-    return {
-      session_id: sessionId,
-      user_id: userId,
-      step: "welcome",
-      accounts_json: "[]",
-      session_token: sessionToken,
-      created_at: now,
-      updated_at: now,
-      completed_at: null,
-    };
+    return this.onboarding.createOnboardingSession(sessionId, userId, sessionToken);
   }
 
-  /**
-   * Get the active onboarding session for a user.
-   * Returns the most recent non-completed session, or null.
-   */
   getOnboardingSession(userId: string): OnboardingSessionRow | null {
-    this.ensureMigrated();
-
-    const rows = this.sql
-      .exec<OnboardingSessionRow>(
-        `SELECT session_id, user_id, step, accounts_json, session_token,
-                created_at, updated_at, completed_at
-         FROM onboarding_sessions
-         WHERE user_id = ?1
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        userId,
-      )
-      .toArray();
-
-    return rows.length > 0 ? rows[0] : null;
+    return this.onboarding.getOnboardingSession(userId);
   }
 
-  /**
-   * Get an onboarding session by session token.
-   * BR-3: Session survives browser close (httpOnly cookie + server state).
-   */
   getOnboardingSessionByToken(sessionToken: string): OnboardingSessionRow | null {
-    this.ensureMigrated();
-
-    const rows = this.sql
-      .exec<OnboardingSessionRow>(
-        `SELECT session_id, user_id, step, accounts_json, session_token,
-                created_at, updated_at, completed_at
-         FROM onboarding_sessions
-         WHERE session_token = ?1
-         LIMIT 1`,
-        sessionToken,
-      )
-      .toArray();
-
-    return rows.length > 0 ? rows[0] : null;
+    return this.onboarding.getOnboardingSessionByToken(sessionToken);
   }
 
-  /**
-   * Add or update an account in the onboarding session.
-   * BR-4: Adding same account is idempotent (update, not duplicate).
-   */
   addOnboardingAccount(
     userId: string,
     account: {
@@ -7383,126 +7314,20 @@ export class UserGraphDO {
       connected_at: string;
     },
   ): OnboardingSessionRow | null {
-    this.ensureMigrated();
-
-    const session = this.getOnboardingSession(userId);
-    if (!session) return null;
-
-    const accounts = JSON.parse(session.accounts_json) as Array<{
-      account_id: string;
-      provider: string;
-      email: string;
-      status: string;
-      calendar_count?: number;
-      connected_at: string;
-    }>;
-
-    // Idempotent: update existing or add new
-    const existingIndex = accounts.findIndex(
-      (a) => a.account_id === account.account_id,
-    );
-    if (existingIndex >= 0) {
-      accounts[existingIndex] = account;
-    } else {
-      accounts.push(account);
-    }
-
-    const now = new Date().toISOString();
-    const accountsJson = JSON.stringify(accounts);
-
-    this.sql.exec<Record<string, unknown>>(
-      `UPDATE onboarding_sessions
-       SET accounts_json = ?1, step = 'connecting', updated_at = ?2
-       WHERE session_id = ?3`,
-      accountsJson,
-      now,
-      session.session_id,
-    );
-
-    return {
-      ...session,
-      accounts_json: accountsJson,
-      step: "connecting",
-      updated_at: now,
-    };
+    return this.onboarding.addOnboardingAccount(userId, account);
   }
 
-  /**
-   * Update the status of an account in the onboarding session.
-   */
   updateOnboardingAccountStatus(
     userId: string,
     accountId: string,
     status: string,
     calendarCount?: number,
   ): OnboardingSessionRow | null {
-    this.ensureMigrated();
-
-    const session = this.getOnboardingSession(userId);
-    if (!session) return null;
-
-    const accounts = JSON.parse(session.accounts_json) as Array<{
-      account_id: string;
-      provider: string;
-      email: string;
-      status: string;
-      calendar_count?: number;
-      connected_at: string;
-    }>;
-
-    const account = accounts.find((a) => a.account_id === accountId);
-    if (account) {
-      account.status = status;
-      if (calendarCount !== undefined) {
-        account.calendar_count = calendarCount;
-      }
-    }
-
-    const now = new Date().toISOString();
-    const accountsJson = JSON.stringify(accounts);
-
-    this.sql.exec<Record<string, unknown>>(
-      `UPDATE onboarding_sessions
-       SET accounts_json = ?1, updated_at = ?2
-       WHERE session_id = ?3`,
-      accountsJson,
-      now,
-      session.session_id,
-    );
-
-    return {
-      ...session,
-      accounts_json: accountsJson,
-      updated_at: now,
-    };
+    return this.onboarding.updateOnboardingAccountStatus(userId, accountId, status, calendarCount);
   }
 
-  /**
-   * Mark onboarding session as complete.
-   * AC 6: Session marked complete on explicit user action (not auto-timeout).
-   */
   completeOnboardingSession(userId: string): OnboardingSessionRow | null {
-    this.ensureMigrated();
-
-    const session = this.getOnboardingSession(userId);
-    if (!session) return null;
-
-    const now = new Date().toISOString();
-
-    this.sql.exec<Record<string, unknown>>(
-      `UPDATE onboarding_sessions
-       SET step = 'complete', completed_at = ?1, updated_at = ?1
-       WHERE session_id = ?2`,
-      now,
-      session.session_id,
-    );
-
-    return {
-      ...session,
-      step: "complete",
-      completed_at: now,
-      updated_at: now,
-    };
+    return this.onboarding.completeOnboardingSession(userId);
   }
 
   /** Convert a DB row to a CanonicalEvent domain object. */
