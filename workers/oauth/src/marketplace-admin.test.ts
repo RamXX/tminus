@@ -295,8 +295,17 @@ function createAdminMockD1() {
               status: "active",
             });
           }
-          if (sql.includes("UPDATE") && sql.includes("org_installations")) {
-            // Update existing installation
+          if (sql.includes("UPDATE") && sql.includes("org_installations") && sql.includes("org_id")) {
+            // Backfill org_id on installation (from handleOrgUserActivation)
+            const orgId = statement.bindings[0] as string;
+            const installId = statement.bindings[1] as string;
+            for (const inst of installations) {
+              if (inst.install_id === installId) {
+                inst.org_id = orgId;
+              }
+            }
+          } else if (sql.includes("UPDATE") && sql.includes("org_installations")) {
+            // Reactivate existing installation (from handleAdminInstall)
             for (const inst of installations) {
               if (inst.install_id === statement.bindings[statement.bindings.length - 1]) {
                 inst.status = "active";
@@ -554,6 +563,90 @@ describe("handleOrgUserActivation", () => {
 
       // OnboardingWorkflow was started
       expect(workflow._calls.length).toBe(1);
+    });
+
+    it("backfills installation.org_id when creating a new org (null org_id)", async () => {
+      const d1 = createAdminMockD1();
+      // Pre-populate installation with null org_id (the bug scenario)
+      d1._installations.push({
+        install_id: "oin_BACKFILL_01",
+        google_customer_id: TEST_CUSTOMER_ID,
+        org_id: null,
+        admin_email: TEST_ADMIN_EMAIL,
+        admin_google_sub: TEST_GOOGLE_SUB,
+        scopes_granted: GOOGLE_SCOPES,
+        status: "active",
+      });
+
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createAdminMockEnv({ d1, accountDO, workflow });
+
+      const mockFetch = createAdminMockFetch({
+        userInfoResponse: {
+          sub: TEST_USER_SUB,
+          email: TEST_USER_EMAIL,
+          name: "Org User",
+          hd: TEST_HOSTED_DOMAIN,
+        },
+      });
+
+      const request = new Request(
+        `https://oauth.tminus.dev/marketplace/org-activate?code=${TEST_AUTH_CODE}`,
+      );
+      await handleOrgUserActivation(request, env, mockFetch);
+
+      // PROOF: org was created
+      expect(d1._orgs.length).toBe(1);
+      const createdOrgId = d1._orgs[0].org_id as string;
+      expect(createdOrgId).toMatch(/^org_/);
+
+      // PROOF: installation.org_id was backfilled (the bug fix)
+      expect(d1._installations[0].org_id).toBe(createdOrgId);
+
+      // PROOF: user was assigned to the same org
+      expect(d1._users[0].org_id).toBe(createdOrgId);
+    });
+
+    it("does NOT create a new org when installation already has org_id", async () => {
+      const d1 = createAdminMockD1();
+      // Pre-populate installation WITH an existing org_id
+      d1._installations.push({
+        install_id: "oin_EXISTING_01",
+        google_customer_id: TEST_CUSTOMER_ID,
+        org_id: "org_EXISTING",
+        admin_email: TEST_ADMIN_EMAIL,
+        admin_google_sub: TEST_GOOGLE_SUB,
+        scopes_granted: GOOGLE_SCOPES,
+        status: "active",
+      });
+
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createAdminMockEnv({ d1, accountDO, workflow });
+
+      const mockFetch = createAdminMockFetch({
+        userInfoResponse: {
+          sub: TEST_USER_SUB,
+          email: TEST_USER_EMAIL,
+          name: "Org User",
+          hd: TEST_HOSTED_DOMAIN,
+        },
+      });
+
+      const request = new Request(
+        `https://oauth.tminus.dev/marketplace/org-activate?code=${TEST_AUTH_CODE}`,
+      );
+      await handleOrgUserActivation(request, env, mockFetch);
+
+      // PROOF: no new org created (uses existing)
+      expect(d1._orgs.length).toBe(0);
+
+      // PROOF: installation.org_id unchanged
+      expect(d1._installations[0].org_id).toBe("org_EXISTING");
+
+      // PROOF: user assigned to the existing org
+      expect(d1._users[0].org_id).toBe("org_EXISTING");
     });
   });
 

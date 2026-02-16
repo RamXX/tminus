@@ -144,6 +144,20 @@ function createMockD1() {
             const found = accounts.filter((a) => a.provider_subject === providerSubject) as T[];
             return { results: found, success: true };
           }
+          // processOrgUninstall: JOIN accounts+users by org_id
+          if (sql.includes("accounts") && sql.includes("JOIN") && sql.includes("org_id")) {
+            const orgId = statement.bindings[0] as string;
+            const orgUserIds = users
+              .filter((u) => u.org_id === orgId)
+              .map((u) => u.user_id);
+            const found = accounts.filter(
+              (a) =>
+                orgUserIds.includes(a.user_id as string) &&
+                a.provider === "google" &&
+                a.status === "active",
+            );
+            return { results: found as T[], success: true };
+          }
           return { results: [], success: true };
         },
         async run(): Promise<{ success: boolean }> {
@@ -158,7 +172,25 @@ function createMockD1() {
               status: "active",
             });
           }
-          if (sql.includes("UPDATE") && sql.includes("org_installations")) {
+          if (sql.includes("UPDATE") && sql.includes("org_installations") && sql.includes("org_id =")) {
+            // Backfill org_id on installation (from handleOrgUserActivation)
+            const orgId = statement.bindings[0] as string;
+            const installId = statement.bindings[1] as string;
+            for (const inst of installations) {
+              if (inst.install_id === installId) {
+                inst.org_id = orgId;
+              }
+            }
+          } else if (sql.includes("UPDATE") && sql.includes("org_installations") && sql.includes("inactive")) {
+            // processOrgUninstall: deactivate installation
+            const installId = statement.bindings[0] as string;
+            for (const inst of installations) {
+              if (inst.install_id === installId) {
+                inst.status = "inactive";
+              }
+            }
+          } else if (sql.includes("UPDATE") && sql.includes("org_installations")) {
+            // handleAdminInstall: reactivate existing installation
             for (const inst of installations) {
               if (inst.install_id === statement.bindings[statement.bindings.length - 1]) {
                 inst.status = "active";
@@ -190,7 +222,16 @@ function createMockD1() {
               status: "active",
             });
           }
-          if (sql.includes("UPDATE") && sql.includes("accounts")) {
+          if (sql.includes("UPDATE") && sql.includes("accounts") && sql.includes("revoked")) {
+            // cleanupAccount: mark account as revoked
+            const accountId = statement.bindings[0] as string;
+            for (const acct of accounts) {
+              if (acct.account_id === accountId) {
+                acct.status = "revoked";
+              }
+            }
+          } else if (sql.includes("UPDATE") && sql.includes("accounts")) {
+            // handleOrgUserActivation: reactivate account
             const targetId = statement.bindings[statement.bindings.length - 1];
             for (const acct of accounts) {
               if (acct.account_id === targetId) {
@@ -488,5 +529,237 @@ describe("Integration: Worker routing handles admin install routes", () => {
       mockCtx,
     );
     expect(response.status).toBe(200);
+  });
+});
+
+// ===========================================================================
+// Integration Test 4: org_id backfill after first user activation (TM-hmq bug fix)
+// ===========================================================================
+
+describe("Integration: org_id backfill after first user activation (TM-hmq)", () => {
+  it("first user activation with null org_id backfills installation record", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+
+    // Pre-populate active org installation with null org_id
+    d1._installations.push({
+      install_id: "oin_BACKFILL_INTEG_01",
+      google_customer_id: TEST_CUSTOMER_ID,
+      org_id: null,
+      admin_email: TEST_ADMIN_EMAIL,
+      admin_google_sub: TEST_ADMIN_SUB,
+      scopes_granted: GOOGLE_SCOPES,
+      status: "active",
+    });
+
+    const env = createMockEnv({ d1, accountDO, workflow });
+    const mockFetch = createAdminMockFetch({
+      sub: TEST_USER_SUB,
+      email: TEST_USER_EMAIL,
+      name: "First Org User",
+      hd: "workspace-integ.dev",
+    });
+    const handler = createHandler(mockFetch);
+
+    const request = new Request(
+      `https://oauth.tminus.dev/marketplace/org-activate?code=${TEST_AUTH_CODE}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    // PROOF: activation succeeded
+    expect(response.status).toBe(302);
+
+    // PROOF: a new org was created
+    expect(d1._orgs.length).toBe(1);
+    const createdOrgId = d1._orgs[0].org_id as string;
+    expect(createdOrgId).toMatch(/^org_/);
+
+    // PROOF: installation.org_id was backfilled with the new org_id
+    expect(d1._installations[0].org_id).toBe(createdOrgId);
+
+    // PROOF: user was assigned to the same org
+    expect(d1._users[0].org_id).toBe(createdOrgId);
+  });
+
+  it("second user activation joins the SAME org (not creates a new one)", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+
+    // Pre-populate active org installation with null org_id
+    d1._installations.push({
+      install_id: "oin_MULTI_USER_01",
+      google_customer_id: TEST_CUSTOMER_ID,
+      org_id: null,
+      admin_email: TEST_ADMIN_EMAIL,
+      admin_google_sub: TEST_ADMIN_SUB,
+      scopes_granted: GOOGLE_SCOPES,
+      status: "active",
+    });
+
+    const env = createMockEnv({ d1, accountDO, workflow });
+
+    // --- First user activates ---
+    const firstUserFetch = createAdminMockFetch({
+      sub: "google-sub-user1-111",
+      email: "user1@workspace-integ.dev",
+      name: "User One",
+      hd: "workspace-integ.dev",
+    });
+    const handler1 = createHandler(firstUserFetch);
+    const req1 = new Request(
+      `https://oauth.tminus.dev/marketplace/org-activate?code=code-user1`,
+    );
+    const resp1 = await handler1.fetch(req1, env, mockCtx);
+    expect(resp1.status).toBe(302);
+
+    // Capture the org_id created by first user
+    expect(d1._orgs.length).toBe(1);
+    const firstOrgId = d1._orgs[0].org_id as string;
+    expect(d1._installations[0].org_id).toBe(firstOrgId);
+
+    // --- Second user activates ---
+    const secondUserFetch = createAdminMockFetch({
+      sub: "google-sub-user2-222",
+      email: "user2@workspace-integ.dev",
+      name: "User Two",
+      hd: "workspace-integ.dev",
+    });
+    const handler2 = createHandler(secondUserFetch);
+    const req2 = new Request(
+      `https://oauth.tminus.dev/marketplace/org-activate?code=code-user2`,
+    );
+    const resp2 = await handler2.fetch(req2, env, mockCtx);
+    expect(resp2.status).toBe(302);
+
+    // PROOF: NO new org was created -- second user joins the first user's org
+    expect(d1._orgs.length).toBe(1);
+
+    // PROOF: both users share the SAME org_id
+    expect(d1._users.length).toBe(2);
+    expect(d1._users[0].org_id).toBe(firstOrgId);
+    expect(d1._users[1].org_id).toBe(firstOrgId);
+
+    // PROOF: installation still has the same backfilled org_id
+    expect(d1._installations[0].org_id).toBe(firstOrgId);
+  });
+});
+
+// ===========================================================================
+// Integration Test 5: processOrgUninstall finds users after org_id backfill (TM-hmq)
+// ===========================================================================
+
+describe("Integration: processOrgUninstall finds users after org_id backfill (TM-hmq)", () => {
+  it("org uninstall correctly finds all users after activation backfilled org_id", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+
+    // Start with null org_id installation
+    d1._installations.push({
+      install_id: "oin_UNINSTALL_TEST_01",
+      google_customer_id: TEST_CUSTOMER_ID,
+      org_id: null,
+      admin_email: TEST_ADMIN_EMAIL,
+      admin_google_sub: TEST_ADMIN_SUB,
+      scopes_granted: GOOGLE_SCOPES,
+      status: "active",
+    });
+
+    const env = createMockEnv({ d1, accountDO, workflow });
+
+    // Activate two users (which should backfill org_id)
+    const user1Fetch = createAdminMockFetch({
+      sub: "google-sub-uninstall-u1",
+      email: "u1@workspace-integ.dev",
+      name: "Uninstall User1",
+      hd: "workspace-integ.dev",
+    });
+    const handler1 = createHandler(user1Fetch);
+    await handler1.fetch(
+      new Request(`https://oauth.tminus.dev/marketplace/org-activate?code=code-u1`),
+      env,
+      mockCtx,
+    );
+
+    const user2Fetch = createAdminMockFetch({
+      sub: "google-sub-uninstall-u2",
+      email: "u2@workspace-integ.dev",
+      name: "Uninstall User2",
+      hd: "workspace-integ.dev",
+    });
+    const handler2 = createHandler(user2Fetch);
+    await handler2.fetch(
+      new Request(`https://oauth.tminus.dev/marketplace/org-activate?code=code-u2`),
+      env,
+      mockCtx,
+    );
+
+    // Verify both users were created in same org
+    expect(d1._users.length).toBe(2);
+    const orgId = d1._installations[0].org_id as string;
+    expect(orgId).toBeTruthy();
+    expect(d1._users[0].org_id).toBe(orgId);
+    expect(d1._users[1].org_id).toBe(orgId);
+    expect(d1._accounts.length).toBe(2);
+
+    // Now simulate processOrgUninstall by importing and calling it directly
+    const { processOrgUninstall } = await import("./marketplace-uninstall");
+
+    // We need an env that supports the uninstall mock patterns.
+    // The D1 already has the correct data; we just need the AccountDO
+    // to handle get-token/delete-credentials/stop-sync requests.
+    const uninstallAccountDO = {
+      idFromName(name: string) { return { name }; },
+      get(id: { name: string }) {
+        return {
+          async fetch(request: Request) {
+            if (request.url.includes("get-token")) {
+              return new Response(JSON.stringify({
+                access_token: "ya29.tok",
+                refresh_token: "1//ref",
+              }), { status: 200 });
+            }
+            if (request.url.includes("delete-credentials")) {
+              return new Response("OK", { status: 200 });
+            }
+            if (request.url.includes("stop-sync")) {
+              return new Response("OK", { status: 200 });
+            }
+            return new Response("OK", { status: 200 });
+          },
+        };
+      },
+    };
+
+    // Create a fetch mock that handles revocation
+    const uninstallFetch: FetchFn = async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("oauth2.googleapis.com/revoke")) {
+        return new Response("", { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    // Override env for uninstall
+    const uninstallEnv = {
+      ...env,
+      ACCOUNT: uninstallAccountDO,
+    } as unknown as Env;
+
+    // PROOF: processOrgUninstall finds both users via the backfilled org_id
+    const results = await processOrgUninstall(TEST_CUSTOMER_ID, uninstallEnv, uninstallFetch);
+
+    // PROOF: BOTH accounts were processed (not zero, which was the pre-fix behavior)
+    expect(results.length).toBe(2);
+    const processedAccountIds = results.map((r) => r.account_id);
+    expect(processedAccountIds).toContain(d1._accounts[0].account_id);
+    expect(processedAccountIds).toContain(d1._accounts[1].account_id);
+
+    // PROOF: credentials were deleted for both accounts
+    for (const result of results) {
+      expect(result.credentials_deleted).toBe(true);
+    }
   });
 });

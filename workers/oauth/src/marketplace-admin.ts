@@ -429,6 +429,13 @@ export async function handleOrgUserActivation(
         .prepare("INSERT OR IGNORE INTO orgs (org_id, name) VALUES (?, ?)")
         .bind(orgId, orgName)
         .run();
+
+      // Backfill org_id on the installation so subsequent users join the SAME
+      // org and processOrgUninstall can find them via the org_id JOIN query.
+      await env.DB
+        .prepare("UPDATE org_installations SET org_id = ? WHERE install_id = ?")
+        .bind(orgId, orgInstall.install_id)
+        .run();
     }
 
     await env.DB
