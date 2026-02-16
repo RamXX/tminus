@@ -708,3 +708,70 @@ export type {
   CleanupResult,
   FederationResult,
 } from "./discovery-service";
+
+// Re-export org rate limiting (TM-9iu.5: per-org rate limits)
+export {
+  checkOrgRateLimit,
+  computeOrgWindowKey,
+  computeOrgWindowReset,
+  getBucketConfig,
+  buildOrgRateLimitHeaders,
+  buildOrgRateLimitResponse,
+  DEFAULT_ORG_RATE_LIMITS,
+  ORG_RATE_LIMIT_PREFIX,
+} from "./org-rate-limit";
+export type {
+  OrgRateLimitBucket,
+  OrgRateLimitConfig,
+  OrgRateLimitResult,
+  OrgRateLimitStore,
+} from "./org-rate-limit";
+
+// Re-export org quota management (TM-9iu.5: per-org quotas)
+export {
+  checkQuota,
+  getQuotaReport,
+  buildQuotaExceededResponse,
+  computeDailyPeriodKey,
+  computeMonthlyPeriodKey,
+  computeDailyResetTime,
+  computeDailyRetryAfter,
+  getPeriodKeyForQuota,
+  getResetTimeForQuota,
+  getQuotaLimit,
+  DEFAULT_ORG_QUOTAS,
+} from "./org-quota";
+export type {
+  QuotaType,
+  OrgQuotaConfig,
+  QuotaUsage,
+  OrgQuotaReport,
+  QuotaCheckResult,
+  OrgQuotaStore,
+} from "./org-quota";
+
+// Re-export compliance audit log (TM-9iu.5: hash chain audit trail)
+export {
+  appendAuditEntry,
+  verifyHashChain,
+  exportAuditLog,
+  generateComplianceReport,
+  sha256,
+  canonicalizeEntry,
+  computeEntryHash,
+  GENESIS_HASH,
+  DEFAULT_RETENTION_DAYS,
+  COMPLIANCE_RETENTION_DAYS,
+  VALID_AUDIT_ACTIONS,
+} from "./compliance-audit-log";
+export type {
+  ComplianceAuditAction,
+  AuditResult,
+  ComplianceAuditEntry,
+  ComplianceAuditInput,
+  AuditRetentionConfig,
+  ChainVerificationResult,
+  ComplianceAuditStore,
+  ComplianceReport,
+  ComplianceAnomaly,
+} from "./compliance-audit-log";

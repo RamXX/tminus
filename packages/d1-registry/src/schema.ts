@@ -685,6 +685,99 @@ CREATE INDEX idx_discovery_config_delegation ON org_discovery_config(delegation_
 ` as const;
 
 /**
+ * Migration 0026: Compliance audit log, org rate limits, and quota tracking (TM-9iu.5).
+ *
+ * compliance_audit_log: Tamper-evident audit log with hash chain integrity.
+ * Each entry includes SHA-256 hash of the previous entry, forming an
+ * append-only chain that detects any modification or deletion.
+ *
+ * org_rate_limit_config: Per-org rate limit configuration for API, Directory
+ * API, and impersonation token buckets.
+ *
+ * org_quota_config: Per-org quota limits for discovered users, delegations,
+ * and daily API calls.
+ *
+ * org_quota_usage: Counter-based quota usage tracking with period keys
+ * for daily reset support.
+ *
+ * Business rules:
+ * - BR-2: compliance_audit_log is append-only (no updates, no deletes)
+ * - BR-3: Hash chain integrity verified on read
+ */
+export const MIGRATION_0026_COMPLIANCE_AND_QUOTAS = `
+-- Compliance audit log with hash chain (append-only)
+CREATE TABLE compliance_audit_log (
+  entry_id       TEXT PRIMARY KEY,
+  org_id         TEXT NOT NULL,
+  timestamp      TEXT NOT NULL,
+  actor          TEXT NOT NULL,
+  action         TEXT NOT NULL CHECK(action IN (
+    'delegation_created', 'delegation_rotated', 'user_discovered',
+    'user_suspended', 'user_removed', 'config_updated',
+    'token_issued', 'admin_action'
+  )),
+  target         TEXT NOT NULL,
+  result         TEXT NOT NULL CHECK(result IN ('success', 'failure', 'error')),
+  ip_address     TEXT NOT NULL,
+  user_agent     TEXT NOT NULL,
+  details        TEXT,
+  previous_hash  TEXT NOT NULL,
+  entry_hash     TEXT NOT NULL,
+  UNIQUE(org_id, entry_hash)
+);
+
+CREATE INDEX idx_compliance_audit_org ON compliance_audit_log(org_id);
+CREATE INDEX idx_compliance_audit_timestamp ON compliance_audit_log(org_id, timestamp);
+CREATE INDEX idx_compliance_audit_action ON compliance_audit_log(action);
+CREATE INDEX idx_compliance_audit_actor ON compliance_audit_log(actor);
+
+-- Per-org rate limit configuration
+CREATE TABLE org_rate_limit_config (
+  org_id                       TEXT PRIMARY KEY,
+  api_max_requests             INTEGER NOT NULL DEFAULT 1000,
+  api_window_seconds           INTEGER NOT NULL DEFAULT 60,
+  directory_max_requests       INTEGER NOT NULL DEFAULT 100,
+  directory_window_seconds     INTEGER NOT NULL DEFAULT 60,
+  impersonation_max_requests   INTEGER NOT NULL DEFAULT 60,
+  impersonation_window_seconds INTEGER NOT NULL DEFAULT 60,
+  created_at                   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-org quota configuration
+CREATE TABLE org_quota_config (
+  org_id               TEXT PRIMARY KEY,
+  max_discovered_users INTEGER NOT NULL DEFAULT 500,
+  max_delegations      INTEGER NOT NULL DEFAULT 10,
+  max_api_calls_daily  INTEGER NOT NULL DEFAULT 10000,
+  retention_days       INTEGER NOT NULL DEFAULT 90,
+  created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Quota usage tracking (counter-based with period key for daily reset)
+CREATE TABLE org_quota_usage (
+  org_id      TEXT NOT NULL,
+  quota_type  TEXT NOT NULL CHECK(quota_type IN ('discovered_users', 'delegations', 'api_calls_daily')),
+  period_key  TEXT NOT NULL,
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(org_id, quota_type, period_key)
+);
+
+CREATE INDEX idx_quota_usage_org ON org_quota_usage(org_id);
+
+-- Rate limit counter state (for org-level fixed-window counters)
+CREATE TABLE org_rate_limit_counters (
+  counter_key TEXT PRIMARY KEY,
+  count       INTEGER NOT NULL DEFAULT 0,
+  expires_at  TEXT NOT NULL
+);
+
+CREATE INDEX idx_rl_counters_expires ON org_rate_limit_counters(expires_at);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -714,4 +807,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0023_DELEGATION_INFRASTRUCTURE,
   MIGRATION_0024_DELEGATION_CACHE_AND_AUDIT,
   MIGRATION_0025_ORG_DISCOVERY,
+  MIGRATION_0026_COMPLIANCE_AND_QUOTAS,
 ] as const;

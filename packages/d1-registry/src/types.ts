@@ -417,3 +417,96 @@ export interface OrgDiscoveryConfigRow {
   readonly created_at: string;
   readonly updated_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Compliance audit log (Migration 0026, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/** Valid compliance audit action types. */
+export type ComplianceAuditAction =
+  | "delegation_created"
+  | "delegation_rotated"
+  | "user_discovered"
+  | "user_suspended"
+  | "user_removed"
+  | "config_updated"
+  | "token_issued"
+  | "admin_action";
+
+/** Valid audit result types. */
+export type ComplianceAuditResult = "success" | "failure" | "error";
+
+/** Row shape for the `compliance_audit_log` table. */
+export interface ComplianceAuditLogRow {
+  readonly entry_id: string;
+  readonly org_id: string;
+  readonly timestamp: string;
+  readonly actor: string;
+  readonly action: ComplianceAuditAction;
+  readonly target: string;
+  readonly result: ComplianceAuditResult;
+  readonly ip_address: string;
+  readonly user_agent: string;
+  readonly details: string | null;
+  readonly previous_hash: string;
+  readonly entry_hash: string;
+}
+
+// ---------------------------------------------------------------------------
+// Org rate limit config (Migration 0026, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/** Row shape for the `org_rate_limit_config` table. */
+export interface OrgRateLimitConfigRow {
+  readonly org_id: string;
+  readonly api_max_requests: number;
+  readonly api_window_seconds: number;
+  readonly directory_max_requests: number;
+  readonly directory_window_seconds: number;
+  readonly impersonation_max_requests: number;
+  readonly impersonation_window_seconds: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Org quota config (Migration 0026, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/** Row shape for the `org_quota_config` table. */
+export interface OrgQuotaConfigRow {
+  readonly org_id: string;
+  readonly max_discovered_users: number;
+  readonly max_delegations: number;
+  readonly max_api_calls_daily: number;
+  readonly retention_days: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Org quota usage (Migration 0026, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/** Valid quota types for usage tracking. */
+export type OrgQuotaType = "discovered_users" | "delegations" | "api_calls_daily";
+
+/** Row shape for the `org_quota_usage` table. */
+export interface OrgQuotaUsageRow {
+  readonly org_id: string;
+  readonly quota_type: OrgQuotaType;
+  readonly period_key: string;
+  readonly usage_count: number;
+  readonly updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Org rate limit counters (Migration 0026, TM-9iu.5)
+// ---------------------------------------------------------------------------
+
+/** Row shape for the `org_rate_limit_counters` table. */
+export interface OrgRateLimitCounterRow {
+  readonly counter_key: string;
+  readonly count: number;
+  readonly expires_at: string;
+}
