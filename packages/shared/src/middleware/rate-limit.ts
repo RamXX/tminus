@@ -265,7 +265,12 @@ export function buildRateLimitHeaders(
 }
 
 /**
- * Build a 429 Too Many Requests response in the T-Minus envelope format.
+ * Build a 429 Too Many Requests response in the canonical T-Minus API envelope
+ * format: error (string) + error_code (string).
+ *
+ * Matches the shared.ts apiErrorResponse() pattern used by feature-gate.ts
+ * and auth.ts, but constructed inline to avoid a cross-package dependency
+ * (this module lives in packages/shared, apiErrorResponse lives in workers/api).
  *
  * @param result - The rate limit check result
  * @returns A Response object with 429 status, rate limit headers, and envelope body
@@ -275,10 +280,8 @@ export function buildRateLimitResponse(result: RateLimitResult): Response {
 
   const body = JSON.stringify({
     ok: false,
-    error: {
-      code: "RATE_LIMITED",
-      message: "Too many requests. Please try again later.",
-    },
+    error: "Too many requests. Please try again later.",
+    error_code: "RATE_LIMITED",
     meta: {
       request_id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date().toISOString(),

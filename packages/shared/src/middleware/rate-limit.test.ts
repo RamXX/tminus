@@ -420,7 +420,7 @@ describe("buildRateLimitResponse", () => {
     expect(response.headers.get("Content-Type")).toBe("application/json");
   });
 
-  it("body follows envelope format with RATE_LIMITED error code", async () => {
+  it("body follows canonical envelope format with error string and error_code", async () => {
     const result: RateLimitResult = {
       allowed: false,
       limit: 10,
@@ -434,11 +434,12 @@ describe("buildRateLimitResponse", () => {
 
     expect(body).toMatchObject({
       ok: false,
-      error: {
-        code: "RATE_LIMITED",
-        message: "Too many requests. Please try again later.",
-      },
+      error: "Too many requests. Please try again later.",
+      error_code: "RATE_LIMITED",
     });
+    // Verify error is a string, not a nested object
+    expect(typeof body.error).toBe("string");
+    expect(typeof body.error_code).toBe("string");
     expect(body.meta).toBeDefined();
     expect(body.meta.request_id).toMatch(/^req_/);
     expect(body.meta.timestamp).toBeDefined();

@@ -295,11 +295,11 @@ describe("Rate limiting integration tests", () => {
       const body = await rateLimited.json() as Record<string, unknown>;
       expect(body).toMatchObject({
         ok: false,
-        error: {
-          code: "RATE_LIMITED",
-          message: "Too many requests. Please try again later.",
-        },
+        error: "Too many requests. Please try again later.",
+        error_code: "RATE_LIMITED",
       });
+      expect(typeof body.error).toBe("string");
+      expect(typeof body.error_code).toBe("string");
       expect(rateLimited.headers.get("Retry-After")).toBeTruthy();
       expect(rateLimited.headers.get("X-RateLimit-Limit")).toBe("10");
       expect(rateLimited.headers.get("X-RateLimit-Remaining")).toBe("0");
@@ -376,8 +376,10 @@ describe("Rate limiting integration tests", () => {
       const body = await rateLimited.json() as Record<string, unknown>;
       expect(body).toMatchObject({
         ok: false,
-        error: { code: "RATE_LIMITED" },
+        error: "Too many requests. Please try again later.",
+        error_code: "RATE_LIMITED",
       });
+      expect(typeof body.error).toBe("string");
       expect(rateLimited.headers.get("Retry-After")).toBeTruthy();
       expect(rateLimited.headers.get("X-RateLimit-Limit")).toBe("100");
     });
@@ -433,13 +435,13 @@ describe("Rate limiting integration tests", () => {
       expect(response.headers.get("X-RateLimit-Remaining")).toBe("0");
       expect(response.headers.get("X-RateLimit-Reset")).toBeTruthy();
 
-      // Verify envelope body
+      // Verify canonical envelope body (error: string + error_code: string)
       const body = await response.json() as Record<string, unknown>;
       expect(body.ok).toBe(false);
-      expect(body.error).toEqual({
-        code: "RATE_LIMITED",
-        message: "Too many requests. Please try again later.",
-      });
+      expect(body.error).toBe("Too many requests. Please try again later.");
+      expect(body.error_code).toBe("RATE_LIMITED");
+      expect(typeof body.error).toBe("string");
+      expect(typeof body.error_code).toBe("string");
       expect((body.meta as Record<string, unknown>).request_id).toMatch(/^req_/);
       expect((body.meta as Record<string, unknown>).timestamp).toBeDefined();
       expect((body.meta as Record<string, unknown>).retry_after).toBeGreaterThan(0);
@@ -512,8 +514,10 @@ describe("Rate limiting integration tests", () => {
       const body = await response.json() as Record<string, unknown>;
       expect(body).toMatchObject({
         ok: false,
-        error: { code: "RATE_LIMITED" },
+        error: "Too many requests. Please try again later.",
+        error_code: "RATE_LIMITED",
       });
+      expect(typeof body.error).toBe("string");
       expect(response.headers.get("Retry-After")).toBeTruthy();
       expect(response.headers.get("X-RateLimit-Limit")).toBe("5");
     });
@@ -549,8 +553,10 @@ describe("Rate limiting integration tests", () => {
       const body = await response.json() as Record<string, unknown>;
       expect(body).toMatchObject({
         ok: false,
-        error: { code: "RATE_LIMITED" },
+        error: "Too many requests. Please try again later.",
+        error_code: "RATE_LIMITED",
       });
+      expect(typeof body.error).toBe("string");
       expect(response.headers.get("X-RateLimit-Limit")).toBe("10");
     });
 
