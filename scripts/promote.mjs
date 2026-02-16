@@ -15,8 +15,9 @@
  *   9. Run smoke tests on production
  *
  * Worker deploy order: api (hosts DOs), sync-consumer, write-consumer,
- * oauth, webhook, cron. API must be first because other workers reference
- * its Durable Objects via script_name.
+ * oauth, webhook, cron, app-gateway, mcp, push. API must be first because
+ * other workers reference its Durable Objects via script_name. app-gateway
+ * and mcp depend on API via service bindings so deploy after core workers.
  *
  * Usage:
  *   node scripts/promote.mjs [options]
@@ -73,13 +74,16 @@ const PROMOTE_WORKER_ORDER = [
   "oauth",
   "webhook",
   "cron",
+  "app-gateway",
+  "mcp",
+  "push",
 ];
 
 /**
  * Workers that have HTTP routes and therefore health endpoints.
  * Queue consumers and cron are triggered by queues/cron, not HTTP requests.
  */
-const HTTP_WORKERS = ["api", "oauth", "webhook"];
+const HTTP_WORKERS = ["api", "oauth", "webhook", "app-gateway", "mcp"];
 
 /**
  * URL patterns per environment. Workers with HTTP routes get subdomain-based URLs.
@@ -89,6 +93,8 @@ const WORKER_URL_MAP = {
   api: { staging: "https://api-staging.tminus.ink", production: "https://api.tminus.ink" },
   oauth: { staging: "https://oauth-staging.tminus.ink", production: "https://oauth.tminus.ink" },
   webhook: { staging: "https://webhooks-staging.tminus.ink", production: "https://webhooks.tminus.ink" },
+  "app-gateway": { staging: "https://app-staging.tminus.ink", production: "https://app.tminus.ink" },
+  mcp: { staging: "https://mcp-staging.tminus.ink", production: "https://mcp.tminus.ink" },
 };
 
 /**

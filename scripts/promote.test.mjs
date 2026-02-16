@@ -169,8 +169,8 @@ describe("PIPELINE_STAGES", () => {
 // ---------------------------------------------------------------------------
 
 describe("getWorkerDeployOrder", () => {
-  it("returns 6 workers", () => {
-    expect(getWorkerDeployOrder()).toHaveLength(6);
+  it("returns 9 workers", () => {
+    expect(getWorkerDeployOrder()).toHaveLength(9);
   });
 
   it("deploys api first (hosts DOs)", () => {
@@ -191,9 +191,19 @@ describe("getWorkerDeployOrder", () => {
     expect(writeIdx).toBeLessThan(cronIdx);
   });
 
-  it("deploys cron last", () => {
+  it("deploys app-gateway and mcp after core workers", () => {
     const order = getWorkerDeployOrder();
-    expect(order[order.length - 1]).toBe("cron");
+    const cronIdx = order.indexOf("cron");
+    const gatewayIdx = order.indexOf("app-gateway");
+    const mcpIdx = order.indexOf("mcp");
+
+    expect(gatewayIdx).toBeGreaterThan(cronIdx);
+    expect(mcpIdx).toBeGreaterThan(cronIdx);
+  });
+
+  it("deploys push last", () => {
+    const order = getWorkerDeployOrder();
+    expect(order[order.length - 1]).toBe("push");
   });
 
   it("includes all expected workers", () => {
@@ -204,6 +214,9 @@ describe("getWorkerDeployOrder", () => {
     expect(order).toContain("oauth");
     expect(order).toContain("webhook");
     expect(order).toContain("cron");
+    expect(order).toContain("app-gateway");
+    expect(order).toContain("mcp");
+    expect(order).toContain("push");
   });
 });
 
@@ -214,19 +227,23 @@ describe("getWorkerDeployOrder", () => {
 describe("getHealthCheckTargets", () => {
   it("returns only workers with HTTP routes for staging", () => {
     const targets = getHealthCheckTargets("staging");
-    // Only api, oauth, webhook have routes
-    expect(targets.length).toBe(3);
+    // api, oauth, webhook, app-gateway, mcp have routes
+    expect(targets.length).toBe(5);
     expect(targets.map((t) => t.worker)).toContain("api");
     expect(targets.map((t) => t.worker)).toContain("oauth");
     expect(targets.map((t) => t.worker)).toContain("webhook");
+    expect(targets.map((t) => t.worker)).toContain("app-gateway");
+    expect(targets.map((t) => t.worker)).toContain("mcp");
   });
 
   it("returns only workers with HTTP routes for production", () => {
     const targets = getHealthCheckTargets("production");
-    expect(targets.length).toBe(3);
+    expect(targets.length).toBe(5);
     expect(targets.map((t) => t.worker)).toContain("api");
     expect(targets.map((t) => t.worker)).toContain("oauth");
     expect(targets.map((t) => t.worker)).toContain("webhook");
+    expect(targets.map((t) => t.worker)).toContain("app-gateway");
+    expect(targets.map((t) => t.worker)).toContain("mcp");
   });
 
   it("does NOT include queue consumers (no HTTP routes)", () => {
@@ -235,9 +252,10 @@ describe("getHealthCheckTargets", () => {
     expect(targets.map((t) => t.worker)).not.toContain("write-consumer");
   });
 
-  it("does NOT include cron worker (no HTTP routes)", () => {
+  it("does NOT include cron or push workers (no HTTP routes)", () => {
     const targets = getHealthCheckTargets("staging");
     expect(targets.map((t) => t.worker)).not.toContain("cron");
+    expect(targets.map((t) => t.worker)).not.toContain("push");
   });
 
   it("staging URLs use -staging subdomain pattern", () => {
@@ -296,10 +314,21 @@ describe("getWorkerUrl", () => {
     );
   });
 
+  it("returns staging URL for app-gateway worker", () => {
+    expect(getWorkerUrl("app-gateway", "staging")).toBe(
+      "https://app-staging.tminus.ink"
+    );
+  });
+
+  it("returns production URL for mcp worker", () => {
+    expect(getWorkerUrl("mcp", "production")).toBe("https://mcp.tminus.ink");
+  });
+
   it("returns null for workers without HTTP routes", () => {
     expect(getWorkerUrl("sync-consumer", "staging")).toBeNull();
     expect(getWorkerUrl("write-consumer", "production")).toBeNull();
     expect(getWorkerUrl("cron", "staging")).toBeNull();
+    expect(getWorkerUrl("push", "production")).toBeNull();
   });
 });
 
@@ -325,19 +354,19 @@ describe("buildPromotePlan", () => {
     expect(stageNames).toContain("smoke-production");
   });
 
-  it("deploy-staging includes all 6 workers in correct order", () => {
+  it("deploy-staging includes all 9 workers in correct order", () => {
     const plan = buildPromotePlan({});
     const deployStage = plan.find((s) => s.stage === "deploy-staging");
     expect(deployStage).toBeDefined();
-    expect(deployStage.steps.length).toBe(6);
+    expect(deployStage.steps.length).toBe(9);
     expect(deployStage.steps[0]).toContain("api");
   });
 
-  it("health-staging includes 3 health check targets", () => {
+  it("health-staging includes 5 health check targets", () => {
     const plan = buildPromotePlan({});
     const healthStage = plan.find((s) => s.stage === "health-staging");
     expect(healthStage).toBeDefined();
-    expect(healthStage.steps.length).toBe(3);
+    expect(healthStage.steps.length).toBe(5);
   });
 
   it("smoke-staging includes smoke test step", () => {

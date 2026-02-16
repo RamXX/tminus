@@ -7,6 +7,7 @@
 name = "tminus-api"
 main = "src/index.ts"
 compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "development"
@@ -91,6 +92,19 @@ ENVIRONMENT = "staging"
 pattern = "api-staging.tminus.ink/*"
 zone_name = "tminus.ink"
 
+# DO class definitions (no inheritance from top-level)
+[[env.staging.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+
+[[env.staging.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserGraphDO", "AccountDO"]
+
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "tminus-registry-staging"
@@ -120,6 +134,9 @@ queue = "tminus-push-queue-staging"
 binding = "PROOF_BUCKET"
 bucket_name = "tminus-proof-exports-staging"
 
+[env.staging.ai]
+binding = "AI"
+
 # ===========================================================================
 # Production environment: tminus-api-production
 # Deploy with: wrangler deploy --env production
@@ -134,6 +151,19 @@ ENVIRONMENT = "production"
 [[env.production.routes]]
 pattern = "api.tminus.ink/*"
 zone_name = "tminus.ink"
+
+# DO class definitions (no inheritance from top-level)
+[[env.production.durable_objects.bindings]]
+name = "USER_GRAPH"
+class_name = "UserGraphDO"
+
+[[env.production.durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDO"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserGraphDO", "AccountDO"]
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -163,3 +193,6 @@ queue = "tminus-push-queue"
 [[env.production.r2_buckets]]
 binding = "PROOF_BUCKET"
 bucket_name = "tminus-proof-exports"
+
+[env.production.ai]
+binding = "AI"
