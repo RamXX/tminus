@@ -670,6 +670,17 @@ export async function handleDowngradeFeed(
     const newFeedAccountId = generateId("account");
 
     try {
+      // Remove any leftover upgraded ICS feed row to avoid UNIQUE constraint
+      // violation on (provider, provider_subject). During upgrade, the old ICS
+      // account is marked status='upgraded' but not deleted; we clean it up here
+      // so the INSERT below succeeds.
+      await env.DB
+        .prepare(
+          `DELETE FROM accounts WHERE provider = 'ics_feed' AND provider_subject = ?1 AND status = 'upgraded'`,
+        )
+        .bind(plan.feedUrl)
+        .run();
+
       await env.DB
         .prepare(
           `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)

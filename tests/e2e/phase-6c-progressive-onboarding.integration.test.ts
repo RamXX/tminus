@@ -2357,13 +2357,8 @@ describe("Phase 6C E2E: Full progressive onboarding journey (capstone)", () => {
         ["/getAccountEvents", { events: providerEvents }],
       ]),
     });
-    // Clean up the upgraded ICS feed account (in production, the upgrade
-    // handler would remove or fully replace this row; here the status is
-    // 'upgraded' but the UNIQUE(provider, provider_subject) constraint
-    // still blocks a new ICS feed account with the same URL).
-    db.prepare(
-      "DELETE FROM accounts WHERE account_id = ? AND status = 'upgraded'",
-    ).run(googleFeedAccountId);
+    // The downgrade handler now pre-deletes any leftover 'upgraded' ICS feed
+    // row before INSERT, so no manual cleanup is needed here.
 
     // Seed the OAuth account for downgrade
     db.prepare(
