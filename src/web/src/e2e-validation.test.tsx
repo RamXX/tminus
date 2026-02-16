@@ -220,6 +220,23 @@ function createMockFetch() {
       });
     }
 
+    // GET /api/v1/events/:id/briefing (must precede the generic events route)
+    if (url.match(/^\/api\/v1\/events\/[^/]+\/briefing$/) && method === "GET") {
+      const eventId = url.split("/api/v1/events/")[1].split("/briefing")[0];
+      const ev = currentEvents.find((e) => e.canonical_event_id === eventId);
+      return mockResponse(200, {
+        ok: true,
+        data: {
+          event_id: eventId,
+          event_title: ev?.summary ?? null,
+          event_start: ev?.start ?? "2026-02-14T09:00:00Z",
+          topics: [],
+          participants: [],
+          computed_at: new Date(NOW).toISOString(),
+        },
+      });
+    }
+
     // GET /api/v1/events
     if (url.startsWith("/api/v1/events") && method === "GET") {
       return mockResponse(200, { ok: true, data: currentEvents });
@@ -508,6 +525,11 @@ describe("Phase 2C E2E Validation", () => {
       // Click the event chip via testid (avoids duplicate text issues)
       const eventChip = screen.getByTestId("event-chip-evt-001");
       fireEvent.click(eventChip);
+
+      // Flush BriefingPanel's async fetch that fires when EventDetail renders
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
 
       // Detail panel renders the event -- text now appears in both chip and panel
       const standupElements = screen.getAllByText("Team Standup");
