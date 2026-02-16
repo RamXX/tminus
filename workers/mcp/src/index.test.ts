@@ -43,7 +43,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const JWT_SECRET = "test-mcp-jwt-secret-for-unit-tests-must-be-long-enough";
-const TEST_USER_ID = "usr_01HXYZ000000000000000001";
+const TEST_USER_ID = "usr_01HXYZ00000000000000000001";
 const TEST_EMAIL = "test@example.com";
 
 // ---------------------------------------------------------------------------

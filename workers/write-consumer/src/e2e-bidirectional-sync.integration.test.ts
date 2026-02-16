@@ -62,17 +62,17 @@ import type {
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01JE2ETEST00000000000001",
+  org_id: "org_01JE2E00TEST00000000000001",
   name: "E2E Bidirectional Sync Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01JE2ETEST00000000000001",
+  user_id: "usr_01JE2E00TEST00000000000001",
   email: "e2e@example.com",
 } as const;
 
 const ACCOUNT_A = {
-  account_id: "acc_01JE2ETESTACCOUNTA000001" as AccountId,
+  account_id: "acc_01JE2E00TESTACCPVNTA000001" as AccountId,
   provider: "google",
   provider_subject: "google-sub-e2e-a",
   email: "alice@gmail.com",
@@ -80,7 +80,7 @@ const ACCOUNT_A = {
 } as const;
 
 const ACCOUNT_B = {
-  account_id: "acc_01JE2ETESTACCOUNTB000001" as AccountId,
+  account_id: "acc_01JE2E00TESTACCPVNTB000001" as AccountId,
   provider: "google",
   provider_subject: "google-sub-e2e-b",
   email: "alice-work@gmail.com",
@@ -88,7 +88,7 @@ const ACCOUNT_B = {
 } as const;
 
 const ACCOUNT_C = {
-  account_id: "acc_01JE2ETESTACCOUNTC000001" as AccountId,
+  account_id: "acc_01JE2E00TESTACCPVNTC000001" as AccountId,
   provider: "google",
   provider_subject: "google-sub-e2e-c",
   email: "alice-personal@gmail.com",

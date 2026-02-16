@@ -29,12 +29,12 @@ import { defaultNotificationSettings } from "@tminus/shared";
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Push Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "push-test@example.com",
 } as const;
@@ -552,7 +552,7 @@ describe("Push worker: D1 device_tokens schema", () => {
     // Insert second user
     db.prepare(
       "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
-    ).run("usr_01HXYZ000000000000000002", TEST_ORG.org_id, "user2@test.com");
+    ).run("usr_01HXYZ00000000000000000002", TEST_ORG.org_id, "user2@test.com");
 
     insertDeviceToken(db, {
       token_id: "dtk_001",
@@ -565,7 +565,7 @@ describe("Push worker: D1 device_tokens schema", () => {
     expect(() => {
       insertDeviceToken(db, {
         token_id: "dtk_002",
-        user_id: "usr_01HXYZ000000000000000002",
+        user_id: "usr_01HXYZ00000000000000000002",
         device_token: "shared-token",
         platform: "ios",
       });

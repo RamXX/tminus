@@ -627,7 +627,7 @@ describe("Integration: ICS Feed Import (Phase 6C)", () => {
     // The DO returns feed events when queried
     const feedEvents = [
       {
-        canonical_event_id: "evt_01TEST00000000000000001",
+        canonical_event_id: "evt_01TEST00000000000000000001",
         origin_account_id: "acc_feed_test",
         origin_event_id: "event-alpha@google.com",
         title: "Alpha Meeting",
@@ -640,7 +640,7 @@ describe("Integration: ICS Feed Import (Phase 6C)", () => {
         transparency: "opaque",
       },
       {
-        canonical_event_id: "evt_01TEST00000000000000002",
+        canonical_event_id: "evt_01TEST00000000000000000002",
         origin_account_id: "acc_feed_test",
         origin_event_id: "event-beta@google.com",
         title: "Beta Review",
@@ -785,7 +785,7 @@ describe("Integration: ICS-to-OAuth Upgrade Flow (TM-d17.5)", () => {
   const GOOGLE_FEED_URL =
     "https://calendar.google.com/calendar/ical/example/public/basic.ics";
   const FEED_ACCOUNT_ID = "acc_01HXY000000000000000FEED01";
-  const OAUTH_ACCOUNT_ID = "acc_01HXY00000000000000OAUTH01";
+  const OAUTH_ACCOUNT_ID = "acc_01HXY00000000000000PAVTH01";
 
   beforeEach(() => {
     db = new Database(":memory:");

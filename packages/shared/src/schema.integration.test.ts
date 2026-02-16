@@ -167,8 +167,8 @@ describe("UserGraphDO schema via migration runner", () => {
         title, start_ts, end_ts, source)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      "evt_01TEST00000000000000001",
-      "acc_01TEST00000000000000001",
+      "evt_01TEST00000000000000000001",
+      "acc_01TEST00000000000000000001",
       "google_event_123",
       "Team Standup",
       "2026-02-14T09:00:00Z",
@@ -178,7 +178,7 @@ describe("UserGraphDO schema via migration runner", () => {
 
     const row = db
       .prepare("SELECT * FROM canonical_events WHERE canonical_event_id = ?")
-      .get("evt_01TEST00000000000000001") as Record<string, unknown>;
+      .get("evt_01TEST00000000000000000001") as Record<string, unknown>;
 
     expect(row).toBeDefined();
     expect(row.title).toBe("Team Standup");

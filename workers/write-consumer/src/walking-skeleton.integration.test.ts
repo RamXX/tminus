@@ -71,18 +71,18 @@ import type {
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01JSKEL00000000000000001",
+  org_id: "org_01JSKE00M00000000000000001",
   name: "Walking Skeleton Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01JSKEL00000000000000001",
+  user_id: "usr_01JSKE00M00000000000000001",
   email: "skeleton@example.com",
 } as const;
 
 // Account A: origin account (has the "Board Meeting")
 const ACCOUNT_A = {
-  account_id: "acc_01JSKELACCOUNTA000000001" as AccountId,
+  account_id: "acc_01JSKE00MACCPVNTA000000001" as AccountId,
   provider: "google",
   provider_subject: "google-sub-acct-a",
   email: "alice@gmail.com",
@@ -91,7 +91,7 @@ const ACCOUNT_A = {
 
 // Account B: target account (will receive "Busy" overlay)
 const ACCOUNT_B = {
-  account_id: "acc_01JSKELACCOUNTB000000001" as AccountId,
+  account_id: "acc_01JSKE00MACCPVNTB000000001" as AccountId,
   provider: "google",
   provider_subject: "google-sub-acct-b",
   email: "alice-work@gmail.com",
@@ -898,7 +898,7 @@ describe("Walking skeleton: webhook-to-busy-overlay pipeline", () => {
         private: {
           tminus: "true",
           managed: "true",
-          canonical_event_id: "evt_01JSKELCANONICAL0000000001",
+          canonical_event_id: "evt_01JSKEMCANPNJCAM0000000001",
           origin_account_id: ACCOUNT_A.account_id,
         },
       },

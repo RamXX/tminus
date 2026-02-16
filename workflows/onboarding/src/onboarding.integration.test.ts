@@ -31,18 +31,18 @@ import type { AccountId } from "@tminus/shared";
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Onboarding Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "onboarding@example.com",
 } as const;
 
 const ACCOUNT_NEW = {
-  account_id: "acc_01HXYZ00000000000000000A" as AccountId,
+  account_id: "acc_01HXYZ0000000000000000000A" as AccountId,
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-new-a",
@@ -50,7 +50,7 @@ const ACCOUNT_NEW = {
 } as const;
 
 const ACCOUNT_EXISTING = {
-  account_id: "acc_01HXYZ00000000000000000B" as AccountId,
+  account_id: "acc_01HXYZ0000000000000000000B" as AccountId,
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-existing-b",
@@ -97,8 +97,8 @@ function makeManagedMirrorEvent(overrides?: Record<string, unknown>) {
       private: {
         tminus: "true",
         managed: "true",
-        canonical_event_id: "evt_01HXYZ000000000000000001",
-        origin_account_id: "acc_01HXYZ00000000000000000B",
+        canonical_event_id: "evt_01HXYZ00000000000000000001",
+        origin_account_id: "acc_01HXYZ0000000000000000000B",
       },
     },
     ...overrides,

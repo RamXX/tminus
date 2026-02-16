@@ -29,12 +29,12 @@ import { createHandler, createJwt } from "../index";
 const JWT_SECRET = "integration-test-jwt-secret-32chars-minimum";
 
 const TEST_ORG = {
-  org_id: "org_01HXY000000000000000000RL1",
+  org_id: "org_01HXY000000000000000000RM1",
   name: "Rate Limit Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXY000000000000000000RL1",
+  user_id: "usr_01HXY000000000000000000RM1",
   org_id: TEST_ORG.org_id,
   email: "ratelimit@example.com",
 } as const;

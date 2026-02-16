@@ -221,7 +221,7 @@ describe("Integration: Privacy routes (deletion request)", () => {
   let db: DatabaseType;
   let d1: D1Database;
   let sessions: KVNamespace;
-  const userId = "usr_01HXYZ000000000000PRIV01";
+  const userId = "usr_01HXYZ00000000000000PRJV01";
   const email = "privacy-test@example.com";
 
   beforeEach(async () => {
@@ -753,7 +753,7 @@ describe("Integration: Privacy routes (deletion request)", () => {
   // -------------------------------------------------------------------------
 
   describe("User isolation", () => {
-    const otherUserId = "usr_01HXYZ000000000000PRIV02";
+    const otherUserId = "usr_01HXYZ00000000000000PRJV02";
     const otherEmail = "other-user@example.com";
 
     it("user A cannot see user B's deletion request", async () => {

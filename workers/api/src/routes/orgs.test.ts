@@ -112,7 +112,7 @@ describe("validateOrgName", () => {
 
 describe("validateMemberInput", () => {
   it("returns null for valid input", () => {
-    expect(validateMemberInput({ user_id: "usr_01HXYZ000000000000000001", role: "member" })).toBeNull();
+    expect(validateMemberInput({ user_id: "usr_01HXYZ00000000000000000001", role: "member" })).toBeNull();
   });
 
   it("returns error when user_id is missing", () => {
@@ -128,11 +128,11 @@ describe("validateMemberInput", () => {
   });
 
   it("returns error when role is missing", () => {
-    expect(validateMemberInput({ user_id: "usr_01HXYZ000000000000000001" })).toBe("role is required");
+    expect(validateMemberInput({ user_id: "usr_01HXYZ00000000000000000001" })).toBe("role is required");
   });
 
   it("returns error for invalid role", () => {
-    expect(validateMemberInput({ user_id: "usr_01HXYZ000000000000000001", role: "owner" })).toBe(
+    expect(validateMemberInput({ user_id: "usr_01HXYZ00000000000000000001", role: "owner" })).toBe(
       "role must be one of: admin, member",
     );
   });

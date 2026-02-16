@@ -32,7 +32,7 @@ import {
 // Test constants
 // ---------------------------------------------------------------------------
 
-const ADMIN_USER_ID = "usr_01HXYZ000000000000000001";
+const ADMIN_USER_ID = "usr_01HXYZ00000000000000000001";
 const TEST_MASTER_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 // Generate a fresh RSA key pair at test runtime (no hardcoded PEM in source).

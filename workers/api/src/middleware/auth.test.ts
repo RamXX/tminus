@@ -27,7 +27,7 @@ import { generateApiKey, hashApiKey } from "../api-keys";
 
 const JWT_SECRET = "test-jwt-secret-must-be-at-least-this-long-for-testing";
 const TEST_USER = {
-  sub: "usr_01HXYZ000000000000000001",
+  sub: "usr_01HXYZ00000000000000000001",
   email: "test@example.com",
   tier: "free" as const,
   pwd_ver: 1,
@@ -349,7 +349,7 @@ describe("authMiddleware: API key routing", () => {
       keyRow: {
         key_id: "key_01TEST",
         key_hash: keyHash,
-        user_id: "usr_01HXYZ000000000000000001",
+        user_id: "usr_01HXYZ00000000000000000001",
         email: "apikey-user@example.com",
       },
     });
@@ -367,7 +367,7 @@ describe("authMiddleware: API key routing", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.data.user_id).toBe("usr_01HXYZ000000000000000001");
+    expect(body.data.user_id).toBe("usr_01HXYZ00000000000000000001");
     expect(body.data.email).toBe("apikey-user@example.com");
   });
 
@@ -434,7 +434,7 @@ describe("authMiddleware: API key routing", () => {
       keyRow: {
         key_id: "key_01TEST",
         key_hash: "0000000000000000000000000000000000000000000000000000000000000000",
-        user_id: "usr_01HXYZ000000000000000001",
+        user_id: "usr_01HXYZ00000000000000000001",
         email: "user@example.com",
       },
     });

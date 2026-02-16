@@ -1022,7 +1022,7 @@ describe("Phase 6C E2E: Feed refresh and change detection (AC#2)", () => {
     seedOrgAndUser(db);
     const d1 = createRealD1(db);
 
-    const feedId = "acc_01HXY00000000000006CFEED1";
+    const feedId = "acc_01HXY000000000000006CFEED1";
     seedFeedAccount(db, feedId, GOOGLE_FEED_URL);
     // Set last refresh to 40 minutes ago (stale for 15-min interval)
     db.prepare(
@@ -1513,8 +1513,8 @@ describe("Phase 6C E2E: ICS-to-OAuth upgrade preserves events (AC#4)", () => {
     seedOrgAndUser(db);
     const d1 = createRealD1(db);
 
-    const feedAccountId = "acc_01HXY0000000000006CFEED01";
-    const oauthAccountId = "acc_01HXY00000000000006COAUTH";
+    const feedAccountId = "acc_01HXY00000000000006CFEED01";
+    const oauthAccountId = "acc_01HXY000000000000006CPAVTH";
     seedFeedAccount(db, feedAccountId, GOOGLE_FEED_URL);
 
     // Build DO mock that returns events per account
@@ -1878,7 +1878,7 @@ describe("Phase 6C E2E: OAuth downgrade resilience (AC#6)", () => {
     }
     seedOrgAndUser(db);
 
-    const oauthAccountId = "acc_01HXY00000000000006COAUTH";
+    const oauthAccountId = "acc_01HXY000000000000006CPAVTH";
     db.prepare(
       `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1970,7 +1970,7 @@ describe("Phase 6C E2E: OAuth downgrade resilience (AC#6)", () => {
     db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     seedOrgAndUser(db);
 
-    const oauthAccountId = "acc_01HXY0000000000006CNOURL";
+    const oauthAccountId = "acc_01HXY000000000000006CNPVRM";
     db.prepare(
       `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2226,7 +2226,7 @@ describe("Phase 6C E2E: Full progressive onboarding journey (capstone)", () => {
     // PHASE 4: OAuth upgrade (Google feed -> OAuth)
     // -----------------------------------------------------------------------
 
-    const oauthAccountId = "acc_01HXY0000000000006CJRNY01";
+    const oauthAccountId = "acc_01HXY00000000000006CJRNY01";
     const icsEvents: IcsEvent[] = [
       {
         origin_event_id: "google-standup-001@google.com",

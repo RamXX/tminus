@@ -34,7 +34,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const JWT_SECRET = "test-jwt-secret-for-unit-tests-must-be-long-enough";
-const TEST_USER_ID = "usr_01HXYZ000000000000000001";
+const TEST_USER_ID = "usr_01HXYZ00000000000000000001";
 
 // ---------------------------------------------------------------------------
 // JWT helpers for tests
@@ -1220,7 +1220,7 @@ function makeTestProofData(overrides?: {
     status: overrides?.status ?? "compliant",
     events: overrides?.events ?? [
       {
-        canonical_event_id: "evt_01TESTEVT00000000000001",
+        canonical_event_id: "evt_01TEST000EVT00000000000001",
         title: "Sprint Planning",
         start_ts: "2026-02-10T09:00:00.000Z",
         end_ts: "2026-02-10T11:00:00.000Z",
@@ -1228,7 +1228,7 @@ function makeTestProofData(overrides?: {
         billing_category: "BILLABLE",
       },
       {
-        canonical_event_id: "evt_01TESTEVT00000000000002",
+        canonical_event_id: "evt_01TEST000EVT00000000000002",
         title: "Code Review",
         start_ts: "2026-02-11T14:00:00.000Z",
         end_ts: "2026-02-11T16:30:00.000Z",
@@ -1236,7 +1236,7 @@ function makeTestProofData(overrides?: {
         billing_category: "BILLABLE",
       },
       {
-        canonical_event_id: "evt_01TESTEVT00000000000003",
+        canonical_event_id: "evt_01TEST000EVT00000000000003",
         title: "Client Meeting",
         start_ts: "2026-02-12T10:00:00.000Z",
         end_ts: "2026-02-12T18:00:00.000Z",
@@ -1327,9 +1327,9 @@ describe("generateProofCsv", () => {
     const data = makeTestProofData();
     const csv = generateProofCsv(data, "hash");
 
-    expect(csv).toContain("evt_01TESTEVT00000000000001,Sprint Planning,");
-    expect(csv).toContain("evt_01TESTEVT00000000000002,Code Review,");
-    expect(csv).toContain("evt_01TESTEVT00000000000003,Client Meeting,");
+    expect(csv).toContain("evt_01TEST000EVT00000000000001,Sprint Planning,");
+    expect(csv).toContain("evt_01TEST000EVT00000000000002,Code Review,");
+    expect(csv).toContain("evt_01TEST000EVT00000000000003,Client Meeting,");
   });
 
   it("includes total event count and hours summary", () => {
@@ -1576,7 +1576,7 @@ describe("generateProofHtml", () => {
     expect(html).toContain("Sprint Planning");
     expect(html).toContain("Code Review");
     expect(html).toContain("Client Meeting");
-    expect(html).toContain("evt_01TESTEVT00000000000001");
+    expect(html).toContain("evt_01TEST000EVT00000000000001");
   });
 
   it("shows no events message when events array is empty", () => {

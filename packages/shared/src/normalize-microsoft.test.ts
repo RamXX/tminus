@@ -314,8 +314,8 @@ describe("normalizeMicrosoftEvent -- open extension detection", () => {
           extensionName: "com.tminus.metadata",
           tminus: "true",
           managed: "true",
-          canonicalId: "evt_01HXYZ12345678901234AB",
-          originAccount: "acc_01HXYZ12345678901234AB",
+          canonicalId: "evt_01HXYZ000012345678901234AB",
+          originAccount: "acc_01HXYZ000012345678901234AB",
         },
       ],
     });

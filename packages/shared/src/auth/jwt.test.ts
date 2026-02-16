@@ -29,7 +29,7 @@ import type { JWTPayload } from "./jwt";
 
 const SECRET = "test-jwt-secret-must-be-at-least-this-long-for-testing";
 const TEST_PAYLOAD = {
-  sub: "usr_01HXYZ000000000000000001",
+  sub: "usr_01HXYZ00000000000000000001",
   email: "test@example.com",
   tier: "free" as const,
   pwd_ver: 1,

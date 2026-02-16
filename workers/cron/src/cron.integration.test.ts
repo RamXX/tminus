@@ -39,18 +39,18 @@ import {
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Cron Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "cron-test@example.com",
 } as const;
 
 const ACCOUNT_A = {
-  account_id: "acc_01HXYZ00000000000000000A",
+  account_id: "acc_01HXYZ0000000000000000000A",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-aaaa",
@@ -61,7 +61,7 @@ const ACCOUNT_A = {
 } as const;
 
 const ACCOUNT_B = {
-  account_id: "acc_01HXYZ00000000000000000B",
+  account_id: "acc_01HXYZ0000000000000000000B",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-bbbb",
@@ -72,7 +72,7 @@ const ACCOUNT_B = {
 } as const;
 
 const ACCOUNT_C_ERROR = {
-  account_id: "acc_01HXYZ00000000000000000C",
+  account_id: "acc_01HXYZ0000000000000000000C",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-cccc",
@@ -714,7 +714,7 @@ describe("Channel expiry threshold calculation", () => {
 // ---------------------------------------------------------------------------
 
 const ACCOUNT_MS = {
-  account_id: "acc_01HXYZ0000000000000000MS",
+  account_id: "acc_01HXYZ000000000000000000MS",
   user_id: TEST_USER.user_id,
   provider: "microsoft",
   provider_subject: "ms-subject-aaaa",
@@ -1110,7 +1110,7 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
   it("continues processing when one user's drift computation fails", async () => {
     // Insert two different users
     const TEST_USER_2 = {
-      user_id: "usr_01HXYZ000000000000000002",
+      user_id: "usr_01HXYZ00000000000000000002",
       org_id: TEST_ORG.org_id,
       email: "user2@example.com",
     };
@@ -1120,7 +1120,7 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
 
     insertAccount(db, { ...ACCOUNT_A });
     insertAccount(db, {
-      account_id: "acc_01HXYZ00000000000000000D",
+      account_id: "acc_01HXYZ0000000000000000000D",
       user_id: TEST_USER_2.user_id,
       provider: "google",
       provider_subject: "google-sub-dddd",
@@ -1247,7 +1247,7 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
 // ---------------------------------------------------------------------------
 
 const ACCOUNT_ICS_FEED = {
-  account_id: "acc_01HXYZ000000000000FEED01",
+  account_id: "acc_01HXYZ00000000000000FEED01",
   user_id: TEST_USER.user_id,
   provider: "ics_feed",
   provider_subject: "https://example.com/feed.ics",
@@ -1689,7 +1689,7 @@ describe("Cron integration tests: ICS Feed Refresh (TM-d17.3)", () => {
     insertAccount(db, ACCOUNT_ICS_FEED);
     const FEED_B = {
       ...ACCOUNT_ICS_FEED,
-      account_id: "acc_01HXYZ000000000000FEED02",
+      account_id: "acc_01HXYZ00000000000000FEED02",
       provider_subject: "https://example.com/feed-b.ics",
       email: "https://example.com/feed-b.ics",
     };

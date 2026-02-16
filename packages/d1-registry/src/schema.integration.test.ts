@@ -20,19 +20,19 @@ import { MIGRATION_0001_INITIAL_SCHEMA } from "./schema";
 
 // Re-usable test fixtures
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Test Organization",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "alice@example.com",
   display_name: "Alice Test",
 } as const;
 
 const TEST_ACCOUNT = {
-  account_id: "acc_01HXYZ000000000000000001",
+  account_id: "acc_01HXYZ00000000000000000001",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-12345",
@@ -44,7 +44,7 @@ const TEST_ACCOUNT = {
 } as const;
 
 const TEST_DELETION_CERT = {
-  cert_id: "cert_01HXYZ000000000000000001",
+  cert_id: "cert_01HXYZ00000000000000000001",
   entity_type: "user",
   entity_id: TEST_USER.user_id,
   proof_hash: "sha256:abc123def456",

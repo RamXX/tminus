@@ -71,8 +71,8 @@ function sampleProjectedEvent(): ProjectedEvent {
       private: {
         tminus: "true",
         managed: "true",
-        canonical_event_id: "evt_01HXYZ12345678901234AB",
-        origin_account_id: "acc_01HXYZ12345678901234AB",
+        canonical_event_id: "evt_01HXYZ000012345678901234AB",
+        origin_account_id: "acc_01HXYZ000012345678901234AB",
       },
     },
   };
@@ -514,8 +514,8 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
         private: {
           tminus: "true",
           managed: "true",
-          canonical_event_id: "evt_01HXYZ12345678901234AB",
-          origin_account_id: "acc_01HXYZ12345678901234AB",
+          canonical_event_id: "evt_01HXYZ000012345678901234AB",
+          origin_account_id: "acc_01HXYZ000012345678901234AB",
         },
       },
     };
@@ -548,8 +548,8 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
     expect(sentBody.extensions[0].extensionName).toBe("com.tminus.metadata");
     expect(sentBody.extensions[0].tminus).toBe("true");
     expect(sentBody.extensions[0].managed).toBe("true");
-    expect(sentBody.extensions[0].canonicalId).toBe("evt_01HXYZ12345678901234AB");
-    expect(sentBody.extensions[0].originAccount).toBe("acc_01HXYZ12345678901234AB");
+    expect(sentBody.extensions[0].canonicalId).toBe("evt_01HXYZ000012345678901234AB");
+    expect(sentBody.extensions[0].originAccount).toBe("acc_01HXYZ000012345678901234AB");
   });
 
   it("sends Authorization header", async () => {

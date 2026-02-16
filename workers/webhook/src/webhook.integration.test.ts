@@ -24,18 +24,18 @@ import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0002_MS_SUBSCRIPTIONS } from "
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Integration Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "integration@example.com",
 } as const;
 
 const ACCOUNT_A = {
-  account_id: "acc_01HXYZ00000000000000000A",
+  account_id: "acc_01HXYZ0000000000000000000A",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-aaaa",
@@ -44,7 +44,7 @@ const ACCOUNT_A = {
 } as const;
 
 const ACCOUNT_B = {
-  account_id: "acc_01HXYZ00000000000000000B",
+  account_id: "acc_01HXYZ0000000000000000000B",
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-bbbb",

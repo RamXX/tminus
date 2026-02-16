@@ -85,8 +85,8 @@ function sampleProjectedEvent(): ProjectedEvent {
       private: {
         tminus: "true",
         managed: "true",
-        canonical_event_id: "evt_01HXYZ12345678901234AB",
-        origin_account_id: "acc_01HXYZ12345678901234AB",
+        canonical_event_id: "evt_01HXYZ000012345678901234AB",
+        origin_account_id: "acc_01HXYZ000012345678901234AB",
       },
     },
   };

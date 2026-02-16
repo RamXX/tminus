@@ -325,7 +325,7 @@ const mockCtx = {
 // ---------------------------------------------------------------------------
 
 function seedOtherUser(db: DatabaseType): void {
-  const otherOrgId = "org_01HXYZ000000000000000099";
+  const otherOrgId = "org_01HXYZ00000000000000000099";
   db.prepare("INSERT OR IGNORE INTO orgs (org_id, name) VALUES (?, ?)").run(
     otherOrgId,
     "Other Org",
@@ -2792,7 +2792,7 @@ const TEST_PROOF_DATA = {
   status: "compliant",
   events: [
     {
-      canonical_event_id: "evt_01TESTEVT00000000000001",
+      canonical_event_id: "evt_01TEST000EVT00000000000001",
       title: "Sprint Planning",
       start_ts: "2026-02-10T09:00:00.000Z",
       end_ts: "2026-02-10T11:00:00.000Z",
@@ -2800,7 +2800,7 @@ const TEST_PROOF_DATA = {
       billing_category: "BILLABLE",
     },
     {
-      canonical_event_id: "evt_01TESTEVT00000000000002",
+      canonical_event_id: "evt_01TEST000EVT00000000000002",
       title: "Code Review",
       start_ts: "2026-02-11T14:00:00.000Z",
       end_ts: "2026-02-11T16:30:00.000Z",
@@ -2808,7 +2808,7 @@ const TEST_PROOF_DATA = {
       billing_category: "BILLABLE",
     },
     {
-      canonical_event_id: "evt_01TESTEVT00000000000003",
+      canonical_event_id: "evt_01TEST000EVT00000000000003",
       title: "Client Meeting",
       start_ts: "2026-02-12T10:00:00.000Z",
       end_ts: "2026-02-12T18:00:00.000Z",

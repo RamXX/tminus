@@ -60,17 +60,17 @@ const SHARED_PERSIST_DIR = resolve(ROOT, ".wrangler-test-sync-consumer");
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01JREALSYNC0000000000001",
+  org_id: "org_01JREA00MSYNC0000000000001",
   name: "Real Sync Consumer Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01JREALSYNC0000000000001",
+  user_id: "usr_01JREA00MSYNC0000000000001",
   email: "real-sync-test@example.com",
 } as const;
 
 const ACCOUNT_A = {
-  account_id: "acc_01JREALSYNCACCOUNTA00001",
+  account_id: "acc_01JREA00MSYNCACCPVNTA00001",
   provider: "google",
   provider_subject: "google-sub-real-sync-a",
   email: "realsynctest@gmail.com",

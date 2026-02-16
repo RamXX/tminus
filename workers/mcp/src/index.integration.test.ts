@@ -383,7 +383,7 @@ describe("MCP integration: tools/call calendar.list_accounts", () => {
 
   it("returns empty array for user with no accounts", async () => {
     // Create a user with no accounts
-    const noAccountsUserId = "usr_01HXY000000000000000EMPTY";
+    const noAccountsUserId = "usr_01HXY0000000000000000EMPTY";
     db.prepare(
       "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
     ).run(noAccountsUserId, TEST_ORG.org_id, "empty@example.com");
@@ -732,7 +732,7 @@ describe("MCP integration: tools/call calendar.get_sync_status", () => {
   });
 
   it("returns empty accounts for user with no accounts", async () => {
-    const noAccountsUserId = "usr_01HXY000000000000000EMPTY";
+    const noAccountsUserId = "usr_01HXY0000000000000000EMPTY";
     db.prepare(
       "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
     ).run(noAccountsUserId, TEST_ORG.org_id, "noaccounts@example.com");

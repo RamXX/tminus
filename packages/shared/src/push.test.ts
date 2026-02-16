@@ -35,7 +35,7 @@ import type {
 
 describe("buildAPNsPayload", () => {
   const baseMessage: PushMessage = {
-    user_id: "usr_01HXYZ000000000000000001",
+    user_id: "usr_01HXYZ00000000000000000001",
     notification_type: "drift_alert",
     title: "Relationship Drift",
     body: "You haven't met with Alice in 14 days",

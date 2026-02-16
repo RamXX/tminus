@@ -44,12 +44,12 @@ import type {
 // Test fixture IDs (valid ULID format: prefix + 26 Crockford Base32 chars)
 // ---------------------------------------------------------------------------
 
-const CANONICAL_EVENT_ID = "evt_01JTESTEVT00000000000000001" as EventId;
-const CANONICAL_EVENT_ID_2 = "evt_01JTESTEVT00000000000000002" as EventId;
-const TARGET_ACCOUNT_ID = "acc_01JTESTACCOUNT000000000001" as AccountId;
-const TARGET_ACCOUNT_ID_2 = "acc_01JTESTACCOUNT000000000002" as AccountId;
-const TARGET_CALENDAR_ID = "cal_01JTESTCALENDAR0000000001" as CalendarId;
-const ORIGIN_ACCOUNT_ID = "acc_01JTESTACCOUNT000000000003" as AccountId;
+const CANONICAL_EVENT_ID = "evt_01JTESEVT00000000000000001" as EventId;
+const CANONICAL_EVENT_ID_2 = "evt_01JTESEVT00000000000000002" as EventId;
+const TARGET_ACCOUNT_ID = "acc_01JTESTACCPVNT000000000001" as AccountId;
+const TARGET_ACCOUNT_ID_2 = "acc_01JTESTACCPVNT000000000002" as AccountId;
+const TARGET_CALENDAR_ID = "cal_01JTES0TCAMENDAR0000000001" as CalendarId;
+const ORIGIN_ACCOUNT_ID = "acc_01JTESTACCPVNT000000000003" as AccountId;
 
 const MOCK_ACCESS_TOKEN = "ya29.mock-access-token-for-testing";
 const MOCK_PROVIDER_EVENT_ID = "google_provider_event_123";

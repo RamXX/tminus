@@ -22,8 +22,8 @@ const now = "2025-06-15T12:00:00Z";
 
 function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
   return {
-    canonical_event_id: "evt_01HXYZ12345678901234AB" as EventId,
-    origin_account_id: "acc_01HXYZ12345678901234AB" as AccountId,
+    canonical_event_id: "evt_01HXYZ000012345678901234AB" as EventId,
+    origin_account_id: "acc_01HXYZ000012345678901234AB" as AccountId,
     origin_event_id: "google_evt_abc",
     title: "Team standup",
     description: "Daily sync with the team",

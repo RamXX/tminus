@@ -44,9 +44,9 @@ import {
 // Test constants
 // ---------------------------------------------------------------------------
 
-const ADMIN_USER_ID = "usr_01HXYZ000000000000000001";
-const MEMBER_USER_ID = "usr_01HXYZ000000000000000002";
-const OUTSIDER_USER_ID = "usr_01HXYZ000000000000000003";
+const ADMIN_USER_ID = "usr_01HXYZ00000000000000000001";
+const MEMBER_USER_ID = "usr_01HXYZ00000000000000000002";
+const OUTSIDER_USER_ID = "usr_01HXYZ00000000000000000003";
 
 // ---------------------------------------------------------------------------
 // Real D1 mock backed by better-sqlite3

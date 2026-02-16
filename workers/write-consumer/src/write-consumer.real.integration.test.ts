@@ -73,11 +73,11 @@ const hasCredentials = requireTestCredentials();
 // Test fixture IDs
 // ---------------------------------------------------------------------------
 
-const CANONICAL_EVENT_ID = "evt_01JREALWRITE000000000000001" as EventId;
-const CANONICAL_EVENT_ID_2 = "evt_01JREALWRITE000000000000002" as EventId;
-const CANONICAL_EVENT_ID_PATCH = "evt_01JREALWRITE000000000000003" as EventId;
-const TARGET_ACCOUNT_ID = "acc_01JREALWRITEACCOUNT00000001" as AccountId;
-const ORIGIN_ACCOUNT_ID = "acc_01JREALWRITEACCOUNT00000002" as AccountId;
+const CANONICAL_EVENT_ID = "evt_01JREAWRJTE000000000000001" as EventId;
+const CANONICAL_EVENT_ID_2 = "evt_01JREAWRJTE000000000000002" as EventId;
+const CANONICAL_EVENT_ID_PATCH = "evt_01JREAWRJTE000000000000003" as EventId;
+const TARGET_ACCOUNT_ID = "acc_01JREAWRJTEACCPVNT00000001" as AccountId;
+const ORIGIN_ACCOUNT_ID = "acc_01JREAWRJTEACCPVNT00000002" as AccountId;
 
 // ---------------------------------------------------------------------------
 // SqlMirrorStore -- same pattern as the mocked integration tests
@@ -664,7 +664,7 @@ describe("Write-consumer real integration tests", () => {
   it.skipIf(!hasCredentials)(
     "UPSERT_MIRROR auto-creates busy overlay calendar when target_calendar_id is placeholder",
     async () => {
-      const calEventId = "evt_01JREALWRITECAL00000000001" as EventId;
+      const calEventId = "evt_01JREAMWRJTECAM00000000001" as EventId;
 
       // Mirror with placeholder calendar ID (same as account_id)
       mirrorStore.insertMirror({
@@ -789,7 +789,7 @@ describe("Write-consumer real integration tests", () => {
       await client.deleteEvent("primary", eventId);
 
       // Now try to delete it via WriteConsumer
-      const deleteEventId = "evt_01JREALWRITEDBLDELETE00001" as EventId;
+      const deleteEventId = "evt_01JREAMWRJTEDBMDEMETE00001" as EventId;
       mirrorStore.insertMirror({
         canonical_event_id: deleteEventId,
         target_account_id: TARGET_ACCOUNT_ID,

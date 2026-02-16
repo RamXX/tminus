@@ -30,18 +30,18 @@ import type { AccountId } from "@tminus/shared";
 // ---------------------------------------------------------------------------
 
 const TEST_ORG = {
-  org_id: "org_01HXYZ000000000000000001",
+  org_id: "org_01HXYZ00000000000000000001",
   name: "Reconcile Test Org",
 } as const;
 
 const TEST_USER = {
-  user_id: "usr_01HXYZ000000000000000001",
+  user_id: "usr_01HXYZ00000000000000000001",
   org_id: TEST_ORG.org_id,
   email: "reconcile@example.com",
 } as const;
 
 const ACCOUNT_A = {
-  account_id: "acc_01HXYZ00000000000000000A" as AccountId,
+  account_id: "acc_01HXYZ0000000000000000000A" as AccountId,
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-recon-a",
@@ -49,7 +49,7 @@ const ACCOUNT_A = {
 } as const;
 
 const ACCOUNT_B = {
-  account_id: "acc_01HXYZ00000000000000000B" as AccountId,
+  account_id: "acc_01HXYZ0000000000000000000B" as AccountId,
   user_id: TEST_USER.user_id,
   provider: "google",
   provider_subject: "google-sub-recon-b",
@@ -60,7 +60,7 @@ const TEST_ACCESS_TOKEN = "ya29.test-access-token-reconcile";
 const TEST_SYNC_TOKEN = "new-sync-token-after-reconcile";
 
 // Canonical event IDs for test fixtures
-const CANONICAL_EVT_1 = "evt_01HXYZ000000000000000001";
+const CANONICAL_EVT_1 = "evt_01HXYZ00000000000000000001";
 const CANONICAL_EVT_2 = "evt_01HXYZ000000000000000002";
 const CANONICAL_EVT_3 = "evt_01HXYZ000000000000000003";
 

@@ -29,7 +29,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 const TEST_SYSTEM_KEY = "test-master-key-for-hmac-signing-2026";
-const TEST_USER_ID = "usr_01HXYZ1234567890ABCDEFGHIJ";
+const TEST_USER_ID = "usr_01HXYZ1234567890ABCDEFGHJJ";
 const TEST_DELETED_AT = "2026-02-14T12:00:00.000Z";
 
 const TEST_DELETED_ENTITIES: DeletedEntities = {

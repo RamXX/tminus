@@ -22,13 +22,13 @@ import type { AuthEnv } from "./auth";
 
 const JWT_SECRET = "integration-test-jwt-secret-long-enough-for-hmac-256";
 const TEST_USER_A = {
-  sub: "usr_01HXYZ000000000000000001",
+  sub: "usr_01HXYZ00000000000000000001",
   email: "alice@example.com",
   tier: "premium" as const,
   pwd_ver: 2,
 };
 const TEST_USER_B = {
-  sub: "usr_01HXYZ000000000000000002",
+  sub: "usr_01HXYZ00000000000000000002",
   email: "bob@example.com",
   tier: "free" as const,
   pwd_ver: 1,
@@ -73,7 +73,7 @@ function createIntegrationApp() {
       {
         ok: true,
         data: {
-          event_id: "evt_01TEST000000000000000001",
+          event_id: "evt_01TEST00000000000000000001",
           created_by: user.user_id,
           title: body.title,
         },
