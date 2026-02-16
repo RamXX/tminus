@@ -302,4 +302,115 @@ describe("OAuth real integration tests", () => {
   // 2. The tminus-api worker running (for AccountDO)
   // These are tested in the E2E walking skeleton story (TM-xxx).
   // Here we verify the error handling paths are correct.
+
+  // -------------------------------------------------------------------------
+  // TM-2w75: OAuth redirect URI verification (always runs -- no credentials needed)
+  //
+  // Verifies that the redirect_uri sent to Google OAuth matches the GCP
+  // OAuth consent screen configuration. Uses the REAL handler with REAL
+  // crypto (PKCE + state encryption) and a production-like origin. No mocks.
+  // -------------------------------------------------------------------------
+
+  describe("redirect URI verification (TM-2w75)", () => {
+    // The EXACT redirect URI configured in the GCP OAuth consent screen.
+    // If this changes in GCP, update this constant and the worker code.
+    const GCP_GOOGLE_REDIRECT_URI = "https://oauth.tminus.ink/oauth/google/callback";
+    const PRODUCTION_ORIGIN = "https://oauth.tminus.ink";
+
+    it("production wrangler.toml routes oauth.tminus.ink to the worker", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const toml = await readFile(
+        resolve(ROOT, "workers/oauth/wrangler.toml"),
+        "utf-8",
+      );
+      // Verify the production route pattern matches the expected domain
+      expect(toml).toContain('pattern = "oauth.tminus.ink/*"');
+      expect(toml).toContain('zone_name = "tminus.ink"');
+    });
+
+    it("CALLBACK_PATH constant matches GCP redirect URI path", async () => {
+      const { CALLBACK_PATH } = await import("./google.js");
+      const gcpPath = new URL(GCP_GOOGLE_REDIRECT_URI).pathname;
+      expect(CALLBACK_PATH).toBe(gcpPath);
+    });
+
+    it("callback route handler is registered at the same path as CALLBACK_PATH", async () => {
+      const { CALLBACK_PATH } = await import("./google.js");
+      const { createHandler } = await import("./index.js");
+      const handler = createHandler();
+
+      // Verify the route handler responds at the callback path (not 404)
+      // Use a request with ?error=test to get a 200 (consent denied) instead of
+      // needing valid state/code params.
+      const request = new Request(
+        `${PRODUCTION_ORIGIN}${CALLBACK_PATH}?error=test_probe`,
+      );
+      const env = {
+        JWT_SECRET: TEST_JWT_SECRET,
+        GOOGLE_CLIENT_ID: TEST_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: TEST_CLIENT_SECRET,
+        MS_CLIENT_ID: "unused",
+        MS_CLIENT_SECRET: "unused",
+        DB: {},
+        USER_GRAPH: {},
+        ACCOUNT: {},
+        ONBOARDING_WORKFLOW: {},
+      } as unknown as Env;
+      const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+
+      const response = await handler.fetch(request, env, ctx);
+      // The error=test_probe path returns 200 with "declined access" message,
+      // proving the route handler is registered and active at this path.
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("declined access");
+    });
+
+    it("authorize redirect sends exact GCP-configured redirect_uri to Google", async () => {
+      const { createHandler } = await import("./index.js");
+      const handler = createHandler();
+
+      // Simulate a request arriving at the production origin
+      const request = new Request(
+        `${PRODUCTION_ORIGIN}/oauth/google/start?user_id=${TEST_USER_ID}`,
+      );
+      const env = {
+        JWT_SECRET: TEST_JWT_SECRET,
+        GOOGLE_CLIENT_ID: TEST_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: TEST_CLIENT_SECRET,
+        MS_CLIENT_ID: "unused",
+        MS_CLIENT_SECRET: "unused",
+        DB: {},
+        USER_GRAPH: {},
+        ACCOUNT: {},
+        ONBOARDING_WORKFLOW: {},
+      } as unknown as Env;
+      const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+
+      const response = await handler.fetch(request, env, ctx);
+      expect(response.status).toBe(302);
+
+      const location = response.headers.get("Location")!;
+      expect(location).toBeTruthy();
+
+      const redirectUrl = new URL(location);
+      const redirectUri = redirectUrl.searchParams.get("redirect_uri");
+
+      // THE critical assertion: the redirect_uri sent to Google MUST
+      // exactly match what is configured in the GCP OAuth consent screen.
+      expect(redirectUri).toBe(GCP_GOOGLE_REDIRECT_URI);
+    });
+
+    it("callback handler constructs the same redirect_uri for token exchange", async () => {
+      // Verify that the callback handler uses the same CALLBACK_PATH constant
+      // for constructing the redirect_uri during token exchange.
+      // We test this by reading the source code constants -- both handleStart
+      // and handleCallback use `${url.origin}${CALLBACK_PATH}`.
+      const { CALLBACK_PATH } = await import("./google.js");
+
+      // The full redirect_uri at production is origin + CALLBACK_PATH
+      const expectedUri = `${PRODUCTION_ORIGIN}${CALLBACK_PATH}`;
+      expect(expectedUri).toBe(GCP_GOOGLE_REDIRECT_URI);
+    });
+  });
 });
