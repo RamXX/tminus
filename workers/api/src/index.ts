@@ -12,7 +12,7 @@
  * - D1 for account lookups (cross-user registry)
  */
 
-import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES, isValidMilestoneKind, isValidMilestoneDate, MILESTONE_KINDS, buildExcusePrompt, parseExcuseResponse, buildVCalendar } from "@tminus/shared";
+import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES, isValidMilestoneKind, isValidMilestoneDate, MILESTONE_KINDS, buildExcusePrompt, parseExcuseResponse, buildVCalendar, DelegationService, DiscoveryService } from "@tminus/shared";
 import type { CanonicalEvent, SimulationScenario, ImpactReport } from "@tminus/shared";
 import type { ExcuseTone, TruthLevel, ExcuseContext } from "@tminus/shared";
 import {
@@ -89,6 +89,24 @@ import {
   handleOrgRegister,
   handleDelegationCalendars,
 } from "./routes/org-delegation";
+import {
+  handleOrgDashboard,
+  handleListDiscoveredUsers,
+  handleGetDiscoveredUser,
+  handleUpdateDiscoveredUser,
+  handleGetDiscoveryConfig,
+  handleUpdateDiscoveryConfig,
+  handleDelegationHealth,
+  handleDelegationRotate,
+  handleAuditLog,
+} from "./routes/org-delegation-admin";
+import type { AdminDeps } from "./routes/org-delegation-admin";
+import {
+  D1DelegationStore,
+  D1DiscoveryStore,
+  queryAuditLogFromD1,
+  getDelegationFromD1,
+} from "./routes/d1-delegation-stores";
 import {
   handleUpdateSeats,
   enforceSeatLimit,
@@ -6469,6 +6487,193 @@ async function routeAuthenticatedRequest(
           env as unknown as { DB: D1Database; MASTER_KEY?: string },
           match.params[0],
         );
+      }
+
+      // -- Delegation admin dashboard routes (Phase 6D: TM-9iu.4) -----------
+      // Helper: build AdminDeps and AdminAuthContext for delegation admin handlers.
+      // Uses MASTER_KEY for DelegationService credential encryption.
+      // Admin status determined by org_members role lookup.
+
+      // PUT /v1/orgs/:id/discovery/config (must match before shorter patterns)
+      match = matchRoute(pathname, "/v1/orgs/:id/discovery/config");
+      if (match && (method === "PUT" || method === "GET")) {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        if (method === "GET") {
+          return handleGetDiscoveryConfig(request, adminAuth, orgId, deps);
+        }
+        return handleUpdateDiscoveryConfig(request, adminAuth, orgId, deps);
+      }
+
+      // GET /v1/orgs/:id/delegation/health
+      match = matchRoute(pathname, "/v1/orgs/:id/delegation/health");
+      if (match && method === "GET") {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        return handleDelegationHealth(request, adminAuth, orgId, deps);
+      }
+
+      // POST /v1/orgs/:id/delegation/rotate
+      match = matchRoute(pathname, "/v1/orgs/:id/delegation/rotate");
+      if (match && method === "POST") {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        return handleDelegationRotate(request, adminAuth, orgId, deps);
+      }
+
+      // GET /v1/orgs/:id/dashboard
+      match = matchRoute(pathname, "/v1/orgs/:id/dashboard");
+      if (match && method === "GET") {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        return handleOrgDashboard(request, adminAuth, orgId, deps);
+      }
+
+      // GET /v1/orgs/:id/audit
+      match = matchRoute(pathname, "/v1/orgs/:id/audit");
+      if (match && method === "GET") {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        return handleAuditLog(request, adminAuth, orgId, deps);
+      }
+
+      // PATCH /v1/orgs/:id/users/:uid (must match before GET /v1/orgs/:id/users/:uid)
+      match = matchRoute(pathname, "/v1/orgs/:id/users/:uid");
+      if (match && (method === "PATCH" || method === "GET")) {
+        const orgId = match.params[0];
+        const userId = match.params[1];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        if (method === "PATCH") {
+          return handleUpdateDiscoveredUser(request, adminAuth, orgId, userId, deps);
+        }
+        return handleGetDiscoveredUser(request, adminAuth, orgId, userId, deps);
+      }
+
+      // GET /v1/orgs/:id/users (list discovered users)
+      match = matchRoute(pathname, "/v1/orgs/:id/users");
+      if (match && method === "GET") {
+        const orgId = match.params[0];
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const masterKey = env.MASTER_KEY ?? "";
+        const delegationStore = new D1DelegationStore(env.DB);
+        const discoveryStore = new D1DiscoveryStore(env.DB);
+        const delegationSvc = new DelegationService(delegationStore, masterKey);
+        const discoverySvc = new DiscoveryService(discoveryStore, {
+          getDirectoryToken: async () => "",
+        });
+        const deps: AdminDeps = {
+          delegationService: delegationSvc,
+          discoveryService: discoverySvc,
+          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+          getDelegation: (did) => getDelegationFromD1(env.DB, did),
+        };
+        return handleListDiscoveredUsers(request, adminAuth, orgId, deps);
       }
 
       // -- Organization routes (Enterprise) -----------------------------------
