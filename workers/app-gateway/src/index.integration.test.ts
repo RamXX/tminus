@@ -139,7 +139,7 @@ function makeIntegrationEnv(overrides?: Partial<AppGatewayEnv>): AppGatewayEnv {
 
 describe("app-gateway integration", () => {
   describe("health endpoint", () => {
-    it("returns 200 OK with json body and security headers", async () => {
+    it("returns 200 OK with enriched health envelope and security headers", async () => {
       const app = createApp();
       const env = makeIntegrationEnv();
       const res = await app.fetch(
@@ -148,8 +148,39 @@ describe("app-gateway integration", () => {
       );
 
       expect(res.status).toBe(200);
-      const body = await res.json() as Record<string, unknown>;
-      expect(body.status).toBe("ok");
+      const body = await res.json() as {
+        ok: boolean;
+        data: {
+          status: string;
+          version: string;
+          worker: string;
+          environment: string;
+          bindings: Array<{ name: string; type: string; available: boolean }>;
+        };
+        error: null;
+        meta: { timestamp: string };
+      };
+
+      // Envelope fields
+      expect(body.ok).toBe(true);
+      expect(body.error).toBeNull();
+      expect(body.meta.timestamp).toBeTruthy();
+
+      // Health data payload
+      expect(body.data.status).toBe("healthy");
+      expect(body.data.version).toBe("0.0.1");
+      expect(body.data.worker).toBe("tminus-app-gateway");
+      expect(body.data.environment).toBe("development");
+
+      // Binding availability
+      expect(Array.isArray(body.data.bindings)).toBe(true);
+      const bindingNames = body.data.bindings.map((b) => b.name);
+      expect(bindingNames).toContain("ASSETS");
+      expect(bindingNames).toContain("API");
+      const assetsBinding = body.data.bindings.find((b) => b.name === "ASSETS");
+      expect(assetsBinding?.available).toBe(true);
+      const apiBinding = body.data.bindings.find((b) => b.name === "API");
+      expect(apiBinding?.available).toBe(true);
 
       // Security headers present
       expect(res.headers.get("X-Frame-Options")).toBe("DENY");

@@ -477,18 +477,72 @@ describe("MCP integration: unauthenticated requests", () => {
 // ---------------------------------------------------------------------------
 
 describe("MCP integration: health endpoint", () => {
-  it("returns 200 healthy with real D1 env", async () => {
+  it("returns 200 with enriched health envelope and all bindings", async () => {
     const handler = createMcpHandler();
-    const env = createEnv();
+    const mockApi = {
+      fetch: vi.fn(async () => new Response("ok")),
+      connect: vi.fn(),
+    } as unknown as Fetcher;
+    const env = { ...createEnv(), API: mockApi };
     const request = new Request("https://mcp.tminus.ink/health", {
       method: "GET",
     });
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as Record<string, unknown>;
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        status: string;
+        version: string;
+        worker: string;
+        environment: string;
+        bindings: Array<{ name: string; type: string; available: boolean }>;
+      };
+      error: null;
+      meta: { timestamp: string };
+    };
+
+    // Envelope fields
     expect(body.ok).toBe(true);
-    expect(body.status).toBe("healthy");
+    expect(body.error).toBeNull();
+    expect(body.meta.timestamp).toBeTruthy();
+
+    // Health data payload (all bindings available -> healthy)
+    expect(body.data.status).toBe("healthy");
+    expect(body.data.version).toBe("0.0.1");
+    expect(body.data.worker).toBe("tminus-mcp");
+    expect(body.data.environment).toBe("development");
+
+    // Binding availability
+    expect(Array.isArray(body.data.bindings)).toBe(true);
+    const bindingNames = body.data.bindings.map((b) => b.name);
+    expect(bindingNames).toContain("DB");
+    expect(bindingNames).toContain("API");
+    const dbBinding = body.data.bindings.find((b) => b.name === "DB");
+    expect(dbBinding?.available).toBe(true);
+    const apiBinding = body.data.bindings.find((b) => b.name === "API");
+    expect(apiBinding?.available).toBe(true);
+  });
+
+  it("returns degraded when API service binding is missing", async () => {
+    const handler = createMcpHandler();
+    const env = createEnv(); // no API binding
+    const request = new Request("https://mcp.tminus.ink/health", {
+      method: "GET",
+    });
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { status: string; bindings: Array<{ name: string; available: boolean }> };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("degraded");
+    const apiBinding = body.data.bindings.find((b) => b.name === "API");
+    expect(apiBinding?.available).toBe(false);
   });
 });
 
