@@ -629,6 +629,62 @@ CREATE INDEX idx_deleg_audit_created ON delegation_audit_log(created_at);
 ` as const;
 
 /**
+ * Migration 0025: User discovery and federation tables (TM-9iu.3).
+ *
+ * org_discovered_users: Tracks users discovered via Google Admin SDK
+ * Directory API for domain-wide delegation orgs. Each row represents
+ * a user in the org with their lifecycle state (active/suspended/removed).
+ *
+ * org_discovery_config: Per-org configuration for user discovery behavior.
+ * Controls which OUs to include, which users to exclude, and whether
+ * background sync is proactive or lazy (on first visit only).
+ *
+ * Business rules:
+ * - BR-1: Discovery respects admin-configured OU filters
+ * - BR-2: Suspended users' calendars stop syncing immediately
+ * - BR-3: Removed users' data cleaned up per retention policy
+ * - BR-4: Directory API calls rate-limited to Google's quotas
+ */
+export const MIGRATION_0025_ORG_DISCOVERY = `
+-- Discovered users from Google Directory API
+CREATE TABLE org_discovered_users (
+  discovery_id      TEXT PRIMARY KEY,
+  delegation_id     TEXT NOT NULL,
+  google_user_id    TEXT NOT NULL,
+  email             TEXT NOT NULL,
+  display_name      TEXT,
+  org_unit_path     TEXT,
+  status            TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'suspended', 'removed')),
+  account_id        TEXT,
+  last_synced_at    TEXT,
+  discovered_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  removed_at        TEXT,
+  UNIQUE(delegation_id, google_user_id)
+);
+
+CREATE INDEX idx_discovered_users_delegation ON org_discovered_users(delegation_id);
+CREATE INDEX idx_discovered_users_email ON org_discovered_users(email);
+CREATE INDEX idx_discovered_users_status ON org_discovered_users(status);
+CREATE INDEX idx_discovered_users_account ON org_discovered_users(account_id);
+
+-- Per-org discovery configuration
+CREATE TABLE org_discovery_config (
+  config_id         TEXT PRIMARY KEY,
+  delegation_id     TEXT NOT NULL UNIQUE,
+  ou_filter_json    TEXT,
+  excluded_emails   TEXT,
+  sync_mode         TEXT NOT NULL DEFAULT 'lazy' CHECK(sync_mode IN ('proactive', 'lazy')),
+  retention_days    INTEGER NOT NULL DEFAULT 30,
+  last_discovery_at TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_discovery_config_delegation ON org_discovery_config(delegation_id);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -657,4 +713,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0022_ORG_DELEGATIONS,
   MIGRATION_0023_DELEGATION_INFRASTRUCTURE,
   MIGRATION_0024_DELEGATION_CACHE_AND_AUDIT,
+  MIGRATION_0025_ORG_DISCOVERY,
 ] as const;

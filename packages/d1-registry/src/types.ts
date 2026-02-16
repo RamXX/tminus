@@ -369,3 +369,51 @@ export interface DelegationAuditLogRow {
   readonly details: string | null;
   readonly created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Org discovered users (Migration 0025, TM-9iu.3)
+// ---------------------------------------------------------------------------
+
+/** Valid lifecycle status values for discovered users. */
+export type DiscoveredUserStatus = "active" | "suspended" | "removed";
+
+/** Row shape for the `org_discovered_users` table. */
+export interface OrgDiscoveredUserRow {
+  readonly discovery_id: string;
+  readonly delegation_id: string;
+  readonly google_user_id: string;
+  readonly email: string;
+  readonly display_name: string | null;
+  readonly org_unit_path: string | null;
+  readonly status: DiscoveredUserStatus;
+  readonly account_id: string | null;
+  readonly last_synced_at: string | null;
+  readonly discovered_at: string;
+  readonly status_changed_at: string;
+  readonly removed_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Org discovery config (Migration 0025, TM-9iu.3)
+// ---------------------------------------------------------------------------
+
+/** Valid sync mode values for discovery configuration. */
+export type DiscoverySyncMode = "proactive" | "lazy";
+
+/** Row shape for the `org_discovery_config` table. */
+export interface OrgDiscoveryConfigRow {
+  readonly config_id: string;
+  readonly delegation_id: string;
+  /** JSON array of OU paths to include (null = all users). */
+  readonly ou_filter_json: string | null;
+  /** JSON array of email addresses to exclude (null = no exclusions). */
+  readonly excluded_emails: string | null;
+  /** 'proactive' = background sync immediately, 'lazy' = sync on first visit. */
+  readonly sync_mode: DiscoverySyncMode;
+  /** Days to retain data after user is removed from org. */
+  readonly retention_days: number;
+  /** ISO 8601 timestamp of last directory API discovery run. */
+  readonly last_discovery_at: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}

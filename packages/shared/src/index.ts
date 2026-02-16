@@ -672,3 +672,39 @@ export type {
   RotationResult,
   ImpersonationResult,
 } from "./delegation-service";
+
+// Re-export discovery schemas (TM-9iu.3: user discovery validation)
+export {
+  DirectoryUserSchema,
+  DirectoryListResponseSchema,
+  SyncModeSchema,
+  DiscoveryConfigSchema,
+  DiscoveredUserStatusSchema,
+  DiscoveredUserSchema,
+  isValidTransition,
+  getAllowedTransitions,
+  DIRECTORY_API_RATE_LIMITS,
+  parseDirectoryResponse,
+  parseDiscoveryConfig,
+  determineUserStatus,
+  filterByOU,
+  filterExcluded,
+} from "./discovery-schemas";
+export type {
+  DirectoryUser,
+  DirectoryListResponse,
+  SyncMode,
+  DiscoveryConfig,
+  DiscoveredUserStatus,
+  DiscoveredUser,
+} from "./discovery-schemas";
+
+// Re-export discovery service (TM-9iu.3: user discovery + auto federation)
+export { DiscoveryService, DIRECTORY_API_SCOPE } from "./discovery-service";
+export type {
+  DiscoveryStore,
+  TokenProvider,
+  DiscoveryResult,
+  CleanupResult,
+  FederationResult,
+} from "./discovery-service";

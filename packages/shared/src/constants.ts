@@ -74,6 +74,7 @@ export const ID_PREFIXES = {
   delegation: "dlg_",
   audit: "aud_",
   cache: "cch_",
+  discovery: "dsc_",
 } as const;
 
 // ---------------------------------------------------------------------------
