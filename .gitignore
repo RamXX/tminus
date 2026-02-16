@@ -18,6 +18,9 @@ dist/
 .env*
 !.env.example
 
+# Deploy resource IDs (contains account-specific Cloudflare resource IDs)
+.deploy-ids.json
+
 # OS files
 .DS_Store
 
