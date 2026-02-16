@@ -44,7 +44,7 @@ const TEST_ACCOUNT = {
 } as const;
 
 const TEST_DELETION_CERT = {
-  cert_id: "cert_01HXYZ00000000000000000001",
+  cert_id: "crt_01HXYZ00000000000000000001",
   entity_type: "user",
   entity_id: TEST_USER.user_id,
   proof_hash: "sha256:abc123def456",
@@ -694,7 +694,7 @@ describe("D1 registry schema integration tests", () => {
           `INSERT INTO deletion_certificates
            (cert_id, entity_type, entity_id, proof_hash, signature)
            VALUES (?, ?, ?, ?, ?)`,
-        ).run(`cert_${i}`, entityType, `entity_${i}`, `hash_${i}`, `sig_${i}`);
+        ).run(`crt_0${i}`, entityType, `entity_${i}`, `hash_${i}`, `sig_${i}`);
       }
 
       const rows = db
@@ -712,7 +712,7 @@ describe("D1 registry schema integration tests", () => {
            (cert_id, entity_type, entity_id, proof_hash, signature)
            VALUES (?, ?, ?, ?, ?)`,
           )
-          .run("cert_bad", "user", "entity_1", null, "sig_1"),
+          .run("crt_bad1", "user", "entity_1", null, "sig_1"),
       ).toThrow(/NOT NULL constraint failed/);
     });
 
@@ -724,7 +724,7 @@ describe("D1 registry schema integration tests", () => {
            (cert_id, entity_type, entity_id, proof_hash, signature)
            VALUES (?, ?, ?, ?, ?)`,
           )
-          .run("cert_bad", "user", "entity_1", "hash_1", null),
+          .run("crt_bad2", "user", "entity_1", "hash_1", null),
       ).toThrow(/NOT NULL constraint failed/);
     });
   });
