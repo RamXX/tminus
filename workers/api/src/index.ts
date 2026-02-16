@@ -5898,7 +5898,7 @@ export function createHandler() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin route helpers -- DRY up delegation admin routes (TM-8xt4)
+// Admin route helpers -- DRY up delegation admin routes (TM-8xt4, TM-i6ao)
 // ---------------------------------------------------------------------------
 
 /**
@@ -5946,6 +5946,36 @@ function buildAdminDeps(
     deps.getQuotaReport = (oid) => getQuotaReport(quotaStore, oid);
   }
   return deps;
+}
+
+/** Context provided to delegation admin route handlers by withDelegationAdmin. */
+interface DelegationAdminContext {
+  request: Request;
+  adminAuth: { userId: string; isAdmin: boolean };
+  orgId: string;
+  env: Env;
+}
+
+/**
+ * Higher-order helper that wraps the common delegation admin route boilerplate:
+ * 1. Rate-limit check (returns 429 if blocked)
+ * 2. Admin auth context construction (org membership lookup)
+ *
+ * The handler callback receives a DelegationAdminContext and returns a Response.
+ * This eliminates the repeated checkDelegationRateLimit/buildAdminAuth pattern
+ * across all delegation admin routes.
+ */
+async function withDelegationAdmin(
+  request: Request,
+  env: Env,
+  auth: { userId: string },
+  orgId: string,
+  handler: (ctx: DelegationAdminContext) => Promise<Response>,
+): Promise<Response> {
+  const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
+  if (rlBlock) return rlBlock;
+  const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+  return handler({ request, adminAuth, orgId, env });
 }
 
 // ---------------------------------------------------------------------------
@@ -6691,100 +6721,85 @@ const routeDelegationRoutes: RouteGroupHandler = async (request, method, pathnam
   }
 
   // -- Delegation admin dashboard routes (Phase 6D: TM-9iu.4) --
+  // All routes below use withDelegationAdmin to handle rate limiting + auth (TM-i6ao).
 
   // PUT/GET /v1/orgs/:id/discovery/config (must match before shorter patterns)
   match = matchRoute(pathname, "/v1/orgs/:id/discovery/config");
   if (match && (method === "PUT" || method === "GET")) {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    if (method === "GET") {
-      return handleGetDiscoveryConfig(request, adminAuth, orgId, deps);
-    }
-    return handleUpdateDiscoveryConfig(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      if (method === "GET") {
+        return handleGetDiscoveryConfig(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+      }
+      return handleUpdateDiscoveryConfig(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   // GET /v1/orgs/:id/delegation/health
   match = matchRoute(pathname, "/v1/orgs/:id/delegation/health");
   if (match && method === "GET") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    return handleDelegationHealth(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      return handleDelegationHealth(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   // POST /v1/orgs/:id/delegation/rotate
   match = matchRoute(pathname, "/v1/orgs/:id/delegation/rotate");
   if (match && method === "POST") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    return handleDelegationRotate(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      return handleDelegationRotate(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   // GET /v1/orgs/:id/dashboard
   match = matchRoute(pathname, "/v1/orgs/:id/dashboard");
   if (match && method === "GET") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env, { includeQuotaReport: true });
-    return handleOrgDashboard(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env, { includeQuotaReport: true });
+      return handleOrgDashboard(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   // POST /v1/orgs/:id/audit-log/export (AC#6: audit log export)
   match = matchRoute(pathname, "/v1/orgs/:id/audit-log/export");
   if (match && method === "POST") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const complianceStore = new D1ComplianceAuditStore(env.DB);
-    return handleAuditLogExport(request, adminAuth, orgId, complianceStore);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const complianceStore = new D1ComplianceAuditStore(ctx.env.DB);
+      return handleAuditLogExport(ctx.request, ctx.adminAuth, ctx.orgId, complianceStore);
+    });
   }
 
   // GET /v1/orgs/:id/audit
   match = matchRoute(pathname, "/v1/orgs/:id/audit");
   if (match && method === "GET") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    return handleAuditLog(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      return handleAuditLog(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   // PATCH/GET /v1/orgs/:id/users/:uid
   match = matchRoute(pathname, "/v1/orgs/:id/users/:uid");
   if (match && (method === "PATCH" || method === "GET")) {
-    const orgId = match.params[0];
     const userId = match.params[1];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    if (method === "PATCH") {
-      return handleUpdateDiscoveredUser(request, adminAuth, orgId, userId, deps);
-    }
-    return handleGetDiscoveredUser(request, adminAuth, orgId, userId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      if (method === "PATCH") {
+        return handleUpdateDiscoveredUser(ctx.request, ctx.adminAuth, ctx.orgId, userId, deps);
+      }
+      return handleGetDiscoveredUser(ctx.request, ctx.adminAuth, ctx.orgId, userId, deps);
+    });
   }
 
   // GET /v1/orgs/:id/users (list discovered users)
   match = matchRoute(pathname, "/v1/orgs/:id/users");
   if (match && method === "GET") {
-    const orgId = match.params[0];
-    const rlBlock = await checkDelegationRateLimit(env.DB, orgId);
-    if (rlBlock) return rlBlock;
-    const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
-    const deps = buildAdminDeps(env);
-    return handleListDiscoveredUsers(request, adminAuth, orgId, deps);
+    return withDelegationAdmin(request, env, auth, match.params[0], (ctx) => {
+      const deps = buildAdminDeps(ctx.env);
+      return handleListDiscoveredUsers(ctx.request, ctx.adminAuth, ctx.orgId, deps);
+    });
   }
 
   return null;
