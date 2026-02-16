@@ -183,11 +183,14 @@ export const ROTATION_REMINDER_DAYS = 90;
 
 /**
  * Compute the rotation due date for a key created at the given timestamp.
+ *
+ * Uses millisecond arithmetic instead of Date.setDate() to avoid DST
+ * timezone drift. Date.setDate() operates in local time, so adding days
+ * across a DST boundary shifts the UTC result by +/- 1 hour.
  */
 export function computeRotationDueDate(createdAt: Date): Date {
-  const due = new Date(createdAt);
-  due.setDate(due.getDate() + ROTATION_REMINDER_DAYS);
-  return due;
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return new Date(createdAt.getTime() + ROTATION_REMINDER_DAYS * msPerDay);
 }
 
 /**
