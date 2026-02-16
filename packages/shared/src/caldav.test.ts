@@ -1091,7 +1091,7 @@ describe("CalDavClient", () => {
       expect(result.etag).toBe("new-etag-123");
     });
 
-    it("deleteEvent removes event", async () => {
+    it("deleteEventCalDav removes event and returns result", async () => {
       // 204 No Content requires null body (not empty string)
       const mockFetch = vi.fn(async () =>
         new Response(null, {
@@ -1101,9 +1101,41 @@ describe("CalDavClient", () => {
       ) as unknown as FetchFn;
 
       const client = new CalDavClient(defaultConfig, mockFetch);
-      const result = await client.deleteEvent("/c/personal/", "test-uid@tminus.app");
+      const result = await client.deleteEventCalDav("/c/personal/", "test-uid@tminus.app");
 
       expect(result.ok).toBe(true);
+    });
+
+    it("deleteEventCalDav returns error on API failure", async () => {
+      const mockFetch = createMockFetch([{ status: 500, body: "Internal Server Error" }]);
+
+      const client = new CalDavClient(defaultConfig, mockFetch);
+      const result = await client.deleteEventCalDav("/c/personal/", "test-uid@tminus.app");
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeDefined();
+    });
+
+    it("deleteEvent (CalendarProvider interface) resolves on success", async () => {
+      const mockFetch = vi.fn(async () =>
+        new Response(null, {
+          status: 204,
+          headers: { "Content-Type": "application/xml" },
+        }),
+      ) as unknown as FetchFn;
+
+      const client = new CalDavClient(defaultConfig, mockFetch);
+      // Should not throw -- returns Promise<void>
+      await client.deleteEvent("/c/personal/", "test-uid@tminus.app");
+    });
+
+    it("deleteEvent (CalendarProvider interface) throws on failure", async () => {
+      const mockFetch = createMockFetch([{ status: 500, body: "Internal Server Error" }]);
+
+      const client = new CalDavClient(defaultConfig, mockFetch);
+      await expect(
+        client.deleteEvent("/c/personal/", "test-uid@tminus.app"),
+      ).rejects.toThrow(/Failed to delete event/);
     });
 
     it("putEvent returns error on conflict", async () => {

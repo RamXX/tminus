@@ -356,13 +356,16 @@ export class CalDavClient implements CalendarProvider {
   }
 
   /**
-   * Delete an event via DELETE.
+   * Delete an event via CalDAV DELETE (low-level).
+   *
+   * Returns a CalDavWriteResult rather than throwing, parallel to putEvent.
+   * The CalendarProvider-compliant deleteEvent() wraps this method.
    *
    * @param calendarHref - Calendar URL path
    * @param eventUid - UID for the event
    * @param etag - If provided, used as If-Match for conflict detection
    */
-  async deleteEvent(
+  async deleteEventCalDav(
     calendarHref: string,
     eventUid: string,
     etag?: string,
@@ -387,6 +390,23 @@ export class CalDavClient implements CalendarProvider {
         return { ok: false, error: err.message };
       }
       throw err;
+    }
+  }
+
+  /**
+   * Delete an event from a calendar.
+   *
+   * CalendarProvider-compliant: accepts (calendarId, eventId), returns
+   * Promise<void>, and throws CalDavApiError on failure.
+   */
+  async deleteEvent(calendarId: string, eventId: string): Promise<void> {
+    const result = await this.deleteEventCalDav(calendarId, eventId);
+
+    if (!result.ok) {
+      throw new CalDavApiError(
+        `Failed to delete event: ${result.error}`,
+        500,
+      );
     }
   }
 
