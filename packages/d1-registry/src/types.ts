@@ -287,13 +287,16 @@ export interface DeviceTokenRow {
 }
 
 // ---------------------------------------------------------------------------
-// Org delegations (Migration 0022, TM-9iu.1)
+// Org delegations (Migration 0022, TM-9iu.1 + TM-9iu.2)
 // ---------------------------------------------------------------------------
 
 /** Valid delegation status values for the `org_delegations.delegation_status` column. */
 export type OrgDelegationStatus = "pending" | "active" | "revoked";
 
-/** Row shape for the `org_delegations` table. */
+/** Valid health check status values. */
+export type DelegationHealthCheckStatus = "healthy" | "degraded" | "revoked" | "unknown";
+
+/** Row shape for the `org_delegations` table (with TM-9iu.2 extensions). */
 export interface OrgDelegationRow {
   readonly delegation_id: string;
   readonly domain: string;
@@ -306,4 +309,63 @@ export interface OrgDelegationRow {
   readonly validated_at: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /** Number of active users in this org delegation. */
+  readonly active_users_count: number;
+  /** Explicit registration timestamp. */
+  readonly registration_date: string | null;
+  /** When the current service account key was uploaded. */
+  readonly sa_key_created_at: string | null;
+  /** Last time the SA key was used for impersonation. */
+  readonly sa_key_last_used_at: string | null;
+  /** When the SA key should be rotated (90 days from creation). */
+  readonly sa_key_rotation_due_at: string | null;
+  /** Old encrypted key during zero-downtime rotation. */
+  readonly previous_encrypted_sa_key: string | null;
+  /** private_key_id of the old key during rotation. */
+  readonly previous_sa_key_id: string | null;
+  /** Last delegation health check timestamp. */
+  readonly last_health_check_at: string | null;
+  /** Result of last health check. */
+  readonly health_check_status: DelegationHealthCheckStatus;
+}
+
+// ---------------------------------------------------------------------------
+// Impersonation token cache (Migration 0024, TM-9iu.2)
+// ---------------------------------------------------------------------------
+
+/** Row shape for the `impersonation_token_cache` table. */
+export interface ImpersonationTokenCacheRow {
+  readonly cache_id: string;
+  readonly delegation_id: string;
+  readonly user_email: string;
+  /** Encrypted access token (same AES-256-GCM envelope pattern). */
+  readonly encrypted_token: string;
+  /** ISO 8601 timestamp when the cached token expires. */
+  readonly token_expires_at: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Delegation audit log (Migration 0024, TM-9iu.2)
+// ---------------------------------------------------------------------------
+
+/** Valid audit action types for delegation events. */
+export type DelegationAuditAction =
+  | "token_issued"
+  | "token_refreshed"
+  | "token_cached"
+  | "health_check"
+  | "key_rotated"
+  | "delegation_revoked";
+
+/** Row shape for the `delegation_audit_log` table. */
+export interface DelegationAuditLogRow {
+  readonly audit_id: string;
+  readonly delegation_id: string;
+  readonly domain: string;
+  readonly user_email: string;
+  readonly action: DelegationAuditAction;
+  readonly details: string | null;
+  readonly created_at: string;
 }

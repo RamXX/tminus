@@ -635,3 +635,40 @@ export {
 export type {
   EncryptedServiceAccountEnvelope,
 } from "./service-account-crypto";
+
+// Re-export delegation Zod schemas (TM-9iu.2: runtime validation)
+export {
+  ServiceAccountKeySchema,
+  EncryptedEnvelopeSchema,
+  KeyMetadataSchema,
+  DelegationHealthStatusSchema,
+  HealthCheckResultSchema,
+  CachedImpersonationTokenSchema,
+  OrgDelegationConfigSchema,
+  parseServiceAccountKey,
+  safeParseServiceAccountKey,
+  parseEncryptedEnvelope,
+  computeRotationDueDate,
+  isKeyRotationDue,
+  ROTATION_REMINDER_DAYS,
+} from "./delegation-schemas";
+export type {
+  ValidatedServiceAccountKey,
+  ValidatedEncryptedEnvelope,
+  KeyMetadata,
+  DelegationHealthStatus,
+  HealthCheckResult,
+  CachedImpersonationToken,
+  OrgDelegationConfig,
+} from "./delegation-schemas";
+
+// Re-export delegation service (TM-9iu.2: credential management + token cache)
+export { DelegationService } from "./delegation-service";
+export type {
+  DelegationStore,
+  DelegationRecord,
+  CachedTokenRecord,
+  AuditLogEntry,
+  RotationResult,
+  ImpersonationResult,
+} from "./delegation-service";

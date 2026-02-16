@@ -72,6 +72,8 @@ export const ID_PREFIXES = {
   onboardSession: "obs_",
   orgInstall: "oin_",
   delegation: "dlg_",
+  audit: "aud_",
+  cache: "cch_",
 } as const;
 
 // ---------------------------------------------------------------------------

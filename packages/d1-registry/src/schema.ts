@@ -557,6 +557,78 @@ CREATE INDEX idx_org_delegations_status ON org_delegations(delegation_status);
 ` as const;
 
 /**
+ * Migration 0023: Service account credential rotation and impersonation token
+ * cache (TM-9iu.2).
+ *
+ * Extends org_delegations with:
+ * - active_users_count: tracked per-org user count
+ * - registration_date: explicit registration timestamp (vs created_at)
+ * - sa_key_created_at: when the current SA key was uploaded
+ * - sa_key_last_used_at: last time the SA key was used for impersonation
+ * - sa_key_rotation_due_at: 90-day reminder for key rotation
+ * - previous_encrypted_sa_key: old key kept during zero-downtime rotation
+ * - previous_sa_key_id: private_key_id of the old key
+ * - last_health_check_at: last delegation health check timestamp
+ * - health_check_status: result of last health check
+ *
+ * Creates impersonation_token_cache for per-user token caching (BR-4).
+ *
+ * Creates delegation_audit_log for tracking impersonation token issuance.
+ */
+export const MIGRATION_0023_DELEGATION_INFRASTRUCTURE = `
+ALTER TABLE org_delegations ADD COLUMN active_users_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE org_delegations ADD COLUMN registration_date TEXT;
+ALTER TABLE org_delegations ADD COLUMN sa_key_created_at TEXT;
+ALTER TABLE org_delegations ADD COLUMN sa_key_last_used_at TEXT;
+ALTER TABLE org_delegations ADD COLUMN sa_key_rotation_due_at TEXT;
+ALTER TABLE org_delegations ADD COLUMN previous_encrypted_sa_key TEXT;
+ALTER TABLE org_delegations ADD COLUMN previous_sa_key_id TEXT;
+ALTER TABLE org_delegations ADD COLUMN last_health_check_at TEXT;
+ALTER TABLE org_delegations ADD COLUMN health_check_status TEXT DEFAULT 'unknown' CHECK(health_check_status IN ('healthy', 'degraded', 'revoked', 'unknown'));
+` as const;
+
+/**
+ * Migration 0024: Impersonation token cache and delegation audit log (TM-9iu.2).
+ *
+ * impersonation_token_cache: Per-user cached access tokens from service account
+ * impersonation. Tokens have 1-hour expiry; we proactively refresh before expiry.
+ *
+ * delegation_audit_log: Immutable audit trail for every impersonation token
+ * issuance. Required for compliance and security monitoring.
+ */
+export const MIGRATION_0024_DELEGATION_CACHE_AND_AUDIT = `
+CREATE TABLE impersonation_token_cache (
+  cache_id          TEXT PRIMARY KEY,
+  delegation_id     TEXT NOT NULL,
+  user_email        TEXT NOT NULL,
+  encrypted_token   TEXT NOT NULL,
+  token_expires_at  TEXT NOT NULL,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(delegation_id, user_email)
+);
+
+CREATE INDEX idx_imp_cache_delegation ON impersonation_token_cache(delegation_id);
+CREATE INDEX idx_imp_cache_user ON impersonation_token_cache(user_email);
+CREATE INDEX idx_imp_cache_expiry ON impersonation_token_cache(token_expires_at);
+
+CREATE TABLE delegation_audit_log (
+  audit_id          TEXT PRIMARY KEY,
+  delegation_id     TEXT NOT NULL,
+  domain            TEXT NOT NULL,
+  user_email        TEXT NOT NULL,
+  action            TEXT NOT NULL CHECK(action IN ('token_issued', 'token_refreshed', 'token_cached', 'health_check', 'key_rotated', 'delegation_revoked')),
+  details           TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_deleg_audit_delegation ON delegation_audit_log(delegation_id);
+CREATE INDEX idx_deleg_audit_user ON delegation_audit_log(user_email);
+CREATE INDEX idx_deleg_audit_action ON delegation_audit_log(action);
+CREATE INDEX idx_deleg_audit_created ON delegation_audit_log(created_at);
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -583,4 +655,6 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0020_FEED_REFRESH,
   MIGRATION_0021_ORG_INSTALLATIONS,
   MIGRATION_0022_ORG_DELEGATIONS,
+  MIGRATION_0023_DELEGATION_INFRASTRUCTURE,
+  MIGRATION_0024_DELEGATION_CACHE_AND_AUDIT,
 ] as const;
