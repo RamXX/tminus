@@ -373,13 +373,14 @@ describe("Integration: Enterprise billing tier", () => {
 
     const body = await response.json() as {
       ok: boolean;
-      error: { code: string; message: string };
+      error: string;
+      error_code: string;
       required_tier: string;
       upgrade_url: string;
     };
 
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("TIER_REQUIRED");
+    expect(body.error_code).toBe("TIER_REQUIRED");
     expect(body.required_tier).toBe("enterprise");
     expect(body.upgrade_url).toContain("enterprise");
   });
@@ -403,11 +404,11 @@ describe("Integration: Enterprise billing tier", () => {
 
     const body = await response.json() as {
       ok: boolean;
-      error: { code: string };
+      error_code: string;
       required_tier: string;
     };
 
-    expect(body.error.code).toBe("TIER_REQUIRED");
+    expect(body.error_code).toBe("TIER_REQUIRED");
     expect(body.required_tier).toBe("enterprise");
   });
 
@@ -662,13 +663,14 @@ describe("Integration: Enterprise billing tier", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
     const body = await response.json() as {
-      error: { code: string; message: string };
+      error: string;
+      error_code: string;
       upgrade_url: string;
       required_tier: string;
     };
 
-    expect(body.error.code).toBe("TIER_REQUIRED");
-    expect(body.error.message).toContain("enterprise");
+    expect(body.error_code).toBe("TIER_REQUIRED");
+    expect(body.error).toContain("enterprise");
     expect(body.upgrade_url).toContain("enterprise");
     expect(body.required_tier).toBe("enterprise");
   });

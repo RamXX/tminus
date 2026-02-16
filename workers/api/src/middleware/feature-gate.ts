@@ -4,7 +4,7 @@
  * Enforces tier-based access control across API and MCP:
  *   - Account limits per tier (free: 2, premium: 5, enterprise: 10)
  *   - Feature gating (scheduling/constraints: Premium+, VIP/commitments: Enterprise)
- *   - TIER_REQUIRED error format with upgrade URL
+ *   - Uses canonical API envelope from shared.ts (error + error_code) with upgrade URL
  *
  * Tier hierarchy: free < premium < enterprise
  *   - "free" users can access "free" features only
@@ -20,6 +20,7 @@
  */
 
 import { getUserTier } from "../routes/billing";
+import { apiErrorResponse } from "../routes/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -179,8 +180,9 @@ export async function checkAccountLimit(
 /**
  * Build a 403 TIER_REQUIRED response for feature gate denial.
  *
- * Follows the T-Minus API envelope format. Includes:
- *   - error.code: "TIER_REQUIRED"
+ * Uses the canonical API envelope format from shared.ts:
+ *   - error: human-readable message (string)
+ *   - error_code: "TIER_REQUIRED" (string)
  *   - required_tier: the tier needed
  *   - upgrade_url: direct link to upgrade checkout
  *
@@ -192,30 +194,22 @@ export function tierRequiredResponse(
   requiredTier: FeatureTier,
   currentTier?: FeatureTier,
 ): Response {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: {
-        code: "TIER_REQUIRED",
-        message: `This feature requires a ${requiredTier} subscription. Please upgrade to access it.`,
-      },
+  return apiErrorResponse(
+    "TIER_REQUIRED",
+    `This feature requires a ${requiredTier} subscription. Please upgrade to access it.`,
+    403,
+    {
       required_tier: requiredTier,
       ...(currentTier !== undefined ? { current_tier: currentTier } : {}),
       upgrade_url: `${UPGRADE_URL}?tier=${requiredTier}`,
-      meta: {
-        request_id: `req_${ts}_${rand}`,
-        timestamp: new Date().toISOString(),
-      },
-    }),
-    { status: 403, headers: { "Content-Type": "application/json" } },
+    },
   );
 }
 
 /**
  * Build a 403 TIER_REQUIRED response specifically for account limit denial.
  *
+ * Uses the canonical API envelope format from shared.ts.
  * Includes the current account count and limit in the response so clients
  * can display usage information.
  *
@@ -232,16 +226,12 @@ export function accountLimitResponse(
   // Determine the next tier for upgrade
   const nextTier: FeatureTier = tier === "free" ? "premium" : "enterprise";
   const nextLimit = ACCOUNT_LIMITS[nextTier];
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
 
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: {
-        code: "TIER_REQUIRED",
-        message: `Account limit reached. Your ${tier} plan allows ${limit} accounts (you have ${currentCount}). Upgrade to ${nextTier} for up to ${nextLimit} accounts.`,
-      },
+  return apiErrorResponse(
+    "TIER_REQUIRED",
+    `Account limit reached. Your ${tier} plan allows ${limit} accounts (you have ${currentCount}). Upgrade to ${nextTier} for up to ${nextLimit} accounts.`,
+    403,
+    {
       required_tier: nextTier,
       current_tier: tier,
       upgrade_url: `${UPGRADE_URL}?tier=${nextTier}`,
@@ -249,12 +239,7 @@ export function accountLimitResponse(
         accounts: currentCount,
         limit,
       },
-      meta: {
-        request_id: `req_${ts}_${rand}`,
-        timestamp: new Date().toISOString(),
-      },
-    }),
-    { status: 403, headers: { "Content-Type": "application/json" } },
+    },
   );
 }
 

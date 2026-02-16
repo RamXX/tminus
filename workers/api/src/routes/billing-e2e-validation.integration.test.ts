@@ -350,14 +350,15 @@ describe("Phase 3C E2E Validation: Billing pipeline end-to-end", () => {
 
       const body = await denied!.json() as {
         ok: boolean;
-        error: { code: string; message: string };
+        error: string;
+        error_code: string;
         required_tier: string;
         current_tier: string;
         upgrade_url: string;
       };
 
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("TIER_REQUIRED");
+      expect(body.error_code).toBe("TIER_REQUIRED");
       expect(body.required_tier).toBe("premium");
       expect(body.current_tier).toBe("free");
       expect(body.upgrade_url).toContain("billing/upgrade");
@@ -791,14 +792,15 @@ describe("Phase 3C E2E Validation: Billing pipeline end-to-end", () => {
 
       const body = await denied!.json() as {
         ok: boolean;
-        error: { code: string; message: string };
+        error: string;
+        error_code: string;
         required_tier: string;
         current_tier: string;
         upgrade_url: string;
         usage: { accounts: number; limit: number };
       };
 
-      expect(body.error.code).toBe("TIER_REQUIRED");
+      expect(body.error_code).toBe("TIER_REQUIRED");
       expect(body.current_tier).toBe("free");
       expect(body.required_tier).toBe("premium");
       expect(body.usage.accounts).toBe(2);
@@ -1214,10 +1216,10 @@ describe("Phase 3C E2E Validation: Billing pipeline end-to-end", () => {
       expect(gateDenied!.status).toBe(403);
 
       const deniedBody = await gateDenied!.json() as {
-        error: { code: string };
+        error_code: string;
         upgrade_url: string;
       };
-      expect(deniedBody.error.code).toBe("TIER_REQUIRED");
+      expect(deniedBody.error_code).toBe("TIER_REQUIRED");
       expect(deniedBody.upgrade_url).toBeTruthy();
 
       // ------------------------------------------------------------------

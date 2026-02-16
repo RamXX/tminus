@@ -362,7 +362,8 @@ describe("Integration: Tier-based feature gating", () => {
 
       const body = (await response.json()) as {
         ok: boolean;
-        error: { code: string; message: string };
+        error: string;
+        error_code: string;
         required_tier: string;
         current_tier: string;
         upgrade_url: string;
@@ -370,8 +371,8 @@ describe("Integration: Tier-based feature gating", () => {
       };
 
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("TIER_REQUIRED");
-      expect(body.error.message).toContain("Account limit reached");
+      expect(body.error_code).toBe("TIER_REQUIRED");
+      expect(body.error).toContain("Account limit reached");
       expect(body.required_tier).toBe("premium");
       expect(body.current_tier).toBe("free");
       expect(body.upgrade_url).toContain(
@@ -436,11 +437,11 @@ describe("Integration: Tier-based feature gating", () => {
       expect(response.status).toBe(403);
 
       const body = (await response.json()) as {
-        error: { code: string };
+        error_code: string;
         required_tier: string;
         upgrade_url: string;
       };
-      expect(body.error.code).toBe("TIER_REQUIRED");
+      expect(body.error_code).toBe("TIER_REQUIRED");
       expect(body.required_tier).toBe("enterprise");
       expect(body.upgrade_url).toContain("tier=enterprise");
     });
@@ -504,15 +505,16 @@ describe("Integration: Tier-based feature gating", () => {
 
       const body = (await response.json()) as {
         ok: boolean;
-        error: { code: string; message: string };
+        error: string;
+        error_code: string;
         required_tier: string;
         current_tier: string;
         upgrade_url: string;
       };
 
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("TIER_REQUIRED");
-      expect(body.error.message).toContain("premium");
+      expect(body.error_code).toBe("TIER_REQUIRED");
+      expect(body.error).toContain("premium");
       expect(body.required_tier).toBe("premium");
       expect(body.current_tier).toBe("free");
       expect(body.upgrade_url).toContain("tier=premium");
