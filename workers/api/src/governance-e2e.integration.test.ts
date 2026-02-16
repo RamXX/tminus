@@ -42,6 +42,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const JWT_SECRET = "governance-e2e-jwt-secret-32chars-minimum";
+const MASTER_KEY = "governance-e2e-master-key-32chars-minimum";
 const TEST_USER_ID = "usr_01HXYE2E0000000000000G0001";
 const TEST_USER_EMAIL = "governance-e2e@example.com";
 const BASE_URL = "https://api.tminus.ink";
@@ -412,6 +413,7 @@ function buildEnv(
     SESSIONS: createMockKV(),
     RATE_LIMITS: createMockKV(),
     JWT_SECRET,
+    MASTER_KEY,
   };
   if (opts?.r2) {
     env.PROOF_BUCKET = opts.r2;
@@ -1109,7 +1111,7 @@ describe("Phase 3B E2E Validation: Governance pipeline end-to-end", () => {
       expect(r2.objects.size).toBe(1);
       const [r2Key, r2Value] = Array.from(r2.objects.entries())[0];
       expect(r2Key).toContain(`proofs/${TEST_USER_ID}/${CMT_ID_1}/`);
-      expect(r2Value.content).toContain("COMMITMENT PROOF DOCUMENT"); // proof doc header
+      expect(r2Value.content).toContain("Commitment Proof Document"); // HTML proof doc header
       expect(r2Value.metadata.proof_hash).toBe(exportBody.data.proof_hash);
 
       // Verify hash is independently reproducible
@@ -1612,7 +1614,7 @@ describe("Phase 3B E2E Validation: Governance pipeline end-to-end", () => {
 
       expect(downloadResp.status).toBe(200);
       const proofContent = await downloadResp.text();
-      expect(proofContent).toContain("COMMITMENT PROOF DOCUMENT");
+      expect(proofContent).toContain("Commitment Proof Document");
       expect(proofContent).toContain("Gamma LLC");
       expect(proofContent).toContain(exportBody.data.proof_hash);
 
