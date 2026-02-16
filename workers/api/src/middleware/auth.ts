@@ -11,14 +11,16 @@
  *
  * On success, attaches user context (user_id, email, tier) to the Hono context.
  *
- * On failure, returns a 401 JSON response with the envelope format:
- *   { ok: false, error: { code: "AUTH_REQUIRED", message: "..." } }
+ * On failure, returns a 401 JSON response using the canonical API envelope
+ * from shared.ts:
+ *   { ok: false, error: "...", error_code: "AUTH_REQUIRED", meta: { request_id, timestamp } }
  */
 
 import type { Context, Next, MiddlewareHandler } from "hono";
 import { verifyJWT } from "@tminus/shared";
 import type { JWTPayload } from "@tminus/shared";
 import { isApiKeyFormat, extractPrefix, hashApiKey } from "../api-keys";
+import { apiErrorResponse } from "../routes/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,19 +65,12 @@ export interface AuthDB {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a 401 error response in the T-Minus envelope format.
+ * Build a 401 error response using the canonical API envelope from shared.ts.
+ *
+ * Produces: { ok: false, error: "<message>", error_code: "AUTH_REQUIRED", meta: {...} }
  */
-function authErrorResponse(c: Context, message: string): Response {
-  return c.json(
-    {
-      ok: false,
-      error: {
-        code: "AUTH_REQUIRED",
-        message,
-      },
-    },
-    401,
-  );
+function authErrorResponse(_c: Context, message: string): Response {
+  return apiErrorResponse("AUTH_REQUIRED", message, 401);
 }
 
 // ---------------------------------------------------------------------------

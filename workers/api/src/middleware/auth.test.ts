@@ -6,7 +6,7 @@
  * - Non-Bearer scheme returns 401
  * - Invalid/expired JWT returns 401
  * - Valid JWT attaches user context
- * - Error response matches envelope format {ok, error: {code, message}}
+ * - Error response matches canonical shared.ts envelope format {ok, error, error_code, meta}
  * - API key routing: tmk_ tokens route to API key validation
  * - API key without DB configured returns 401
  * - Invalid API key format returns 401
@@ -86,8 +86,8 @@ describe("authMiddleware: rejection cases", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
-    expect(body.error.message).toContain("Missing");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
+    expect(body.error).toContain("Missing");
   });
 
   it("returns 401 when Authorization header is not Bearer", async () => {
@@ -104,8 +104,8 @@ describe("authMiddleware: rejection cases", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
-    expect(body.error.message).toContain("Invalid");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
+    expect(body.error).toContain("Invalid");
   });
 
   it("returns 401 when Bearer token is malformed", async () => {
@@ -122,7 +122,7 @@ describe("authMiddleware: rejection cases", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
   });
 
   it("returns 401 when Bearer token is expired", async () => {
@@ -146,8 +146,8 @@ describe("authMiddleware: rejection cases", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
-    expect(body.error.message).toContain("Invalid or expired");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
+    expect(body.error).toContain("Invalid or expired");
   });
 
   it("returns 401 when token was signed with different secret", async () => {
@@ -166,7 +166,7 @@ describe("authMiddleware: rejection cases", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
   });
 
   it("returns 401 when Authorization header has no token after Bearer", async () => {
@@ -263,7 +263,7 @@ describe("authMiddleware: success cases", () => {
 // ---------------------------------------------------------------------------
 
 describe("authMiddleware: error envelope format", () => {
-  it("error response has {ok: false, error: {code, message}} structure", async () => {
+  it("error response matches canonical shared.ts envelope format", async () => {
     const app = createTestApp();
     const res = await app.request(
       "/protected/me",
@@ -275,12 +275,17 @@ describe("authMiddleware: error envelope format", () => {
     expect(res.headers.get("Content-Type")).toContain("application/json");
 
     const body = await res.json();
+    // Canonical format: { ok, error (string), error_code (string), meta: { request_id, timestamp } }
     expect(body).toHaveProperty("ok", false);
     expect(body).toHaveProperty("error");
-    expect(body.error).toHaveProperty("code");
-    expect(body.error).toHaveProperty("message");
-    expect(typeof body.error.code).toBe("string");
-    expect(typeof body.error.message).toBe("string");
+    expect(body).toHaveProperty("error_code");
+    expect(body).toHaveProperty("meta");
+    expect(typeof body.error).toBe("string");
+    expect(typeof body.error_code).toBe("string");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
+    expect(body.meta).toHaveProperty("request_id");
+    expect(body.meta).toHaveProperty("timestamp");
+    expect(body.meta.request_id).toMatch(/^req_/);
   });
 });
 
@@ -387,7 +392,7 @@ describe("authMiddleware: API key routing", () => {
 
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.error.message).toContain("not configured");
+    expect(body.error).toContain("not configured");
   });
 
   it("returns 401 for tmk_ token with bad format", async () => {
@@ -405,7 +410,7 @@ describe("authMiddleware: API key routing", () => {
 
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.error.message).toContain("Invalid API key format");
+    expect(body.error).toContain("Invalid API key format");
   });
 
   it("returns 401 when API key is not found in DB", async () => {
@@ -424,7 +429,7 @@ describe("authMiddleware: API key routing", () => {
 
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.error.message).toContain("Invalid or revoked");
+    expect(body.error).toContain("Invalid or revoked");
   });
 
   it("returns 401 when API key hash does not match", async () => {

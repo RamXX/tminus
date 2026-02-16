@@ -98,7 +98,10 @@ describe("integration: unauthenticated requests", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_REQUIRED");
+    expect(body.error_code).toBe("AUTH_REQUIRED");
+    expect(typeof body.error).toBe("string");
+    expect(body.meta).toHaveProperty("request_id");
+    expect(body.meta).toHaveProperty("timestamp");
   });
 
   it("GET /v1/accounts without auth returns 401", async () => {
