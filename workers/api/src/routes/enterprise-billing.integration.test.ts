@@ -481,14 +481,15 @@ describe("Integration: Enterprise billing tier", () => {
 
     const body = await response.json() as {
       ok: boolean;
-      error: { code: string; message: string };
+      error: string;
+      error_code: string;
       current_seats: number;
       seat_limit: number;
       upgrade_url: string;
     };
 
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("SEAT_LIMIT");
+    expect(body.error_code).toBe("SEAT_LIMIT");
     expect(body.current_seats).toBe(2);
     expect(body.seat_limit).toBe(2);
     expect(body.upgrade_url).toBeTruthy();
@@ -698,13 +699,14 @@ describe("Integration: Enterprise billing tier", () => {
     expect(response.status).toBe(403);
 
     const body = await response.json() as {
-      error: { code: string; message: string };
+      error: string;
+      error_code: string;
       upgrade_url: string;
     };
 
-    expect(body.error.code).toBe("SEAT_LIMIT");
-    expect(body.error.message).toContain("Seat limit");
-    expect(body.error.message).toContain("add more seats");
+    expect(body.error_code).toBe("SEAT_LIMIT");
+    expect(body.error).toContain("Seat limit");
+    expect(body.error).toContain("add more seats");
     expect(body.upgrade_url).toContain("seats");
   });
 

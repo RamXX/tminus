@@ -228,7 +228,8 @@ describe("Enterprise billing: seatLimitResponse", () => {
 
     const body = (await response.json()) as {
       ok: boolean;
-      error: { code: string; message: string };
+      error: string;
+      error_code: string;
       current_seats: number;
       seat_limit: number;
       upgrade_url: string;
@@ -236,8 +237,8 @@ describe("Enterprise billing: seatLimitResponse", () => {
     };
 
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("SEAT_LIMIT");
-    expect(body.error.message).toContain("Seat limit reached");
+    expect(body.error_code).toBe("SEAT_LIMIT");
+    expect(body.error).toContain("Seat limit reached");
     expect(body.current_seats).toBe(5);
     expect(body.seat_limit).toBe(5);
     expect(body.upgrade_url).toContain("seats");
@@ -248,10 +249,10 @@ describe("Enterprise billing: seatLimitResponse", () => {
   it("includes upgrade prompt with billing URL", async () => {
     const response = seatLimitResponse(10, 10);
     const body = (await response.json()) as {
-      error: { message: string };
+      error: string;
       upgrade_url: string;
     };
-    expect(body.error.message).toContain("add more seats");
+    expect(body.error).toContain("add more seats");
     expect(body.upgrade_url).toBeTruthy();
   });
 });

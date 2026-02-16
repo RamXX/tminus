@@ -755,9 +755,9 @@ describe("Billing: response helpers", () => {
     const response = billingErrorResponse("STRIPE_ERROR", "Payment failed", 502);
     expect(response.status).toBe(502);
 
-    const body = await response.json() as { ok: boolean; error: { code: string; message: string } };
+    const body = await response.json() as { ok: boolean; error: string; error_code: string };
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("STRIPE_ERROR");
-    expect(body.error.message).toBe("Payment failed");
+    expect(body.error).toBe("Payment failed");
+    expect(body.error_code).toBe("STRIPE_ERROR");
   });
 });

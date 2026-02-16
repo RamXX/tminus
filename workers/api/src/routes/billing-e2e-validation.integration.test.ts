@@ -470,9 +470,9 @@ describe("Phase 3C E2E Validation: Billing pipeline end-to-end", () => {
       );
 
       expect(response.status).toBe(400);
-      const body = await response.json() as { ok: boolean; error: { code: string } };
+      const body = await response.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("VALIDATION_ERROR");
+      expect(body.error_code).toBe("VALIDATION_ERROR");
     });
   });
 

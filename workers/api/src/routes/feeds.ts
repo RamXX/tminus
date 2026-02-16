@@ -29,6 +29,7 @@ import {
   type IcsEvent,
   type ProviderEvent,
 } from "@tminus/shared";
+import { apiSuccessResponse, apiErrorResponse } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,17 +79,17 @@ export async function handleImportFeed(
   try {
     body = await request.json() as ImportFeedBody;
   } catch {
-    return jsonResp({ ok: false, error: "Invalid JSON body" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "Invalid JSON body", 400);
   }
 
   if (!body.url) {
-    return jsonResp({ ok: false, error: "url is required" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "url is required", 400);
   }
 
   // Validate URL
   const validation = validateFeedUrl(body.url);
   if (!validation.valid) {
-    return jsonResp({ ok: false, error: validation.error }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", validation.error ?? "Invalid feed URL", 400);
   }
 
   const feedUrl = validation.url!;
@@ -100,15 +101,13 @@ export async function handleImportFeed(
       headers: { "Accept": "text/calendar, text/plain" },
     });
     if (!fetchResp.ok) {
-      return jsonResp(
-        { ok: false, error: `Failed to fetch ICS feed: HTTP ${fetchResp.status}` },
-        502,
-      );
+      return apiErrorResponse("PROVIDER_ERROR", `Failed to fetch ICS feed: HTTP ${fetchResp.status}`, 502);
     }
     icsText = await fetchResp.text();
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to fetch ICS feed: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "PROVIDER_ERROR",
+      `Failed to fetch ICS feed: ${err instanceof Error ? err.message : String(err)}`,
       502,
     );
   }
@@ -120,10 +119,7 @@ export async function handleImportFeed(
   const feedEvents = normalizeIcsFeedEvents(icsText, accountId);
 
   if (feedEvents.length === 0) {
-    return jsonResp(
-      { ok: false, error: "No events found in the ICS feed" },
-      422,
-    );
+    return apiErrorResponse("VALIDATION_ERROR", "No events found in the ICS feed", 422);
   }
 
   // Register feed account in D1
@@ -143,8 +139,9 @@ export async function handleImportFeed(
       )
       .run();
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to register feed account: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to register feed account: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -187,15 +184,16 @@ export async function handleImportFeed(
     if (!doResp.ok) {
       // Clean up D1 entry if DO storage fails
       await env.DB.prepare("DELETE FROM accounts WHERE account_id = ?1").bind(accountId).run();
-      return jsonResp({ ok: false, error: "Failed to store feed events" }, 500);
+      return apiErrorResponse("INTERNAL_ERROR", "Failed to store feed events", 500);
     }
   } catch (err) {
     // Clean up D1 entry if DO call fails
     try {
       await env.DB.prepare("DELETE FROM accounts WHERE account_id = ?1").bind(accountId).run();
     } catch { /* best effort cleanup */ }
-    return jsonResp(
-      { ok: false, error: `Failed to store feed events: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to store feed events: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -216,7 +214,7 @@ export async function handleImportFeed(
     },
   };
 
-  return jsonResp({ ok: true, data: result }, 201);
+  return apiSuccessResponse(result, 201);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,10 +246,11 @@ export async function handleListFeeds(
         created_at: string;
       }>();
 
-    return jsonResp({ ok: true, data: result.results ?? [] }, 200);
+    return apiSuccessResponse(result.results ?? []);
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to list feeds: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to list feeds: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -291,11 +290,12 @@ export async function handleUpdateFeedConfig(
       .first<{ account_id: string }>();
 
     if (!row) {
-      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+      return apiErrorResponse("NOT_FOUND", "Feed not found", 404);
     }
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -303,11 +303,9 @@ export async function handleUpdateFeedConfig(
   // Validate refresh interval if provided
   if (body.refreshIntervalMs !== undefined) {
     if (!VALID_REFRESH_INTERVALS.includes(body.refreshIntervalMs)) {
-      return jsonResp(
-        {
-          ok: false,
-          error: `Invalid refresh interval. Valid values: ${VALID_REFRESH_INTERVALS.join(", ")} (milliseconds)`,
-        },
+      return apiErrorResponse(
+        "VALIDATION_ERROR",
+        `Invalid refresh interval. Valid values: ${VALID_REFRESH_INTERVALS.join(", ")} (milliseconds)`,
         400,
       );
     }
@@ -323,16 +321,14 @@ export async function handleUpdateFeedConfig(
       .bind(intervalValue, feedId)
       .run();
 
-    return jsonResp({
-      ok: true,
-      data: {
-        account_id: feedId,
-        refresh_interval_ms: body.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
-      },
-    }, 200);
+    return apiSuccessResponse({
+      account_id: feedId,
+      refresh_interval_ms: body.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
+    });
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to update feed config: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to update feed config: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -376,7 +372,7 @@ export async function handleGetFeedHealth(
       }>();
 
     if (!row) {
-      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+      return apiErrorResponse("NOT_FOUND", "Feed not found", 404);
     }
 
     const intervalMs = row.feed_refresh_interval_ms ?? DEFAULT_REFRESH_INTERVAL_MS;
@@ -388,25 +384,23 @@ export async function handleGetFeedHealth(
 
     const staleness = computeStaleness(state);
 
-    return jsonResp({
-      ok: true,
-      data: {
-        account_id: row.account_id,
-        status: row.status,
-        staleness: staleness.status,
-        is_dead: staleness.isDead,
-        last_refresh_at: row.feed_last_refresh_at,
-        last_fetch_at: row.feed_last_fetch_at,
-        consecutive_failures: row.feed_consecutive_failures,
-        refresh_interval_ms: intervalMs,
-        ms_since_last_refresh: staleness.msSinceLastRefresh === Infinity
-          ? null
-          : staleness.msSinceLastRefresh,
-      },
-    }, 200);
+    return apiSuccessResponse({
+      account_id: row.account_id,
+      status: row.status,
+      staleness: staleness.status,
+      is_dead: staleness.isDead,
+      last_refresh_at: row.feed_last_refresh_at,
+      last_fetch_at: row.feed_last_fetch_at,
+      consecutive_failures: row.feed_consecutive_failures,
+      refresh_interval_ms: intervalMs,
+      ms_since_last_refresh: staleness.msSinceLastRefresh === Infinity
+        ? null
+        : staleness.msSinceLastRefresh,
+    });
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to get feed health: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to get feed health: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -455,11 +449,11 @@ export async function handleUpgradeFeed(
   try {
     body = await request.json() as UpgradeFeedBody;
   } catch {
-    return jsonResp({ ok: false, error: "Invalid JSON body" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "Invalid JSON body", 400);
   }
 
   if (!body.oauth_account_id) {
-    return jsonResp({ ok: false, error: "oauth_account_id is required" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "oauth_account_id is required", 400);
   }
 
   // Validate the ICS feed belongs to the user
@@ -474,11 +468,12 @@ export async function handleUpgradeFeed(
       .first<{ account_id: string; provider_subject: string }>();
 
     if (!feedRow) {
-      return jsonResp({ ok: false, error: "ICS feed not found" }, 404);
+      return apiErrorResponse("NOT_FOUND", "ICS feed not found", 404);
     }
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to verify feed: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -503,7 +498,7 @@ export async function handleUpgradeFeed(
     });
 
     if (!icsResp.ok) {
-      return jsonResp({ ok: false, error: "Failed to fetch ICS events" }, 500);
+      return apiErrorResponse("INTERNAL_ERROR", "Failed to fetch ICS events", 500);
     }
 
     const icsData = await icsResp.json() as { events: IcsEvent[] };
@@ -517,14 +512,15 @@ export async function handleUpgradeFeed(
     });
 
     if (!providerResp.ok) {
-      return jsonResp({ ok: false, error: "Failed to fetch provider events" }, 500);
+      return apiErrorResponse("INTERNAL_ERROR", "Failed to fetch provider events", 500);
     }
 
     const providerData = await providerResp.json() as { events: ProviderEvent[] };
     providerEvents = providerData.events ?? [];
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to fetch events: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to fetch events: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -556,11 +552,12 @@ export async function handleUpgradeFeed(
     });
 
     if (!upgradeResp.ok) {
-      return jsonResp({ ok: false, error: "Failed to execute upgrade in UserGraphDO" }, 500);
+      return apiErrorResponse("INTERNAL_ERROR", "Failed to execute upgrade in UserGraphDO", 500);
     }
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to execute upgrade: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to execute upgrade: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
@@ -575,17 +572,14 @@ export async function handleUpgradeFeed(
     // Best effort -- the DO is the source of truth
   }
 
-  return jsonResp({
-    ok: true,
-    data: {
-      detected_provider: detected,
-      merged_count: plan.mergedEvents.length,
-      new_count: plan.newProviderEvents.length,
-      orphaned_count: plan.orphanedIcsEvents.length,
-      ics_account_removed: feedId,
-      oauth_account_activated: body.oauth_account_id,
-    },
-  }, 200);
+  return apiSuccessResponse({
+    detected_provider: detected,
+    merged_count: plan.mergedEvents.length,
+    new_count: plan.newProviderEvents.length,
+    orphaned_count: plan.orphanedIcsEvents.length,
+    ics_account_removed: feedId,
+    oauth_account_activated: body.oauth_account_id,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -624,15 +618,15 @@ export async function handleDowngradeFeed(
   try {
     body = await request.json() as DowngradeFeedBody;
   } catch {
-    return jsonResp({ ok: false, error: "Invalid JSON body" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "Invalid JSON body", 400);
   }
 
   if (!body.oauth_account_id) {
-    return jsonResp({ ok: false, error: "oauth_account_id is required" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "oauth_account_id is required", 400);
   }
 
   if (!body.provider) {
-    return jsonResp({ ok: false, error: "provider is required" }, 400);
+    return apiErrorResponse("VALIDATION_ERROR", "provider is required", 400);
   }
 
   // Fetch current events from the OAuth account
@@ -696,8 +690,9 @@ export async function handleDowngradeFeed(
         )
         .run();
     } catch (err) {
-      return jsonResp(
-        { ok: false, error: `Failed to create fallback feed account: ${err instanceof Error ? err.message : String(err)}` },
+      return apiErrorResponse(
+        "INTERNAL_ERROR",
+        `Failed to create fallback feed account: ${err instanceof Error ? err.message : String(err)}`,
         500,
       );
     }
@@ -712,16 +707,13 @@ export async function handleDowngradeFeed(
       // Best effort
     }
 
-    return jsonResp({
-      ok: true,
-      data: {
-        new_feed_account_id: newFeedAccountId,
-        feed_url: plan.feedUrl,
-        preserved_event_count: plan.preservedEventCount,
-        mode: plan.mode,
-        oauth_account_removed: body.oauth_account_id,
-      },
-    }, 200);
+    return apiSuccessResponse({
+      new_feed_account_id: newFeedAccountId,
+      feed_url: plan.feedUrl,
+      preserved_event_count: plan.preservedEventCount,
+      mode: plan.mode,
+      oauth_account_removed: body.oauth_account_id,
+    });
   }
 
   // No feed URL available -- just mark as downgraded
@@ -734,15 +726,12 @@ export async function handleDowngradeFeed(
     // Best effort
   }
 
-  return jsonResp({
-    ok: true,
-    data: {
-      preserved_event_count: plan.preservedEventCount,
-      mode: plan.mode,
-      oauth_account_removed: body.oauth_account_id,
-      warning: "No public ICS feed URL available for this provider. Events preserved but no automatic refresh.",
-    },
-  }, 200);
+  return apiSuccessResponse({
+    preserved_event_count: plan.preservedEventCount,
+    mode: plan.mode,
+    oauth_account_removed: body.oauth_account_id,
+    warning: "No public ICS feed URL available for this provider. Events preserved but no automatic refresh.",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -771,35 +760,24 @@ export async function handleDetectFeedProvider(
       .first<{ account_id: string; provider_subject: string }>();
 
     if (!row) {
-      return jsonResp({ ok: false, error: "Feed not found" }, 404);
+      return apiErrorResponse("NOT_FOUND", "Feed not found", 404);
     }
 
     const detected = detectProvider(row.provider_subject);
 
-    return jsonResp({
-      ok: true,
-      data: {
-        account_id: row.account_id,
-        feed_url: row.provider_subject,
-        detected_provider: detected.provider,
-        confidence: detected.confidence,
-      },
-    }, 200);
+    return apiSuccessResponse({
+      account_id: row.account_id,
+      feed_url: row.provider_subject,
+      detected_provider: detected.provider,
+      confidence: detected.confidence,
+    });
   } catch (err) {
-    return jsonResp(
-      { ok: false, error: `Failed to detect provider: ${err instanceof Error ? err.message : String(err)}` },
+    return apiErrorResponse(
+      "INTERNAL_ERROR",
+      `Failed to detect provider: ${err instanceof Error ? err.message : String(err)}`,
       500,
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function jsonResp(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+// Response helpers are imported from ./shared

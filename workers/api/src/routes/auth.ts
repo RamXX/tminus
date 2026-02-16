@@ -11,8 +11,8 @@
  *   POST /refresh   - Exchange refresh token for new JWT + rotated refresh token
  *   POST /logout    - Invalidate refresh token in KV
  *
- * All responses use the envelope format:
- *   { ok, data, error: { code, message }, meta: { request_id, timestamp } }
+ * All responses use the standard API envelope from shared.ts:
+ *   { ok, data, error, error_code, meta: { request_id, timestamp } }
  */
 
 import { Hono } from "hono";
@@ -26,6 +26,7 @@ import {
   REFRESH_TOKEN_EXPIRY_SECONDS,
 } from "@tminus/shared";
 import type { JWTPayload, SubscriptionTier } from "@tminus/shared";
+import { apiSuccessResponse, apiErrorResponse } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,23 +37,6 @@ interface AuthEnv {
   DB: D1Database;
   SESSIONS: KVNamespace;
   JWT_SECRET: string;
-}
-
-/** Envelope error shape. */
-interface EnvelopeError {
-  code: string;
-  message: string;
-}
-
-/** Standard API envelope. */
-interface Envelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: EnvelopeError;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -128,47 +112,6 @@ function getRetryAfterSeconds(lockedUntil: string | null, now: Date = new Date()
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Generate a short request ID for tracing (not cryptographically secure). */
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function makeMeta(): Envelope["meta"] {
-  return {
-    request_id: generateRequestId(),
-    timestamp: new Date().toISOString(),
-  };
-}
-
-/** Build a success envelope response. */
-function successResponse<T>(c: { json: (data: unknown, status: number) => Response }, data: T, status = 200): Response {
-  const envelope: Envelope<T> = {
-    ok: true,
-    data,
-    meta: makeMeta(),
-  };
-  return c.json(envelope, status);
-}
-
-/** Build an error envelope response, with optional extra fields merged at the top level. */
-function errorResponse(
-  c: { json: (data: unknown, status: number) => Response },
-  code: string,
-  message: string,
-  status: number,
-  extra?: Record<string, unknown>,
-): Response {
-  const envelope: Envelope & Record<string, unknown> = {
-    ok: false,
-    error: { code, message },
-    meta: makeMeta(),
-    ...extra,
-  };
-  return c.json(envelope, status);
-}
-
 /** Validate email format (basic but sufficient). */
 function isValidEmail(email: string): boolean {
   if (!email || typeof email !== "string") return false;
@@ -236,7 +179,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     try {
       body = await c.req.json();
     } catch {
-      return errorResponse(c, "VALIDATION_ERROR", "Request body must be valid JSON", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
     }
 
     const email = (body.email ?? "").trim().toLowerCase();
@@ -244,13 +187,13 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
 
     // Validate email
     if (!isValidEmail(email)) {
-      return errorResponse(c, "VALIDATION_ERROR", "Invalid email format", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Invalid email format", 400);
     }
 
     // Validate password
     const pwError = validatePassword(password);
     if (pwError) {
-      return errorResponse(c, "VALIDATION_ERROR", pwError, 400);
+      return apiErrorResponse("VALIDATION_ERROR", pwError, 400);
     }
 
     // Check email uniqueness in D1
@@ -260,7 +203,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       .first<{ user_id: string }>();
 
     if (existing) {
-      return errorResponse(c, "CONFLICT", "Email already registered", 409);
+      return apiErrorResponse("CONFLICT", "Email already registered", 409);
     }
 
     // Hash password
@@ -305,7 +248,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       expirationTtl: REFRESH_TOKEN_KV_TTL,
     });
 
-    return successResponse(c, {
+    return apiSuccessResponse({
       user: { id: userId, email, tier: "free" },
       access_token: jwt,
       refresh_token: refreshToken,
@@ -323,14 +266,14 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     try {
       body = await c.req.json();
     } catch {
-      return errorResponse(c, "VALIDATION_ERROR", "Request body must be valid JSON", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
     }
 
     const email = (body.email ?? "").trim().toLowerCase();
     const password = body.password ?? "";
 
     if (!email || !password) {
-      return errorResponse(c, "VALIDATION_ERROR", "Email and password are required", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Email and password are required", 400);
     }
 
     // Lookup user by email
@@ -351,7 +294,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       }>();
 
     if (!user || !user.password_hash) {
-      return errorResponse(c, "AUTH_FAILED", "Invalid email or password", 401);
+      return apiErrorResponse("AUTH_FAILED", "Invalid email or password", 401);
     }
 
     // -----------------------------------------------------------------------
@@ -363,8 +306,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     const now = new Date();
     const retryAfter = getRetryAfterSeconds(user.locked_until, now);
     if (retryAfter > 0) {
-      return errorResponse(
-        c,
+      return apiErrorResponse(
         "ERR_ACCOUNT_LOCKED",
         "Account is temporarily locked due to too many failed login attempts",
         403,
@@ -395,7 +337,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
         .bind(newAttempts, lockedUntil, user.user_id)
         .run();
 
-      return errorResponse(c, "AUTH_FAILED", "Invalid email or password", 401);
+      return apiErrorResponse("AUTH_FAILED", "Invalid email or password", 401);
     }
 
     // Successful login -- reset failed attempts and clear lockout
@@ -428,7 +370,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       expirationTtl: REFRESH_TOKEN_KV_TTL,
     });
 
-    return successResponse(c, {
+    return apiSuccessResponse({
       user: { id: user.user_id, email: user.email, tier: "free" },
       access_token: jwt,
       refresh_token: refreshToken,
@@ -446,12 +388,12 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     try {
       body = await c.req.json();
     } catch {
-      return errorResponse(c, "VALIDATION_ERROR", "Request body must be valid JSON", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
     }
 
     const refreshToken = body.refresh_token;
     if (!refreshToken || typeof refreshToken !== "string") {
-      return errorResponse(c, "VALIDATION_ERROR", "refresh_token is required", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "refresh_token is required", 400);
     }
 
     // Look up hashed token in KV
@@ -459,7 +401,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     const sessionDataStr = await env.SESSIONS.get(`refresh_${tokenHash}`);
 
     if (!sessionDataStr) {
-      return errorResponse(c, "AUTH_FAILED", "Invalid or expired refresh token", 401);
+      return apiErrorResponse("AUTH_FAILED", "Invalid or expired refresh token", 401);
     }
 
     const sessionData = JSON.parse(sessionDataStr) as {
@@ -481,7 +423,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     if (!user) {
       // User was deleted; clean up the old token
       await env.SESSIONS.delete(`refresh_${tokenHash}`);
-      return errorResponse(c, "AUTH_FAILED", "User not found", 401);
+      return apiErrorResponse("AUTH_FAILED", "User not found", 401);
     }
 
     // Generate new JWT
@@ -510,7 +452,7 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
       expirationTtl: REFRESH_TOKEN_KV_TTL,
     });
 
-    return successResponse(c, {
+    return apiSuccessResponse({
       access_token: jwt,
       refresh_token: newRefreshToken,
     });
@@ -527,19 +469,19 @@ export function createAuthRoutes(): Hono<{ Bindings: AuthEnv }> {
     try {
       body = await c.req.json();
     } catch {
-      return errorResponse(c, "VALIDATION_ERROR", "Request body must be valid JSON", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
     }
 
     const refreshToken = body.refresh_token;
     if (!refreshToken || typeof refreshToken !== "string") {
-      return errorResponse(c, "VALIDATION_ERROR", "refresh_token is required", 400);
+      return apiErrorResponse("VALIDATION_ERROR", "refresh_token is required", 400);
     }
 
     // Delete the hashed token from KV (idempotent - no error if not found)
     const tokenHash = await sha256Hex(refreshToken);
     await env.SESSIONS.delete(`refresh_${tokenHash}`);
 
-    return successResponse(c, { logged_out: true });
+    return apiSuccessResponse({ logged_out: true });
   });
 
   return auth;

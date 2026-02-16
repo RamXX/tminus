@@ -305,9 +305,9 @@ describe("Integration: Auth routes", () => {
       );
 
       expect(res.status).toBe(409);
-      const body = await res.json() as { ok: boolean; error: { code: string; message: string } };
+      const body = await res.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("CONFLICT");
+      expect(body.error_code).toBe("CONFLICT");
     });
 
     it("returns 400 for invalid email format", async () => {
@@ -325,9 +325,9 @@ describe("Integration: Auth routes", () => {
       );
 
       expect(res.status).toBe(400);
-      const body = await res.json() as { ok: boolean; error: { code: string } };
+      const body = await res.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("VALIDATION_ERROR");
+      expect(body.error_code).toBe("VALIDATION_ERROR");
     });
 
     it("returns 400 for weak password", async () => {
@@ -345,9 +345,9 @@ describe("Integration: Auth routes", () => {
       );
 
       expect(res.status).toBe(400);
-      const body = await res.json() as { ok: boolean; error: { code: string } };
+      const body = await res.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("VALIDATION_ERROR");
+      expect(body.error_code).toBe("VALIDATION_ERROR");
     });
 
     it("returns 400 for missing body", async () => {
@@ -440,9 +440,9 @@ describe("Integration: Auth routes", () => {
       );
 
       expect(res.status).toBe(401);
-      const body = await res.json() as { ok: boolean; error: { code: string } };
+      const body = await res.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("AUTH_FAILED");
+      expect(body.error_code).toBe("AUTH_FAILED");
     });
 
     it("increments failed_login_attempts on wrong password", async () => {
@@ -629,9 +629,9 @@ describe("Integration: Auth routes", () => {
       );
 
       expect(res.status).toBe(401);
-      const body = await res.json() as { ok: boolean; error: { code: string } };
+      const body = await res.json() as { ok: boolean; error_code: string };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("AUTH_FAILED");
+      expect(body.error_code).toBe("AUTH_FAILED");
     });
 
     it("returns 401 for invalid refresh token", async () => {
@@ -1016,12 +1016,13 @@ describe("Integration: Auth routes", () => {
 
       const body = await res.json() as {
         ok: boolean;
-        error: { code: string; message: string };
+        error: string;
+        error_code: string;
         retryAfter: number;
       };
       expect(body.ok).toBe(false);
-      expect(body.error.code).toBe("ERR_ACCOUNT_LOCKED");
-      expect(body.error.message).toContain("locked");
+      expect(body.error_code).toBe("ERR_ACCOUNT_LOCKED");
+      expect(body.error).toContain("locked");
       // retryAfter should be present and approximately 900 seconds (15 min)
       expect(body.retryAfter).toBeGreaterThan(0);
       expect(body.retryAfter).toBeLessThanOrEqual(900);

@@ -357,9 +357,9 @@ describe("Integration: Billing routes", () => {
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(400);
 
-    const body = await response.json() as { ok: boolean; error: { code: string } };
+    const body = await response.json() as { ok: boolean; error_code: string };
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("VALIDATION_ERROR");
+    expect(body.error_code).toBe("VALIDATION_ERROR");
   });
 
   it("POST /v1/billing/checkout returns 401 without auth", async () => {
@@ -442,9 +442,9 @@ describe("Integration: Billing routes", () => {
     const response = await handler.fetch(request, env, mockCtx);
     expect(response.status).toBe(401);
 
-    const body = await response.json() as { ok: boolean; error: { code: string } };
+    const body = await response.json() as { ok: boolean; error_code: string };
     expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("AUTH_FAILED");
+    expect(body.error_code).toBe("AUTH_FAILED");
   });
 
   it("POST /v1/billing/webhook returns 400 without Stripe-Signature header", async () => {

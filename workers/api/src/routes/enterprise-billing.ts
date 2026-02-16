@@ -24,6 +24,7 @@
 import { logBillingEvent } from "./billing";
 import type { BillingEnv } from "./billing";
 import { checkOrgAdmin } from "./orgs";
+import { apiSuccessResponse, apiErrorResponse } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,29 +45,7 @@ const BILLING_SEATS_URL = "https://app.tminus.ink/billing/seats";
 
 export { MIGRATION_0018_ORG_SEAT_BILLING } from "@tminus/d1-registry";
 
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function makeMeta(): { request_id: string; timestamp: string } {
-  return {
-    request_id: generateRequestId(),
-    timestamp: new Date().toISOString(),
-  };
-}
-
-function jsonResponse(data: unknown, status: number): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+// Response helpers are imported from ./shared
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -165,19 +144,15 @@ export function seatLimitResponse(
   currentSeats: number,
   seatLimit: number,
 ): Response {
-  return jsonResponse(
+  return apiErrorResponse(
+    "SEAT_LIMIT",
+    `Seat limit reached. Your organization has ${currentSeats}/${seatLimit} seats. Please add more seats to invite additional members.`,
+    403,
     {
-      ok: false,
-      error: {
-        code: "SEAT_LIMIT",
-        message: `Seat limit reached. Your organization has ${currentSeats}/${seatLimit} seats. Please add more seats to invite additional members.`,
-      },
       current_seats: currentSeats,
       seat_limit: seatLimit,
       upgrade_url: BILLING_SEATS_URL,
-      meta: makeMeta(),
     },
-    403,
   );
 }
 
@@ -372,18 +347,12 @@ export async function handleUpdateSeats(
   try {
     body = await request.json() as Record<string, unknown>;
   } catch {
-    return jsonResponse(
-      { ok: false, error: { code: "VALIDATION_ERROR", message: "Request body must be valid JSON" }, meta: makeMeta() },
-      400,
-    );
+    return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
   }
 
   const inputError = validateSeatInput(body);
   if (inputError) {
-    return jsonResponse(
-      { ok: false, error: { code: "VALIDATION_ERROR", message: inputError }, meta: makeMeta() },
-      400,
-    );
+    return apiErrorResponse("VALIDATION_ERROR", inputError, 400);
   }
 
   const newSeatCount = body.seat_count as number;
@@ -395,10 +364,7 @@ export async function handleUpdateSeats(
     .first<{ org_id: string; seat_limit: number; stripe_subscription_id: string | null }>();
 
   if (!org) {
-    return jsonResponse(
-      { ok: false, error: { code: "NOT_FOUND", message: "Organization not found" }, meta: makeMeta() },
-      404,
-    );
+    return apiErrorResponse("NOT_FOUND", "Organization not found", 404);
   }
 
   const oldSeatLimit = org.seat_limit;
@@ -414,14 +380,7 @@ export async function handleUpdateSeats(
 
     if (!stripeResult.success) {
       console.error("Failed to update Stripe subscription quantity:", stripeResult.error);
-      return jsonResponse(
-        {
-          ok: false,
-          error: { code: "STRIPE_ERROR", message: "Failed to update Stripe subscription" },
-          meta: makeMeta(),
-        },
-        502,
-      );
+      return apiErrorResponse("STRIPE_ERROR", "Failed to update Stripe subscription", 502);
     }
 
     stripeUpdated = true;
@@ -445,16 +404,9 @@ export async function handleUpdateSeats(
     },
   });
 
-  return jsonResponse(
-    {
-      ok: true,
-      data: {
-        org_id: orgId,
-        seat_limit: newSeatCount,
-        stripe_updated: stripeUpdated,
-      },
-      meta: makeMeta(),
-    },
-    200,
-  );
+  return apiSuccessResponse({
+    org_id: orgId,
+    seat_limit: newSeatCount,
+    stripe_updated: stripeUpdated,
+  });
 }

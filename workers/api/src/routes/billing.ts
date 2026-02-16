@@ -24,6 +24,7 @@
 
 import { generateId } from "@tminus/shared";
 import { handleSeatQuantityUpdated } from "./enterprise-billing";
+import { apiSuccessResponse, apiErrorResponse } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,43 +93,17 @@ export const TIER_LEVELS: Record<string, number> = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Generate a short request ID for tracing. */
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
+/**
+ * @deprecated Use apiSuccessResponse from shared.ts. Kept as alias for
+ * backward compatibility with tests that import it.
+ */
+export const billingSuccessResponse = apiSuccessResponse;
 
-function makeMeta(): { request_id: string; timestamp: string } {
-  return {
-    request_id: generateRequestId(),
-    timestamp: new Date().toISOString(),
-  };
-}
-
-/** Build a success response envelope. */
-export function billingSuccessResponse<T>(data: T, status = 200): Response {
-  return new Response(
-    JSON.stringify({
-      ok: true,
-      data,
-      meta: makeMeta(),
-    }),
-    { status, headers: { "Content-Type": "application/json" } },
-  );
-}
-
-/** Build an error response envelope. */
-export function billingErrorResponse(code: string, message: string, status: number): Response {
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: { code, message },
-      meta: makeMeta(),
-    }),
-    { status, headers: { "Content-Type": "application/json" } },
-  );
-}
+/**
+ * @deprecated Use apiErrorResponse from shared.ts. Kept as alias for
+ * backward compatibility with tests that import it.
+ */
+export const billingErrorResponse = apiErrorResponse;
 
 // ---------------------------------------------------------------------------
 // Tier comparison
@@ -814,11 +789,11 @@ export async function handleCreateCheckoutSession(
   try {
     body = await request.json() as typeof body;
   } catch {
-    return billingErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
+    return apiErrorResponse("VALIDATION_ERROR", "Request body must be valid JSON", 400);
   }
 
   if (!body.price_id || typeof body.price_id !== "string") {
-    return billingErrorResponse("VALIDATION_ERROR", "price_id is required", 400);
+    return apiErrorResponse("VALIDATION_ERROR", "price_id is required", 400);
   }
 
   // Look up user email for Stripe
@@ -836,13 +811,13 @@ export async function handleCreateCheckoutSession(
       cancel_url: body.cancel_url,
     });
 
-    return billingSuccessResponse({
+    return apiSuccessResponse({
       session_id: session.id,
       checkout_url: session.url,
     }, 201);
   } catch (err) {
     console.error("Failed to create checkout session", err);
-    return billingErrorResponse(
+    return apiErrorResponse(
       "STRIPE_ERROR",
       "Failed to create checkout session",
       502,
@@ -862,7 +837,7 @@ export async function handleStripeWebhook(
 ): Promise<Response> {
   const signatureHeader = request.headers.get("Stripe-Signature");
   if (!signatureHeader) {
-    return billingErrorResponse("VALIDATION_ERROR", "Missing Stripe-Signature header", 400);
+    return apiErrorResponse("VALIDATION_ERROR", "Missing Stripe-Signature header", 400);
   }
 
   const rawBody = await request.text();
@@ -873,7 +848,7 @@ export async function handleStripeWebhook(
   );
 
   if (!event) {
-    return billingErrorResponse("AUTH_FAILED", "Invalid webhook signature", 401);
+    return apiErrorResponse("AUTH_FAILED", "Invalid webhook signature", 401);
   }
 
   let result: { success: boolean; error?: string };
@@ -913,10 +888,10 @@ export async function handleStripeWebhook(
 
   if (!result.success) {
     console.error(`Webhook handler failed for ${event.type}: ${result.error}`);
-    return billingErrorResponse("INTERNAL_ERROR", result.error ?? "Webhook processing failed", 500);
+    return apiErrorResponse("INTERNAL_ERROR", result.error ?? "Webhook processing failed", 500);
   }
 
-  return billingSuccessResponse({ received: true });
+  return apiSuccessResponse({ received: true });
 }
 
 /**
@@ -943,7 +918,7 @@ export async function handleCreatePortalSession(
       .first<{ stripe_customer_id: string }>();
 
     if (!row) {
-      return billingErrorResponse("NOT_FOUND", "No active subscription found", 404);
+      return apiErrorResponse("NOT_FOUND", "No active subscription found", 404);
     }
 
     // Create a Stripe Billing Portal session
@@ -966,10 +941,10 @@ export async function handleCreatePortalSession(
     }
 
     const session = await response.json() as { id: string; url: string };
-    return billingSuccessResponse({ portal_url: session.url }, 201);
+    return apiSuccessResponse({ portal_url: session.url }, 201);
   } catch (err) {
     console.error("Failed to create portal session", err);
-    return billingErrorResponse("STRIPE_ERROR", "Failed to create portal session", 502);
+    return apiErrorResponse("STRIPE_ERROR", "Failed to create portal session", 502);
   }
 }
 
@@ -1004,10 +979,10 @@ export async function handleGetBillingEvents(
         created_at: string;
       }>();
 
-    return billingSuccessResponse(rows.results ?? []);
+    return apiSuccessResponse(rows.results ?? []);
   } catch (err) {
     console.error("Failed to get billing events", err);
-    return billingErrorResponse("INTERNAL_ERROR", "Failed to get billing events", 500);
+    return apiErrorResponse("INTERNAL_ERROR", "Failed to get billing events", 500);
   }
 }
 
@@ -1048,14 +1023,14 @@ export async function handleGetBillingStatus(
       }>();
 
     if (!row) {
-      return billingSuccessResponse({
+      return apiSuccessResponse({
         tier: "free",
         status: "none",
         subscription: null,
       });
     }
 
-    return billingSuccessResponse({
+    return apiSuccessResponse({
       tier: row.tier,
       status: row.status,
       subscription: {
@@ -1072,6 +1047,6 @@ export async function handleGetBillingStatus(
     });
   } catch (err) {
     console.error("Failed to get billing status", err);
-    return billingErrorResponse("INTERNAL_ERROR", "Failed to get billing status", 500);
+    return apiErrorResponse("INTERNAL_ERROR", "Failed to get billing status", 500);
   }
 }

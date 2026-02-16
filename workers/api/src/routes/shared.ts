@@ -42,6 +42,7 @@ export interface ApiEnvelope<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
+  error_code?: string;
   meta: {
     request_id: string;
     timestamp: string;
@@ -68,10 +69,11 @@ export function successEnvelope<T>(data: T, meta?: { next_cursor?: string }): Ap
   };
 }
 
-export function errorEnvelope(error: string, _code?: ErrorCodeName | string): ApiEnvelope {
+export function errorEnvelope(error: string, code?: ErrorCodeName | string): ApiEnvelope {
   return {
     ok: false,
     error,
+    ...(code ? { error_code: code } : {}),
     meta: {
       request_id: generateRequestId(),
       timestamp: new Date().toISOString(),
@@ -84,6 +86,38 @@ export function jsonResponse(envelope: ApiEnvelope, status: number): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Build a success JSON Response using the standard API envelope.
+ *
+ * Convenience wrapper combining successEnvelope + jsonResponse.
+ */
+export function apiSuccessResponse<T>(data: T, status = 200): Response {
+  return jsonResponse(successEnvelope(data), status);
+}
+
+/**
+ * Build an error JSON Response using the standard API envelope.
+ *
+ * Convenience wrapper combining errorEnvelope + jsonResponse.
+ *
+ * @param code  Machine-readable error code (e.g. "VALIDATION_ERROR").
+ * @param message  Human-readable error message.
+ * @param status  HTTP status code.
+ * @param extra  Optional extra top-level fields merged into the envelope.
+ */
+export function apiErrorResponse(
+  code: string,
+  message: string,
+  status: number,
+  extra?: Record<string, unknown>,
+): Response {
+  const envelope: ApiEnvelope & Record<string, unknown> = {
+    ...errorEnvelope(message, code),
+    ...extra,
+  };
+  return jsonResponse(envelope as ApiEnvelope, status);
 }
 
 // ---------------------------------------------------------------------------
