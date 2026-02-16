@@ -12,24 +12,13 @@
 
 import { GroupScheduleDO } from "@tminus/do-group-schedule";
 import type { GroupSessionParams } from "@tminus/do-group-schedule";
-
-// ---------------------------------------------------------------------------
-// Types for the API handler signatures
-// ---------------------------------------------------------------------------
-
-interface AuthContext {
-  userId: string;
-}
-
-interface ApiEnvelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
-}
+import {
+  type AuthContext,
+  successEnvelope,
+  errorEnvelope,
+  jsonResponse,
+  parseJsonBody,
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // Env bindings needed by group scheduling handlers
@@ -39,55 +28,6 @@ export interface GroupSchedulingHandlerEnv {
   USER_GRAPH: DurableObjectNamespace;
   WRITE_QUEUE: Queue;
   DB: D1Database;
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function successEnvelope<T>(data: T): ApiEnvelope<T> {
-  return {
-    ok: true,
-    data,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function errorEnvelope(error: string): ApiEnvelope {
-  return {
-    ok: false,
-    error,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function jsonResponse(envelope: ApiEnvelope, status: number): Response {
-  return new Response(JSON.stringify(envelope), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-async function parseJsonBody<T>(request: Request): Promise<T | null> {
-  try {
-    const text = await request.text();
-    if (!text) return null;
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------

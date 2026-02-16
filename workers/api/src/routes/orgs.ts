@@ -19,24 +19,14 @@
 import { generateId, isValidId, validateOrgPolicyConfig, isValidOrgPolicyType } from "@tminus/shared";
 import type { OrgMergePolicyType } from "@tminus/shared";
 import { DEFAULT_INCLUDED_SEATS } from "./enterprise-billing";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface AuthContext {
-  userId: string;
-}
-
-interface ApiEnvelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
-}
+import {
+  type AuthContext,
+  type ApiEnvelope,
+  successEnvelope,
+  errorEnvelope,
+  jsonResponse,
+  parseJsonBody,
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -190,58 +180,7 @@ export function validatePolicyUpdateInput(
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Response helpers (replicates envelope pattern from index.ts)
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function successEnvelope<T>(data: T): ApiEnvelope<T> {
-  return {
-    ok: true,
-    data,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function errorEnvelope(error: string): ApiEnvelope {
-  return {
-    ok: false,
-    error,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function jsonResponse(envelope: ApiEnvelope, status: number): Response {
-  return new Response(JSON.stringify(envelope), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Request body parsing
-// ---------------------------------------------------------------------------
-
-async function parseJsonBody<T>(request: Request): Promise<T | null> {
-  try {
-    const text = await request.text();
-    if (!text) return null;
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
+// Response helpers and request body parsing imported from ./shared
 
 // ---------------------------------------------------------------------------
 // RBAC: checkOrgAdmin

@@ -22,26 +22,13 @@ import {
   isApproachingExpiry,
   HOLD_DURATION_DEFAULT_HOURS,
 } from "@tminus/workflow-scheduling";
-
-// ---------------------------------------------------------------------------
-// Types for the API handler signatures
-// ---------------------------------------------------------------------------
-
-/** Auth context passed from the main router. */
-interface AuthContext {
-  userId: string;
-}
-
-/** API response envelope. */
-interface ApiEnvelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
-}
+import {
+  type AuthContext,
+  successEnvelope,
+  errorEnvelope,
+  jsonResponse,
+  parseJsonBody,
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // Env bindings needed by scheduling handlers
@@ -51,55 +38,6 @@ export interface SchedulingHandlerEnv {
   USER_GRAPH: DurableObjectNamespace;
   ACCOUNT: DurableObjectNamespace;
   WRITE_QUEUE: Queue;
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers (mirroring the pattern in workers/api/src/index.ts)
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function successEnvelope<T>(data: T): ApiEnvelope<T> {
-  return {
-    ok: true,
-    data,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function errorEnvelope(error: string): ApiEnvelope {
-  return {
-    ok: false,
-    error,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function jsonResponse(envelope: ApiEnvelope, status: number): Response {
-  return new Response(JSON.stringify(envelope), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-async function parseJsonBody<T>(request: Request): Promise<T | null> {
-  try {
-    const text = await request.text();
-    if (!text) return null;
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------

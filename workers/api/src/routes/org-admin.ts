@@ -14,63 +14,12 @@
 
 import { isValidId } from "@tminus/shared";
 import { checkOrgAdmin } from "./orgs";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface AuthContext {
-  userId: string;
-}
-
-interface ApiEnvelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers (same pattern as orgs.ts)
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function successEnvelope<T>(data: T): ApiEnvelope<T> {
-  return {
-    ok: true,
-    data,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function errorEnvelope(error: string): ApiEnvelope {
-  return {
-    ok: false,
-    error,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function jsonResponse(envelope: ApiEnvelope, status: number): Response {
-  return new Response(JSON.stringify(envelope), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+import {
+  type AuthContext,
+  successEnvelope,
+  errorEnvelope,
+  jsonResponse,
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // GET /v1/org/:id/users -- List users with T-Minus in the org

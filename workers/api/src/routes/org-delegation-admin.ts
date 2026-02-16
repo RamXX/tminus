@@ -38,6 +38,12 @@ import type {
   QuotaUsage,
 } from "@tminus/shared";
 import { exportAuditLog as exportComplianceAuditLog } from "@tminus/shared";
+import {
+  successEnvelope,
+  errorEnvelope,
+  jsonResponse,
+  parseJsonBody,
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,55 +87,6 @@ export interface AuditPage {
   total: number;
   limit: number;
   offset: number;
-}
-
-interface ApiEnvelope<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-  meta: {
-    request_id: string;
-    timestamp: string;
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers (same pattern as org-delegation.ts)
-// ---------------------------------------------------------------------------
-
-function generateRequestId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `req_${ts}_${rand}`;
-}
-
-function successEnvelope<T>(data: T): ApiEnvelope<T> {
-  return {
-    ok: true,
-    data,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function errorEnvelope(error: string): ApiEnvelope {
-  return {
-    ok: false,
-    error,
-    meta: {
-      request_id: generateRequestId(),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-function jsonResponse(envelope: ApiEnvelope, status: number): Response {
-  return new Response(JSON.stringify(envelope), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -250,19 +207,7 @@ export function parsePagination(url: URL): { limit: number; offset: number } {
   return { limit, offset };
 }
 
-// ---------------------------------------------------------------------------
-// Request body parsing
-// ---------------------------------------------------------------------------
-
-async function parseJsonBody<T>(request: Request): Promise<T | null> {
-  try {
-    const text = await request.text();
-    if (!text) return null;
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
+// Request body parsing imported from ./shared
 
 // ---------------------------------------------------------------------------
 // Route handlers
