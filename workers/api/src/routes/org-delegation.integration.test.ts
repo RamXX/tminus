@@ -22,11 +22,13 @@ import {
   MIGRATION_0001_INITIAL_SCHEMA,
   MIGRATION_0004_AUTH_FIELDS,
   MIGRATION_0022_ORG_DELEGATIONS,
+  MIGRATION_0023_DELEGATION_INFRASTRUCTURE,
 } from "@tminus/d1-registry";
 import {
   handleOrgRegister,
   handleDelegationCalendars,
 } from "./org-delegation";
+import { D1DelegationStore } from "./d1-delegation-stores";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -239,7 +241,7 @@ function makeGetRequest(url: string): Request {
 describe("org-delegation integration", () => {
   let rawDb: DatabaseType;
   let d1: D1Database;
-  let env: { DB: D1Database; MASTER_KEY: string };
+  let env: { store: D1DelegationStore; MASTER_KEY: string };
   const auth = { userId: ADMIN_USER_ID };
 
   beforeEach(() => {
@@ -247,8 +249,13 @@ describe("org-delegation integration", () => {
     rawDb.exec(MIGRATION_0001_INITIAL_SCHEMA);
     rawDb.exec(MIGRATION_0004_AUTH_FIELDS);
     rawDb.exec(MIGRATION_0022_ORG_DELEGATIONS);
+    // Migration 0023 adds columns required by D1DelegationStore.createDelegation
+    // (active_users_count, registration_date, sa_key_* fields, health_check_*)
+    for (const stmt of MIGRATION_0023_DELEGATION_INFRASTRUCTURE.split(";").filter((s) => s.trim())) {
+      rawDb.exec(stmt + ";");
+    }
     d1 = createRealD1(rawDb);
-    env = { DB: d1, MASTER_KEY: TEST_MASTER_KEY };
+    env = { store: new D1DelegationStore(d1), MASTER_KEY: TEST_MASTER_KEY };
   });
 
   // -----------------------------------------------------------------------
@@ -379,7 +386,7 @@ describe("org-delegation integration", () => {
     });
 
     it("rejects when MASTER_KEY is not configured (500)", async () => {
-      const envNoKey = { DB: d1, MASTER_KEY: undefined };
+      const envNoKey = { store: new D1DelegationStore(d1), MASTER_KEY: undefined };
       const request = makeRequest({
         domain: "acme.com",
         admin_email: "admin@acme.com",
@@ -484,7 +491,7 @@ describe("org-delegation integration", () => {
     });
 
     it("returns 500 when MASTER_KEY is not configured", async () => {
-      const envNoKey = { DB: d1, MASTER_KEY: undefined };
+      const envNoKey = { store: new D1DelegationStore(d1), MASTER_KEY: undefined };
       const request = makeGetRequest("https://api.tminus.ink/v1/orgs/delegation/calendars/user@acme.com");
 
       const response = await handleDelegationCalendars(request, auth, envNoKey, "user@acme.com");

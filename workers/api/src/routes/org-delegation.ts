@@ -9,7 +9,7 @@
  * - Service account credentials encrypted with AES-256-GCM (AD-2)
  * - Delegation validated before accepting registration
  * - Users in registered domains get calendar access without personal OAuth
- * - D1 stores org delegation records (cross-user lookup per AD-1)
+ * - All data access goes through DelegationStore (no raw SQL)
  */
 
 import {
@@ -26,6 +26,8 @@ import type {
   ServiceAccountKey,
   CalendarListEntry,
   FetchFn,
+  DelegationStore,
+  DelegationRecord,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -36,8 +38,8 @@ interface AuthContext {
   userId: string;
 }
 
-interface DelegationEnv {
-  DB: D1Database;
+export interface DelegationEnv {
+  store: DelegationStore;
   /** Hex-encoded 32-byte master key for encryption (AD-2). */
   MASTER_KEY?: string;
 }
@@ -203,11 +205,8 @@ export async function handleOrgRegister(
   const adminEmail = body.admin_email as string;
   const serviceAccountKey = body.service_account_key as ServiceAccountKey;
 
-  // Check if domain is already registered
-  const existing = await env.DB
-    .prepare("SELECT delegation_id FROM org_delegations WHERE domain = ?1")
-    .bind(domain)
-    .first<{ delegation_id: string }>();
+  // Check if domain is already registered (via DelegationStore)
+  const existing = await env.store.getDelegation(domain);
 
   if (existing) {
     return jsonResponse(
@@ -247,29 +246,34 @@ export async function handleOrgRegister(
   const masterKey = await importMasterKeyForServiceAccount(env.MASTER_KEY);
   const encryptedKey = await encryptServiceAccountKey(masterKey, serviceAccountKey);
 
-  // Store the delegation record
+  // Store the delegation record (via DelegationStore)
   const delegationId = generateId("delegation");
   const now = new Date().toISOString();
 
+  const record: DelegationRecord = {
+    delegationId,
+    domain,
+    adminEmail,
+    delegationStatus: "active",
+    encryptedSaKey: JSON.stringify(encryptedKey),
+    saClientEmail: serviceAccountKey.client_email,
+    saClientId: serviceAccountKey.client_id,
+    validatedAt: now,
+    activeUsersCount: 0,
+    registrationDate: now,
+    saKeyCreatedAt: now,
+    saKeyLastUsedAt: null,
+    saKeyRotationDueAt: null,
+    previousEncryptedSaKey: null,
+    previousSaKeyId: null,
+    lastHealthCheckAt: null,
+    healthCheckStatus: "unknown",
+    createdAt: now,
+    updatedAt: now,
+  };
+
   try {
-    await env.DB
-      .prepare(
-        `INSERT INTO org_delegations
-         (delegation_id, domain, admin_email, delegation_status, encrypted_sa_key, sa_client_email, sa_client_id, validated_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9)`,
-      )
-      .bind(
-        delegationId,
-        domain,
-        adminEmail,
-        JSON.stringify(encryptedKey),
-        serviceAccountKey.client_email,
-        serviceAccountKey.client_id,
-        now,
-        now,
-        now,
-      )
-      .run();
+    await env.store.createDelegation(record);
 
     return jsonResponse(
       successEnvelope({
@@ -322,18 +326,8 @@ export async function handleDelegationCalendars(
     return jsonResponse(errorEnvelope("Could not extract domain from email"), 400);
   }
 
-  // Look up delegation for this domain
-  const delegation = await env.DB
-    .prepare(
-      "SELECT delegation_id, domain, delegation_status, encrypted_sa_key FROM org_delegations WHERE domain = ?1",
-    )
-    .bind(domain)
-    .first<{
-      delegation_id: string;
-      domain: string;
-      delegation_status: string;
-      encrypted_sa_key: string;
-    }>();
+  // Look up delegation for this domain (via DelegationStore)
+  const delegation = await env.store.getDelegation(domain);
 
   if (!delegation) {
     return jsonResponse(
@@ -342,9 +336,9 @@ export async function handleDelegationCalendars(
     );
   }
 
-  if (delegation.delegation_status !== "active") {
+  if (delegation.delegationStatus !== "active") {
     return jsonResponse(
-      errorEnvelope(`Delegation for domain '${domain}' is ${delegation.delegation_status}`),
+      errorEnvelope(`Delegation for domain '${domain}' is ${delegation.delegationStatus}`),
       403,
     );
   }
@@ -353,7 +347,7 @@ export async function handleDelegationCalendars(
   let serviceAccountKey: ServiceAccountKey;
   try {
     const masterKey = await importMasterKeyForServiceAccount(env.MASTER_KEY);
-    const envelope = JSON.parse(delegation.encrypted_sa_key);
+    const envelope = JSON.parse(delegation.encryptedSaKey);
     serviceAccountKey = await decryptServiceAccountKey(masterKey, envelope);
   } catch (err) {
     console.error("Failed to decrypt service account key", err);
@@ -379,7 +373,7 @@ export async function handleDelegationCalendars(
       successEnvelope({
         email,
         domain,
-        delegation_id: delegation.delegation_id,
+        delegation_id: delegation.delegationId,
         calendars: calendars.map((cal: CalendarListEntry) => ({
           id: cal.id,
           summary: cal.summary,

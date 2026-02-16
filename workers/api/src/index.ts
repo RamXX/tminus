@@ -6476,15 +6476,17 @@ async function routeAuthenticatedRequest(
       // -- Domain-wide delegation routes (Phase 6D: TM-9iu.1) ----------------
 
       if (method === "POST" && pathname === "/v1/orgs/register") {
-        return handleOrgRegister(request, auth, env as unknown as { DB: D1Database; MASTER_KEY?: string });
+        const delegationStore = new D1DelegationStore(env.DB);
+        return handleOrgRegister(request, auth, { store: delegationStore, MASTER_KEY: env.MASTER_KEY });
       }
 
       match = matchRoute(pathname, "/v1/orgs/delegation/calendars/:email");
       if (match && method === "GET") {
+        const delegationStore = new D1DelegationStore(env.DB);
         return handleDelegationCalendars(
           request,
           auth,
-          env as unknown as { DB: D1Database; MASTER_KEY?: string },
+          { store: delegationStore, MASTER_KEY: env.MASTER_KEY },
           match.params[0],
         );
       }
