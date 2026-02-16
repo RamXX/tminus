@@ -68,13 +68,36 @@ function base64urlDecode(str: string): Uint8Array {
   return bytes;
 }
 
-async function importStateKey(secretHex: string): Promise<CryptoKey> {
-  const keyBytes = hexToBytes(secretHex);
-  if (keyBytes.length !== 32) {
-    throw new Error(
-      `JWT_SECRET must be 32 bytes (64 hex chars), got ${keyBytes.length} bytes`,
-    );
+/**
+ * Detect whether a string is a valid hex string of given length.
+ */
+function isHexString(str: string, expectedLength: number): boolean {
+  return str.length === expectedLength && /^[0-9a-fA-F]+$/.test(str);
+}
+
+/**
+ * Import a secret as an AES-256-GCM key.
+ *
+ * Accepts two formats:
+ * 1. A 64-character hex string (32 bytes) -- used directly (backward compatible
+ *    with existing test fixtures).
+ * 2. Any other string (e.g., base64-encoded) -- hashed via SHA-256 to derive
+ *    a deterministic 32-byte key. This allows production JWT_SECRET values
+ *    that are not hex-encoded to work correctly.
+ */
+async function importStateKey(secret: string): Promise<CryptoKey> {
+  let keyBytes: Uint8Array;
+
+  if (isHexString(secret, 64)) {
+    // Legacy path: interpret as 32 raw hex bytes (backward compatible with tests)
+    keyBytes = hexToBytes(secret);
+  } else {
+    // Derive a 32-byte key via SHA-256 of the raw secret string.
+    // This handles base64-encoded secrets, arbitrary strings, etc.
+    const encoded = new TextEncoder().encode(secret);
+    keyBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
   }
+
   return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, [
     "encrypt",
     "decrypt",
@@ -88,19 +111,20 @@ async function importStateKey(secretHex: string): Promise<CryptoKey> {
 /**
  * Encrypt OAuth context into a state parameter string.
  *
- * @param secretHex - Hex-encoded 32-byte symmetric key (JWT_SECRET)
+ * @param secret - Symmetric key (JWT_SECRET). Accepts 64-char hex or any string
+ *                 (non-hex values are hashed via SHA-256 to derive a 32-byte key).
  * @param codeVerifier - PKCE code_verifier
  * @param userId - The user linking an account
  * @param redirectUri - Post-completion redirect URI
  * @returns URL-safe encrypted state string
  */
 export async function encryptState(
-  secretHex: string,
+  secret: string,
   codeVerifier: string,
   userId: string,
   redirectUri: string,
 ): Promise<string> {
-  const key = await importStateKey(secretHex);
+  const key = await importStateKey(secret);
 
   const payload: StatePayload = {
     code_verifier: codeVerifier,
@@ -127,16 +151,17 @@ export async function encryptState(
 /**
  * Decrypt and validate a state parameter string.
  *
- * @param secretHex - Hex-encoded 32-byte symmetric key (JWT_SECRET)
+ * @param secret - Symmetric key (JWT_SECRET). Accepts 64-char hex or any string
+ *                 (non-hex values are hashed via SHA-256 to derive a 32-byte key).
  * @param stateString - The encrypted state parameter from the callback
  * @returns Decrypted payload, or null if decryption fails or state is expired
  */
 export async function decryptState(
-  secretHex: string,
+  secret: string,
   stateString: string,
 ): Promise<StatePayload | null> {
   try {
-    const key = await importStateKey(secretHex);
+    const key = await importStateKey(secret);
     const combined = base64urlDecode(stateString);
 
     if (combined.length < 13) {

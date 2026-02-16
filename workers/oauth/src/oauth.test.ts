@@ -163,6 +163,63 @@ describe("State encryption", () => {
     const s2 = await encryptState(TEST_JWT_SECRET, "v", "u", "https://x.com");
     expect(s1).not.toBe(s2);
   });
+
+  // TM-qt2f: Non-hex key support (base64 secrets, arbitrary strings)
+  describe("non-hex key support (TM-qt2f)", () => {
+    const BASE64_SECRET = "8LtWFEQU/GdWiTWQKredhwuJ6/Bn2HYV3XUzBYK8vNI=";
+
+    it("round-trips with base64-encoded secret", async () => {
+      const state = await encryptState(
+        BASE64_SECRET,
+        "pkce-verifier-for-base64-test",
+        "usr_base64_test_user",
+        "https://app.example.com/callback",
+      );
+
+      expect(state.length).toBeGreaterThan(0);
+      expect(state).toMatch(/^[A-Za-z0-9_-]+$/);
+
+      const payload = await decryptState(BASE64_SECRET, state);
+      expect(payload).not.toBeNull();
+      expect(payload!.code_verifier).toBe("pkce-verifier-for-base64-test");
+      expect(payload!.user_id).toBe("usr_base64_test_user");
+      expect(payload!.redirect_uri).toBe("https://app.example.com/callback");
+      expect(payload!.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    it("returns null when decrypting with wrong non-hex key", async () => {
+      const state = await encryptState(BASE64_SECRET, "v", "u", "https://x.com");
+      const wrongKey = "wrong-base64-secret-value!=";
+      const payload = await decryptState(wrongKey, state);
+      expect(payload).toBeNull();
+    });
+
+    it("hex key and non-hex key produce different ciphertexts", async () => {
+      // Ensure hex and non-hex paths use different derived keys
+      const stateHex = await encryptState(TEST_JWT_SECRET, "v", "u", "https://x.com");
+      const stateBase64 = await encryptState(BASE64_SECRET, "v", "u", "https://x.com");
+
+      // They should not be decryptable with each other's key
+      const crossDecrypt1 = await decryptState(TEST_JWT_SECRET, stateBase64);
+      const crossDecrypt2 = await decryptState(BASE64_SECRET, stateHex);
+      expect(crossDecrypt1).toBeNull();
+      expect(crossDecrypt2).toBeNull();
+    });
+
+    it("handles arbitrary string as secret", async () => {
+      const arbitrarySecret = "my-super-secret-password-that-is-not-hex";
+      const state = await encryptState(
+        arbitrarySecret,
+        "verifier",
+        "user_123",
+        "https://done.example.com",
+      );
+
+      const payload = await decryptState(arbitrarySecret, state);
+      expect(payload).not.toBeNull();
+      expect(payload!.user_id).toBe("user_123");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
