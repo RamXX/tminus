@@ -125,6 +125,15 @@ test-e2e-phase6b: install
 test-e2e-phase6c: install
 	npx vitest run --config vitest.e2e.phase6c.config.ts
 
+# ---- Phase 6D E2E validation ----
+# Domain-wide delegation lifecycle: admin registration, user discovery,
+# calendar federation, admin dashboard, rate limiting, compliance audit,
+# delegation revocation detection, key rotation.
+# Uses real API handlers + real D1 (better-sqlite3) + mock Google APIs.
+
+test-e2e-phase6d: install
+	npx vitest run --config vitest.e2e.phase6d.config.ts
+
 lint: install
 	pnpm run lint
 
