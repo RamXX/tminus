@@ -108,7 +108,7 @@ describe("BriefingPanel", () => {
       expect(screen.getByTestId("briefing-loading")).toBeInTheDocument();
     });
 
-    it("calls fetchBriefing with the event ID", () => {
+    it("calls fetchBriefing with the event ID", async () => {
       const fetchBriefing = createMockFetchBriefing();
 
       render(
@@ -120,6 +120,12 @@ describe("BriefingPanel", () => {
       );
 
       expect(fetchBriefing).toHaveBeenCalledWith("evt-1");
+
+      // Wait for the async fetch to resolve and flush the resulting state
+      // updates, preventing act() warnings from state updates after test ends.
+      await waitFor(() => {
+        expect(screen.getByTestId("briefing-panel")).toBeInTheDocument();
+      });
     });
   });
 

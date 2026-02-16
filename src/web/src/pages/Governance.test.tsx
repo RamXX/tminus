@@ -367,10 +367,15 @@ describe("Governance Dashboard", () => {
       const fetchCommitments = vi.fn(
         (): Promise<Commitment[]> => new Promise(() => {}),
       );
+      // Also use a never-resolving promise for VIPs to prevent its state
+      // update from firing outside act() while we assert loading.
+      const fetchVips = vi.fn(
+        (): Promise<VipContact[]> => new Promise(() => {}),
+      );
       render(
         <Governance
           fetchCommitments={fetchCommitments}
-          fetchVips={createMockFetchVips()}
+          fetchVips={fetchVips}
           addVip={createMockAddVip()}
           removeVip={createMockRemoveVip()}
           exportProof={createMockExportProof()}

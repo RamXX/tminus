@@ -368,12 +368,17 @@ describe("Billing Page", () => {
       const fetchBillingStatus = vi.fn(
         (): Promise<BillingStatusResponse> => new Promise(() => {}),
       );
+      // Also use a never-resolving promise for billing history to prevent
+      // its state update from firing outside act() while we assert loading.
+      const fetchBillingHistory = vi.fn(
+        (): Promise<BillingEvent[]> => new Promise(() => {}),
+      );
       render(
         <Billing
           fetchBillingStatus={fetchBillingStatus}
           createCheckoutSession={createMockCreateCheckout()}
           createPortalSession={createMockCreatePortalSession()}
-          fetchBillingHistory={createMockFetchBillingHistory()}
+          fetchBillingHistory={fetchBillingHistory}
           accountsUsed={0}
           navigateToUrl={vi.fn()}
         />,

@@ -428,10 +428,15 @@ describe("Scheduling Page", () => {
       const listSessions = vi.fn(
         (): Promise<SchedulingSession[]> => new Promise(() => {}),
       );
+      // Also use a never-resolving promise for accounts to prevent its state
+      // update from firing outside act() while we assert loading.
+      const fetchAccounts = vi.fn(
+        (): Promise<LinkedAccount[]> => new Promise(() => {}),
+      );
       render(
         <Scheduling
           listSessions={listSessions}
-          fetchAccounts={createMockFetchAccounts()}
+          fetchAccounts={fetchAccounts}
           createSession={createMockCreateSession()}
           commitCandidate={createMockCommitCandidate()}
           cancelSession={createMockCancelSession()}
