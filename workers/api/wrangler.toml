@@ -5,7 +5,7 @@
 # ============================================================================
 
 name = "tminus-api"
-main = "src/index.ts"
+main = "src/dev-entry.ts"
 compatibility_date = "2025-02-14"
 compatibility_flags = ["nodejs_compat"]
 

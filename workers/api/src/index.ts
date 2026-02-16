@@ -81,7 +81,11 @@ export {
 export const API_VERSION = "0.0.1";
 
 // ---------------------------------------------------------------------------
-// Durable Object class re-exports (required by wrangler for DO hosting)
+// Durable Object class re-exports (for backward compatibility in tests)
+//
+// Note: These are the testable core classes, NOT the production wrappers.
+// The production wrappers (which extend DurableObject from cloudflare:workers)
+// are in do-wrappers.ts and exported from dev-entry.ts (the wrangler entry point).
 // ---------------------------------------------------------------------------
 
 export { UserGraphDO } from "@tminus/do-user-graph";
