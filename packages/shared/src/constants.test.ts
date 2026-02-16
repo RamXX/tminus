@@ -47,18 +47,22 @@ describe("constants.ts -- calendar defaults", () => {
 describe("constants.ts -- ID_PREFIXES", () => {
   it("contains all expected entity prefixes", () => {
     const keys = Object.keys(ID_PREFIXES);
-    // Core prefixes that must always exist
+    // Every entity type in ID_PREFIXES must be listed here.
+    // When you add a new entity type to ID_PREFIXES, add it here too.
     const requiredKeys = [
       "user", "account", "event", "policy", "calendar",
       "journal", "constraint", "apikey", "cert",
       "session", "candidate", "hold", "vip", "allocation",
-      "commitment", "report", "relationship",
+      "commitment", "report", "relationship", "ledger",
+      "alert", "milestone", "proof", "schedHist",
+      "org", "onboardSession", "orgInstall", "delegation",
+      "audit", "cache", "discovery",
     ];
     for (const key of requiredKeys) {
       expect(keys).toContain(key);
     }
-    // Ensure no unexpected shrinkage
-    expect(keys.length).toBeGreaterThanOrEqual(requiredKeys.length);
+    // Exact count ensures both additions and removals are caught
+    expect(keys.length).toBe(requiredKeys.length);
   });
 
   it("user prefix is 'usr_'", () => {
@@ -107,6 +111,66 @@ describe("constants.ts -- ID_PREFIXES", () => {
 
   it("hold prefix is 'hld_'", () => {
     expect(ID_PREFIXES.hold).toBe("hld_");
+  });
+
+  it("vip prefix is 'vip_'", () => {
+    expect(ID_PREFIXES.vip).toBe("vip_");
+  });
+
+  it("allocation prefix is 'alc_'", () => {
+    expect(ID_PREFIXES.allocation).toBe("alc_");
+  });
+
+  it("commitment prefix is 'cmt_'", () => {
+    expect(ID_PREFIXES.commitment).toBe("cmt_");
+  });
+
+  it("report prefix is 'rpt_'", () => {
+    expect(ID_PREFIXES.report).toBe("rpt_");
+  });
+
+  it("ledger prefix is 'ldg_'", () => {
+    expect(ID_PREFIXES.ledger).toBe("ldg_");
+  });
+
+  it("alert prefix is 'alt_'", () => {
+    expect(ID_PREFIXES.alert).toBe("alt_");
+  });
+
+  it("milestone prefix is 'mst_'", () => {
+    expect(ID_PREFIXES.milestone).toBe("mst_");
+  });
+
+  it("proof prefix is 'prf_'", () => {
+    expect(ID_PREFIXES.proof).toBe("prf_");
+  });
+
+  it("schedHist prefix is 'shx_'", () => {
+    expect(ID_PREFIXES.schedHist).toBe("shx_");
+  });
+
+  it("org prefix is 'org_'", () => {
+    expect(ID_PREFIXES.org).toBe("org_");
+  });
+
+  it("onboardSession prefix is 'obs_'", () => {
+    expect(ID_PREFIXES.onboardSession).toBe("obs_");
+  });
+
+  it("orgInstall prefix is 'oin_'", () => {
+    expect(ID_PREFIXES.orgInstall).toBe("oin_");
+  });
+
+  it("audit prefix is 'aud_'", () => {
+    expect(ID_PREFIXES.audit).toBe("aud_");
+  });
+
+  it("cache prefix is 'cch_'", () => {
+    expect(ID_PREFIXES.cache).toBe("cch_");
+  });
+
+  it("discovery prefix is 'dsc_'", () => {
+    expect(ID_PREFIXES.discovery).toBe("dsc_");
   });
 
   it("all prefixes end with underscore", () => {
