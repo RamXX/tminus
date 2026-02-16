@@ -32,7 +32,12 @@ import type {
   DiscoveryService,
   DiscoveredUser,
   DiscoveryConfig,
+  ComplianceAuditStore,
+  ComplianceAuditEntry,
+  OrgQuotaReport,
+  QuotaUsage,
 } from "@tminus/shared";
+import { exportAuditLog as exportComplianceAuditLog } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +66,8 @@ export interface AdminDeps {
   ) => Promise<AuditPage>;
   /** Get the delegation record by its ID. */
   getDelegation: (delegationId: string) => Promise<DelegationRecord | null>;
+  /** Get quota report for an org (optional, for dashboard quota visibility). */
+  getQuotaReport?: (orgId: string) => Promise<OrgQuotaReport>;
 }
 
 export interface AuditQueryOptions {
@@ -310,6 +317,34 @@ export async function handleOrgDashboard(
   // Discovery config
   const discoveryConfig = await deps.discoveryService.getConfig(orgId);
 
+  // AC#7: Quota utilization with alert thresholds
+  let quotaUtilization: Record<string, unknown> | null = null;
+  if (deps.getQuotaReport) {
+    try {
+      const quotaReport = await deps.getQuotaReport(orgId);
+      quotaUtilization = {
+        quotas: quotaReport.quotas.map((q: QuotaUsage) => {
+          const utilizationPct = q.limit > 0 ? (q.current / q.limit) * 100 : 0;
+          return {
+            type: q.type,
+            current: q.current,
+            limit: q.limit,
+            utilization_pct: Math.round(utilizationPct * 100) / 100,
+            exceeded: q.exceeded,
+            resets_at: q.resetsAt,
+            alert_level: utilizationPct >= 95 ? "critical"
+              : utilizationPct >= 80 ? "warning"
+              : "normal",
+          };
+        }),
+        any_exceeded: quotaReport.anyExceeded,
+      };
+    } catch {
+      // Quota report failure is non-fatal for the dashboard
+      quotaUtilization = null;
+    }
+  }
+
   return jsonResponse(
     successEnvelope({
       delegation: {
@@ -340,6 +375,7 @@ export async function handleOrgDashboard(
             retention_days: discoveryConfig.retentionDays,
           }
         : null,
+      quota_utilization: quotaUtilization,
     }),
     200,
   );
@@ -764,6 +800,130 @@ export async function handleAuditLog(
       500,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log export (AC#6: CSV and JSON format support)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/orgs/:orgId/audit-log/export
+ *
+ * Export compliance audit log entries in CSV or JSON format.
+ *
+ * Body: {
+ *   format: "csv" | "json",
+ *   start_date: string (ISO 8601),
+ *   end_date: string (ISO 8601)
+ * }
+ *
+ * Returns the audit log entries as a downloadable file.
+ */
+export async function handleAuditLogExport(
+  request: Request,
+  auth: AdminAuthContext,
+  orgId: string,
+  complianceStore: ComplianceAuditStore,
+): Promise<Response> {
+  const authErr = checkAdminAuth(auth);
+  if (authErr) return authErr;
+
+  const body = await parseJsonBody<Record<string, unknown>>(request);
+  if (!body) {
+    return jsonResponse(errorEnvelope("Request body must be valid JSON"), 400);
+  }
+
+  // Validate required fields
+  const format = body.format as string | undefined;
+  if (!format || (format !== "csv" && format !== "json")) {
+    return jsonResponse(
+      errorEnvelope("format is required and must be 'csv' or 'json'"),
+      400,
+    );
+  }
+
+  const startDate = body.start_date as string | undefined;
+  const endDate = body.end_date as string | undefined;
+  if (!startDate || !endDate) {
+    return jsonResponse(
+      errorEnvelope("start_date and end_date are required (ISO 8601 format)"),
+      400,
+    );
+  }
+
+  // Validate date format (basic check)
+  if (isNaN(Date.parse(startDate)) || isNaN(Date.parse(endDate))) {
+    return jsonResponse(
+      errorEnvelope("start_date and end_date must be valid ISO 8601 dates"),
+      400,
+    );
+  }
+
+  try {
+    const entries = await complianceStore.getEntries(orgId, startDate, endDate);
+
+    if (format === "json") {
+      // JSON-lines format (one JSON object per line)
+      const jsonLines = entries.map((entry) => JSON.stringify(entry)).join("\n");
+      return new Response(jsonLines, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/x-ndjson",
+          "Content-Disposition": `attachment; filename="audit-log-${orgId}-${startDate.split("T")[0]}-to-${endDate.split("T")[0]}.jsonl"`,
+        },
+      });
+    }
+
+    // CSV format
+    const csvHeader = [
+      "entry_id", "org_id", "timestamp", "actor", "action", "target",
+      "result", "ip_address", "user_agent", "details", "previous_hash", "entry_hash",
+    ].join(",");
+
+    const csvRows = entries.map((entry) => {
+      return [
+        csvEscape(entry.entryId),
+        csvEscape(entry.orgId),
+        csvEscape(entry.timestamp),
+        csvEscape(entry.actor),
+        csvEscape(entry.action),
+        csvEscape(entry.target),
+        csvEscape(entry.result),
+        csvEscape(entry.ipAddress),
+        csvEscape(entry.userAgent),
+        csvEscape(entry.details ?? ""),
+        csvEscape(entry.previousHash),
+        csvEscape(entry.entryHash),
+      ].join(",");
+    });
+
+    const csvContent = [csvHeader, ...csvRows].join("\n");
+
+    return new Response(csvContent, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv",
+        "Content-Disposition": `attachment; filename="audit-log-${orgId}-${startDate.split("T")[0]}-to-${endDate.split("T")[0]}.csv"`,
+      },
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return jsonResponse(
+      errorEnvelope(`Failed to export audit log: ${errMsg}`),
+      500,
+    );
+  }
+}
+
+/**
+ * Escape a value for CSV output.
+ * Wraps in quotes if it contains commas, quotes, or newlines.
+ */
+function csvEscape(value: string): string {
+  if (value.includes(",") || value.includes('"') || value.includes("\n")) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------

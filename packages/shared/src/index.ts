@@ -719,12 +719,17 @@ export {
   buildOrgRateLimitResponse,
   DEFAULT_ORG_RATE_LIMITS,
   ORG_RATE_LIMIT_PREFIX,
+  computeBackoffDelay,
+  withBackoff,
+  DEFAULT_BACKOFF_CONFIG,
+  OrgRequestQueue,
 } from "./org-rate-limit";
 export type {
   OrgRateLimitBucket,
   OrgRateLimitConfig,
   OrgRateLimitResult,
   OrgRateLimitStore,
+  BackoffConfig,
 } from "./org-rate-limit";
 
 // Re-export org quota management (TM-9iu.5: per-org quotas)

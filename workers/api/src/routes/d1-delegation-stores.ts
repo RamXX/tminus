@@ -21,7 +21,16 @@ import type {
   DiscoveredUser,
   DiscoveredUserStatus,
   DiscoveryConfig,
+  OrgRateLimitStore,
+  OrgRateLimitConfig,
+  OrgQuotaStore,
+  OrgQuotaConfig,
+  QuotaType,
+  ComplianceAuditStore,
+  ComplianceAuditEntry,
+  AuditRetentionConfig,
 } from "@tminus/shared";
+import { DEFAULT_ORG_RATE_LIMITS, DEFAULT_ORG_QUOTAS, GENESIS_HASH, DEFAULT_RETENTION_DAYS } from "@tminus/shared";
 import type { AuditPage, AuditQueryOptions } from "./org-delegation-admin";
 
 // ---------------------------------------------------------------------------
@@ -532,4 +541,276 @@ export async function getDelegationFromD1(
 ): Promise<DelegationRecord | null> {
   const store = new D1DelegationStore(db);
   return store.getDelegationById(delegationId);
+}
+
+// ---------------------------------------------------------------------------
+// D1OrgRateLimitStore (sliding window log backed by D1)
+// ---------------------------------------------------------------------------
+
+/**
+ * D1-backed rate limit store implementing the sliding window log pattern.
+ *
+ * Uses the org_rate_limit_counters table to store individual request
+ * timestamps. Each row represents a single request event with an
+ * expiration time for cleanup.
+ */
+export class D1OrgRateLimitStore implements OrgRateLimitStore {
+  constructor(private readonly db: D1Database) {}
+
+  // Legacy fixed-window methods (kept for interface compliance)
+  async getCount(key: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT count FROM org_rate_limit_counters WHERE counter_key = ?1")
+      .bind(key)
+      .first<{ count: number }>();
+    return row?.count ?? 0;
+  }
+
+  async incrementCount(key: string, ttlSeconds: number): Promise<number> {
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    await this.db
+      .prepare(
+        `INSERT INTO org_rate_limit_counters (counter_key, count, expires_at)
+         VALUES (?1, 1, ?2)
+         ON CONFLICT(counter_key) DO UPDATE SET count = count + 1, expires_at = ?2`,
+      )
+      .bind(key, expiresAt)
+      .run();
+    const row = await this.db
+      .prepare("SELECT count FROM org_rate_limit_counters WHERE counter_key = ?1")
+      .bind(key)
+      .first<{ count: number }>();
+    return row?.count ?? 1;
+  }
+
+  // Sliding-window methods
+  async addTimestamp(key: string, timestampMs: number, ttlSeconds: number): Promise<void> {
+    const expiresAt = new Date(timestampMs + ttlSeconds * 1000).toISOString();
+    const entryKey = `${key}:${timestampMs}:${Math.random().toString(36).slice(2, 8)}`;
+    await this.db
+      .prepare(
+        `INSERT INTO org_rate_limit_counters (counter_key, count, expires_at)
+         VALUES (?1, ?2, ?3)`,
+      )
+      .bind(entryKey, timestampMs, expiresAt)
+      .run();
+  }
+
+  async countInWindow(key: string, windowStartMs: number): Promise<number> {
+    const row = await this.db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM org_rate_limit_counters
+         WHERE counter_key LIKE ?1 AND count >= ?2`,
+      )
+      .bind(`${key}:%`, windowStartMs)
+      .first<{ cnt: number }>();
+    return row?.cnt ?? 0;
+  }
+
+  async pruneExpired(key: string, beforeMs: number): Promise<void> {
+    await this.db
+      .prepare(
+        `DELETE FROM org_rate_limit_counters
+         WHERE counter_key LIKE ?1 AND count < ?2`,
+      )
+      .bind(`${key}:%`, beforeMs)
+      .run();
+  }
+
+  /**
+   * Get per-org rate limit configuration from D1.
+   * Returns null if the org uses default limits.
+   */
+  async getOrgConfig(orgId: string): Promise<OrgRateLimitConfig | null> {
+    const row = await this.db
+      .prepare("SELECT * FROM org_rate_limit_config WHERE org_id = ?1")
+      .bind(orgId)
+      .first<Record<string, unknown>>();
+    if (!row) return null;
+    return {
+      apiMaxRequests: (row.api_max_requests as number) ?? DEFAULT_ORG_RATE_LIMITS.apiMaxRequests,
+      apiWindowSeconds: (row.api_window_seconds as number) ?? DEFAULT_ORG_RATE_LIMITS.apiWindowSeconds,
+      directoryMaxRequests: (row.directory_max_requests as number) ?? DEFAULT_ORG_RATE_LIMITS.directoryMaxRequests,
+      directoryWindowSeconds: (row.directory_window_seconds as number) ?? DEFAULT_ORG_RATE_LIMITS.directoryWindowSeconds,
+      impersonationMaxRequests: (row.impersonation_max_requests as number) ?? DEFAULT_ORG_RATE_LIMITS.impersonationMaxRequests,
+      impersonationWindowSeconds: (row.impersonation_window_seconds as number) ?? DEFAULT_ORG_RATE_LIMITS.impersonationWindowSeconds,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D1OrgQuotaStore
+// ---------------------------------------------------------------------------
+
+/**
+ * D1-backed quota store for org-level quota tracking.
+ */
+export class D1OrgQuotaStore implements OrgQuotaStore {
+  constructor(private readonly db: D1Database) {}
+
+  async getUsage(orgId: string, quotaType: QuotaType, periodKey: string): Promise<number> {
+    const row = await this.db
+      .prepare(
+        "SELECT usage_count FROM org_quota_usage WHERE org_id = ?1 AND quota_type = ?2 AND period_key = ?3",
+      )
+      .bind(orgId, quotaType, periodKey)
+      .first<{ usage_count: number }>();
+    return row?.usage_count ?? 0;
+  }
+
+  async incrementUsage(orgId: string, quotaType: QuotaType, periodKey: string): Promise<number> {
+    await this.db
+      .prepare(
+        `INSERT INTO org_quota_usage (org_id, quota_type, period_key, usage_count)
+         VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(org_id, quota_type, period_key) DO UPDATE SET usage_count = usage_count + 1`,
+      )
+      .bind(orgId, quotaType, periodKey)
+      .run();
+    const row = await this.db
+      .prepare(
+        "SELECT usage_count FROM org_quota_usage WHERE org_id = ?1 AND quota_type = ?2 AND period_key = ?3",
+      )
+      .bind(orgId, quotaType, periodKey)
+      .first<{ usage_count: number }>();
+    return row?.usage_count ?? 1;
+  }
+
+  async setUsage(orgId: string, quotaType: QuotaType, periodKey: string, value: number): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO org_quota_usage (org_id, quota_type, period_key, usage_count)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(org_id, quota_type, period_key) DO UPDATE SET usage_count = ?4`,
+      )
+      .bind(orgId, quotaType, periodKey, value)
+      .run();
+  }
+
+  async getOrgQuotaConfig(orgId: string): Promise<OrgQuotaConfig | null> {
+    const row = await this.db
+      .prepare("SELECT * FROM org_quota_config WHERE org_id = ?1")
+      .bind(orgId)
+      .first<Record<string, unknown>>();
+    if (!row) return null;
+    return {
+      maxDiscoveredUsers: (row.max_discovered_users as number) ?? DEFAULT_ORG_QUOTAS.maxDiscoveredUsers,
+      maxDelegations: (row.max_delegations as number) ?? DEFAULT_ORG_QUOTAS.maxDelegations,
+      maxApiCallsDaily: (row.max_api_calls_daily as number) ?? DEFAULT_ORG_QUOTAS.maxApiCallsDaily,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D1ComplianceAuditStore
+// ---------------------------------------------------------------------------
+
+/**
+ * D1-backed compliance audit log store with hash chain integrity.
+ */
+export class D1ComplianceAuditStore implements ComplianceAuditStore {
+  constructor(private readonly db: D1Database) {}
+
+  async getLastEntryHash(orgId: string): Promise<string> {
+    const row = await this.db
+      .prepare(
+        "SELECT entry_hash FROM compliance_audit_log WHERE org_id = ?1 ORDER BY timestamp DESC LIMIT 1",
+      )
+      .bind(orgId)
+      .first<{ entry_hash: string }>();
+    return row?.entry_hash ?? GENESIS_HASH;
+  }
+
+  async appendEntry(entry: ComplianceAuditEntry): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO compliance_audit_log
+         (entry_id, org_id, timestamp, actor, action, target, result,
+          ip_address, user_agent, details, previous_hash, entry_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      )
+      .bind(
+        entry.entryId,
+        entry.orgId,
+        entry.timestamp,
+        entry.actor,
+        entry.action,
+        entry.target,
+        entry.result,
+        entry.ipAddress,
+        entry.userAgent,
+        entry.details,
+        entry.previousHash,
+        entry.entryHash,
+      )
+      .run();
+  }
+
+  async getEntries(
+    orgId: string,
+    startDate: string,
+    endDate: string,
+    limit: number = 1000,
+    offset: number = 0,
+  ): Promise<ComplianceAuditEntry[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT * FROM compliance_audit_log
+         WHERE org_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3
+         ORDER BY timestamp ASC
+         LIMIT ?4 OFFSET ?5`,
+      )
+      .bind(orgId, startDate, endDate, limit, offset)
+      .all<Record<string, unknown>>();
+    return (results ?? []).map((row) => this.rowToEntry(row));
+  }
+
+  async getEntryCount(orgId: string, startDate: string, endDate: string): Promise<number> {
+    const row = await this.db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM compliance_audit_log WHERE org_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+      )
+      .bind(orgId, startDate, endDate)
+      .first<{ cnt: number }>();
+    return row?.cnt ?? 0;
+  }
+
+  async getEntriesForVerification(orgId: string, limit?: number): Promise<ComplianceAuditEntry[]> {
+    const sql = limit
+      ? "SELECT * FROM compliance_audit_log WHERE org_id = ?1 ORDER BY timestamp ASC LIMIT ?2"
+      : "SELECT * FROM compliance_audit_log WHERE org_id = ?1 ORDER BY timestamp ASC";
+    const stmt = limit
+      ? this.db.prepare(sql).bind(orgId, limit)
+      : this.db.prepare(sql).bind(orgId);
+    const { results } = await stmt.all<Record<string, unknown>>();
+    return (results ?? []).map((row) => this.rowToEntry(row));
+  }
+
+  async getRetentionConfig(orgId: string): Promise<AuditRetentionConfig | null> {
+    // Reuse org_quota_config or discovery_config for retention settings
+    // For now, return null (use defaults)
+    const row = await this.db
+      .prepare("SELECT retention_days FROM org_discovery_config WHERE delegation_id = ?1")
+      .bind(orgId)
+      .first<{ retention_days: number }>();
+    if (!row) return null;
+    return { retentionDays: row.retention_days ?? DEFAULT_RETENTION_DAYS };
+  }
+
+  private rowToEntry(row: Record<string, unknown>): ComplianceAuditEntry {
+    return {
+      entryId: row.entry_id as string,
+      orgId: row.org_id as string,
+      timestamp: row.timestamp as string,
+      actor: row.actor as string,
+      action: row.action as ComplianceAuditEntry["action"],
+      target: row.target as string,
+      result: row.result as ComplianceAuditEntry["result"],
+      ipAddress: row.ip_address as string,
+      userAgent: row.user_agent as string,
+      details: (row.details as string) ?? null,
+      previousHash: row.previous_hash as string,
+      entryHash: row.entry_hash as string,
+    };
+  }
 }

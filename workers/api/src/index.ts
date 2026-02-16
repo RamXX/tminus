@@ -12,7 +12,8 @@
  * - D1 for account lookups (cross-user registry)
  */
 
-import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES, isValidMilestoneKind, isValidMilestoneDate, MILESTONE_KINDS, buildExcusePrompt, parseExcuseResponse, buildVCalendar, DelegationService, DiscoveryService } from "@tminus/shared";
+import { isValidId, generateId, isValidBillingCategory, BILLING_CATEGORIES, isValidRelationshipCategory, RELATIONSHIP_CATEGORIES, isValidOutcome, INTERACTION_OUTCOMES, isValidMilestoneKind, isValidMilestoneDate, MILESTONE_KINDS, buildExcusePrompt, parseExcuseResponse, buildVCalendar, DelegationService, DiscoveryService, checkOrgRateLimit, buildOrgRateLimitResponse, buildOrgRateLimitHeaders, DEFAULT_ORG_RATE_LIMITS, checkQuota, buildQuotaExceededResponse, getQuotaReport, appendAuditEntry as appendComplianceAuditEntry, exportAuditLog as exportComplianceAuditLog } from "@tminus/shared";
+import type { OrgRateLimitConfig, ComplianceAuditInput } from "@tminus/shared";
 import type { CanonicalEvent, SimulationScenario, ImpactReport } from "@tminus/shared";
 import type { ExcuseTone, TruthLevel, ExcuseContext } from "@tminus/shared";
 import {
@@ -99,11 +100,15 @@ import {
   handleDelegationHealth,
   handleDelegationRotate,
   handleAuditLog,
+  handleAuditLogExport,
 } from "./routes/org-delegation-admin";
 import type { AdminDeps } from "./routes/org-delegation-admin";
 import {
   D1DelegationStore,
   D1DiscoveryStore,
+  D1OrgRateLimitStore,
+  D1OrgQuotaStore,
+  D1ComplianceAuditStore,
   queryAuditLogFromD1,
   getDelegationFromD1,
 } from "./routes/d1-delegation-stores";
@@ -6475,6 +6480,20 @@ async function routeAuthenticatedRequest(
 
       // -- Domain-wide delegation routes (Phase 6D: TM-9iu.1) ----------------
 
+      // Rate limit check helper for org delegation endpoints (TM-9iu.5).
+      // Applies sliding-window rate limiting per-org on the "api" bucket.
+      // Returns a 429 Response if rate limited, null if allowed.
+      // Also attaches rate limit headers to the eventual response.
+      const checkDelegationRateLimit = async (orgId: string): Promise<Response | null> => {
+        const rlStore = new D1OrgRateLimitStore(env.DB);
+        const rlConfig = (await rlStore.getOrgConfig(orgId)) ?? DEFAULT_ORG_RATE_LIMITS;
+        const rlResult = await checkOrgRateLimit(rlStore, orgId, "api", rlConfig);
+        if (!rlResult.allowed) {
+          return buildOrgRateLimitResponse(rlResult);
+        }
+        return null;
+      };
+
       if (method === "POST" && pathname === "/v1/orgs/register") {
         const delegationStore = new D1DelegationStore(env.DB);
         return handleOrgRegister(request, auth, { store: delegationStore, MASTER_KEY: env.MASTER_KEY });
@@ -6482,13 +6501,46 @@ async function routeAuthenticatedRequest(
 
       match = matchRoute(pathname, "/v1/orgs/delegation/calendars/:email");
       if (match && method === "GET") {
+        const targetEmail = match.params[0];
         const delegationStore = new D1DelegationStore(env.DB);
-        return handleDelegationCalendars(
+        const response = await handleDelegationCalendars(
           request,
           auth,
           { store: delegationStore, MASTER_KEY: env.MASTER_KEY },
-          match.params[0],
+          targetEmail,
         );
+
+        // AC#4: Log impersonation to compliance audit log (hash chain)
+        // Fire-and-forget: audit logging must not block the response
+        try {
+          const emailDomain = targetEmail.includes("@") ? targetEmail.split("@")[1]?.toLowerCase() : null;
+          if (emailDomain) {
+            const delegation = await delegationStore.getDelegation(emailDomain);
+            if (delegation) {
+              const complianceStore = new D1ComplianceAuditStore(env.DB);
+              const auditInput: ComplianceAuditInput = {
+                entryId: generateId("audit"),
+                orgId: delegation.delegationId,
+                timestamp: new Date().toISOString(),
+                actor: auth.userId,
+                action: "token_issued",
+                target: targetEmail,
+                result: response.ok ? "success" : "failure",
+                ipAddress: request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown",
+                userAgent: request.headers.get("User-Agent") ?? "unknown",
+                details: JSON.stringify({
+                  service: "delegation_calendars",
+                  http_status: response.status,
+                }),
+              };
+              await appendComplianceAuditEntry(complianceStore, auditInput);
+            }
+          }
+        } catch {
+          // Audit log failure must not affect the user-facing response
+        }
+
+        return response;
       }
 
       // -- Delegation admin dashboard routes (Phase 6D: TM-9iu.4) -----------
@@ -6500,6 +6552,8 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/discovery/config");
       if (match && (method === "PUT" || method === "GET")) {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6528,6 +6582,8 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/delegation/health");
       if (match && method === "GET") {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6553,6 +6609,8 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/delegation/rotate");
       if (match && method === "POST") {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6578,6 +6636,8 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/dashboard");
       if (match && method === "GET") {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6590,19 +6650,38 @@ async function routeAuthenticatedRequest(
         const discoverySvc = new DiscoveryService(discoveryStore, {
           getDirectoryToken: async () => "",
         });
+        const quotaStore = new D1OrgQuotaStore(env.DB);
         const deps: AdminDeps = {
           delegationService: delegationSvc,
           discoveryService: discoverySvc,
           queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
           getDelegation: (did) => getDelegationFromD1(env.DB, did),
+          getQuotaReport: (oid) => getQuotaReport(quotaStore, oid),
         };
         return handleOrgDashboard(request, adminAuth, orgId, deps);
+      }
+
+      // POST /v1/orgs/:id/audit-log/export (AC#6: audit log export)
+      match = matchRoute(pathname, "/v1/orgs/:id/audit-log/export");
+      if (match && method === "POST") {
+        const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
+        const memberRow = await env.DB
+          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+          .bind(orgId, auth.userId)
+          .first<{ role: string }>();
+        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const complianceStore = new D1ComplianceAuditStore(env.DB);
+        return handleAuditLogExport(request, adminAuth, orgId, complianceStore);
       }
 
       // GET /v1/orgs/:id/audit
       match = matchRoute(pathname, "/v1/orgs/:id/audit");
       if (match && method === "GET") {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6629,6 +6708,8 @@ async function routeAuthenticatedRequest(
       if (match && (method === "PATCH" || method === "GET")) {
         const orgId = match.params[0];
         const userId = match.params[1];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)
@@ -6657,6 +6738,8 @@ async function routeAuthenticatedRequest(
       match = matchRoute(pathname, "/v1/orgs/:id/users");
       if (match && method === "GET") {
         const orgId = match.params[0];
+        const rlBlock = await checkDelegationRateLimit(orgId);
+        if (rlBlock) return rlBlock;
         const memberRow = await env.DB
           .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
           .bind(orgId, auth.userId)

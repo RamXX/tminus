@@ -199,6 +199,44 @@ class D1OrgRateLimitStore implements OrgRateLimitStore {
       .run(key, expiresAt);
     return 1;
   }
+
+  /**
+   * Sliding-window: add a timestamp entry. Each request becomes a row
+   * with counter_key = "<key>:<timestampMs>:<random>" and count = timestampMs.
+   */
+  async addTimestamp(key: string, timestampMs: number, ttlSeconds: number): Promise<void> {
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const uniqueKey = `${key}:${timestampMs}:${Math.random().toString(36).slice(2, 8)}`;
+    this.db
+      .prepare(
+        "INSERT INTO org_rate_limit_counters (counter_key, count, expires_at) VALUES (?, ?, ?)",
+      )
+      .run(uniqueKey, timestampMs, expiresAt);
+  }
+
+  /**
+   * Sliding-window: count entries where count (used as timestampMs) >= windowStartMs
+   * and counter_key starts with the given key prefix.
+   */
+  async countInWindow(key: string, windowStartMs: number): Promise<number> {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM org_rate_limit_counters WHERE counter_key LIKE ? AND count >= ?",
+      )
+      .get(`${key}:%`, windowStartMs) as { cnt: number };
+    return row.cnt;
+  }
+
+  /**
+   * Sliding-window: remove entries where count (timestampMs) < beforeMs.
+   */
+  async pruneExpired(key: string, beforeMs: number): Promise<void> {
+    this.db
+      .prepare(
+        "DELETE FROM org_rate_limit_counters WHERE counter_key LIKE ? AND count < ?",
+      )
+      .run(`${key}:%`, beforeMs);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,12 +577,14 @@ describe("Org rate limit state (real SQLite)", () => {
     expect(r2.allowed).toBe(true);
     expect(r2.remaining).toBe(3);
 
-    // Verify counter is in SQLite
-    const row = db.prepare(
-      "SELECT count FROM org_rate_limit_counters WHERE counter_key LIKE 'org_rl:org_test:api:%'",
-    ).get() as { count: number } | undefined;
-    expect(row).toBeDefined();
-    expect(row!.count).toBe(2);
+    // Verify sliding-window timestamp entries are in SQLite
+    // Each request adds a separate row with counter_key like 'org_rl:org_test:api:<ts>:<random>'
+    const rows = db.prepare(
+      "SELECT counter_key, count FROM org_rate_limit_counters WHERE counter_key LIKE 'org_rl:org_test:api:%'",
+    ).all() as { counter_key: string; count: number }[];
+    expect(rows).toHaveLength(2);
+    // The count column stores the timestamp (ms), not a counter
+    expect(rows.every((r) => r.count >= now)).toBe(true);
   });
 
   it("blocks when counter reaches limit", async () => {
@@ -579,13 +619,15 @@ describe("Org rate limit state (real SQLite)", () => {
     const dirAllowed = await checkOrgRateLimit(rateLimitStore, "org_test", "directory", config, now + 100);
     expect(dirAllowed.allowed).toBe(true);
 
-    // Verify separate rows in SQLite
+    // Verify separate sliding-window rows in SQLite
+    // api bucket: 1 allowed call = 1 timestamp row (second call was blocked, no row added)
+    // directory bucket: 1 allowed call = 1 timestamp row
     const rows = db.prepare(
       "SELECT counter_key FROM org_rate_limit_counters WHERE counter_key LIKE 'org_rl:org_test:%'",
     ).all() as { counter_key: string }[];
     expect(rows.length).toBe(2);
-    expect(rows.some((r) => r.counter_key.includes(":api:"))).toBe(true);
-    expect(rows.some((r) => r.counter_key.includes(":directory:"))).toBe(true);
+    expect(rows.some((r) => r.counter_key.startsWith("org_rl:org_test:api:"))).toBe(true);
+    expect(rows.some((r) => r.counter_key.startsWith("org_rl:org_test:directory:"))).toBe(true);
   });
 });
 
