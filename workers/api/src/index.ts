@@ -5897,6 +5897,57 @@ export function createHandler() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Admin route helpers -- DRY up delegation admin routes (TM-8xt4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up the caller's org membership and return an AdminAuthContext.
+ * Admin status is determined by the `role` column in `org_members`.
+ */
+async function buildAdminAuth(
+  db: D1Database,
+  orgId: string,
+  userId: string,
+): Promise<{ userId: string; isAdmin: boolean }> {
+  const memberRow = await db
+    .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+    .bind(orgId, userId)
+    .first<{ role: string }>();
+  return { userId, isAdmin: memberRow?.role === "admin" };
+}
+
+/**
+ * Construct the standard AdminDeps for delegation admin handlers.
+ *
+ * Options:
+ * - `includeQuotaReport`: when true, attaches `getQuotaReport` (used by the
+ *   dashboard endpoint only).
+ */
+function buildAdminDeps(
+  env: Env,
+  options?: { includeQuotaReport?: boolean },
+): AdminDeps {
+  const masterKey = env.MASTER_KEY ?? "";
+  const delegationStore = new D1DelegationStore(env.DB);
+  const discoveryStore = new D1DiscoveryStore(env.DB);
+  const delegationSvc = new DelegationService(delegationStore, masterKey);
+  const discoverySvc = new DiscoveryService(discoveryStore, {
+    getDirectoryToken: async () => "",
+  });
+  const deps: AdminDeps = {
+    delegationService: delegationSvc,
+    discoveryService: discoverySvc,
+    queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
+    getDelegation: (did) => getDelegationFromD1(env.DB, did),
+  };
+  if (options?.includeQuotaReport) {
+    const quotaStore = new D1OrgQuotaStore(env.DB);
+    deps.getQuotaReport = (oid) => getQuotaReport(quotaStore, oid);
+  }
+  return deps;
+}
+
 /**
  * Route an authenticated request to the appropriate handler.
  * Extracted to allow the fetch handler to wrap responses with rate limit headers.
@@ -6554,24 +6605,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         if (method === "GET") {
           return handleGetDiscoveryConfig(request, adminAuth, orgId, deps);
         }
@@ -6584,24 +6619,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         return handleDelegationHealth(request, adminAuth, orgId, deps);
       }
 
@@ -6611,24 +6630,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         return handleDelegationRotate(request, adminAuth, orgId, deps);
       }
 
@@ -6638,26 +6641,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const quotaStore = new D1OrgQuotaStore(env.DB);
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-          getQuotaReport: (oid) => getQuotaReport(quotaStore, oid),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env, { includeQuotaReport: true });
         return handleOrgDashboard(request, adminAuth, orgId, deps);
       }
 
@@ -6667,11 +6652,7 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
         const complianceStore = new D1ComplianceAuditStore(env.DB);
         return handleAuditLogExport(request, adminAuth, orgId, complianceStore);
       }
@@ -6682,24 +6663,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         return handleAuditLog(request, adminAuth, orgId, deps);
       }
 
@@ -6710,24 +6675,8 @@ async function routeAuthenticatedRequest(
         const userId = match.params[1];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         if (method === "PATCH") {
           return handleUpdateDiscoveredUser(request, adminAuth, orgId, userId, deps);
         }
@@ -6740,24 +6689,8 @@ async function routeAuthenticatedRequest(
         const orgId = match.params[0];
         const rlBlock = await checkDelegationRateLimit(orgId);
         if (rlBlock) return rlBlock;
-        const memberRow = await env.DB
-          .prepare("SELECT role FROM org_members WHERE org_id = ?1 AND user_id = ?2")
-          .bind(orgId, auth.userId)
-          .first<{ role: string }>();
-        const adminAuth = { userId: auth.userId, isAdmin: memberRow?.role === "admin" };
-        const masterKey = env.MASTER_KEY ?? "";
-        const delegationStore = new D1DelegationStore(env.DB);
-        const discoveryStore = new D1DiscoveryStore(env.DB);
-        const delegationSvc = new DelegationService(delegationStore, masterKey);
-        const discoverySvc = new DiscoveryService(discoveryStore, {
-          getDirectoryToken: async () => "",
-        });
-        const deps: AdminDeps = {
-          delegationService: delegationSvc,
-          discoveryService: discoverySvc,
-          queryAuditLog: (did, opts) => queryAuditLogFromD1(env.DB, did, opts),
-          getDelegation: (did) => getDelegationFromD1(env.DB, did),
-        };
+        const adminAuth = await buildAdminAuth(env.DB, orgId, auth.userId);
+        const deps = buildAdminDeps(env);
         return handleListDiscoveredUsers(request, adminAuth, orgId, deps);
       }
 
