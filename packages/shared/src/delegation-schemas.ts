@@ -9,9 +9,15 @@
  * Design decision: Zod schemas are the source of truth for credential
  * shapes. The TypeScript types in jwt-assertion.ts are derived from
  * these schemas for consistency.
+ *
+ * Bundle size note (TM-8z5v): Uses zod/v4-mini instead of zod/v4 to
+ * reduce bundle size impact in Cloudflare Workers from ~60KB to ~6KB
+ * gzipped. The mini variant uses .check() for constraints instead of
+ * chained methods (e.g., z.string().check(z.minLength(1)) instead of
+ * z.string().min(1)).
  */
 
-import { z } from "zod/v4";
+import * as z from "zod/v4-mini";
 
 // ---------------------------------------------------------------------------
 // Service account key schema (Google Cloud JSON key file)
@@ -23,25 +29,29 @@ import { z } from "zod/v4";
  */
 export const ServiceAccountKeySchema = z.object({
   type: z.literal("service_account"),
-  project_id: z.string().min(1),
-  private_key_id: z.string().min(1),
+  project_id: z.string().check(z.minLength(1)),
+  private_key_id: z.string().check(z.minLength(1)),
   private_key: z
     .string()
-    .min(1)
-    .refine(
-      (key) => key.includes("PRIVATE KEY"),
-      "Must be a PEM-encoded private key",
+    .check(
+      z.minLength(1),
+      z.refine(
+        (key) => key.includes("PRIVATE KEY"),
+        "Must be a PEM-encoded private key",
+      ),
     ),
   client_email: z
     .string()
-    .min(1)
-    .refine(
-      (email) => email.includes("@") && email.includes(".iam.gserviceaccount.com"),
-      "Must be a service account email (name@project.iam.gserviceaccount.com)",
+    .check(
+      z.minLength(1),
+      z.refine(
+        (email) => email.includes("@") && email.includes(".iam.gserviceaccount.com"),
+        "Must be a service account email (name@project.iam.gserviceaccount.com)",
+      ),
     ),
-  client_id: z.string().min(1),
-  auth_uri: z.string().url().optional(),
-  token_uri: z.string().url(),
+  client_id: z.string().check(z.minLength(1)),
+  auth_uri: z.optional(z.url()),
+  token_uri: z.url(),
 });
 
 /** Type derived from Zod schema. */
@@ -56,10 +66,10 @@ export type ValidatedServiceAccountKey = z.infer<typeof ServiceAccountKeySchema>
  * Validates structure after JSON.parse of stored encrypted data.
  */
 export const EncryptedEnvelopeSchema = z.object({
-  iv: z.string().min(1),
-  ciphertext: z.string().min(1),
-  encryptedDek: z.string().min(1),
-  dekIv: z.string().min(1),
+  iv: z.string().check(z.minLength(1)),
+  ciphertext: z.string().check(z.minLength(1)),
+  encryptedDek: z.string().check(z.minLength(1)),
+  dekIv: z.string().check(z.minLength(1)),
 });
 
 export type ValidatedEncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;
@@ -73,13 +83,13 @@ export type ValidatedEncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>
  */
 export const KeyMetadataSchema = z.object({
   /** private_key_id from the Google SA key. */
-  keyId: z.string().min(1),
+  keyId: z.string().check(z.minLength(1)),
   /** When the key was first uploaded to T-Minus. */
-  createdAt: z.string().datetime(),
+  createdAt: z.iso.datetime(),
   /** Last time this key was used for JWT signing. */
-  lastUsedAt: z.string().datetime().nullable(),
+  lastUsedAt: z.nullable(z.iso.datetime()),
   /** When key rotation is recommended (90 days from creation). */
-  rotationDueAt: z.string().datetime(),
+  rotationDueAt: z.iso.datetime(),
 });
 
 export type KeyMetadata = z.infer<typeof KeyMetadataSchema>;
@@ -98,12 +108,12 @@ export const DelegationHealthStatusSchema = z.enum([
 export type DelegationHealthStatus = z.infer<typeof DelegationHealthStatusSchema>;
 
 export const HealthCheckResultSchema = z.object({
-  delegationId: z.string().min(1),
-  domain: z.string().min(1),
+  delegationId: z.string().check(z.minLength(1)),
+  domain: z.string().check(z.minLength(1)),
   status: DelegationHealthStatusSchema,
-  checkedAt: z.string().datetime(),
+  checkedAt: z.iso.datetime(),
   /** Error message if health check failed. */
-  error: z.string().nullable(),
+  error: z.nullable(z.string()),
   /** Whether the admin user's impersonation still works. */
   canImpersonateAdmin: z.boolean(),
   /** Whether calendar API scopes are still granted. */
@@ -117,15 +127,15 @@ export type HealthCheckResult = z.infer<typeof HealthCheckResultSchema>;
 // ---------------------------------------------------------------------------
 
 export const CachedImpersonationTokenSchema = z.object({
-  accessToken: z.string().min(1),
+  accessToken: z.string().check(z.minLength(1)),
   /** ISO 8601 timestamp of token expiry. */
-  expiresAt: z.string().datetime(),
+  expiresAt: z.iso.datetime(),
   /** ISO 8601 timestamp of when this was cached. */
-  cachedAt: z.string().datetime(),
+  cachedAt: z.iso.datetime(),
   /** Email of the impersonated user. */
-  userEmail: z.string().email(),
+  userEmail: z.email(),
   /** Delegation ID the token was issued under. */
-  delegationId: z.string().min(1),
+  delegationId: z.string().check(z.minLength(1)),
 });
 
 export type CachedImpersonationToken = z.infer<typeof CachedImpersonationTokenSchema>;
@@ -135,15 +145,15 @@ export type CachedImpersonationToken = z.infer<typeof CachedImpersonationTokenSc
 // ---------------------------------------------------------------------------
 
 export const OrgDelegationConfigSchema = z.object({
-  delegationId: z.string().min(1),
-  domain: z.string().min(1),
-  adminEmail: z.string().email(),
+  delegationId: z.string().check(z.minLength(1)),
+  domain: z.string().check(z.minLength(1)),
+  adminEmail: z.email(),
   delegationStatus: z.enum(["pending", "active", "revoked"]),
-  saClientEmail: z.string().min(1),
-  saClientId: z.string().min(1),
-  activeUsersCount: z.number().int().min(0),
-  registrationDate: z.string().datetime().nullable(),
-  validatedAt: z.string().datetime().nullable(),
+  saClientEmail: z.string().check(z.minLength(1)),
+  saClientId: z.string().check(z.minLength(1)),
+  activeUsersCount: z.number().check(z.int(), z.minimum(0)),
+  registrationDate: z.nullable(z.iso.datetime()),
+  validatedAt: z.nullable(z.iso.datetime()),
 });
 
 export type OrgDelegationConfig = z.infer<typeof OrgDelegationConfigSchema>;

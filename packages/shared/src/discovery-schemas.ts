@@ -8,9 +8,13 @@
  *
  * Design decision: optional config fields use undefined (not false)
  * for "not configured by admin / use system default" per project learnings.
+ *
+ * Bundle size note (TM-8z5v): Uses zod/v4-mini instead of zod/v4 to
+ * reduce bundle size impact in Cloudflare Workers from ~60KB to ~6KB
+ * gzipped.
  */
 
-import { z } from "zod/v4";
+import * as z from "zod/v4-mini";
 
 // ---------------------------------------------------------------------------
 // Google Directory API user schema
@@ -24,23 +28,23 @@ import { z } from "zod/v4";
  */
 export const DirectoryUserSchema = z.object({
   /** Google's internal user ID (stable across email changes). */
-  id: z.string().min(1),
+  id: z.string().check(z.minLength(1)),
   /** Primary email address. */
-  primaryEmail: z.string().email(),
+  primaryEmail: z.email(),
   /** Full display name. */
   name: z.object({
-    fullName: z.string().optional(),
-    givenName: z.string().optional(),
-    familyName: z.string().optional(),
+    fullName: z.optional(z.string()),
+    givenName: z.optional(z.string()),
+    familyName: z.optional(z.string()),
   }),
   /** Whether the user is suspended in Google Workspace. */
-  suspended: z.boolean().default(false),
+  suspended: z._default(z.boolean(), false),
   /** Whether the user is archived. Treated as suspended for our purposes. */
-  archived: z.boolean().default(false),
+  archived: z._default(z.boolean(), false),
   /** Organizational unit path (e.g., "/Engineering/Backend"). */
-  orgUnitPath: z.string().optional(),
+  orgUnitPath: z.optional(z.string()),
   /** Whether the user account is deleted. */
-  isEnrolledIn2Sv: z.boolean().optional(),
+  isEnrolledIn2Sv: z.optional(z.boolean()),
 });
 
 export type DirectoryUser = z.infer<typeof DirectoryUserSchema>;
@@ -49,8 +53,8 @@ export type DirectoryUser = z.infer<typeof DirectoryUserSchema>;
  * Schema for the full Directory API list response (paginated).
  */
 export const DirectoryListResponseSchema = z.object({
-  users: z.array(DirectoryUserSchema).default([]),
-  nextPageToken: z.string().optional(),
+  users: z._default(z.array(DirectoryUserSchema), []),
+  nextPageToken: z.optional(z.string()),
 });
 
 export type DirectoryListResponse = z.infer<typeof DirectoryListResponseSchema>;
@@ -73,15 +77,18 @@ export type SyncMode = z.infer<typeof SyncModeSchema>;
  */
 export const DiscoveryConfigSchema = z.object({
   /** Delegation ID this config belongs to. */
-  delegationId: z.string().min(1),
+  delegationId: z.string().check(z.minLength(1)),
   /** OU paths to include (undefined = all users in the domain). */
-  ouFilter: z.array(z.string().min(1)).optional(),
+  ouFilter: z.optional(z.array(z.string().check(z.minLength(1)))),
   /** Emails to exclude from discovery (admin opt-out list). */
-  excludedEmails: z.array(z.string().email()).optional(),
+  excludedEmails: z.optional(z.array(z.email())),
   /** Sync mode: proactive or lazy. Default: lazy. */
-  syncMode: SyncModeSchema.default("lazy"),
+  syncMode: z._default(SyncModeSchema, "lazy"),
   /** Days to retain data after user removal. Default: 30. */
-  retentionDays: z.number().int().min(1).max(365).default(30),
+  retentionDays: z._default(
+    z.number().check(z.int(), z.minimum(1), z.lte(365)),
+    30,
+  ),
 });
 
 export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
@@ -106,19 +113,19 @@ export type DiscoveredUserStatus = z.infer<typeof DiscoveredUserStatusSchema>;
  * Represents a discovered user with their lifecycle state.
  */
 export const DiscoveredUserSchema = z.object({
-  discoveryId: z.string().min(1),
-  delegationId: z.string().min(1),
-  googleUserId: z.string().min(1),
-  email: z.string().email(),
-  displayName: z.string().nullable().default(null),
-  orgUnitPath: z.string().nullable().default(null),
+  discoveryId: z.string().check(z.minLength(1)),
+  delegationId: z.string().check(z.minLength(1)),
+  googleUserId: z.string().check(z.minLength(1)),
+  email: z.email(),
+  displayName: z._default(z.nullable(z.string()), null),
+  orgUnitPath: z._default(z.nullable(z.string()), null),
   status: DiscoveredUserStatusSchema,
   /** Account ID if an AccountDO has been created for this user. */
-  accountId: z.string().nullable().default(null),
-  lastSyncedAt: z.string().datetime().nullable().default(null),
-  discoveredAt: z.string().datetime(),
-  statusChangedAt: z.string().datetime(),
-  removedAt: z.string().datetime().nullable().default(null),
+  accountId: z._default(z.nullable(z.string()), null),
+  lastSyncedAt: z._default(z.nullable(z.iso.datetime()), null),
+  discoveredAt: z.iso.datetime(),
+  statusChangedAt: z.iso.datetime(),
+  removedAt: z._default(z.nullable(z.iso.datetime()), null),
 });
 
 export type DiscoveredUser = z.infer<typeof DiscoveredUserSchema>;
