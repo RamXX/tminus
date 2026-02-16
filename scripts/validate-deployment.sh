@@ -4,10 +4,12 @@
 #
 # Curls the /health endpoint of every HTTP-accessible worker and verifies:
 #   1. HTTP 200 response
-#   2. If JSON response: ok:true and valid status
-#   3. If plain text response: just confirms 200 OK
+#   2. Enriched JSON format with ok:true, data.status, data.environment,
+#      data.worker, and data.bindings fields
+#   3. Status is "healthy" or "degraded"
 #
-# Supports both enriched (new) and legacy (old) health response formats.
+# Legacy or plaintext health responses are treated as FAIL -- all workers
+# must return the enriched format from buildHealthResponse().
 #
 # Uses --resolve flag for DNS propagation resilience (resolve to Cloudflare).
 #
@@ -85,8 +87,10 @@ parse_health_json() {
 import sys, json
 try:
     d = json.load(sys.stdin)
-    # Enriched format: {ok, data:{status, version, environment, worker, bindings}, ...}
-    if isinstance(d, dict) and 'data' in d and isinstance(d['data'], dict):
+    # Enriched format requires: ok, data.{status, version, environment, worker, bindings}
+    if (isinstance(d, dict) and 'data' in d and isinstance(d['data'], dict)
+            and 'environment' in d['data'] and 'worker' in d['data']
+            and 'bindings' in d['data']):
         status = d['data'].get('status', '')
         version = d['data'].get('version', '?')
         env = d['data'].get('environment', '?')
@@ -155,37 +159,42 @@ for WORKER_NAME in "${!WORKERS[@]}"; do
   PARSED=$(echo "$BODY" | parse_health_json)
   IFS='|' read -r FORMAT OK STATUS VERSION DEPLOY_ENV WORKER_TAG <<< "$PARSED"
 
-  # For enriched format, validate ok:true and status
-  if [[ "$FORMAT" == "enriched" ]]; then
-    if [[ "$OK" != "True" ]]; then
-      echo "FAIL (ok != true)"
-      FAILED=$((FAILED + 1))
-      FAILURES+=("$WORKER_NAME: ok field is not true")
-      if [[ "$VERBOSE" == "true" ]]; then
-        echo "  Body: $BODY"
-      fi
-      continue
+  # Check 3: Require enriched format -- legacy/plaintext is a deployment failure
+  if [[ "$FORMAT" != "enriched" ]]; then
+    echo "FAIL (format=$FORMAT, expected enriched)"
+    FAILED=$((FAILED + 1))
+    FAILURES+=("$WORKER_NAME: health response is $FORMAT format, expected enriched (missing data.environment, data.worker, data.bindings)")
+    if [[ "$VERBOSE" == "true" ]]; then
+      echo "  Body: $BODY"
     fi
-    if [[ "$STATUS" != "healthy" && "$STATUS" != "degraded" ]]; then
-      echo "FAIL (status=$STATUS)"
-      FAILED=$((FAILED + 1))
-      FAILURES+=("$WORKER_NAME: unexpected status '$STATUS'")
-      if [[ "$VERBOSE" == "true" ]]; then
-        echo "  Body: $BODY"
-      fi
-      continue
-    fi
+    continue
   fi
 
-  # HTTP 200 received -- worker is alive
-  if [[ "$VERBOSE" == "true" ]]; then
-    if [[ "$FORMAT" == "enriched" ]]; then
-      echo "PASS (status=$STATUS, version=$VERSION, env=$DEPLOY_ENV, format=enriched)"
-    elif [[ "$FORMAT" == "legacy-json" ]]; then
-      echo "PASS (format=legacy-json, status=$STATUS)"
-    else
-      echo "PASS (format=plaintext)"
+  # Check 4: Validate ok:true
+  if [[ "$OK" != "True" ]]; then
+    echo "FAIL (ok != true)"
+    FAILED=$((FAILED + 1))
+    FAILURES+=("$WORKER_NAME: ok field is not true")
+    if [[ "$VERBOSE" == "true" ]]; then
+      echo "  Body: $BODY"
     fi
+    continue
+  fi
+
+  # Check 5: Validate status is healthy or degraded
+  if [[ "$STATUS" != "healthy" && "$STATUS" != "degraded" ]]; then
+    echo "FAIL (status=$STATUS)"
+    FAILED=$((FAILED + 1))
+    FAILURES+=("$WORKER_NAME: unexpected status '$STATUS'")
+    if [[ "$VERBOSE" == "true" ]]; then
+      echo "  Body: $BODY"
+    fi
+    continue
+  fi
+
+  # All checks passed -- enriched, ok:true, valid status
+  if [[ "$VERBOSE" == "true" ]]; then
+    echo "PASS (status=$STATUS, version=$VERSION, env=$DEPLOY_ENV, worker=$WORKER_TAG, format=enriched)"
   else
     echo "PASS"
   fi
