@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck ios-build ios-test ios-clean
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
 
 # ---- Core targets ----
 
@@ -144,6 +144,16 @@ clean:
 	pnpm -r exec rm -rf dist
 	pnpm -r exec rm -rf .wrangler
 	rm -rf node_modules
+
+# ---- Validation targets ----
+
+check-placeholders:
+	@if grep -rn 'placeholder\|PLACEHOLDER' workers/*/wrangler.toml 2>/dev/null; then \
+		echo "ERROR: Placeholder IDs found in wrangler.toml files. Replace them with real resource IDs before deploying."; \
+		exit 1; \
+	else \
+		echo "OK: No placeholder IDs found in any wrangler.toml."; \
+	fi
 
 # ---- Deployment targets ----
 # All deploy targets source .env for Cloudflare credentials.

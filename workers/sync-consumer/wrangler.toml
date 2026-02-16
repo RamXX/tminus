@@ -74,7 +74,7 @@ cpu_ms = 300000
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "tminus-registry-staging"
-database_id = "STAGING_DB_ID_PLACEHOLDER"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[env.staging.durable_objects.bindings]]
 name = "USER_GRAPH"
@@ -116,7 +116,7 @@ cpu_ms = 300000
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "tminus-registry"
-database_id = "PRODUCTION_DB_ID_PLACEHOLDER"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[env.production.durable_objects.bindings]]
 name = "USER_GRAPH"

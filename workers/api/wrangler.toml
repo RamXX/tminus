@@ -51,11 +51,11 @@ queue = "tminus-push-queue"
 
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "placeholder-sessions-id"  # Replace with real ID after `wrangler kv namespace create tminus-sessions`
+id = "8641f58e6fc24539b6a1e2bcf26afd44"
 
 [[kv_namespaces]]
 binding = "RATE_LIMITS"
-id = "placeholder-rate-limits-id"  # Replace with real ID after `wrangler kv namespace create tminus-rate-limits`
+id = "fff8534aadf848a8a9a9fcac07828bdf"
 
 # --- Workers AI ---------------------------------------------------------------
 
@@ -94,15 +94,15 @@ zone_name = "tminus.ink"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "tminus-registry-staging"
-database_id = "placeholder-staging-d1-id"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[env.staging.kv_namespaces]]
 binding = "SESSIONS"
-id = "placeholder-staging-sessions-id"
+id = "8641f58e6fc24539b6a1e2bcf26afd44"
 
 [[env.staging.kv_namespaces]]
 binding = "RATE_LIMITS"
-id = "placeholder-staging-rate-limits-id"
+id = "fff8534aadf848a8a9a9fcac07828bdf"
 
 [[env.staging.queues.producers]]
 binding = "SYNC_QUEUE"
@@ -142,11 +142,11 @@ database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[env.production.kv_namespaces]]
 binding = "SESSIONS"
-id = "placeholder-production-sessions-id"  # Replace with real KV namespace ID
+id = "8641f58e6fc24539b6a1e2bcf26afd44"
 
 [[env.production.kv_namespaces]]
 binding = "RATE_LIMITS"
-id = "placeholder-production-rate-limits-id"  # Replace with real KV namespace ID
+id = "fff8534aadf848a8a9a9fcac07828bdf"
 
 [[env.production.queues.producers]]
 binding = "SYNC_QUEUE"

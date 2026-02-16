@@ -45,7 +45,7 @@ zone_name = "tminus.ink"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "tminus-registry-staging"
-database_id = "placeholder-staging-d1-id"
+database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[env.staging.services]]
 binding = "API"

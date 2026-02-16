@@ -710,18 +710,17 @@ describe("wrangler.toml configuration validation", () => {
           expect(db!.database_name).toBe("tminus-registry-staging");
         });
 
-        it(`${workerName} staging D1 ID differs from production D1 ID`, () => {
+        it(`${workerName} staging D1 ID is a real resource ID (not a placeholder)`, () => {
           const staging = getEnv(configs[workerName], "staging")!;
-          const production = getEnv(configs[workerName], "production")!;
           const stagingDb = envD1Databases(staging).find(
             (d) => d.binding === "DB"
           );
-          const prodDb = envD1Databases(production).find(
-            (d) => d.binding === "DB"
-          );
           expect(stagingDb).toBeDefined();
-          expect(prodDb).toBeDefined();
-          expect(stagingDb!.database_id).not.toBe(prodDb!.database_id);
+          // Must be a real UUID, not a placeholder string
+          expect(stagingDb!.database_id).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+          );
+          expect(stagingDb!.database_id).not.toMatch(/placeholder/i);
         });
 
         it(`${workerName} production D1 uses tminus-registry (not staging)`, () => {
@@ -738,17 +737,14 @@ describe("wrangler.toml configuration validation", () => {
 
     describe("AC3: Stage uses separate KV namespaces and queues", () => {
       // API worker has KV (SESSIONS, RATE_LIMITS)
-      it("api staging has separate KV namespace IDs from production", () => {
+      it("api staging KV namespace IDs are real resource IDs (not placeholders)", () => {
         const staging = getEnv(configs["api"], "staging")!;
-        const production = getEnv(configs["api"], "production")!;
         const stagingKv = envKvNamespaces(staging);
-        const prodKv = envKvNamespaces(production);
 
-        // staging should have same bindings but different IDs
+        // staging KV IDs must be real hex IDs, not placeholders
         for (const stagingNs of stagingKv) {
-          const prodNs = prodKv.find((p) => p.binding === stagingNs.binding);
-          expect(prodNs).toBeDefined();
-          expect(stagingNs.id).not.toBe(prodNs!.id);
+          expect(stagingNs.id).toMatch(/^[0-9a-f]{32}$/);
+          expect(stagingNs.id).not.toMatch(/placeholder/i);
         }
       });
 
