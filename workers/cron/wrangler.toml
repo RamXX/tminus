@@ -18,6 +18,8 @@ crons = [
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
   "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "0 * * * *",     # Deletion check: every hour
+  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 # --- Durable Object references (hosted on tminus-api) ----------------------
@@ -48,6 +50,10 @@ queue = "tminus-reconcile-queue"
 [[queues.producers]]
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
+
+[[queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"
 
 [[queues.producers]]
 binding = "PUSH_QUEUE"
@@ -86,6 +92,8 @@ crons = [
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
   "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "0 * * * *",     # Deletion check: every hour
+  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 [[env.staging.d1_databases]]
@@ -110,6 +118,10 @@ queue = "tminus-reconcile-queue-staging"
 [[env.staging.queues.producers]]
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue-staging"
+
+[[env.staging.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue-staging"
 
 [[env.staging.queues.producers]]
 binding = "PUSH_QUEUE"
@@ -139,6 +151,8 @@ crons = [
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
   "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
   "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "0 * * * *",     # Deletion check: every hour
+  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 [[env.production.d1_databases]]
@@ -163,6 +177,10 @@ queue = "tminus-reconcile-queue"
 [[env.production.queues.producers]]
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
+
+[[env.production.queues.producers]]
+binding = "WRITE_QUEUE"
+queue = "tminus-write-queue"
 
 [[env.production.queues.producers]]
 binding = "PUSH_QUEUE"
