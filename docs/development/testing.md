@@ -72,7 +72,35 @@ make test-live             # Against production
 make test-live-staging     # Against staging
 ```
 
-Requires `LIVE_BASE_URL` and optionally `LIVE_JWT_TOKEN` in `.env`.
+### Environment Variables by Provider
+
+Live tests are credential-gated: suites skip with clear messages when required env vars are absent. Set these in `.env` (never committed).
+
+| Provider | Required Env Vars | Test File |
+|----------|-------------------|-----------|
+| **Core** (health, auth, errors) | `LIVE_BASE_URL` | `health.live.test.ts`, `error-cases.live.test.ts`, `core-pipeline.live.test.ts` |
+| **Google** (webhook sync) | `LIVE_BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_TEST_REFRESH_TOKEN_A`, `JWT_SECRET` | `webhook-sync.live.test.ts`, `core-pipeline.live.test.ts` |
+| **Microsoft** (Graph API parity) | `LIVE_BASE_URL`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TEST_REFRESH_TOKEN_B`, `JWT_SECRET` | `microsoft-provider.live.test.ts` |
+| **CalDAV/ICS** (feed import, export) | `LIVE_BASE_URL`, `LIVE_JWT_TOKEN` | `caldav-ics-provider.live.test.ts` |
+| **Authenticated CRUD** | `LIVE_BASE_URL`, `LIVE_JWT_TOKEN` | `core-pipeline.live.test.ts` |
+
+### Provider Credential Setup
+
+**Google:** Create OAuth credentials at https://console.cloud.google.com/apis/credentials. Obtain a refresh token via the OAuth consent flow or the walking skeleton (TM-qt2f).
+
+**Microsoft:** Register an app at https://entra.microsoft.com/ -> App registrations. Required scopes: `Calendars.ReadWrite`, `User.Read`, `offline_access`. Obtain `MS_TEST_REFRESH_TOKEN_B` via the Microsoft OAuth consent flow.
+
+**CalDAV/ICS:** No external provider credentials needed. Only `LIVE_BASE_URL` and `LIVE_JWT_TOKEN` are required to test the feed import/export pipeline.
+
+### Safe Rerun Guidance
+
+- **All live tests are idempotent** -- safe to rerun repeatedly.
+- **Test artifacts are cleaned up** by afterAll hooks in each suite.
+- **Microsoft tests** create and delete events in the test user's Outlook calendar. If a test is interrupted mid-run, orphaned events will have `[tminus-live-parity]` in their subject and can be manually deleted.
+- **CalDAV/ICS tests** import from a public Google Calendar holidays feed. Imported events are harmless (public holiday data) and persist in the user's store.
+- **Google webhook tests** create events with `TM-hpq7-E2E-` in the summary and clean them up.
+- **Auth tests** create users with `@test.tminus.ink` email addresses that are exempt from registration rate limits.
+- **Rate limiting**: If tests fail with 429 status codes, wait for the rate limit window to expire (typically 1 hour for registration, less for other endpoints) and rerun.
 
 ---
 

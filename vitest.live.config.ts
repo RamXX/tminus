@@ -43,6 +43,10 @@ export default defineConfig({
             GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
             GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
             JWT_SECRET: process.env.JWT_SECRET || "",
+            MS_CLIENT_ID: process.env.MS_CLIENT_ID || "",
+            MS_CLIENT_SECRET: process.env.MS_CLIENT_SECRET || "",
+            MS_TEST_REFRESH_TOKEN_B:
+              process.env.MS_TEST_REFRESH_TOKEN_B || "",
           },
           // Run tests in file order, not shuffled
           sequence: {

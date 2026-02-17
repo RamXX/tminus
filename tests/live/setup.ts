@@ -25,6 +25,12 @@ export interface LiveEnv {
   googleClientId: string | null;
   /** Google client secret. Null if not configured. */
   googleClientSecret: string | null;
+  /** Microsoft client ID. Null if not configured. */
+  msClientId: string | null;
+  /** Microsoft client secret. Null if not configured. */
+  msClientSecret: string | null;
+  /** Microsoft test refresh token. Null if not configured. */
+  msTestRefreshToken: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +57,9 @@ export function loadLiveEnv(): LiveEnv | null {
       process.env.GOOGLE_TEST_REFRESH_TOKEN_A?.trim() || null,
     googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || null,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || null,
+    msClientId: process.env.MS_CLIENT_ID?.trim() || null,
+    msClientSecret: process.env.MS_CLIENT_SECRET?.trim() || null,
+    msTestRefreshToken: process.env.MS_TEST_REFRESH_TOKEN_B?.trim() || null,
   };
 }
 
@@ -84,5 +93,32 @@ export function hasGoogleCredentials(): boolean {
     !!process.env.GOOGLE_TEST_REFRESH_TOKEN_A?.trim() &&
     !!process.env.GOOGLE_CLIENT_ID?.trim() &&
     !!process.env.GOOGLE_CLIENT_SECRET?.trim()
+  );
+}
+
+/**
+ * Returns true if Microsoft Calendar live test credentials are available.
+ * Requires LIVE_BASE_URL, LIVE_JWT_TOKEN (or JWT_SECRET), and MS_* credentials.
+ */
+export function hasMicrosoftCredentials(): boolean {
+  return (
+    hasLiveCredentials() &&
+    !!process.env.MS_CLIENT_ID?.trim() &&
+    !!process.env.MS_CLIENT_SECRET?.trim() &&
+    !!process.env.MS_TEST_REFRESH_TOKEN_B?.trim() &&
+    !!process.env.JWT_SECRET?.trim()
+  );
+}
+
+/**
+ * Returns true if CalDAV/ICS feed live test credentials are available.
+ * Requires LIVE_BASE_URL and either LIVE_JWT_TOKEN or JWT_SECRET for
+ * authenticated API calls. CalDAV/ICS tests use the deployed API's feed
+ * endpoints -- no external provider credentials needed beyond T-Minus auth.
+ */
+export function hasCalDavCredentials(): boolean {
+  return (
+    hasLiveCredentials() &&
+    (!!process.env.LIVE_JWT_TOKEN?.trim() || !!process.env.JWT_SECRET?.trim())
   );
 }
