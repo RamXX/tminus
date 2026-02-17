@@ -39,8 +39,11 @@ coverage/
 # iOS / Swift
 ios/TMinus/.build/
 ios/TMinus/.swiftpm/
+ios/TMinus/build/
 ios/TMinus/TMinus.xcodeproj/xcuserdata/
 ios/TMinus/TMinus.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcuserstate
 *.xcuserdatad
+*.xcarchive
+*.xcresult
 DerivedData/

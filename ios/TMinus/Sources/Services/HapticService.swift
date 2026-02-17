@@ -6,6 +6,9 @@
 // library compiles on macOS for SPM testing.
 
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Feedback intensity levels for haptic events.
 enum HapticFeedbackType: Equatable {
