@@ -81,6 +81,7 @@ Live tests are credential-gated: suites skip with clear messages when required e
 | **Core** (health, auth, errors) | `LIVE_BASE_URL` | `health.live.test.ts`, `error-cases.live.test.ts`, `core-pipeline.live.test.ts` |
 | **Google** (webhook sync) | `LIVE_BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_TEST_REFRESH_TOKEN_A`, `JWT_SECRET` | `webhook-sync.live.test.ts`, `core-pipeline.live.test.ts` |
 | **Microsoft** (Graph API parity) | `LIVE_BASE_URL`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TEST_REFRESH_TOKEN_B`, `JWT_SECRET` | `microsoft-provider.live.test.ts` |
+| **Microsoft E2E** (API -> Graph loop) | `LIVE_BASE_URL`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TEST_REFRESH_TOKEN_B`, `JWT_SECRET` | `microsoft-e2e.live.test.ts` |
 | **CalDAV/ICS** (feed import, export) | `LIVE_BASE_URL`, `LIVE_JWT_TOKEN` | `caldav-ics-provider.live.test.ts` |
 | **Authenticated CRUD** | `LIVE_BASE_URL`, `LIVE_JWT_TOKEN` | `core-pipeline.live.test.ts` |
 
@@ -96,11 +97,52 @@ Live tests are credential-gated: suites skip with clear messages when required e
 
 - **All live tests are idempotent** -- safe to rerun repeatedly.
 - **Test artifacts are cleaned up** by afterAll hooks in each suite.
-- **Microsoft tests** create and delete events in the test user's Outlook calendar. If a test is interrupted mid-run, orphaned events will have `[tminus-live-parity]` in their subject and can be manually deleted.
+- **Microsoft provider tests** create and delete events directly in the test user's Outlook calendar via Graph API. If a test is interrupted mid-run, orphaned events will have `[tminus-live-parity]` in their subject and can be manually deleted.
+- **Microsoft E2E tests** create events via the T-Minus API and verify propagation to Microsoft Graph. Orphaned events from this suite have `[tminus-ms-e2e]` in their subject. The afterAll hook performs a sweep to clean up both the canonical store and Graph. If interrupted, search Outlook for events with `[tminus-ms-e2e]` and delete manually.
 - **CalDAV/ICS tests** import from a public Google Calendar holidays feed. Imported events are harmless (public holiday data) and persist in the user's store.
 - **Google webhook tests** create events with `TM-hpq7-E2E-` in the summary and clean them up.
 - **Auth tests** create users with `@test.tminus.ink` email addresses that are exempt from registration rate limits.
 - **Rate limiting**: If tests fail with 429 status codes, wait for the rate limit window to expire (typically 1 hour for registration, less for other endpoints) and rerun.
+
+### Microsoft E2E Prerequisites (TM-psbd)
+
+The Microsoft E2E suite (`microsoft-e2e.live.test.ts`) validates the full loop: T-Minus API create/update/delete with verification that events propagate to and from Microsoft Graph.
+
+**Prerequisites:**
+
+1. **Azure AD app registration** with `Calendars.ReadWrite`, `User.Read`, `offline_access` scopes. See `docs/development/ms-bootstrap-checklist.md` for full setup.
+2. **Microsoft account onboarded in T-Minus** -- the test user (`ramiro@cibertrend.com`) must have completed the T-Minus OAuth onboarding flow so that a policy edge exists linking API-created events to the Microsoft calendar.
+3. **Environment variables** in `.env`:
+   - `MS_CLIENT_ID` -- Azure AD Application (client) ID
+   - `MS_CLIENT_SECRET` -- Azure AD client secret
+   - `MS_TEST_REFRESH_TOKEN_B` -- OAuth refresh token for the test user
+   - `JWT_SECRET` -- T-Minus API JWT signing secret (used to generate test JWTs)
+
+**Running:**
+
+```bash
+# Full live suite (includes Microsoft E2E when creds present)
+make test-live
+
+# Targeted Microsoft E2E only
+source .env && LIVE_BASE_URL=https://api.tminus.ink \
+  npx vitest run tests/live/microsoft-e2e.live.test.ts \
+  --config vitest.live.config.ts
+```
+
+**Propagation behavior:**
+
+Events created via `POST /v1/events` are stored in the canonical store and then propagated to Microsoft Graph asynchronously via the write-consumer queue pipeline. The E2E tests poll Microsoft Graph with a 120-second timeout to verify propagation. If propagation does not complete within this window, the test logs a diagnostic message but does not hard-fail for the propagation check (the API surface tests still pass).
+
+**Manual-assist fallback procedure:**
+
+If Microsoft E2E tests consistently fail at the propagation step:
+
+1. **Verify the Microsoft account is onboarded**: Check that `ramiro@cibertrend.com` has completed the T-Minus OAuth flow and has an active account linkage. Run `scripts/ms-bootstrap-verify.mjs` to confirm.
+2. **Check write-consumer health**: The write-consumer queue processes mirror writes. If the queue is backed up or the worker is unhealthy, propagation will be delayed.
+3. **Verify policy edges exist**: The user's Durable Object must have a policy edge that routes API-created events to the Microsoft account. This is established during OAuth onboarding.
+4. **Manual verification**: Create an event via the T-Minus API manually (`curl -X POST https://api.tminus.ink/v1/events -H "Authorization: Bearer <jwt>" -H "Content-Type: application/json" -d '{"title":"Manual test","start":{"dateTime":"...","timeZone":"UTC"},"end":{"dateTime":"...","timeZone":"UTC"}}'`), then check if it appears in the test user's Outlook calendar within 2 minutes.
+5. **Refresh token rotation**: Microsoft refresh tokens expire after 90 days of inactivity. If token exchange fails, re-run the OAuth consent flow (see `ms-bootstrap-checklist.md`).
 
 ---
 
