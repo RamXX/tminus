@@ -87,6 +87,56 @@ make smoke-test-staging    # Staging
 
 ---
 
+## Unified E2E Gate: Module Resolution
+
+The unified E2E config (`vitest.e2e.config.ts`) runs ALL E2E suites under a single
+`make test-e2e` command. Because these tests import from workspace packages that are
+not published to npm, Vitest needs explicit `resolve.alias` entries to map package
+names to source directories.
+
+### Root cause of past breakage (TM-zf91.2, 2026-02-17)
+
+Individual phase configs (e.g. `vitest.e2e.phase3a.config.ts`) each declared the
+aliases they needed, but the unified config only had `@tminus/shared` and
+`@tminus/d1-registry`. When all E2E suites were aggregated under one config, suites
+that depended on additional workspace packages failed at import time:
+
+1. **`@tminus/do-user-graph` resolution failure** -- 7 test files import
+   `UserGraphDO` from this workspace package. The unified config lacked the alias
+   pointing to `durable-objects/user-graph/src`.
+
+2. **`cloudflare:workers` resolution failure** -- The `walking-skeleton-oauth` and
+   `phase-6b` suites transitively import `workers/oauth/src/index.ts`, which
+   re-exports `OnboardingWorkflow` from `./workflow-wrapper.ts`. That module imports
+   `WorkflowEntrypoint` from the `cloudflare:workers` built-in, which only exists
+   in the Cloudflare Workers runtime and is unavailable in Node/vitest.
+
+### How the fix works
+
+The unified `vitest.e2e.config.ts` now declares the **superset** of all aliases used
+by any individual phase config:
+
+| Alias | Resolves to |
+|-------|-------------|
+| `@tminus/shared` | `packages/shared/src` |
+| `@tminus/d1-registry` | `packages/d1-registry/src` |
+| `@tminus/do-user-graph` | `durable-objects/user-graph/src` |
+| `@tminus/do-group-schedule` | `durable-objects/group-schedule/src` |
+| `@tminus/workflow-scheduling` | `workflows/scheduling/src` |
+| `cloudflare:workers` | `workers/oauth/src/__stubs__/cloudflare-workers.ts` |
+
+The `cloudflare:workers` stub provides minimal `WorkflowEntrypoint` and
+`DurableObject` classes -- just enough for the import to resolve. Production code
+runs against the real Cloudflare module; only tests use this stub.
+
+### Maintenance rule
+
+When adding a new workspace package that E2E tests import, add the alias to
+**both** the individual phase config AND `vitest.e2e.config.ts`. If the unified
+gate breaks, this table is the first place to check.
+
+---
+
 ## Testing Philosophy
 
 - **Hard TDD:** Red/green/refactor cycle.

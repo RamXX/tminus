@@ -38,10 +38,37 @@ export default defineConfig({
         },
         resolve: {
           alias: {
+            // --- Workspace packages (source aliases) ---
             "@tminus/shared": path.resolve(__dirname, "packages/shared/src"),
             "@tminus/d1-registry": path.resolve(
               __dirname,
               "packages/d1-registry/src",
+            ),
+            // --- Durable Objects ---
+            "@tminus/do-user-graph": path.resolve(
+              __dirname,
+              "durable-objects/user-graph/src",
+            ),
+            "@tminus/do-group-schedule": path.resolve(
+              __dirname,
+              "durable-objects/group-schedule/src",
+            ),
+            // --- Workflows ---
+            "@tminus/workflow-scheduling": path.resolve(
+              __dirname,
+              "workflows/scheduling/src",
+            ),
+            // --- Cloudflare runtime stubs ---
+            // The "cloudflare:workers" scheme is a Cloudflare Workers built-in
+            // module unavailable in Node/vitest. Several E2E test files
+            // transitively import it (e.g. walking-skeleton-oauth imports
+            // workers/oauth/src/index which re-exports workflow-wrapper.ts
+            // which imports WorkflowEntrypoint from cloudflare:workers).
+            // This stub provides minimal WorkflowEntrypoint and DurableObject
+            // classes so the import resolves without error.
+            "cloudflare:workers": path.resolve(
+              __dirname,
+              "workers/oauth/src/__stubs__/cloudflare-workers.ts",
             ),
           },
         },
