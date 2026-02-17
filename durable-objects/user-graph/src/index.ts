@@ -1018,6 +1018,16 @@ export class UserGraphDO {
   ): Promise<string> {
     this.ensureMigrated();
 
+    // For API-created events, generate missing IDs.
+    // The API handler passes raw user input which won't have
+    // canonical_event_id, origin_account_id, or origin_event_id.
+    const canonicalId =
+      (event.canonical_event_id as string) || generateId("event");
+    const originAccountId =
+      (event.origin_account_id as string) || "api";
+    const originEventId =
+      event.origin_event_id || canonicalId;
+
     const startTs = event.start.dateTime ?? event.start.date ?? "";
     const endTs = event.end.dateTime ?? event.end.date ?? "";
 
@@ -1026,7 +1036,7 @@ export class UserGraphDO {
       .exec<{ canonical_event_id: string; version: number }>(
         `SELECT canonical_event_id, version FROM canonical_events
          WHERE canonical_event_id = ?`,
-        event.canonical_event_id as string,
+        canonicalId,
       )
       .toArray();
 
@@ -1052,11 +1062,11 @@ export class UserGraphDO {
         event.transparency ?? "opaque",
         event.recurrence_rule ?? null,
         newVersion,
-        event.canonical_event_id as string,
+        canonicalId,
       );
 
       this.writeJournal(
-        event.canonical_event_id as string,
+        canonicalId,
         "updated",
         source,
         { new_version: newVersion },
@@ -1069,9 +1079,9 @@ export class UserGraphDO {
           all_day, status, visibility, transparency, recurrence_rule,
           source, version, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
-        event.canonical_event_id as string,
-        event.origin_account_id as string,
-        event.origin_event_id,
+        canonicalId,
+        originAccountId,
+        originEventId,
         event.title ?? null,
         event.description ?? null,
         event.location ?? null,
@@ -1083,11 +1093,11 @@ export class UserGraphDO {
         event.visibility ?? "default",
         event.transparency ?? "opaque",
         event.recurrence_rule ?? null,
-        event.source,
+        event.source ?? source,
       );
 
       this.writeJournal(
-        event.canonical_event_id as string,
+        canonicalId,
         "created",
         source,
         {},
@@ -1096,11 +1106,11 @@ export class UserGraphDO {
 
     // Trigger projections
     await this.projectAndEnqueue(
-      event.canonical_event_id as string,
-      event.origin_account_id as string,
+      canonicalId,
+      originAccountId,
     );
 
-    return event.canonical_event_id as string;
+    return canonicalId;
   }
 
   // -------------------------------------------------------------------------

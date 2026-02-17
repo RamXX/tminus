@@ -1367,6 +1367,108 @@ describe("UserGraphDO integration", () => {
       expect(result!.event.title).toBe("Updated Title");
       expect(result!.event.version).toBe(2);
     });
+
+    it("generates canonical_event_id when not provided (API-created event)", async () => {
+      // Simulates what happens when POST /v1/events forwards raw user body
+      // without canonical_event_id, origin_account_id, or origin_event_id
+      const apiEvent = {
+        title: "API Created Event",
+        start: { dateTime: "2026-02-20T14:00:00Z" },
+        end: { dateTime: "2026-02-20T15:00:00Z" },
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+      };
+
+      const id = await ug.upsertCanonicalEvent(apiEvent as any, "api");
+
+      // Must return a valid evt_ prefixed ID
+      expect(id).toBeTruthy();
+      expect(id).toMatch(/^evt_/);
+
+      // Must be retrievable
+      const result = ug.getCanonicalEvent(id);
+      expect(result).not.toBeNull();
+      expect(result!.event.title).toBe("API Created Event");
+      expect(result!.event.canonical_event_id).toBe(id);
+      // origin_account_id defaults to "api" when not provided
+      expect(result!.event.origin_account_id).toBe("api");
+      // source defaults to the source parameter when event.source is not set
+      expect(result!.event.source).toBe("api");
+
+      // Journal should record creation
+      const journal = ug.queryJournal();
+      const createEntry = journal.items.find(
+        (j: any) => j.canonical_event_id === id && j.change_type === "created",
+      );
+      expect(createEntry).toBeDefined();
+      expect(createEntry!.actor).toBe("api");
+    });
+
+    it("uses provided canonical_event_id when present (backward compatibility)", async () => {
+      const event = {
+        canonical_event_id: "evt_01COMPAT000000000000000001",
+        origin_account_id: TEST_ACCOUNT_ID,
+        origin_event_id: "compat_001",
+        title: "Compat Event",
+        start: { dateTime: "2026-02-20T16:00:00Z" },
+        end: { dateTime: "2026-02-20T17:00:00Z" },
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+        source: "ui" as const,
+        version: 1,
+        created_at: "2026-02-14T00:00:00Z",
+        updated_at: "2026-02-14T00:00:00Z",
+      };
+
+      const id = await ug.upsertCanonicalEvent(event as any, "user:usr_test");
+
+      // Must use the provided ID, not generate a new one
+      expect(id).toBe("evt_01COMPAT000000000000000001");
+
+      const result = ug.getCanonicalEvent(id);
+      expect(result).not.toBeNull();
+      expect(result!.event.origin_account_id).toBe(TEST_ACCOUNT_ID);
+      expect(result!.event.origin_event_id).toBe("compat_001");
+    });
+
+    it("creates then updates API event via upsert", async () => {
+      // Create without IDs (API path)
+      const apiEvent = {
+        title: "Will Be Updated",
+        start: { dateTime: "2026-02-21T09:00:00Z" },
+        end: { dateTime: "2026-02-21T10:00:00Z" },
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+      };
+
+      const id = await ug.upsertCanonicalEvent(apiEvent as any, "api");
+      expect(id).toMatch(/^evt_/);
+
+      // Now update using the returned ID (like PATCH /v1/events/:id does)
+      const updateEvent = {
+        canonical_event_id: id,
+        title: "Updated Via Patch",
+        start: { dateTime: "2026-02-21T09:00:00Z" },
+        end: { dateTime: "2026-02-21T10:00:00Z" },
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+      };
+
+      const updatedId = await ug.upsertCanonicalEvent(updateEvent as any, "api");
+      expect(updatedId).toBe(id);
+
+      const result = ug.getCanonicalEvent(id);
+      expect(result!.event.title).toBe("Updated Via Patch");
+      expect(result!.event.version).toBe(2);
+    });
   });
 
   // -------------------------------------------------------------------------
