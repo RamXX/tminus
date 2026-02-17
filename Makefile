@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-live test-live-staging test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-live test-live-staging test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean ios-build-xcode ios-test-xcode ios-archive ios-ci ios-clean-xcode audit-governance verify-closure
 
 # ---- Core targets ----
 
@@ -277,8 +277,8 @@ secrets-setup-dry-run:
 	@test -f .env || { echo "ERROR: .env not found. Copy .env.example and fill in values."; exit 1; }
 	. ./.env && node scripts/setup-secrets.mjs --dry-run
 
-# ---- iOS targets ----
-# Build and test the iOS walking skeleton (Swift Package Manager).
+# ---- iOS targets (SPM) ----
+# Build and test the iOS library via Swift Package Manager (macOS host).
 # Requires Xcode 16+ with Swift 6.1+ toolchain.
 
 ios-build:
@@ -289,3 +289,61 @@ ios-test:
 
 ios-clean:
 	cd ios/TMinus && swift package clean
+
+# ---- iOS targets (Xcode / CI) ----
+# Deterministic xcodebuild targets for CI pipelines and release readiness.
+# These build against the iOS Simulator SDK (no code signing required).
+# For real-device / TestFlight builds, set DEVELOPMENT_TEAM and use ios-archive.
+#
+# Simulator device name defaults to "iPhone 17 Pro". Override with:
+#   make ios-build-xcode IOS_SIM="iPhone 16e"
+
+IOS_SIM ?= iPhone 17 Pro
+IOS_DEST = platform=iOS Simulator,name=$(IOS_SIM)
+IOS_PROJ_DIR = ios/TMinus
+IOS_SCHEME = TMinus
+
+ios-build-xcode:
+	cd $(IOS_PROJ_DIR) && xcodebuild clean build \
+		-scheme $(IOS_SCHEME) \
+		-destination '$(IOS_DEST)' \
+		-quiet
+
+ios-test-xcode:
+	cd $(IOS_PROJ_DIR) && xcodebuild test \
+		-scheme $(IOS_SCHEME) \
+		-destination '$(IOS_DEST)' \
+		-enableCodeCoverage YES \
+		-resultBundlePath ./build/TestResults.xcresult \
+		-quiet
+
+ios-archive:
+	cd $(IOS_PROJ_DIR) && xcodebuild archive \
+		-scheme $(IOS_SCHEME) \
+		-destination 'generic/platform=iOS' \
+		-archivePath ./build/TMinus.xcarchive \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGN_IDENTITY="" \
+		-quiet
+	@echo "Archive created: $(IOS_PROJ_DIR)/build/TMinus.xcarchive"
+	@plutil -p $(IOS_PROJ_DIR)/build/TMinus.xcarchive/Info.plist
+
+ios-clean-xcode:
+	cd $(IOS_PROJ_DIR) && xcodebuild clean -scheme $(IOS_SCHEME) -quiet
+	rm -rf $(IOS_PROJ_DIR)/build
+
+# ios-ci: Full CI pipeline -- SPM tests + xcodebuild build + archive.
+# Runs all three stages sequentially; fails fast on first error.
+ios-ci: ios-test ios-build-xcode ios-archive
+	@echo "iOS CI pipeline complete: SPM tests PASS, Xcode build PASS, archive PASS"
+
+# ---- Delivery governance targets ----
+# Audit and enforce Paivot delivery-governance label integrity.
+# See docs/development/coding-conventions.md for workflow documentation.
+
+audit-governance:
+	bash scripts/audit-delivery-governance.sh
+
+verify-closure:
+	@test -n "$(ISSUE)" || { echo "Usage: make verify-closure ISSUE=TM-xxxx"; exit 1; }
+	bash scripts/verify-closure-governance.sh $(ISSUE)

@@ -49,3 +49,52 @@
 - Each worker has its own `wrangler.toml`
 - Environment sections have NO inheritance from top-level config -- declare all bindings in each `[env.*]` section
 - Only export the default handler and DO classes from `index.ts` -- move constants/utilities to separate modules
+
+## Delivery Governance
+
+Every beads issue must follow the Paivot delivery lifecycle: **new -> in_progress -> delivered -> accepted/rejected -> closed**. Labels must reflect this progression so backlog state is trustworthy.
+
+### Required Labels Before Closure
+
+| Issue Type | Required Label(s) | Notes |
+|------------|-------------------|-------|
+| Task / Bug / Story | `delivered` + `accepted` | Must have delivery evidence in notes (CI results, bd_contract) |
+| Epic / Milestone | `accepted` | Verified via child story completion |
+| `[MANUAL]` tasks | `accepted` | No automated CI evidence required; operator confirmation suffices |
+| Rejected issues | `rejected` | Must have rejection reason in notes |
+
+### Enforcement Workflow
+
+1. **Before closing any issue**, run the pre-closure check:
+   ```bash
+   make verify-closure ISSUE=TM-xxxx
+   ```
+   This verifies the issue has proper acceptance/rejection labels and evidence.
+
+2. **Periodic audit** of all closed issues:
+   ```bash
+   make audit-governance
+   ```
+   Reports mismatches between closure status and governance labels. Exit code 0 means clean; exit code 1 means mismatches found.
+
+3. **Available output modes** for the audit:
+   ```bash
+   ./scripts/audit-delivery-governance.sh          # Human-readable report
+   ./scripts/audit-delivery-governance.sh --json    # Machine-readable JSON
+   ./scripts/audit-delivery-governance.sh --counts  # Summary counts only
+   ```
+
+### Acceptance Evidence Requirements
+
+Delivery notes for non-manual tasks MUST include:
+- **CI Results**: lint, test, integration, build pass/fail status with counts
+- **Wiring verification**: each new function and where it is called from
+- **AC verification table**: mapping each acceptance criterion to code and test locations
+- **bd_contract status**: explicitly set to `delivered` then `accepted`
+
+### What Happens When Governance Fails
+
+- `make audit-governance` returns exit code 1 and lists all mismatched issues
+- `make verify-closure` returns exit code 1 with specific missing requirements
+- Issues flagged must be remediated before the backlog can be considered clean
+- The governance audit should be run as part of milestone reviews
