@@ -35,6 +35,39 @@ import {
 } from "./constants";
 
 // ---------------------------------------------------------------------------
+// Mock GoogleCalendarClient and generateId (used by reRegisterChannel)
+//
+// After TM-ucl1, the cron worker calls reRegisterChannel() which creates a
+// GoogleCalendarClient and calls stopChannel/watchEvents directly against
+// Google's API. In integration tests we mock these external API calls while
+// keeping all D1 queries real (via better-sqlite3).
+// ---------------------------------------------------------------------------
+
+/** Tracks Google Calendar API calls for assertion. */
+const googleApiCalls: Array<{ method: string; args: unknown[] }> = [];
+
+vi.mock("@tminus/shared", async () => {
+  const actual = await vi.importActual("@tminus/shared");
+  return {
+    ...actual,
+    GoogleCalendarClient: vi.fn().mockImplementation(() => ({
+      stopChannel: vi.fn(async (...args: unknown[]) => {
+        googleApiCalls.push({ method: "stopChannel", args });
+      }),
+      watchEvents: vi.fn(async (...args: unknown[]) => {
+        googleApiCalls.push({ method: "watchEvents", args });
+        return {
+          channelId: "new-channel-from-google",
+          resourceId: "new-resource-from-google",
+          expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        };
+      }),
+    })),
+    generateId: vi.fn((prefix: string) => `${prefix}_mock_${Date.now()}`),
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Test constants
 // ---------------------------------------------------------------------------
 
@@ -291,6 +324,7 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -300,13 +334,14 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
     ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
     d1 = createRealD1(db);
     queue = createMockQueue();
+    googleApiCalls.length = 0;
   });
 
   afterEach(() => {
     db.close();
   });
 
-  it("renews channels expiring within 24 hours", async () => {
+  it("re-registers channels expiring within 24 hours via reRegisterChannel", async () => {
     // Channel expires in 12 hours (within threshold)
     const expiresIn12h = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
     insertAccount(db, {
@@ -314,42 +349,71 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
       channel_expiry_ts: expiresIn12h,
     });
 
-    const doNamespace = createMockAccountDONamespace();
+    // Mock DO responses for the reRegisterChannel flow:
+    // 1. /getAccessToken returns a token
+    // 2. /storeWatchChannel stores new channel metadata
+    const responses = new Map<string, Map<string, Response>>();
+    responses.set(
+      ACCOUNT_A.account_id,
+      new Map([
+        ["/getAccessToken", new Response(JSON.stringify({ access_token: "mock-token" }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })],
+        ["/storeWatchChannel", new Response(JSON.stringify({ ok: true }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })],
+      ]),
+    );
+
+    const doNamespace = createMockAccountDONamespace({ responses });
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
     await handler.scheduled(event, env, ctx);
 
-    // AccountDO.renewChannel() should have been called
-    expect(doNamespace.calls).toHaveLength(1);
-    expect(doNamespace.calls[0].accountId).toBe(ACCOUNT_A.account_id);
-    expect(doNamespace.calls[0].path).toBe("/renewChannel");
-    expect(doNamespace.calls[0].method).toBe("POST");
+    // reRegisterChannel flow: getAccessToken -> Google stopChannel -> Google watchEvents -> storeWatchChannel
+    const accountCalls = doNamespace.calls.filter(c => c.accountId === ACCOUNT_A.account_id);
+    expect(accountCalls.some(c => c.path === "/getAccessToken")).toBe(true);
+    expect(accountCalls.some(c => c.path === "/storeWatchChannel")).toBe(true);
+
+    // Google API calls should have been made (mocked)
+    expect(googleApiCalls.some(c => c.method === "watchEvents")).toBe(true);
+
+    // D1 should be updated with new channel metadata
+    const row = db.prepare("SELECT channel_id, resource_id FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_A.account_id) as { channel_id: string; resource_id: string };
+    expect(row.channel_id).toBe("new-channel-from-google");
+    expect(row.resource_id).toBe("new-resource-from-google");
   });
 
   it("does NOT renew channels expiring in more than 24 hours", async () => {
     // Channel expires in 48 hours (outside threshold)
     const expiresIn48h = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    // Also set last_sync_ts to now so it's not considered stale
+    const now = new Date().toISOString();
     insertAccount(db, {
       ...ACCOUNT_A,
       channel_expiry_ts: expiresIn48h,
     });
+    // Set last_sync_ts to now so the channel is NOT considered stale
+    db.prepare("UPDATE accounts SET last_sync_ts = ? WHERE account_id = ?")
+      .run(now, ACCOUNT_A.account_id);
 
     const doNamespace = createMockAccountDONamespace();
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
     await handler.scheduled(event, env, ctx);
 
-    // No DO calls -- channel is not expiring soon
+    // No DO calls -- channel is not expiring soon and has recent sync
     expect(doNamespace.calls).toHaveLength(0);
   });
 
-  it("renews multiple expiring channels in a single run", async () => {
+  it("re-registers multiple expiring channels in a single run", async () => {
     const expiresIn6h = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
     insertAccount(db, {
       ...ACCOUNT_A,
@@ -360,20 +424,41 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
       channel_expiry_ts: expiresIn6h,
     });
 
-    const doNamespace = createMockAccountDONamespace();
+    // Mock DO responses for both accounts
+    const responses = new Map<string, Map<string, Response>>();
+    for (const acct of [ACCOUNT_A, ACCOUNT_B]) {
+      responses.set(
+        acct.account_id,
+        new Map([
+          ["/getAccessToken", new Response(JSON.stringify({ access_token: "mock-token" }), {
+            status: 200, headers: { "Content-Type": "application/json" },
+          })],
+          ["/storeWatchChannel", new Response(JSON.stringify({ ok: true }), {
+            status: 200, headers: { "Content-Type": "application/json" },
+          })],
+        ]),
+      );
+    }
+
+    const doNamespace = createMockAccountDONamespace({ responses });
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
     await handler.scheduled(event, env, ctx);
 
-    // Both accounts should have renewChannel called
-    expect(doNamespace.calls).toHaveLength(2);
-    const calledAccountIds = doNamespace.calls.map((c) => c.accountId).sort();
+    // Both accounts should have getAccessToken + storeWatchChannel called
+    const calledAccountIds = [...new Set(doNamespace.calls.map(c => c.accountId))].sort();
     expect(calledAccountIds).toEqual(
       [ACCOUNT_A.account_id, ACCOUNT_B.account_id].sort(),
     );
+    // Each account should have both DO calls
+    for (const acctId of calledAccountIds) {
+      const calls = doNamespace.calls.filter(c => c.accountId === acctId);
+      expect(calls.some(c => c.path === "/getAccessToken")).toBe(true);
+      expect(calls.some(c => c.path === "/storeWatchChannel")).toBe(true);
+    }
   });
 
   it("skips accounts with null channel_expiry_ts", async () => {
@@ -384,7 +469,7 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
 
     const doNamespace = createMockAccountDONamespace();
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
@@ -402,7 +487,7 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
 
     const doNamespace = createMockAccountDONamespace();
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
@@ -417,23 +502,40 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
     insertAccount(db, { ...ACCOUNT_A, channel_expiry_ts: expiresIn6h });
     insertAccount(db, { ...ACCOUNT_B, channel_expiry_ts: expiresIn6h });
 
-    // Account A returns 500, Account B succeeds
+    // Account A: getAccessToken returns 500 (reRegisterChannel will log error and continue)
+    // Account B: succeeds normally
     const responses = new Map<string, Map<string, Response>>();
     responses.set(
       ACCOUNT_A.account_id,
-      new Map([["/renewChannel", new Response("Internal Error", { status: 500 })]]),
+      new Map([["/getAccessToken", new Response("Internal Error", { status: 500 })]]),
+    );
+    responses.set(
+      ACCOUNT_B.account_id,
+      new Map([
+        ["/getAccessToken", new Response(JSON.stringify({ access_token: "mock-token" }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })],
+        ["/storeWatchChannel", new Response(JSON.stringify({ ok: true }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })],
+      ]),
     );
 
     const doNamespace = createMockAccountDONamespace({ responses });
     const handler = createHandler();
-    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue, WEBHOOK_URL: "https://webhook.test" } as Env;
     const event = buildScheduledEvent(CRON_CHANNEL_RENEWAL);
     const ctx = buildMockCtx();
 
     await handler.scheduled(event, env, ctx);
 
-    // Both should be attempted (error is caught, not thrown)
-    expect(doNamespace.calls).toHaveLength(2);
+    // Both accounts should be attempted (error is caught, not thrown)
+    const uniqueAccounts = [...new Set(doNamespace.calls.map(c => c.accountId))];
+    expect(uniqueAccounts).toHaveLength(2);
+    // Account A should have getAccessToken attempted (and failed)
+    expect(doNamespace.calls.some(c => c.accountId === ACCOUNT_A.account_id && c.path === "/getAccessToken")).toBe(true);
+    // Account B should have completed successfully (getAccessToken + storeWatchChannel)
+    expect(doNamespace.calls.some(c => c.accountId === ACCOUNT_B.account_id && c.path === "/storeWatchChannel")).toBe(true);
   });
 });
 
@@ -450,6 +552,7 @@ describe("Cron integration tests: Token Health Check (every 12h)", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -587,6 +690,7 @@ describe("Cron integration tests: Drift Reconciliation (daily 03:00 UTC)", () =>
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -733,6 +837,7 @@ describe("Cron integration tests: Microsoft Subscription Renewal (AC 5)", () => 
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -742,6 +847,7 @@ describe("Cron integration tests: Microsoft Subscription Renewal (AC 5)", () => 
     ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
     d1 = createRealD1(db);
     queue = createMockQueue();
+    googleApiCalls.length = 0;
   });
 
   afterEach(() => {
@@ -897,6 +1003,7 @@ describe("Cron dispatch routing", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -956,6 +1063,7 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
