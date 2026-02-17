@@ -38,6 +38,11 @@ export default defineConfig({
           env: {
             LIVE_BASE_URL: process.env.LIVE_BASE_URL || "",
             LIVE_JWT_TOKEN: process.env.LIVE_JWT_TOKEN || "",
+            GOOGLE_TEST_REFRESH_TOKEN_A:
+              process.env.GOOGLE_TEST_REFRESH_TOKEN_A || "",
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
+            JWT_SECRET: process.env.JWT_SECRET || "",
           },
           // Run tests in file order, not shuffled
           sequence: {
