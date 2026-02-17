@@ -784,6 +784,173 @@ describe("UserGraphDO integration", () => {
       expect(result.items).toHaveLength(1);
       expect(result.items[0].title).toBe("Other Account Event");
     });
+
+    it("filters by origin_event_id (exact match)", async () => {
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "google_evt_abc",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "google_evt_abc",
+          title: "Target Event",
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "google_evt_def",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "google_evt_def",
+          title: "Other Event",
+          start: { dateTime: "2026-02-15T10:00:00Z" },
+          end: { dateTime: "2026-02-15T10:30:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      const result = ug.listCanonicalEvents({
+        origin_event_id: "google_evt_abc",
+      });
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].title).toBe("Target Event");
+      expect(result.items[0].origin_event_id).toBe("google_evt_abc");
+    });
+
+    it("filters by updated_after timestamp", async () => {
+      // Create two events -- both get created_at/updated_at = datetime('now')
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_old",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_old",
+          title: "Old Event",
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_new",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_new",
+          title: "New Event",
+          start: { dateTime: "2026-02-15T10:00:00Z" },
+          end: { dateTime: "2026-02-15T10:30:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      // All events were just created, so updated_after = a past timestamp
+      // should return all of them
+      const resultAll = ug.listCanonicalEvents({
+        updated_after: "2020-01-01T00:00:00Z",
+      });
+      expect(resultAll.items).toHaveLength(2);
+
+      // A future timestamp should return none
+      const resultNone = ug.listCanonicalEvents({
+        updated_after: "2099-01-01T00:00:00Z",
+      });
+      expect(resultNone.items).toHaveLength(0);
+    });
+
+    it("filters by source", async () => {
+      // Provider events are created via applyProviderDelta (source = "provider")
+      const delta = makeCreatedDelta({
+        origin_event_id: "evt_provider",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_provider",
+          title: "Provider Event",
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Create a user-initiated event via upsertCanonicalEvent (source = "api")
+      await ug.upsertCanonicalEvent(
+        {
+          canonical_event_id: "evt_01HXYZ00000000000000000099" as import("@tminus/shared").EventId,
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: "evt_api",
+          title: "API Event",
+          start: { dateTime: "2026-02-15T11:00:00Z" },
+          end: { dateTime: "2026-02-15T11:30:00Z" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+          source: "ui",
+          version: 1,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        "api",
+      );
+
+      // Filter for provider-only events
+      const providerResult = ug.listCanonicalEvents({ source: "provider" });
+      expect(providerResult.items).toHaveLength(1);
+      expect(providerResult.items[0].title).toBe("Provider Event");
+
+      // All events (no source filter)
+      const allResult = ug.listCanonicalEvents({});
+      expect(allResult.items.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("combines multiple filters", async () => {
+      const delta1 = makeCreatedDelta({
+        origin_event_id: "evt_combo_1",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_combo_1",
+          title: "Morning Provider Event",
+          start: { dateTime: "2026-02-15T08:00:00Z" },
+          end: { dateTime: "2026-02-15T09:00:00Z" },
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "evt_combo_2",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "evt_combo_2",
+          title: "Afternoon Provider Event",
+          start: { dateTime: "2026-02-15T14:00:00Z" },
+          end: { dateTime: "2026-02-15T15:00:00Z" },
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1, delta2]);
+
+      // Combine origin_event_id + time range
+      const result = ug.listCanonicalEvents({
+        origin_event_id: "evt_combo_1",
+        time_min: "2026-02-15T07:00:00Z",
+        time_max: "2026-02-15T10:00:00Z",
+      });
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].title).toBe("Morning Provider Event");
+
+      // Combine with non-matching time range -- should return empty
+      const resultEmpty = ug.listCanonicalEvents({
+        origin_event_id: "evt_combo_1",
+        time_min: "2026-02-15T12:00:00Z",
+        time_max: "2026-02-15T16:00:00Z",
+      });
+      expect(resultEmpty.items).toHaveLength(0);
+    });
+
+    it("returns empty when origin_event_id does not exist", async () => {
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const result = ug.listCanonicalEvents({
+        origin_event_id: "nonexistent_event_id",
+      });
+
+      expect(result.items).toHaveLength(0);
+      expect(result.has_more).toBe(false);
+    });
   });
 
   // -------------------------------------------------------------------------

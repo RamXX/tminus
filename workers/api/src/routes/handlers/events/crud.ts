@@ -32,6 +32,9 @@ export async function handleListEvents(
   const accountIdFilter = url.searchParams.get("account_id");
   const cursor = url.searchParams.get("cursor");
   const limitStr = url.searchParams.get("limit");
+  const originEventId = url.searchParams.get("origin_event_id");
+  const updatedAfter = url.searchParams.get("updated_after");
+  const provider = url.searchParams.get("provider");
 
   if (start) query.time_min = start;
   if (end) query.time_max = end;
@@ -41,6 +44,9 @@ export async function handleListEvents(
     const limit = parseInt(limitStr, 10);
     if (!isNaN(limit) && limit > 0) query.limit = limit;
   }
+  if (originEventId) query.origin_event_id = originEventId;
+  if (updatedAfter) query.updated_after = updatedAfter;
+  if (provider) query.source = provider;
 
   try {
     const result = await callDO<{

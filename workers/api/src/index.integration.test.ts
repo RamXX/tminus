@@ -932,6 +932,143 @@ describe("Integration: Event endpoints", () => {
     expect(doBody.origin_account_id).toBe(ACCOUNT_A.account_id);
   });
 
+  it("GET /v1/events passes origin_event_id filter to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request(
+        "https://api.tminus.dev/v1/events?origin_event_id=google_evt_abc",
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.origin_event_id).toBe("google_evt_abc");
+  });
+
+  it("GET /v1/events passes updated_after filter to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request(
+        "https://api.tminus.dev/v1/events?updated_after=2026-02-15T00:00:00Z",
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.updated_after).toBe("2026-02-15T00:00:00Z");
+  });
+
+  it("GET /v1/events passes provider filter as source to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request(
+        "https://api.tminus.dev/v1/events?provider=google",
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.source).toBe("google");
+  });
+
+  it("GET /v1/events passes all filters simultaneously to DO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", {
+          items: [{ canonical_event_id: "evt_01HXYZ00000000000000000001", title: "Filtered" }],
+          cursor: null,
+          has_more: false,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(
+        "https://api.tminus.dev/v1/events?start=2026-01-01&end=2026-12-31&origin_event_id=evt123&updated_after=2026-02-01T00:00:00Z&provider=outlook&limit=5",
+        { method: "GET", headers: { Authorization: authHeader } },
+      ),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; data: unknown[] };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.time_min).toBe("2026-01-01");
+    expect(doBody.time_max).toBe("2026-12-31");
+    expect(doBody.origin_event_id).toBe("evt123");
+    expect(doBody.updated_after).toBe("2026-02-01T00:00:00Z");
+    expect(doBody.source).toBe("outlook");
+    expect(doBody.limit).toBe(5);
+  });
+
+  it("GET /v1/events omits undefined filter params from DO call", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listCanonicalEvents", { items: [], cursor: null, has_more: false }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    await handler.fetch(
+      new Request("https://api.tminus.dev/v1/events", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    // None of the new filter params should be present when not provided
+    expect(doBody.origin_event_id).toBeUndefined();
+    expect(doBody.updated_after).toBeUndefined();
+    expect(doBody.source).toBeUndefined();
+  });
+
   // -----------------------------------------------------------------------
   // GET /v1/events/:id
   // -----------------------------------------------------------------------

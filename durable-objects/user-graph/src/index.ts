@@ -279,6 +279,12 @@ export interface ListEventsQuery {
   readonly time_min?: string;
   readonly time_max?: string;
   readonly origin_account_id?: string;
+  /** Exact match on the provider-specific event ID. */
+  readonly origin_event_id?: string;
+  /** Only return events updated after this ISO 8601 timestamp. */
+  readonly updated_after?: string;
+  /** Filter by event source (e.g. "provider", "ics_feed", "ui", "mcp", "system"). */
+  readonly source?: string;
   readonly limit?: number;
   /** Cursor: "start_ts|canonical_event_id" */
   readonly cursor?: string;
@@ -1183,6 +1189,18 @@ export class UserGraphDO {
     if (query.origin_account_id) {
       conditions.push("origin_account_id = ?");
       params.push(query.origin_account_id);
+    }
+    if (query.origin_event_id) {
+      conditions.push("origin_event_id = ?");
+      params.push(query.origin_event_id);
+    }
+    if (query.updated_after) {
+      conditions.push("updated_at > ?");
+      params.push(query.updated_after);
+    }
+    if (query.source) {
+      conditions.push("source = ?");
+      params.push(query.source);
     }
 
     // Cursor: "start_ts|canonical_event_id"
