@@ -241,9 +241,9 @@ INSERT OR IGNORE INTO accounts (account_id, user_id, provider, provider_subject,
     async () => {
       // Wrangler dev exposes /__scheduled to trigger the scheduled handler.
       // The cron handler will attempt to query D1 for expiring channels
-      // and try to call AccountDO.renewChannel(). The DO call will fail
-      // in isolated local mode (no tminus-api running), but the handler
-      // should NOT crash -- it logs errors and continues.
+      // and re-register them via reRegisterChannel(). The DO/API calls
+      // will fail in isolated local mode (no tminus-api running), but the
+      // handler should NOT crash -- it logs errors and continues.
       const resp = await fetch(
         `${cronWorker!.url}/__scheduled?cron=${encodeURIComponent(CRON_CHANNEL_RENEWAL)}`,
       );

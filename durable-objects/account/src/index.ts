@@ -675,40 +675,6 @@ export class AccountDO {
   }
 
   /**
-   * Renew an existing watch channel by extending its expiry.
-   * Throws if the channel does not exist.
-   */
-  async renewChannel(
-    channelId: string,
-  ): Promise<{ channelId: string; expiry: string }> {
-    this.ensureMigrated();
-
-    // Verify channel exists
-    const rows = this.sql
-      .exec<{ channel_id: string; calendar_id: string }>(
-        "SELECT channel_id, calendar_id FROM watch_channels WHERE channel_id = ?",
-        channelId,
-      )
-      .toArray();
-
-    if (rows.length === 0) {
-      throw new Error(`Watch channel not found: ${channelId}`);
-    }
-
-    const newExpiry = new Date(
-      Date.now() + 7 * 24 * 60 * 60 * 1000,
-    ).toISOString();
-
-    this.sql.exec(
-      `UPDATE watch_channels SET expiry_ts = ?, status = 'active' WHERE channel_id = ?`,
-      newExpiry,
-      channelId,
-    );
-
-    return { channelId, expiry: newExpiry };
-  }
-
-  /**
    * Get the status of all watch channels for this account.
    */
   async getChannelStatus(): Promise<{ channels: ChannelInfo[] }> {

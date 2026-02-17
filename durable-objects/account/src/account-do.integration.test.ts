@@ -817,7 +817,7 @@ describe("AccountDO integration", () => {
   // Watch channel lifecycle
   // -------------------------------------------------------------------------
 
-  describe("registerChannel / renewChannel / getChannelStatus", () => {
+  describe("registerChannel / getChannelStatus", () => {
     it("registers a new channel with auto-generated ID", async () => {
       const mockFetch = createMockFetch();
       const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
@@ -865,34 +865,6 @@ describe("AccountDO integration", () => {
 
       const status = await acct.getChannelStatus();
       expect(status.channels).toHaveLength(2);
-    });
-
-    it("renewChannel extends expiry of existing channel", async () => {
-      const mockFetch = createMockFetch();
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
-
-      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
-      const original = await acct.registerChannel("primary");
-
-      // Wait a tiny bit so expiry is different
-      const renewed = await acct.renewChannel(original.channelId);
-
-      expect(renewed.channelId).toBe(original.channelId);
-      // New expiry should be at or after original expiry
-      expect(new Date(renewed.expiry).getTime()).toBeGreaterThanOrEqual(
-        new Date(original.expiry).getTime(),
-      );
-    });
-
-    it("renewChannel throws for non-existent channel", async () => {
-      const mockFetch = createMockFetch();
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
-
-      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
-
-      await expect(
-        acct.renewChannel("cal_nonexistent0000000000000000"),
-      ).rejects.toThrow(/Watch channel not found/);
     });
 
     it("getChannelStatus returns all channels with correct info", async () => {
