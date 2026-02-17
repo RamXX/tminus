@@ -93,18 +93,36 @@ async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
 // ---------------------------------------------------------------------------
 
 /**
- * Import the master key from a hex-encoded string.
- * The master key must be exactly 32 bytes (64 hex characters) for AES-256.
+ * Detect whether a string is a valid hex string of given length.
+ */
+function isHexString(str: string, expectedLength: number): boolean {
+  return str.length === expectedLength && /^[0-9a-fA-F]+$/.test(str);
+}
+
+/**
+ * Import the master key from a secret string.
+ *
+ * Accepts two formats:
+ * 1. A 64-character hex string (32 bytes) -- used directly (backward compatible
+ *    with existing test fixtures).
+ * 2. Any other string (e.g., base64-encoded) -- hashed via SHA-256 to derive
+ *    a deterministic 32-byte key. This allows production MASTER_KEY values
+ *    that are not hex-encoded to work correctly.
  */
 export async function importMasterKey(
   masterKeyHex: string,
 ): Promise<CryptoKey> {
-  const keyBytes = hexToBytes(masterKeyHex);
-  if (keyBytes.length !== 32) {
-    throw new Error(
-      `Master key must be 32 bytes (64 hex chars), got ${keyBytes.length} bytes`,
-    );
+  let keyBytes: Uint8Array;
+
+  if (isHexString(masterKeyHex, 64)) {
+    // Legacy path: interpret as 32 raw hex bytes (backward compatible with tests)
+    keyBytes = hexToBytes(masterKeyHex);
+  } else {
+    // Derive a 32-byte key via SHA-256 of the raw secret string.
+    const encoded = new TextEncoder().encode(masterKeyHex);
+    keyBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
   }
+
   return importKey(keyBytes);
 }
 

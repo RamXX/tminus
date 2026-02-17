@@ -2744,6 +2744,37 @@ export class UserGraphDO {
     );
   }
 
+  /**
+   * Batch-store calendar entries for an account.
+   * Called by OnboardingWorkflow after discovering primary + overlay calendars.
+   */
+  storeCalendars(
+    calendars: ReadonlyArray<{
+      account_id: string;
+      provider_calendar_id: string;
+      role: string;
+      kind: string;
+      display_name: string;
+    }>,
+  ): void {
+    this.ensureMigrated();
+
+    for (const cal of calendars) {
+      const calendarId = generateId("calendar");
+      this.sql.exec(
+        `INSERT OR REPLACE INTO calendars
+         (calendar_id, account_id, provider_calendar_id, role, kind, display_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        calendarId,
+        cal.account_id,
+        cal.provider_calendar_id,
+        cal.role,
+        cal.kind,
+        cal.display_name,
+      );
+    }
+  }
+
   // -------------------------------------------------------------------------
   // ReconcileWorkflow data access methods
   // -------------------------------------------------------------------------
@@ -4952,6 +4983,20 @@ export class UserGraphDO {
             body.provider_calendar_id,
           );
           return Response.json({ ok: true });
+        }
+
+        case "/storeCalendars": {
+          const body = (await request.json()) as {
+            calendars: Array<{
+              account_id: string;
+              provider_calendar_id: string;
+              role: string;
+              kind: string;
+              display_name: string;
+            }>;
+          };
+          this.storeCalendars(body.calendars);
+          return Response.json({ ok: true, stored: body.calendars.length });
         }
 
         case "/listCanonicalEvents": {

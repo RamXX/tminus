@@ -33,6 +33,12 @@ interface Env {
   /** Symmetric key for encrypting state parameter (hex-encoded 32 bytes). */
   JWT_SECRET: string;
 
+  /** Queue for write operations (used by OnboardingWorkflow). */
+  WRITE_QUEUE: Queue;
+
+  /** Google Calendar webhook URL for watch channel registration. */
+  WEBHOOK_URL: string;
+
   /** Deployment environment: "production", "staging", or "development" (default). */
   ENVIRONMENT?: string;
 }

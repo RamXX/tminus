@@ -705,6 +705,34 @@ export class AccountDO {
   }
 
   /**
+   * Store a watch channel created externally (e.g. during onboarding workflow).
+   *
+   * Unlike registerChannel(), which generates its own channel_id, this method
+   * accepts all fields from the caller -- typically the Google Calendar API
+   * response forwarded by the OnboardingWorkflow.
+   */
+  async storeWatchChannel(
+    channelId: string,
+    resourceId: string,
+    expiration: string,
+    calendarId: string,
+  ): Promise<void> {
+    this.ensureMigrated();
+
+    this.sql.exec(
+      `INSERT OR REPLACE INTO watch_channels
+       (channel_id, account_id, resource_id, expiry_ts, calendar_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'active', datetime('now'))`,
+      channelId,
+      ACCOUNT_ROW_KEY,
+      resourceId,
+      expiration,
+      calendarId,
+    );
+  }
+
+
+  /**
    * Stop all active watch channels and remove them from storage.
    *
    * Calls Google's channels.stop API for each active channel.
@@ -1166,6 +1194,22 @@ export class AccountDO {
           const body = (await request.json()) as { calendar_id: string };
           const result = await this.registerChannel(body.calendar_id);
           return Response.json(result);
+        }
+
+        case "/storeWatchChannel": {
+          const body = (await request.json()) as {
+            channel_id: string;
+            resource_id: string;
+            expiration: string;
+            calendar_id: string;
+          };
+          await this.storeWatchChannel(
+            body.channel_id,
+            body.resource_id,
+            body.expiration,
+            body.calendar_id,
+          );
+          return Response.json({ ok: true });
         }
 
         case "/getChannelStatus": {
