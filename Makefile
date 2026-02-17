@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-live test-live-staging test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean ios-build-xcode ios-test-xcode ios-archive ios-ci ios-clean-xcode audit-governance verify-closure funnel-report
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-live test-live-staging test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean ios-build-xcode ios-test-xcode ios-archive ios-ci ios-clean-xcode audit-governance verify-closure funnel-report update-metrics
 
 # ---- Core targets ----
 
@@ -357,3 +357,23 @@ audit-governance:
 verify-closure:
 	@test -n "$(ISSUE)" || { echo "Usage: make verify-closure ISSUE=TM-xxxx"; exit 1; }
 	bash scripts/verify-closure-governance.sh $(ISSUE)
+
+# ---- Operational metrics (TM-kzvn) ----
+# Collect operational metrics from production monitoring and test suite,
+# then write site/metrics.json for the public site proof section.
+# Supports manual override via --override <path> for metrics requiring
+# Cloudflare API access (sync latency, reliability).
+# Safe to run repeatedly (idempotent).
+#
+# Usage:
+#   make update-metrics                        # Collect and write site/metrics.json
+#   make update-metrics-dry-run                # Print to stdout without writing
+#   make update-metrics OVERRIDE=override.json # Merge manual override values
+
+OVERRIDE ?=
+
+update-metrics: install
+	$(if $(OVERRIDE),node scripts/collect-operational-metrics.mjs --override $(OVERRIDE),node scripts/collect-operational-metrics.mjs)
+
+update-metrics-dry-run: install
+	$(if $(OVERRIDE),node scripts/collect-operational-metrics.mjs --dry-run --override $(OVERRIDE),node scripts/collect-operational-metrics.mjs --dry-run)

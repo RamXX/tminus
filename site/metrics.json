@@ -1,0 +1,19 @@
+{
+  "test_count": 3433,
+  "provider_count": 3,
+  "providers": [
+    "google",
+    "microsoft",
+    "caldav"
+  ],
+  "sync_latency_p50_ms": 1200,
+  "sync_latency_p95_ms": 3800,
+  "sync_reliability_pct": 99.7,
+  "collected_at": "2026-02-17T23:17:29.832Z",
+  "display": {
+    "sync_latency": "<4s",
+    "sync_reliability": "99.7%",
+    "provider_coverage": "3",
+    "test_coverage": "3,400+"
+  }
+}

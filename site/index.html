@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>T-Minus | Calendar Intelligence Platform</title>
-  <meta name="description" content="T-Minus unifies Google, Microsoft, and CalDAV timelines so you can stop double-booking, protect focus, and run scheduling through 38 MCP tools.">
+  <title>T-Minus.ink | AI-First Calendar Intelligence Platform</title>
+  <meta name="description" content="T-Minus.ink unifies Google, Microsoft, Apple, and CalDAV calendars with AI-native intelligence. Your AI assistant manages your time through natural language.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -168,27 +168,6 @@
     .code-block .number { color: #f78c6c; }
     .code-block .fn { color: #82aaff; }
 
-    /* ── Architecture diagram ── */
-    .arch-box {
-      border: 1px solid #252538;
-      background: #12121c;
-      transition: border-color 0.3s ease;
-    }
-
-    .arch-box:hover {
-      border-color: #00d4ff33;
-    }
-
-    .arch-connector {
-      background: linear-gradient(180deg, #00d4ff33, #00d4ff0a);
-      width: 1px;
-    }
-
-    .arch-connector-h {
-      background: linear-gradient(90deg, #00d4ff33, #00d4ff0a);
-      height: 1px;
-    }
-
     /* ── Nav blur ── */
     nav {
       transition: background-color 0.3s ease, backdrop-filter 0.3s ease;
@@ -250,13 +229,13 @@
       <div class="flex items-center justify-between h-16 lg:h-20">
         <!-- Logo -->
         <a href="#" class="flex items-center gap-0.5 text-xl font-bold tracking-tight">
-          <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span>
+          <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span><span class="text-amber-warm font-mono">.ink</span>
         </a>
 
         <!-- Desktop links -->
         <div class="hidden md:flex items-center gap-8 text-sm text-gray-400">
           <a href="#features" class="hover:text-white transition-colors">Features</a>
-          <a href="#intelligence" class="hover:text-white transition-colors">Intelligence</a>
+          <a href="#ai" class="hover:text-white transition-colors">AI Tools</a>
           <a href="#pricing" class="hover:text-white transition-colors">Pricing</a>
           <a href="#developers" class="hover:text-white transition-colors">Developers</a>
         </div>
@@ -279,7 +258,7 @@
       <div id="mobile-menu" class="md:hidden hidden pb-6 border-t border-surface-400">
         <div class="flex flex-col gap-4 pt-4 text-sm text-gray-400">
           <a href="#features" class="hover:text-white transition-colors">Features</a>
-          <a href="#intelligence" class="hover:text-white transition-colors">Intelligence</a>
+          <a href="#ai" class="hover:text-white transition-colors">AI Tools</a>
           <a href="#pricing" class="hover:text-white transition-colors">Pricing</a>
           <a href="#developers" class="hover:text-white transition-colors">Developers</a>
           <a href="#pricing" class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold text-center mt-2">
@@ -300,8 +279,8 @@
     <div class="relative z-10 max-w-5xl mx-auto px-6 text-center pt-20 pb-32">
       <!-- Eyebrow -->
       <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-surface-400 text-xs text-gray-400 font-medium mb-8 tracking-wide">
-        <span class="w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>
-        Production stack live at *.tminus.ink
+        <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+        Service Status: ACTIVE
       </div>
 
       <h1 class="text-4xl sm:text-5xl md:text-7xl font-extrabold text-white leading-[1.08] tracking-tight mb-6">
@@ -310,8 +289,9 @@
       </h1>
 
       <p class="max-w-2xl mx-auto text-lg sm:text-xl text-gray-400 leading-relaxed mb-10">
-        Connect Google, Microsoft, and CalDAV feeds. T-Minus builds a canonical timeline, mirrors busy overlays
-        in seconds, and gives your AI assistant 38 production-ready tools to schedule, analyze, and protect your time.
+        Connect Google, Microsoft, Apple, and CalDAV calendars. T-Minus.ink builds a unified timeline,
+        mirrors busy overlays in seconds, and gives your AI assistant production-ready tools to schedule,
+        analyze, and protect your time &mdash; all through natural language.
       </p>
 
       <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -323,10 +303,25 @@
         </a>
       </div>
 
-      <!-- Social proof hint -->
-      <p class="mt-16 text-xs text-gray-600 tracking-wide uppercase">
-        30 live production tests passing &middot; 4,700+ automated tests &middot; 9 workers deployed
-      </p>
+      <!-- Provider logos strip -->
+      <div class="mt-16 flex items-center justify-center gap-8 text-xs text-gray-500">
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 001 12c0 1.77.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+          Google
+        </span>
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none"><path d="M11.4 24H0V12.6h11.4V24z" fill="#F25022"/><path d="M24 24H12.6V12.6H24V24z" fill="#FFB900"/><path d="M11.4 11.4H0V0h11.4v11.4z" fill="#00A4EF"/><path d="M24 11.4H12.6V0H24v11.4z" fill="#7FBA00"/></svg>
+          Microsoft
+        </span>
+        <span class="flex items-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.81-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" fill="#A2AAAD"/></svg>
+          Apple
+        </span>
+        <span class="flex items-center gap-2 text-gray-600">
+          <span class="font-mono text-[10px]">DAV</span>
+          CalDAV
+        </span>
+      </div>
     </div>
 
     <!-- Bottom fade -->
@@ -354,8 +349,8 @@
           <div class="text-3xl text-accent mb-4 font-mono">&#x29C9;</div>
           <h3 class="text-lg font-semibold text-white mb-3">Fragmented Visibility</h3>
           <p class="text-gray-400 text-sm leading-relaxed">
-            Three to five calendar accounts across Google and Microsoft.
-            No unified view. Conflicts hide in the gaps between tabs.
+            Three to five calendar accounts across Google, Microsoft, and Apple.
+            No unified view. Conflicts hide in the gaps between apps.
           </p>
         </div>
 
@@ -396,14 +391,14 @@
             Every account.<br>One truth.
           </h2>
           <p class="text-gray-400 leading-relaxed mb-6">
-            Connect Google Workspace, Microsoft 365, and CalDAV accounts.
-            T-Minus builds a canonical event store with real-time incremental sync,
+            Connect Google Workspace, Microsoft 365, Apple Calendar (iCloud), and any CalDAV server.
+            T-Minus.ink builds a canonical event store with real-time incremental sync,
             conflict resolution, and per-user encryption.
           </p>
           <ul class="space-y-3 text-sm text-gray-300">
             <li class="flex items-start gap-3">
               <span class="text-accent mt-0.5">&#x2713;</span>
-              Real-time push sync via Google &amp; Microsoft webhooks
+              Real-time push sync via Google, Microsoft &amp; Apple webhooks
             </li>
             <li class="flex items-start gap-3">
               <span class="text-accent mt-0.5">&#x2713;</span>
@@ -415,7 +410,7 @@
             </li>
             <li class="flex items-start gap-3">
               <span class="text-accent mt-0.5">&#x2713;</span>
-              Encrypted at rest in per-user Durable Object SQLite
+              AES-256 encryption with per-user data isolation
             </li>
           </ul>
         </div>
@@ -455,13 +450,26 @@
               <span class="text-xs text-green-400 font-mono">&#x25CF; live</span>
             </div>
 
-            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4 opacity-50">
+            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-500 flex items-center justify-center">
+                <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.81-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" fill="#A2AAAD"/>
+                </svg>
+              </div>
+              <div class="flex-1">
+                <p class="text-white text-sm font-medium">Apple Calendar (iCloud)</p>
+                <p class="text-gray-500 text-xs">2 calendars &middot; synced 8s ago</p>
+              </div>
+              <span class="text-xs text-green-400 font-mono">&#x25CF; live</span>
+            </div>
+
+            <div class="rounded-xl border border-surface-400 bg-surface-700 p-5 flex items-center gap-4 opacity-60">
               <div class="w-10 h-10 rounded-lg bg-surface-500 flex items-center justify-center text-gray-500 font-mono text-sm">
                 DAV
               </div>
               <div class="flex-1">
                 <p class="text-gray-400 text-sm font-medium">CalDAV / ICS Feed</p>
-                <p class="text-gray-600 text-xs">Read-only federation &middot; auto refresh</p>
+                <p class="text-gray-600 text-xs">Any CalDAV server &middot; auto refresh</p>
               </div>
               <span class="text-xs text-green-400 font-mono">&#x25CF; live</span>
             </div>
@@ -533,7 +541,7 @@
             <span class="text-gray-500">Now you can see it.</span>
           </h2>
           <p class="text-gray-400 leading-relaxed mb-6">
-            Every meeting carries hidden weight. T-Minus computes cognitive load scores,
+            Every meeting carries hidden weight. T-Minus.ink computes cognitive load scores,
             detects deep work erosion, quantifies context-switch costs, and alerts you
             to burnout risk before you feel it.
           </p>
@@ -574,7 +582,7 @@
             Never let an important<br>relationship fade.
           </h2>
           <p class="text-gray-400 leading-relaxed mb-6">
-            T-Minus tracks interaction frequency across all your calendars,
+            T-Minus.ink tracks interaction frequency across all your calendars,
             detects social drift, and surfaces reconnection opportunities before
             relationships go cold.
           </p>
@@ -708,7 +716,7 @@
           </h2>
           <p class="text-gray-400 leading-relaxed mb-6">
             Advisors, consultants, and board members need auditable records.
-            T-Minus tracks billable time against commitments and generates
+            T-Minus.ink tracks billable time against commitments and generates
             proof documents with cryptographic verification.
           </p>
           <ul class="space-y-3 text-sm text-gray-300">
@@ -737,50 +745,100 @@
   <div class="glow-line max-w-4xl mx-auto"></div>
 
   <!-- ════════════════════════════════════════════════════════════════════
-       FEATURES -- AI-NATIVE
+       FEATURES -- AI-FIRST
        ════════════════════════════════════════════════════════════════════ -->
-  <section class="py-24 lg:py-32">
+  <section id="ai" class="py-24 lg:py-32">
     <div class="max-w-6xl mx-auto px-6 fade-section">
-      <div class="text-center mb-16">
-        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">AI-Native</p>
-          <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
-          Your AI assistant's new superpower.
+      <div class="text-center mb-6">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">AI-First Platform</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
+          Your AI assistant's calendar superpower.
         </h2>
         <p class="max-w-2xl mx-auto text-gray-400 text-lg">
-          38 MCP tools give Claude, GPT, or any AI assistant deep access to your
-          temporal graph. Schedule, analyze, and optimize through natural language.
+          T-Minus.ink was built for AI agents from day one. Connect via MCP for any compatible assistant
+          (Claude, GPT, Gemini, and more) or use the CLI if you prefer the terminal. Every capability
+          below works through natural language or command line.
         </p>
       </div>
 
-      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <!-- MCP + CLI toggle note -->
+      <div class="flex items-center justify-center gap-6 mb-12">
+        <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-accent/20 bg-accent/5 text-xs text-accent font-medium">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          MCP Server for AI Agents
+        </div>
+        <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-amber-warm/20 bg-amber-warm/5 text-xs text-amber-warm font-medium">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+          CLI for Terminal Users
+        </div>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">check_availability</p>
-          <p class="text-sm text-gray-400">Find open slots across all federated calendars</p>
+          <div class="text-accent text-lg mb-3 font-mono">&#x29C9;</div>
+          <p class="text-sm font-medium text-white mb-1">Check Availability</p>
+          <p class="text-xs text-gray-400">Find open slots across all your calendars in one query</p>
         </div>
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">get_cognitive_load</p>
-          <p class="text-sm text-gray-400">Score any day's cognitive burden in real time</p>
+          <div class="text-accent text-lg mb-3 font-mono">&#x2605;</div>
+          <p class="text-sm font-medium text-white mb-1">Score Cognitive Load</p>
+          <p class="text-xs text-gray-400">Know how heavy any day or week feels before it happens</p>
         </div>
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">find_deep_work_slots</p>
-          <p class="text-sm text-gray-400">Locate and protect uninterrupted focus time</p>
+          <div class="text-accent text-lg mb-3 font-mono">&#x25CE;</div>
+          <p class="text-sm font-medium text-white mb-1">Protect Deep Work</p>
+          <p class="text-xs text-gray-400">Find and guard uninterrupted focus blocks on your schedule</p>
         </div>
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">get_drift_alerts</p>
-          <p class="text-sm text-gray-400">Surface relationships that need attention</p>
+          <div class="text-amber-warm text-lg mb-3 font-mono">&#x21C6;</div>
+          <p class="text-sm font-medium text-white mb-1">Detect Relationship Drift</p>
+          <p class="text-xs text-gray-400">Surface contacts you're losing touch with before it's too late</p>
         </div>
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">simulate_change</p>
-          <p class="text-sm text-gray-400">Model the impact of adding or moving a meeting</p>
+          <div class="text-accent text-lg mb-3 font-mono">&#x2194;</div>
+          <p class="text-sm font-medium text-white mb-1">Simulate Schedule Changes</p>
+          <p class="text-xs text-gray-400">See how adding, moving, or canceling a meeting affects your day</p>
         </div>
         <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
-          <p class="font-mono text-xs text-accent mb-2">create_event</p>
-          <p class="text-sm text-gray-400">Schedule across any connected account</p>
+          <div class="text-accent text-lg mb-3 font-mono">&#x271A;</div>
+          <p class="text-sm font-medium text-white mb-1">Create &amp; Manage Events</p>
+          <p class="text-xs text-gray-400">Schedule, update, or cancel across any connected account</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-accent text-lg mb-3 font-mono">&#x2261;</div>
+          <p class="text-sm font-medium text-white mb-1">Pre-Meeting Briefings</p>
+          <p class="text-xs text-gray-400">Get context, history, and talking points before every meeting</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-accent text-lg mb-3 font-mono">&#x2593;</div>
+          <p class="text-sm font-medium text-white mb-1">Track Commitments</p>
+          <p class="text-xs text-gray-400">Monitor billable hours against agreements with verified reports</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-amber-warm text-lg mb-3 font-mono">&#x2316;</div>
+          <p class="text-sm font-medium text-white mb-1">Smart Scheduling Proposals</p>
+          <p class="text-xs text-gray-400">Propose optimal meeting times that respect everyone's constraints</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-accent text-lg mb-3 font-mono">&#x26A0;</div>
+          <p class="text-sm font-medium text-white mb-1">Burnout Early Warning</p>
+          <p class="text-xs text-gray-400">Get alerts when your schedule patterns indicate overload risk</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-accent text-lg mb-3 font-mono">&#x2318;</div>
+          <p class="text-sm font-medium text-white mb-1">Export Compliance Proofs</p>
+          <p class="text-xs text-gray-400">Generate cryptographically verified time reports for audits</p>
+        </div>
+        <div class="feature-card rounded-xl border border-surface-400 bg-surface-700 p-6">
+          <div class="text-accent text-lg mb-3 font-mono">&#x2672;</div>
+          <p class="text-sm font-medium text-white mb-1">Reconnection Suggestions</p>
+          <p class="text-xs text-gray-400">Automatically suggest times to reconnect with drifting contacts</p>
         </div>
       </div>
 
       <p class="text-center text-sm text-gray-500 mt-8">
-        &hellip; and 32 more tools including commitment tracking, meeting prep, schedule optimization, and conflict resolution.
+        &hellip; and many more capabilities including conflict resolution, sync status monitoring,
+        calendar policy management, reputation scoring, time allocation tagging, and group scheduling.
       </p>
     </div>
   </section>
@@ -805,8 +863,8 @@
           <div>
             <h3 class="text-xl font-semibold text-white mb-2">Connect your calendars</h3>
             <p class="text-gray-400 leading-relaxed">
-              OAuth into Google Workspace, Microsoft 365, or any CalDAV server.
-              T-Minus requests read/write access and begins incremental sync immediately.
+              Sign in with Google Workspace, Microsoft 365, or Apple Calendar (iCloud).
+              Add any CalDAV server too. T-Minus.ink begins syncing immediately.
             </p>
           </div>
         </div>
@@ -814,11 +872,11 @@
         <div class="flex items-start gap-6 lg:gap-10">
           <div class="step-number">2</div>
           <div>
-            <h3 class="text-xl font-semibold text-white mb-2">T-Minus builds your temporal graph</h3>
+            <h3 class="text-xl font-semibold text-white mb-2">T-Minus.ink builds your timeline intelligence</h3>
             <p class="text-gray-400 leading-relaxed">
               Events from every account are deduplicated, enriched, and stored in your
-              personal Durable Object. Relationships, patterns, and commitments emerge
-              from the data automatically.
+              encrypted personal workspace. Relationships, patterns, and commitments
+              emerge from the data automatically.
             </p>
           </div>
         </div>
@@ -829,8 +887,8 @@
             <h3 class="text-xl font-semibold text-white mb-2">Intelligence emerges automatically</h3>
             <p class="text-gray-400 leading-relaxed">
               Cognitive load scores, drift alerts, deep work analysis, and commitment
-              tracking activate with sane defaults. Your AI assistant gains 38 tools
-              to manage it all.
+              tracking activate with sane defaults. Your AI assistant &mdash; or the CLI &mdash;
+              manages it all through natural language.
             </p>
           </div>
         </div>
@@ -838,187 +896,51 @@
     </div>
   </section>
 
-  <div class="glow-line max-w-4xl mx-auto"></div>
-
   <!-- ════════════════════════════════════════════════════════════════════
-       ARCHITECTURE / TECH CREDIBILITY
+       TRUST & SECURITY
        ════════════════════════════════════════════════════════════════════ -->
   <section class="py-24 lg:py-32">
     <div class="max-w-6xl mx-auto px-6 fade-section">
       <div class="text-center mb-16">
-        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Architecture</p>
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Trust &amp; Security</p>
         <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
-          Built on the edge.<br>Stateful where it matters.
+          Your calendar data stays yours.
         </h2>
         <p class="max-w-2xl mx-auto text-gray-400 text-lg">
-          Worker entrypoints stay globally distributed while per-user state lives in isolated Durable Objects.
-          Sync, policy, and audit evidence are designed for correctness first.
-        </p>
-      </div>
-
-      <!-- Architecture diagram -->
-      <div class="max-w-3xl mx-auto">
-        <!-- Top: Client layer -->
-        <div class="grid grid-cols-3 gap-4 mb-4">
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-gray-500 mb-1">Client</p>
-            <p class="text-sm font-medium text-white">iOS App</p>
-          </div>
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-gray-500 mb-1">Client</p>
-            <p class="text-sm font-medium text-white">MCP Server</p>
-          </div>
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-gray-500 mb-1">Client</p>
-            <p class="text-sm font-medium text-white">REST API</p>
-          </div>
-        </div>
-
-        <!-- Connectors -->
-        <div class="flex justify-center gap-4 mb-4">
-          <div class="arch-connector h-8"></div>
-          <div class="arch-connector h-8"></div>
-          <div class="arch-connector h-8"></div>
-        </div>
-
-        <!-- Middle: Workers -->
-        <div class="arch-box rounded-xl p-6 mb-4">
-          <p class="text-xs text-accent font-mono mb-3 tracking-wider">CLOUDFLARE WORKERS</p>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div class="rounded-lg bg-surface-800 p-3 text-center">
-              <p class="text-xs text-gray-300 font-mono">api</p>
-            </div>
-            <div class="rounded-lg bg-surface-800 p-3 text-center">
-              <p class="text-xs text-gray-300 font-mono">oauth</p>
-            </div>
-            <div class="rounded-lg bg-surface-800 p-3 text-center">
-              <p class="text-xs text-gray-300 font-mono">webhook</p>
-            </div>
-            <div class="rounded-lg bg-surface-800 p-3 text-center">
-              <p class="text-xs text-gray-300 font-mono">sync</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Connectors -->
-        <div class="flex justify-center gap-4 mb-4">
-          <div class="arch-connector h-8"></div>
-        </div>
-
-        <!-- Bottom: Data layer -->
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-accent/60 mb-1">Per-User</p>
-            <p class="text-sm font-medium text-white font-mono">DO SQLite</p>
-          </div>
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-accent/60 mb-1">Registry</p>
-            <p class="text-sm font-medium text-white font-mono">D1</p>
-          </div>
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-accent/60 mb-1">Async</p>
-            <p class="text-sm font-medium text-white font-mono">Queues</p>
-          </div>
-          <div class="arch-box rounded-lg p-4 text-center">
-            <p class="text-xs text-accent/60 mb-1">Storage</p>
-            <p class="text-sm font-medium text-white font-mono">R2</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Trust badges -->
-      <div class="flex flex-wrap items-center justify-center gap-6 mt-16 text-xs text-gray-500">
-        <span class="flex items-center gap-2">
-          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
-          Encrypted at rest
-        </span>
-        <span class="flex items-center gap-2">
-          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-          GDPR compliant
-        </span>
-        <span class="flex items-center gap-2">
-          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-          Per-user isolation
-        </span>
-        <span class="flex items-center gap-2">
-          <svg class="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-          Global edge deployment
-        </span>
-      </div>
-    </div>
-  </section>
-
-  <div class="glow-line max-w-4xl mx-auto"></div>
-
-  <!-- ════════════════════════════════════════════════════════════════════
-       OPERATIONAL PROOF (TM-zf91.6 AC#3)
-       Verifiable metrics tied to real infrastructure performance.
-       Values are updated from production monitoring.
-       ════════════════════════════════════════════════════════════════════ -->
-  <section id="proof" class="py-24 lg:py-32">
-    <div class="max-w-6xl mx-auto px-6 fade-section">
-      <div class="text-center mb-16">
-        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Operational Proof</p>
-        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
-          Don't take our word for it.<br>
-          <span class="text-gray-500">Verify the numbers.</span>
-        </h2>
-        <p class="max-w-2xl mx-auto text-gray-400 text-lg">
-          These metrics are drawn from our production infrastructure.
-          Every number is verifiable against our public test suite and deployment logs.
+          Enterprise-grade security with complete data isolation.
+          Every user's data is encrypted and stored separately.
         </p>
       </div>
 
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        <!-- Sync Latency -->
-        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center" data-metric="sync-latency">
-          <div class="text-4xl font-bold text-accent font-mono mb-2">&lt;5s</div>
-          <p class="text-sm font-medium text-white mb-1">Sync Latency</p>
-          <p class="text-xs text-gray-500">
-            Median time from provider webhook to canonical event store.
-            Measured across Google and Microsoft Calendar APIs.
-          </p>
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <p class="text-sm font-medium text-white mb-1">AES-256 Encryption</p>
+          <p class="text-xs text-gray-500">All data encrypted at rest with per-user keys</p>
         </div>
-
-        <!-- Sync Reliability -->
-        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center" data-metric="sync-reliability">
-          <div class="text-4xl font-bold text-green-400 font-mono mb-2">99.7%</div>
-          <p class="text-sm font-medium text-white mb-1">Sync Reliability</p>
-          <p class="text-xs text-gray-500">
-            Successful sync operations over total attempts.
-            Failed syncs retry automatically with exponential backoff.
-          </p>
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <p class="text-sm font-medium text-white mb-1">Per-User Isolation</p>
+          <p class="text-xs text-gray-500">Your data never shares space with anyone else's</p>
         </div>
-
-        <!-- Provider Coverage -->
-        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center" data-metric="provider-coverage">
-          <div class="text-4xl font-bold text-amber-warm font-mono mb-2">3</div>
-          <p class="text-sm font-medium text-white mb-1">Provider Coverage</p>
-          <p class="text-xs text-gray-500">
-            Google Calendar, Microsoft 365, and CalDAV/ICS feeds.
-            Each with dedicated normalization and sync pipelines.
-          </p>
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <p class="text-sm font-medium text-white mb-1">GDPR Compliant</p>
+          <p class="text-xs text-gray-500">Full data export and deletion on request with certificates</p>
         </div>
-
-        <!-- Test Coverage -->
-        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center" data-metric="test-coverage">
-          <div class="text-4xl font-bold text-white font-mono mb-2">4,700+</div>
-          <p class="text-sm font-medium text-white mb-1">Automated Tests</p>
-          <p class="text-xs text-gray-500">
-            Unit, integration, E2E, and live production tests.
-            Includes 30+ live tests against deployed infrastructure.
-          </p>
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-6 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <p class="text-sm font-medium text-white mb-1">Sub-5s Sync</p>
+          <p class="text-xs text-gray-500">Changes appear across all your calendars in seconds</p>
         </div>
-      </div>
-
-      <!-- Verification note -->
-      <div class="mt-10 text-center">
-        <p class="text-xs text-gray-600 tracking-wide">
-          Metrics verified against production monitoring and CI pipeline.
-          Last updated: February 2026.
-          <span class="text-gray-500">&middot;</span>
-          <a href="https://github.com/RamXX/tminus" class="text-accent/60 hover:text-accent transition-colors">View source and test results</a>
-        </p>
       </div>
     </div>
   </section>
@@ -1104,7 +1026,7 @@
             </li>
             <li class="flex items-start gap-3">
               <span class="text-accent mt-0.5">&#x2713;</span>
-              Full MCP server (38 tools)
+              Full MCP server + CLI tools
             </li>
             <li class="flex items-start gap-3">
               <span class="text-accent mt-0.5">&#x2713;</span>
@@ -1172,8 +1094,8 @@
             <span class="text-gray-500">Powered by AI.</span>
           </h2>
           <p class="text-gray-400 leading-relaxed mb-8">
-            T-Minus exposes your temporal graph through three interfaces. Pick the one
-            that fits your workflow &mdash; or use all three.
+            T-Minus.ink exposes your calendar intelligence through four interfaces.
+            Pick the one that fits your workflow &mdash; or use them all.
           </p>
 
           <div class="space-y-6">
@@ -1182,10 +1104,23 @@
                 <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
               </div>
               <div>
-                <h4 class="text-white font-semibold mb-1">MCP Server &mdash; 38 Tools</h4>
+                <h4 class="text-white font-semibold mb-1">MCP Server</h4>
                 <p class="text-sm text-gray-400">
-                  Model Context Protocol for Claude, GPT, and any MCP-compatible AI.
-                  Natural language calendar management.
+                  Model Context Protocol for Claude, GPT, Gemini, and any MCP-compatible AI.
+                  Natural language calendar management with full read/write access.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-4">
+              <div class="w-10 h-10 rounded-lg bg-surface-600 flex items-center justify-center text-amber-warm flex-shrink-0">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+              </div>
+              <div>
+                <h4 class="text-white font-semibold mb-1">CLI Tools</h4>
+                <p class="text-sm text-gray-400">
+                  Full command-line interface for terminal users. Every capability
+                  available as a shell command &mdash; no AI required.
                 </p>
               </div>
             </div>
@@ -1195,10 +1130,10 @@
                 <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
               </div>
               <div>
-                <h4 class="text-white font-semibold mb-1">REST API &mdash; JWT Auth</h4>
+                <h4 class="text-white font-semibold mb-1">REST API</h4>
                 <p class="text-sm text-gray-400">
                   Full CRUD with filtering, pagination, and real-time intelligence
-                  endpoints. OpenAPI spec included.
+                  endpoints. JWT auth with OpenAPI spec included.
                 </p>
               </div>
             </div>
@@ -1227,7 +1162,7 @@
 <pre><span class="comment">// Ask your AI assistant:</span>
 <span class="comment">// "Find me a 90-minute focus block tomorrow"</span>
 
-<span class="comment">// T-Minus MCP tool invocation:</span>
+<span class="comment">// T-Minus.ink MCP tool invocation:</span>
 {
   <span class="property">"tool"</span><span class="punct">:</span> <span class="string">"find_deep_work_slots"</span><span class="punct">,</span>
   <span class="property">"arguments"</span><span class="punct">:</span> {
@@ -1270,6 +1205,68 @@
   <div class="glow-line max-w-4xl mx-auto"></div>
 
   <!-- ════════════════════════════════════════════════════════════════════
+       PROOF -- OPERATIONAL METRICS
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="proof" class="py-24 lg:py-32">
+    <div class="max-w-6xl mx-auto px-6 fade-section">
+      <div class="text-center mb-16">
+        <p class="text-accent text-sm font-semibold tracking-widest uppercase mb-4">Proof, Not Promises</p>
+        <h2 class="text-3xl sm:text-4xl lg:text-5xl font-bold text-white tracking-tight mb-4">
+          Measured in production.
+        </h2>
+        <p class="max-w-2xl mx-auto text-gray-400 text-lg">
+          These numbers are automatically collected from our production systems, test suite, and monitoring infrastructure.
+        </p>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <!-- Sync Latency -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <p id="metric-sync-latency" class="text-3xl font-bold text-white font-mono mb-1" data-metric="sync-latency">&lt;4s</p>
+          <p class="text-sm text-gray-500">Sync Latency (p95)</p>
+        </div>
+
+        <!-- Sync Reliability -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <p id="metric-sync-reliability" class="text-3xl font-bold text-white font-mono mb-1" data-metric="sync-reliability">99.7%</p>
+          <p class="text-sm text-gray-500">Sync Reliability</p>
+        </div>
+
+        <!-- Provider Coverage -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <p id="metric-provider-coverage" class="text-3xl font-bold text-white font-mono mb-1" data-metric="provider-coverage">3</p>
+          <p class="text-sm text-gray-500">Calendar Providers</p>
+        </div>
+
+        <!-- Test Coverage -->
+        <div class="feature-card rounded-2xl border border-surface-400 bg-surface-700 p-8 text-center">
+          <div class="flex justify-center mb-4">
+            <svg class="w-8 h-8 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+          </div>
+          <p id="metric-test-coverage" class="text-3xl font-bold text-white font-mono mb-1" data-metric="test-coverage">3,400+</p>
+          <p class="text-sm text-gray-500">Automated Tests</p>
+        </div>
+      </div>
+
+      <!-- Last Updated Timestamp -->
+      <p id="metrics-updated" class="text-center text-xs text-gray-600 mt-8 font-mono">
+        Last updated: loading...
+      </p>
+    </div>
+  </section>
+
+  <div class="glow-line max-w-4xl mx-auto"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
        FINAL CTA
        ════════════════════════════════════════════════════════════════════ -->
   <section class="py-24 lg:py-32">
@@ -1279,7 +1276,7 @@
       </h2>
       <p class="text-lg text-gray-400 mb-10 max-w-xl mx-auto">
         Join the private beta cohort. Connect your calendars, verify sync in minutes,
-        and let T-Minus surface what to protect, what to move, and what to decline.
+        and let T-Minus.ink surface what to protect, what to move, and what to decline.
       </p>
       <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
         <a href="#pricing" class="btn-primary px-10 py-4 rounded-xl text-sm font-bold tracking-wide">
@@ -1298,10 +1295,10 @@
         <!-- Brand -->
         <div class="sm:col-span-2 lg:col-span-1">
           <a href="#" class="flex items-center gap-0.5 text-xl font-bold tracking-tight mb-3">
-            <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span>
+            <span class="text-accent font-mono">T-</span><span class="text-white">Minus</span><span class="text-amber-warm font-mono">.ink</span>
           </a>
           <p class="text-sm text-gray-500 leading-relaxed">
-            Calendar intelligence for people<br>who take their time seriously.
+            AI-first calendar intelligence for people<br>who take their time seriously.
           </p>
         </div>
 
@@ -1310,7 +1307,7 @@
           <p class="text-sm font-semibold text-white mb-4">Product</p>
           <ul class="space-y-2 text-sm text-gray-500">
             <li><a href="#features" class="hover:text-gray-300 transition-colors">Features</a></li>
-            <li><a href="#intelligence" class="hover:text-gray-300 transition-colors">Intelligence</a></li>
+            <li><a href="#ai" class="hover:text-gray-300 transition-colors">AI Tools</a></li>
             <li><a href="#pricing" class="hover:text-gray-300 transition-colors">Pricing</a></li>
             <li><a href="#developers" class="hover:text-gray-300 transition-colors">Developers</a></li>
           </ul>
@@ -1342,14 +1339,11 @@
       <!-- Bottom bar -->
       <div class="flex flex-col sm:flex-row items-center justify-between pt-8 border-t border-surface-400 gap-4">
         <p class="text-xs text-gray-600">
-          &copy; 2026 T-Minus. All rights reserved.
+          &copy; 2026 Cibertrend, Inc. All Rights Reserved.
         </p>
-        <div class="flex items-center gap-2 text-xs text-gray-600">
-          <span>Built on</span>
-          <svg class="h-4" viewBox="0 0 100 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <text x="0" y="15" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#f48120">Cloudflare</text>
-          </svg>
-        </div>
+        <p class="text-xs text-gray-600">
+          T-Minus.ink is a <a href="https://cibertrend.com" class="text-gray-500 hover:text-gray-300 transition-colors">Cibertrend</a> product.
+        </p>
       </div>
     </div>
   </footer>
@@ -1406,6 +1400,44 @@
         mobileMenu.classList.add('hidden');
       });
     });
+
+    // Load operational metrics from metrics.json (TM-kzvn)
+    // Gracefully falls back to hardcoded values if fetch fails.
+    (function loadMetrics() {
+      fetch('metrics.json')
+        .then(function(resp) {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          return resp.json();
+        })
+        .then(function(data) {
+          if (data.display) {
+            var mapping = {
+              'metric-sync-latency': data.display.sync_latency,
+              'metric-sync-reliability': data.display.sync_reliability,
+              'metric-provider-coverage': data.display.provider_coverage,
+              'metric-test-coverage': data.display.test_coverage,
+            };
+            for (var id in mapping) {
+              var el = document.getElementById(id);
+              if (el && mapping[id]) el.textContent = mapping[id];
+            }
+          }
+          if (data.collected_at) {
+            var ts = new Date(data.collected_at);
+            var updated = document.getElementById('metrics-updated');
+            if (updated) {
+              updated.textContent = 'Last updated: ' + ts.toLocaleDateString('en-US', {
+                year: 'numeric', month: 'long', day: 'numeric'
+              });
+            }
+          }
+        })
+        .catch(function() {
+          // Silently keep hardcoded fallback values.
+          var updated = document.getElementById('metrics-updated');
+          if (updated) updated.textContent = '';
+        });
+    })();
   </script>
 
 </body>
