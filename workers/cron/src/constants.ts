@@ -39,6 +39,17 @@ export const CRON_FEED_REFRESH = "*/15 * * * *";
 export const CHANNEL_RENEWAL_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * If no incremental sync has occurred in this window, the channel is
+ * considered silently dead and will be force-renewed regardless of expiry.
+ *
+ * Google may stop delivering push notifications at any time (documented
+ * behavior). 12 hours of silence on an active account is a strong signal.
+ *
+ * See: TM-ucl1 root cause analysis.
+ */
+export const CHANNEL_LIVENESS_THRESHOLD_MS = 12 * 60 * 60 * 1000;
+
+/**
  * Microsoft subscription max lifetime: 3 days (4230 min for calendar events).
  * Renew at 75% lifetime = ~2.25 days = 54 hours.
  */

@@ -18,6 +18,8 @@
 
 import type { ReconcileAccountMessage, AccountId, DeleteMirrorMessage, EventId } from "@tminus/shared";
 import {
+  GoogleCalendarClient,
+  generateId,
   computeContentHash,
   detectFeedChanges,
   classifyFeedError,
@@ -35,6 +37,7 @@ import {
   CRON_DRIFT_COMPUTATION,
   CRON_FEED_REFRESH,
   CHANNEL_RENEWAL_THRESHOLD_MS,
+  CHANNEL_LIVENESS_THRESHOLD_MS,
   MS_SUBSCRIPTION_RENEWAL_THRESHOLD_MS,
 } from "./constants";
 
@@ -51,7 +54,24 @@ export { ReconcileWorkflow } from "@tminus/workflow-reconcile";
 interface ExpiringChannelRow {
   readonly account_id: string;
   readonly channel_id: string;
+  readonly channel_token: string;
   readonly channel_expiry_ts: string;
+}
+
+/**
+ * Row type for the channel liveness check.
+ * Channels that have not seen a sync in CHANNEL_LIVENESS_THRESHOLD_MS
+ * are considered silently dead (Google may stop delivering push notifications
+ * at any time, even before channel expiry).
+ *
+ * See: TM-ucl1 root cause analysis.
+ */
+interface StaleChannelRow {
+  readonly account_id: string;
+  readonly channel_id: string;
+  readonly channel_token: string;
+  readonly channel_expiry_ts: string;
+  readonly last_sync_ts: string | null;
 }
 
 interface ActiveAccountRow {
@@ -68,57 +88,229 @@ interface MsAccountRow {
 // ---------------------------------------------------------------------------
 
 /**
- * Query D1 for accounts with channels expiring within CHANNEL_RENEWAL_THRESHOLD_MS
- * and call AccountDO.renewChannel() for each.
+ * Query D1 for Google accounts that need channel re-registration:
  *
- * Only processes active accounts with non-null channel_id and channel_expiry_ts.
+ * 1. EXPIRING: channels expiring within CHANNEL_RENEWAL_THRESHOLD_MS (24h)
+ * 2. STALE: channels that have not seen a sync in CHANNEL_LIVENESS_THRESHOLD_MS (12h)
+ *    despite being "active" -- Google may silently stop delivering push
+ *    notifications even before channel expiry (documented behavior).
+ *
+ * For each account found:
+ * 1. Get access token from AccountDO
+ * 2. Stop the old channel with Google (best-effort, may already be dead)
+ * 3. Register a new channel with Google via Calendar API
+ * 4. Store the new channel in AccountDO and update D1
+ *
+ * BUG FIX (TM-ucl1): Previously this only called AccountDO.renewChannel()
+ * which bumped the local expiry timestamp but NEVER re-registered with Google.
+ * This meant channel "renewal" was a no-op from Google's perspective.
  */
 async function handleChannelRenewal(env: Env): Promise<void> {
-  const thresholdTs = new Date(
-    Date.now() + CHANNEL_RENEWAL_THRESHOLD_MS,
+  const now = Date.now();
+  const expiryThresholdTs = new Date(
+    now + CHANNEL_RENEWAL_THRESHOLD_MS,
+  ).toISOString();
+  const livenessThresholdTs = new Date(
+    now - CHANNEL_LIVENESS_THRESHOLD_MS,
   ).toISOString();
 
-  const { results } = await env.DB
+  // Query 1: Channels expiring within 24 hours
+  const { results: expiringResults } = await env.DB
     .prepare(
-      `SELECT account_id, channel_id, channel_expiry_ts
+      `SELECT account_id, channel_id, channel_token, channel_expiry_ts
        FROM accounts
        WHERE status = ?1
+         AND provider = 'google'
          AND channel_id IS NOT NULL
          AND channel_expiry_ts IS NOT NULL
          AND channel_expiry_ts <= ?2`,
     )
-    .bind("active", thresholdTs)
+    .bind("active", expiryThresholdTs)
     .all<ExpiringChannelRow>();
 
-  console.log(`Channel renewal: found ${results.length} expiring channels`);
+  // Query 2: Channels that are alive per expiry but have not synced recently
+  // (silently dead -- Google stopped delivering)
+  const { results: staleResults } = await env.DB
+    .prepare(
+      `SELECT account_id, channel_id, channel_token, channel_expiry_ts, last_sync_ts
+       FROM accounts
+       WHERE status = ?1
+         AND provider = 'google'
+         AND channel_id IS NOT NULL
+         AND channel_expiry_ts IS NOT NULL
+         AND channel_expiry_ts > ?2
+         AND (last_sync_ts IS NULL OR last_sync_ts <= ?3)`,
+    )
+    .bind("active", expiryThresholdTs, livenessThresholdTs)
+    .all<StaleChannelRow>();
 
-  for (const row of results) {
+  // Deduplicate by account_id (an account could appear in both queries)
+  const seen = new Set<string>();
+  const accountsToRenew: Array<{
+    account_id: string;
+    channel_id: string;
+    channel_token: string;
+    reason: string;
+  }> = [];
+
+  for (const row of expiringResults) {
+    if (!seen.has(row.account_id)) {
+      seen.add(row.account_id);
+      accountsToRenew.push({
+        account_id: row.account_id,
+        channel_id: row.channel_id,
+        channel_token: row.channel_token,
+        reason: `expiring (${row.channel_expiry_ts})`,
+      });
+    }
+  }
+
+  for (const row of staleResults) {
+    if (!seen.has(row.account_id)) {
+      seen.add(row.account_id);
+      accountsToRenew.push({
+        account_id: row.account_id,
+        channel_id: row.channel_id,
+        channel_token: row.channel_token,
+        reason: `stale (last_sync: ${row.last_sync_ts ?? "never"})`,
+      });
+    }
+  }
+
+  console.log(
+    `Channel renewal: ${expiringResults.length} expiring, ${staleResults.length} stale, ${accountsToRenew.length} total to renew`,
+  );
+
+  for (const account of accountsToRenew) {
     try {
-      const doId = env.ACCOUNT.idFromName(row.account_id);
-      const stub = env.ACCOUNT.get(doId);
-
-      const response = await stub.fetch(
-        new Request("https://account-do.internal/renewChannel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channelId: row.channel_id }),
-        }),
-      );
-
-      if (!response.ok) {
-        console.error(
-          `Channel renewal failed for account ${row.account_id}: ${response.status}`,
-        );
-      } else {
-        console.log(`Channel renewed for account ${row.account_id}`);
-      }
+      await reRegisterChannel(env, account.account_id, account.channel_id, account.reason);
     } catch (err) {
       console.error(
-        `Channel renewal error for account ${row.account_id}:`,
+        `Channel re-registration error for account ${account.account_id} (${account.reason}):`,
         err,
       );
     }
   }
+}
+
+/**
+ * Re-register a Google Calendar watch channel for an account.
+ *
+ * Steps:
+ * 1. Get access token from AccountDO
+ * 2. Stop the old channel with Google (best-effort)
+ * 3. Register a new channel with Google
+ * 4. Store new channel in AccountDO via storeWatchChannel
+ * 5. Update D1 with new channel_id, channel_token, channel_expiry_ts
+ */
+async function reRegisterChannel(
+  env: Env,
+  accountId: string,
+  oldChannelId: string,
+  reason: string,
+): Promise<void> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  // Step 1: Get access token from AccountDO
+  const tokenResponse = await stub.fetch(
+    new Request("https://account-do.internal/getAccessToken", {
+      method: "POST",
+    }),
+  );
+
+  if (!tokenResponse.ok) {
+    console.error(
+      `Channel renewal: failed to get access token for account ${accountId}: ${tokenResponse.status}`,
+    );
+    return;
+  }
+
+  const { access_token } = (await tokenResponse.json()) as { access_token: string };
+  const client = new GoogleCalendarClient(access_token);
+
+  // Step 2: Get resource_id for the old channel from D1 (needed for stop)
+  const resourceRow = await env.DB
+    .prepare("SELECT resource_id FROM accounts WHERE account_id = ?1")
+    .bind(accountId)
+    .first<{ resource_id: string | null }>();
+
+  // Best-effort: stop old channel (may already be dead/expired)
+  if (resourceRow?.resource_id) {
+    try {
+      await client.stopChannel(oldChannelId, resourceRow.resource_id);
+      console.log(`Channel renewal: stopped old channel ${oldChannelId} for account ${accountId}`);
+    } catch (err) {
+      // 404 means channel already expired/deleted -- that's fine
+      console.warn(
+        `Channel renewal: could not stop old channel ${oldChannelId} (expected if already dead):`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  // Step 3: Register new channel with Google
+  const newChannelId = generateId("calendar");
+  const newToken = generateId("calendar");
+
+  let watchResponse;
+  try {
+    watchResponse = await client.watchEvents(
+      "primary",
+      env.WEBHOOK_URL,
+      newChannelId,
+      newToken,
+    );
+  } catch (err) {
+    console.error(
+      `Channel renewal: failed to register new channel for account ${accountId}:`,
+      err,
+    );
+    return;
+  }
+
+  // Step 4: Store new channel in AccountDO
+  const storeResponse = await stub.fetch(
+    new Request("https://account-do.internal/storeWatchChannel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel_id: watchResponse.channelId,
+        resource_id: watchResponse.resourceId,
+        expiration: watchResponse.expiration,
+        calendar_id: "primary",
+      }),
+    }),
+  );
+
+  if (!storeResponse.ok) {
+    console.error(
+      `Channel renewal: failed to store new channel in AccountDO for account ${accountId}: ${storeResponse.status}`,
+    );
+    return;
+  }
+
+  // Step 5: Update D1 with new channel info
+  const expiryTs = new Date(parseInt(watchResponse.expiration, 10)).toISOString();
+  await env.DB
+    .prepare(
+      `UPDATE accounts
+       SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
+       WHERE account_id = ?5`,
+    )
+    .bind(
+      watchResponse.channelId,
+      newToken,
+      expiryTs,
+      watchResponse.resourceId,
+      accountId,
+    )
+    .run();
+
+  console.log(
+    `Channel renewal: re-registered for account ${accountId} (reason: ${reason}). ` +
+      `New channel: ${watchResponse.channelId}, expires: ${expiryTs}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

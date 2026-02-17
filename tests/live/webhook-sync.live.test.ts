@@ -30,8 +30,19 @@ import type { LiveEnv } from "./setup.js";
 const TEST_USER_ID = "usr_01KHMDJ8J604D317X12W0JFSNW";
 const TEST_USER_EMAIL = "hextropian@hextropian.systems";
 
-/** Maximum wait for webhook propagation (seconds) */
-const MAX_WAIT_SECONDS = 90;
+/**
+ * Maximum wait for webhook propagation (seconds).
+ *
+ * Increased from 90 to 180 (TM-ucl1) because:
+ * - Google webhook delivery latency varies (0-30s typical, can be minutes)
+ * - Cloudflare Queue batch_timeout adds up to 30s
+ * - sync-consumer processing adds 2-10s
+ * - Event pagination across 2500+ events adds 5-15s
+ *
+ * Total worst-case pipeline latency: ~60-90s typical, ~120s under load.
+ * 180s gives comfortable margin.
+ */
+const MAX_WAIT_SECONDS = 180;
 
 /** Poll interval when waiting for propagation (milliseconds) */
 const POLL_INTERVAL_MS = 5_000;

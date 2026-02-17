@@ -62,6 +62,7 @@ class_name = "ReconcileWorkflow"
 
 [vars]
 ENVIRONMENT = "development"
+WEBHOOK_URL = "https://webhooks.tminus.ink/webhook/google"
 
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # MASTER_KEY          -- envelope encryption master key
@@ -76,6 +77,7 @@ name = "tminus-cron-staging"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
+WEBHOOK_URL = "https://webhooks-staging.tminus.ink/webhook/google"
 
 [env.staging.triggers]
 crons = [
@@ -128,6 +130,7 @@ name = "tminus-cron-production"
 
 [env.production.vars]
 ENVIRONMENT = "production"
+WEBHOOK_URL = "https://webhooks.tminus.ink/webhook/google"
 
 [env.production.triggers]
 crons = [
