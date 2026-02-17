@@ -49,6 +49,13 @@ export default defineConfig({
               __dirname,
               "workflows/scheduling/src",
             ),
+            // Stub the Cloudflare runtime-only module so transitive imports
+            // (e.g. workflow-wrapper.ts -> cloudflare:workers) resolve in Vitest.
+            // The stub provides minimal WorkflowEntrypoint and DurableObject classes.
+            "cloudflare:workers": path.resolve(
+              __dirname,
+              "workers/oauth/src/__stubs__/cloudflare-workers.ts",
+            ),
           },
         },
       },
