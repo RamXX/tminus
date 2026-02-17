@@ -53,10 +53,10 @@ dead_letter_queue = "tminus-sync-queue-dlq"
 [vars]
 ENVIRONMENT = "development"
 
-# --- Secrets (set via `wrangler secret put`, listed here for documentation) -
-# GOOGLE_CLIENT_ID
-# GOOGLE_CLIENT_SECRET
-# MASTER_KEY          -- envelope encryption master key
+# --- Secrets -------------------------------------------------------------------
+# This worker does NOT need direct secrets. All credential operations are
+# delegated to AccountDO via DO RPC (hosted on tminus-api where secrets exist).
+# See TM-pd65 for the architectural audit confirming this design.
 
 # ===========================================================================
 # Staging environment: tminus-sync-consumer-staging

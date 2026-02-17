@@ -25,8 +25,13 @@ queue = "tminus-sync-queue"
 ENVIRONMENT = "development"
 
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
-# MASTER_KEY          -- envelope encryption master key
-# JWT_SECRET          -- API auth JWT signing secret
+# MS_WEBHOOK_CLIENT_STATE -- shared secret for validating Microsoft Graph
+#                            change notifications (clientState field).
+#                            Not needed until Microsoft provider support is live.
+#
+# NOTE: This worker does NOT need MASTER_KEY or JWT_SECRET. Google webhook
+# validation uses D1 channel_token lookup (shared secret set during watch
+# registration). See TM-pd65 for the architectural audit.
 
 # ===========================================================================
 # Staging environment: tminus-webhook-staging
