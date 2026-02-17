@@ -1,4 +1,4 @@
-.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
+.PHONY: build build-web test test-unit test-integration test-integration-real test-e2e test-e2e-phase2a test-e2e-phase2a-staging test-e2e-phase2a-production test-e2e-phase2b test-e2e-phase2b-staging test-e2e-phase2b-production test-e2e-phase3a test-e2e-phase4b test-e2e-phase4c test-e2e-phase4d test-e2e-phase5a test-e2e-phase5b test-e2e-phase6a test-e2e-phase6b test-e2e-phase6c test-live test-live-staging test-scripts lint deploy deploy-promote deploy-stage deploy-prod deploy-promote-dry-run deploy-secrets deploy-d1-migrate deploy-production deploy-staging deploy-production-dry-run deploy-dns dns-setup dns-setup-staging dns-setup-all smoke-test validate-deployment validate-deployment-staging secrets-setup secrets-setup-staging secrets-setup-production secrets-setup-dry-run install clean typecheck check-placeholders ios-build ios-test ios-clean
 
 # ---- Core targets ----
 
@@ -28,6 +28,17 @@ test-integration-real: install
 
 test-e2e: install
 	@test -f .env && . ./.env; npx vitest run --config vitest.e2e.config.ts
+
+# ---- Live integration tests against deployed stack ----
+# Real HTTP tests against the deployed production or staging environment.
+# No mocks, no local servers. Tests skip gracefully when LIVE_BASE_URL not set.
+# Requires: LIVE_BASE_URL, optionally LIVE_JWT_TOKEN for authenticated tests.
+
+test-live: install
+	@test -f .env && . ./.env; LIVE_BASE_URL=https://api.tminus.ink npx vitest run --config vitest.live.config.ts
+
+test-live-staging: install
+	@test -f .env && . ./.env; LIVE_BASE_URL=https://api-staging.tminus.ink npx vitest run --config vitest.live.config.ts
 
 # ---- Phase 2A E2E validation ----
 # Real HTTP tests against a running API worker.
