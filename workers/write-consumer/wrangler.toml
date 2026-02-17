@@ -37,6 +37,8 @@ database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[queues.consumers]]
 queue = "tminus-write-queue"
+max_batch_size = 10
+max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-dlq"
 
@@ -79,6 +81,8 @@ script_name = "tminus-api-staging"
 
 [[env.staging.queues.consumers]]
 queue = "tminus-write-queue-staging"
+max_batch_size = 10
+max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-staging-dlq"
 
@@ -113,5 +117,7 @@ script_name = "tminus-api-production"
 
 [[env.production.queues.consumers]]
 queue = "tminus-write-queue"
+max_batch_size = 10
+max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-dlq"
