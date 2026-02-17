@@ -11,6 +11,54 @@
  */
 
 // ---------------------------------------------------------------------------
+// Constants: Test user from the walking skeleton OAuth flow (TM-qt2f)
+// ---------------------------------------------------------------------------
+
+/** User ID from the walking skeleton OAuth flow (TM-qt2f). */
+export const TEST_USER_ID = "usr_01KHMDJ8J604D317X12W0JFSNW";
+export const TEST_USER_EMAIL = "hextropian@hextropian.systems";
+
+// ---------------------------------------------------------------------------
+// JWT generation helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a JWT for the test user using the deployed JWT secret.
+ *
+ * This is the canonical JWT generation helper for all live test suites.
+ * Use it when LIVE_JWT_TOKEN is not set but JWT_SECRET is available.
+ * The generated token authenticates as the walking skeleton test user
+ * (OAuth user, no password) and is valid for 1 hour.
+ *
+ * @param secret - The JWT_SECRET from the deployed environment
+ * @returns A signed HS256 JWT string
+ */
+export async function generateTestJWT(secret: string): Promise<string> {
+  const header = { alg: "HS256", typ: "JWT" };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: TEST_USER_ID,
+    email: TEST_USER_EMAIL,
+    tier: "free",
+    pwd_ver: 0,
+    iat: now,
+    exp: now + 3600, // 1 hour
+  };
+
+  const b64url = (str: string) => Buffer.from(str).toString("base64url");
+
+  const headerB64 = b64url(JSON.stringify(header));
+  const payloadB64 = b64url(JSON.stringify(payload));
+
+  const { createHmac } = await import("crypto");
+  const signature = createHmac("sha256", secret)
+    .update(`${headerB64}.${payloadB64}`)
+    .digest("base64url");
+
+  return `${headerB64}.${payloadB64}.${signature}`;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -77,10 +125,16 @@ export function hasLiveCredentials(): boolean {
 
 /**
  * Returns true if live tests can make authenticated API calls.
- * Requires both LIVE_BASE_URL and LIVE_JWT_TOKEN.
+ * Requires LIVE_BASE_URL and either LIVE_JWT_TOKEN or JWT_SECRET.
+ *
+ * When JWT_SECRET is available, suites can generate their own JWT
+ * via generateTestJWT() -- no pre-generated LIVE_JWT_TOKEN needed.
  */
 export function hasAuthCredentials(): boolean {
-  return hasLiveCredentials() && !!process.env.LIVE_JWT_TOKEN?.trim();
+  return (
+    hasLiveCredentials() &&
+    (!!process.env.LIVE_JWT_TOKEN?.trim() || !!process.env.JWT_SECRET?.trim())
+  );
 }
 
 /**

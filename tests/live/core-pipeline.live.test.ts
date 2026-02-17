@@ -12,9 +12,9 @@
  *
  * Credential gating:
  * - Suite 1 (Auth Flow): requires LIVE_BASE_URL only
- * - Suite 2 (Full Sync): requires LIVE_BASE_URL + LIVE_JWT_TOKEN
- * - Suite 3 (Incremental Sync): requires all Google credentials
- * - Suite 4 (Event CRUD): requires LIVE_BASE_URL + LIVE_JWT_TOKEN
+ * - Suite 2 (Full Sync): requires LIVE_BASE_URL + LIVE_JWT_TOKEN (or JWT_SECRET)
+ * - Suite 3 (Incremental Sync): requires all Google credentials + LIVE_JWT_TOKEN (or JWT_SECRET)
+ * - Suite 4 (Event CRUD): requires LIVE_BASE_URL + LIVE_JWT_TOKEN (or JWT_SECRET)
  *
  * Run with: make test-live
  *
@@ -22,7 +22,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { loadLiveEnv, hasLiveCredentials, hasAuthCredentials, hasGoogleCredentials } from "./setup.js";
+import { loadLiveEnv, hasLiveCredentials, hasAuthCredentials, hasGoogleCredentials, generateTestJWT } from "./setup.js";
 import { LiveTestClient } from "./helpers.js";
 import type { LiveEnv } from "./setup.js";
 
@@ -506,13 +506,13 @@ describe("Live: Full sync pipeline (synced events from Google Calendar)", () => 
   let client: LiveTestClient;
   let env: LiveEnv;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!canRun) {
       console.warn(
         "\n" +
-          "  WARNING: Full sync tests require LIVE_BASE_URL + LIVE_JWT_TOKEN.\n" +
+          "  WARNING: Full sync tests require LIVE_BASE_URL + LIVE_JWT_TOKEN (or JWT_SECRET).\n" +
           "  Skipping full sync live tests.\n" +
-          "  Set LIVE_JWT_TOKEN to a JWT for a user with synced Google Calendar.\n",
+          "  Set LIVE_JWT_TOKEN or JWT_SECRET for a user with synced Google Calendar.\n",
       );
       return;
     }
@@ -520,7 +520,23 @@ describe("Live: Full sync pipeline (synced events from Google Calendar)", () => 
     const loaded = loadLiveEnv();
     if (!loaded) return;
     env = loaded;
-    client = LiveTestClient.fromEnv(env);
+
+    // Use LIVE_JWT_TOKEN if available, otherwise generate from JWT_SECRET
+    let jwtToken = env.jwtToken;
+    if (!jwtToken && process.env.JWT_SECRET?.trim()) {
+      jwtToken = await generateTestJWT(process.env.JWT_SECRET.trim());
+      console.log("  [SETUP] Generated JWT from JWT_SECRET for full sync tests");
+    }
+
+    if (!jwtToken) {
+      console.warn("  [SYNC] No JWT available -- tests will fail");
+      return;
+    }
+
+    client = new LiveTestClient({
+      baseUrl: env.baseUrl,
+      jwtToken,
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -640,8 +656,8 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
       console.warn(
         "\n" +
           "  WARNING: Incremental sync tests require all Google credentials:\n" +
-          "    LIVE_BASE_URL, LIVE_JWT_TOKEN, GOOGLE_TEST_REFRESH_TOKEN_A,\n" +
-          "    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET\n" +
+          "    LIVE_BASE_URL, LIVE_JWT_TOKEN (or JWT_SECRET),\n" +
+          "    GOOGLE_TEST_REFRESH_TOKEN_A, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET\n" +
           "  Skipping incremental sync live tests.\n",
       );
       return;
@@ -650,7 +666,23 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
     const loaded = loadLiveEnv();
     if (!loaded) return;
     env = loaded;
-    client = LiveTestClient.fromEnv(env);
+
+    // Use LIVE_JWT_TOKEN if available, otherwise generate from JWT_SECRET
+    let jwtToken = env.jwtToken;
+    if (!jwtToken && process.env.JWT_SECRET?.trim()) {
+      jwtToken = await generateTestJWT(process.env.JWT_SECRET.trim());
+      console.log("  [SETUP] Generated JWT from JWT_SECRET for incremental sync tests");
+    }
+
+    if (!jwtToken) {
+      console.warn("  [SYNC] No JWT available -- tests will fail");
+      return;
+    }
+
+    client = new LiveTestClient({
+      baseUrl: env.baseUrl,
+      jwtToken,
+    });
 
     // Exchange refresh token for access token
     const tokenResp = await fetch("https://oauth2.googleapis.com/token", {
@@ -803,11 +835,11 @@ describe("Live: Event CRUD operations via API", () => {
   // Track created event IDs for cleanup
   let createdEventId: string | null = null;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!canRun) {
       console.warn(
         "\n" +
-          "  WARNING: Event CRUD tests require LIVE_BASE_URL + LIVE_JWT_TOKEN.\n" +
+          "  WARNING: Event CRUD tests require LIVE_BASE_URL + LIVE_JWT_TOKEN (or JWT_SECRET).\n" +
           "  Skipping event CRUD live tests.\n",
       );
       return;
@@ -816,7 +848,23 @@ describe("Live: Event CRUD operations via API", () => {
     const loaded = loadLiveEnv();
     if (!loaded) return;
     env = loaded;
-    client = LiveTestClient.fromEnv(env);
+
+    // Use LIVE_JWT_TOKEN if available, otherwise generate from JWT_SECRET
+    let jwtToken = env.jwtToken;
+    if (!jwtToken && process.env.JWT_SECRET?.trim()) {
+      jwtToken = await generateTestJWT(process.env.JWT_SECRET.trim());
+      console.log("  [SETUP] Generated JWT from JWT_SECRET for event CRUD tests");
+    }
+
+    if (!jwtToken) {
+      console.warn("  [CRUD] No JWT available -- tests will fail");
+      return;
+    }
+
+    client = new LiveTestClient({
+      baseUrl: env.baseUrl,
+      jwtToken,
+    });
   });
 
   afterAll(async () => {

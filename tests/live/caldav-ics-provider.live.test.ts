@@ -21,46 +21,10 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   loadLiveEnv,
   hasCalDavCredentials,
+  generateTestJWT,
 } from "./setup.js";
 import { LiveTestClient } from "./helpers.js";
 import type { LiveEnv } from "./setup.js";
-
-// ---------------------------------------------------------------------------
-// JWT generation helper (when LIVE_JWT_TOKEN is not set)
-// ---------------------------------------------------------------------------
-
-/** User ID from the walking skeleton OAuth flow (TM-qt2f). */
-const TEST_USER_ID = "usr_01KHMDJ8J604D317X12W0JFSNW";
-const TEST_USER_EMAIL = "hextropian@hextropian.systems";
-
-/**
- * Generate a JWT for the test user using the deployed JWT secret.
- * Fallback for when LIVE_JWT_TOKEN is not set in .env.
- */
-async function generateTestJWT(secret: string): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    sub: TEST_USER_ID,
-    email: TEST_USER_EMAIL,
-    tier: "free",
-    pwd_ver: 0,
-    iat: now,
-    exp: now + 3600,
-  };
-
-  const b64url = (str: string) => Buffer.from(str).toString("base64url");
-
-  const headerB64 = b64url(JSON.stringify(header));
-  const payloadB64 = b64url(JSON.stringify(payload));
-
-  const { createHmac } = await import("crypto");
-  const signature = createHmac("sha256", secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest("base64url");
-
-  return `${headerB64}.${payloadB64}.${signature}`;
-}
 
 // ---------------------------------------------------------------------------
 // Types matching the API envelope

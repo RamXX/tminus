@@ -18,17 +18,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { loadLiveEnv, hasLiveCredentials } from "./setup.js";
+import { loadLiveEnv, hasLiveCredentials, generateTestJWT } from "./setup.js";
 import { LiveTestClient } from "./helpers.js";
 import type { LiveEnv } from "./setup.js";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** User ID from the walking skeleton OAuth flow (TM-qt2f) */
-const TEST_USER_ID = "usr_01KHMDJ8J604D317X12W0JFSNW";
-const TEST_USER_EMAIL = "hextropian@hextropian.systems";
 
 /**
  * Maximum wait for webhook propagation (seconds).
@@ -169,41 +161,6 @@ async function deleteGoogleEvent(
     const body = await resp.text();
     throw new Error(`Failed to delete Google event: ${resp.status} ${body}`);
   }
-}
-
-// ---------------------------------------------------------------------------
-// JWT helper
-// ---------------------------------------------------------------------------
-
-/**
- * Generate a JWT for the test user using the deployed JWT secret.
- * This is necessary because the OAuth user has no password (created via OAuth flow).
- */
-async function generateTestJWT(secret: string): Promise<string> {
-  // Use Web Crypto API (available in Node.js 18+)
-  const header = { alg: "HS256", typ: "JWT" };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    sub: TEST_USER_ID,
-    email: TEST_USER_EMAIL,
-    tier: "free",
-    pwd_ver: 0,
-    iat: now,
-    exp: now + 3600, // 1 hour
-  };
-
-  const b64url = (str: string) =>
-    Buffer.from(str).toString("base64url");
-
-  const headerB64 = b64url(JSON.stringify(header));
-  const payloadB64 = b64url(JSON.stringify(payload));
-
-  const { createHmac } = await import("crypto");
-  const signature = createHmac("sha256", secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest("base64url");
-
-  return `${headerB64}.${payloadB64}.${signature}`;
 }
 
 // ---------------------------------------------------------------------------
