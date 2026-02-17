@@ -493,7 +493,7 @@ describe("Rate limiting integration tests", () => {
       const key = computeWindowKey(identity, 3600);
       rateLimitsKV.store.set(key, "5");
 
-      // Next register attempt should be rate-limited
+      // Next register attempt with a real (non-test) email should be rate-limited
       const response = await handler.fetch(
         new Request("https://api.tminus.ink/v1/auth/register", {
           method: "POST",
@@ -502,7 +502,7 @@ describe("Rate limiting integration tests", () => {
             "CF-Connecting-IP": "10.0.0.77",
           },
           body: JSON.stringify({
-            email: "newuser@example.com",
+            email: "newuser@realmail.com",
             password: "ValidPassword123",
           }),
         }),
@@ -703,6 +703,238 @@ describe("Rate limiting integration tests", () => {
         ctx,
       );
       expect(allowed.status).toBe(401); // 401 because no auth, but NOT 429
+    });
+  });
+
+  // =========================================================================
+  // TM-x8aq: Test email exemption from register rate limits
+  // =========================================================================
+
+  describe("Test email exemption from register rate limits (TM-x8aq)", () => {
+    it("test email (@example.com) bypasses register rate limit even when IP is exhausted", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill the register rate limit counter for this IP to the limit (5/hr)
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_register:10.0.0.200";
+      const key = computeWindowKey(identity, 3600);
+      rateLimitsKV.store.set(key, "5");
+
+      // A real email from the same IP should be blocked
+      const blockedResp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.200",
+          },
+          body: JSON.stringify({
+            email: "realuser@gmail.com",
+            password: "ValidPassword123",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      expect(blockedResp.status).toBe(429);
+
+      // A test email from the same IP should NOT be blocked
+      const exemptResp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.200",
+          },
+          body: JSON.stringify({
+            email: "testuser@example.com",
+            password: "ValidPassword123",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      // Should NOT be 429 -- should proceed to handler (likely 201 for success)
+      expect(exemptResp.status).not.toBe(429);
+      // Verify it actually reached the register handler (201 = user created)
+      expect(exemptResp.status).toBe(201);
+      const body = await exemptResp.json() as Record<string, unknown>;
+      expect(body.ok).toBe(true);
+    });
+
+    it("smoke-test email pattern (@test.tminus.ink) bypasses register rate limit", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill the register rate limit counter for this IP to the limit
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_register:10.0.0.201";
+      const key = computeWindowKey(identity, 3600);
+      rateLimitsKV.store.set(key, "5");
+
+      // The exact pattern used by smoke-test.mjs
+      const smokeEmail = `smoke-${Date.now().toString(36)}@test.tminus.ink`;
+      const exemptResp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.201",
+          },
+          body: JSON.stringify({
+            email: smokeEmail,
+            password: "ValidPassword123",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      // Should NOT be 429 -- should proceed to handler
+      expect(exemptResp.status).not.toBe(429);
+      expect(exemptResp.status).toBe(201);
+    });
+
+    it("test- prefix email bypasses register rate limit", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill the register rate limit counter to the limit
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_register:10.0.0.202";
+      const key = computeWindowKey(identity, 3600);
+      rateLimitsKV.store.set(key, "5");
+
+      const exemptResp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.202",
+          },
+          body: JSON.stringify({
+            email: "test-deployment-check@anyserver.com",
+            password: "ValidPassword123",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      expect(exemptResp.status).not.toBe(429);
+      expect(exemptResp.status).toBe(201);
+    });
+
+    it("login endpoint is NOT exempt for test emails (only register is)", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill the login rate limit counter to the limit
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_login:10.0.0.203";
+      const key = computeWindowKey(identity, 60);
+      rateLimitsKV.store.set(key, "10");
+
+      // Even a test email should be rate-limited on login
+      const resp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.203",
+          },
+          body: JSON.stringify({
+            email: "test-user@example.com",
+            password: "anypassword",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      expect(resp.status).toBe(429);
+    });
+
+    it("real user emails are still rate-limited normally on register", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill to the limit
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_register:10.0.0.204";
+      const key = computeWindowKey(identity, 3600);
+      rateLimitsKV.store.set(key, "5");
+
+      const resp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.204",
+          },
+          body: JSON.stringify({
+            email: "legitimate.user@protonmail.com",
+            password: "ValidPassword123",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      expect(resp.status).toBe(429);
+      const body = await resp.json() as Record<string, unknown>;
+      expect(body.error_code).toBe("RATE_LIMITED");
+    });
+
+    it("malformed JSON body still gets rate-limited (no bypass)", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Pre-fill to the limit
+      const { computeWindowKey } = await import("@tminus/shared");
+      const identity = "auth_register:10.0.0.205";
+      const key = computeWindowKey(identity, 3600);
+      rateLimitsKV.store.set(key, "5");
+
+      const resp = await handler.fetch(
+        new Request("https://api.tminus.ink/v1/auth/register", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "10.0.0.205",
+          },
+          body: "not valid json",
+        }),
+        env,
+        ctx,
+      );
+      // Should still be rate-limited because we can't determine the email
+      expect(resp.status).toBe(429);
+    });
+
+    it("multiple test email registrations from same IP all succeed (no accumulation)", async () => {
+      const env = createEnv(d1, rateLimitsKV);
+      const ctx = createExecutionContext();
+
+      // Make 10 test email registrations from the same IP (well above the 5/hr limit)
+      for (let i = 0; i < 10; i++) {
+        const resp = await handler.fetch(
+          new Request("https://api.tminus.ink/v1/auth/register", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "CF-Connecting-IP": "10.0.0.206",
+            },
+            body: JSON.stringify({
+              email: `test-user-${i}@example.com`,
+              password: "ValidPassword123",
+            }),
+          }),
+          env,
+          ctx,
+        );
+        // None should be 429 -- test emails bypass rate limiting entirely
+        expect(resp.status).not.toBe(429);
+        // All should succeed (201)
+        expect(resp.status).toBe(201);
+      }
     });
   });
 });

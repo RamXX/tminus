@@ -25,9 +25,12 @@ import {
   detectAuthEndpoint,
   extractClientIp,
   applyRateLimitHeaders,
+  isTestEmail,
   TIER_LIMITS,
   AUTH_ENDPOINT_LIMITS,
   RATE_LIMIT_KEY_PREFIX,
+  TEST_EMAIL_DOMAINS,
+  TEST_EMAIL_PREFIXES,
 } from "./rate-limit";
 import type { RateLimitKV, RateLimitResult } from "./rate-limit";
 
@@ -552,5 +555,114 @@ describe("applyRateLimitHeaders", () => {
     const modified = await applyRateLimitHeaders(original, result);
     expect(modified.status).toBe(201);
     expect(modified.headers.get("X-RateLimit-Limit")).toBe("500");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isTestEmail
+// ---------------------------------------------------------------------------
+
+describe("isTestEmail", () => {
+  // -- Test email constants ---------------------------------------------------
+
+  it("exports TEST_EMAIL_DOMAINS with expected domains", () => {
+    expect(TEST_EMAIL_DOMAINS).toContain("example.com");
+    expect(TEST_EMAIL_DOMAINS).toContain("example.net");
+    expect(TEST_EMAIL_DOMAINS).toContain("example.org");
+    expect(TEST_EMAIL_DOMAINS).toContain("test.tminus.ink");
+  });
+
+  it("exports TEST_EMAIL_PREFIXES with expected prefixes", () => {
+    expect(TEST_EMAIL_PREFIXES).toContain("test-");
+    expect(TEST_EMAIL_PREFIXES).toContain("smoke-");
+  });
+
+  // -- RFC 2606 reserved domains ----------------------------------------------
+
+  it("recognizes @example.com as a test email", () => {
+    expect(isTestEmail("user@example.com")).toBe(true);
+  });
+
+  it("recognizes @example.net as a test email", () => {
+    expect(isTestEmail("user@example.net")).toBe(true);
+  });
+
+  it("recognizes @example.org as a test email", () => {
+    expect(isTestEmail("user@example.org")).toBe(true);
+  });
+
+  // -- Internal test domain ---------------------------------------------------
+
+  it("recognizes @test.tminus.ink as a test email", () => {
+    expect(isTestEmail("smoke-abc123@test.tminus.ink")).toBe(true);
+  });
+
+  // -- Test prefixes ----------------------------------------------------------
+
+  it("recognizes test- prefix as a test email", () => {
+    expect(isTestEmail("test-user@gmail.com")).toBe(true);
+  });
+
+  it("recognizes smoke- prefix as a test email", () => {
+    expect(isTestEmail("smoke-abc123@anyserver.com")).toBe(true);
+  });
+
+  // -- Smoke test actual pattern ----------------------------------------------
+
+  it("recognizes the exact smoke test email pattern", () => {
+    // From smoke-test.mjs: `smoke-${uniqueId}@test.tminus.ink`
+    const smokeEmail = "smoke-lz3abc@test.tminus.ink";
+    expect(isTestEmail(smokeEmail)).toBe(true);
+  });
+
+  // -- Real user emails should NOT match --------------------------------------
+
+  it("does not match a regular gmail address", () => {
+    expect(isTestEmail("john@gmail.com")).toBe(false);
+  });
+
+  it("does not match a company email", () => {
+    expect(isTestEmail("admin@tminus.ink")).toBe(false);
+  });
+
+  it("does not match an email that merely contains 'test' in the domain", () => {
+    expect(isTestEmail("user@testing.com")).toBe(false);
+  });
+
+  it("does not match an email that contains 'test' mid-local-part", () => {
+    expect(isTestEmail("mytest@gmail.com")).toBe(false);
+  });
+
+  it("does not match an email with 'smoke' mid-local-part", () => {
+    expect(isTestEmail("nosmoke-here@gmail.com")).toBe(false);
+  });
+
+  // -- Case insensitivity -----------------------------------------------------
+
+  it("handles uppercase emails (case insensitive)", () => {
+    expect(isTestEmail("Test-User@Example.COM")).toBe(true);
+  });
+
+  it("handles mixed case smoke prefix", () => {
+    expect(isTestEmail("SMOKE-abc@Gmail.com")).toBe(true);
+  });
+
+  // -- Edge cases / invalid inputs --------------------------------------------
+
+  it("returns false for empty string", () => {
+    expect(isTestEmail("")).toBe(false);
+  });
+
+  it("returns false for null/undefined (coerced)", () => {
+    expect(isTestEmail(null as unknown as string)).toBe(false);
+    expect(isTestEmail(undefined as unknown as string)).toBe(false);
+  });
+
+  it("returns false for malformed email without @", () => {
+    expect(isTestEmail("notanemail")).toBe(false);
+  });
+
+  it("returns false for email with empty local part", () => {
+    expect(isTestEmail("@example.com")).toBe(false);
   });
 });

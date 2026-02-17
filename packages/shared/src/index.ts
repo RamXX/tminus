@@ -271,6 +271,9 @@ export {
   TIER_LIMITS,
   AUTH_ENDPOINT_LIMITS,
   RATE_LIMIT_KEY_PREFIX,
+  isTestEmail,
+  TEST_EMAIL_DOMAINS,
+  TEST_EMAIL_PREFIXES,
 } from "./middleware/rate-limit";
 export type {
   RateLimitTier,

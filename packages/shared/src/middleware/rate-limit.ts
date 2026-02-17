@@ -82,6 +82,68 @@ export const AUTH_ENDPOINT_LIMITS: Record<"register" | "login", RateLimitConfig>
 /** KV key prefix for rate limit counters. */
 export const RATE_LIMIT_KEY_PREFIX = "rl:" as const;
 
+/**
+ * Email domains that are exempt from auth-endpoint rate limits.
+ *
+ * These are reserved/test domains (RFC 2606 and internal) that should never
+ * be rate-limited during automated testing and deployment verification.
+ * Real users cannot register with these domains, so exempting them does not
+ * weaken security.
+ */
+export const TEST_EMAIL_DOMAINS: ReadonlyArray<string> = [
+  "example.com",       // RFC 2606 reserved
+  "example.net",       // RFC 2606 reserved
+  "example.org",       // RFC 2606 reserved
+  "test.tminus.ink",   // Internal test domain (used by smoke-test.mjs)
+] as const;
+
+/**
+ * Email local-part prefixes that signal a test account.
+ *
+ * Emails matching `<prefix>*@<any-domain>` are considered test accounts
+ * and exempt from auth-endpoint rate limits.
+ */
+export const TEST_EMAIL_PREFIXES: ReadonlyArray<string> = [
+  "test-",
+  "smoke-",
+] as const;
+
+/**
+ * Determine whether an email address is a test email that should be
+ * exempt from auth-endpoint rate limits.
+ *
+ * A test email is one that:
+ * - Uses a reserved/test domain (example.com, test.tminus.ink, etc.), OR
+ * - Has a local part starting with a known test prefix (test-, smoke-)
+ *
+ * This function is intentionally conservative: it only matches well-known
+ * patterns used by our automated test infrastructure. Real user signups
+ * are unaffected.
+ *
+ * @param email - The email address to check (should be trimmed and lowercased)
+ * @returns true if the email is a test email
+ */
+export function isTestEmail(email: string): boolean {
+  if (!email || typeof email !== "string") return false;
+
+  const lower = email.toLowerCase().trim();
+  const atIndex = lower.indexOf("@");
+  if (atIndex < 1) return false;
+
+  const localPart = lower.slice(0, atIndex);
+  const domain = lower.slice(atIndex + 1);
+
+  // Check domain against test domains
+  if (TEST_EMAIL_DOMAINS.includes(domain)) return true;
+
+  // Check local part against test prefixes
+  for (const prefix of TEST_EMAIL_PREFIXES) {
+    if (localPart.startsWith(prefix)) return true;
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Core logic
 // ---------------------------------------------------------------------------

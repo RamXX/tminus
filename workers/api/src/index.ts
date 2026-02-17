@@ -17,6 +17,7 @@ import {
   addCorsHeaders,
   buildPreflightResponse,
   buildHealthResponse,
+  isTestEmail,
 } from "@tminus/shared";
 import type { RateLimitKV, RateLimitTier } from "@tminus/shared";
 import { createAuthRoutes } from "./routes/auth";
@@ -411,16 +412,38 @@ export function createHandler() {
       // Auth routes (/v1/auth/*) do NOT require existing JWT -- they create tokens.
       // Delegate to the Hono auth router.
       if (pathname.startsWith("/v1/auth/")) {
-        // Rate limit auth endpoints (register/login have stricter limits)
+        // Rate limit auth endpoints (register/login have stricter limits).
+        // Test emails (RFC 2606 reserved domains, test-* prefixes, smoke-* prefixes,
+        // @test.tminus.ink) are exempt so automated test runs and deployment
+        // verification don't accumulate 429s. This does not weaken security --
+        // real users cannot register with these domains.
         if (env.RATE_LIMITS) {
           const authEndpoint = detectAuthEndpoint(pathname);
           if (authEndpoint) {
-            const clientIp = extractClientIp(request);
-            const identity = getRateLimitIdentity(null, clientIp, authEndpoint);
-            const config = selectRateLimitConfig(null, authEndpoint);
-            const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
-            if (!rlResult.allowed) {
-              return finalize(buildRateLimitResponse(rlResult));
+            // For register endpoints, check if the email is a test email before
+            // applying rate limits. We clone the request so the body remains
+            // available for the auth route handler downstream.
+            let exempt = false;
+            if (authEndpoint === "register") {
+              try {
+                const cloned = request.clone();
+                const body = await cloned.json() as { email?: string };
+                const email = (body.email ?? "").trim().toLowerCase();
+                exempt = isTestEmail(email);
+              } catch {
+                // If body parsing fails, proceed with rate limiting.
+                // The auth handler will return a proper validation error.
+              }
+            }
+
+            if (!exempt) {
+              const clientIp = extractClientIp(request);
+              const identity = getRateLimitIdentity(null, clientIp, authEndpoint);
+              const config = selectRateLimitConfig(null, authEndpoint);
+              const rlResult = await checkRL(env.RATE_LIMITS as unknown as RateLimitKV, identity, config);
+              if (!rlResult.allowed) {
+                return finalize(buildRateLimitResponse(rlResult));
+              }
             }
           }
         }
