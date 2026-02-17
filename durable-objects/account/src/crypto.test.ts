@@ -47,27 +47,68 @@ describe("importMasterKey", () => {
     expect(key.algorithm).toMatchObject({ name: "AES-GCM" });
   });
 
-  it("rejects a key shorter than 32 bytes", async () => {
-    await expect(importMasterKey("0123456789abcdef")).rejects.toThrow(
-      /must be 32 bytes/,
-    );
+  it("uses SHA-256 fallback for hex string shorter than 64 chars", async () => {
+    // "0123456789abcdef" is valid hex but only 16 chars (not 64),
+    // so it hits the SHA-256 fallback path and produces a valid key.
+    const key = await importMasterKey("0123456789abcdef");
+    expect(key).toBeDefined();
+    expect(key.type).toBe("secret");
+    expect(key.algorithm).toMatchObject({ name: "AES-GCM" });
   });
 
-  it("rejects a key longer than 32 bytes", async () => {
-    await expect(
-      importMasterKey(TEST_MASTER_KEY_HEX + "aabb"),
-    ).rejects.toThrow(/must be 32 bytes/);
+  it("uses SHA-256 fallback for hex string longer than 64 chars", async () => {
+    // 68-char hex string is not exactly 64, so SHA-256 fallback is used.
+    const key = await importMasterKey(TEST_MASTER_KEY_HEX + "aabb");
+    expect(key).toBeDefined();
+    expect(key.type).toBe("secret");
+    expect(key.algorithm).toMatchObject({ name: "AES-GCM" });
   });
 
-  it("rejects invalid hex characters", async () => {
+  it("uses SHA-256 fallback for string with non-hex characters", async () => {
+    // 64-char string with invalid hex chars triggers SHA-256 fallback.
     const badHex = "zz" + TEST_MASTER_KEY_HEX.slice(2);
-    await expect(importMasterKey(badHex)).rejects.toThrow(
-      /Invalid hex character/,
-    );
+    const key = await importMasterKey(badHex);
+    expect(key).toBeDefined();
+    expect(key.type).toBe("secret");
+    expect(key.algorithm).toMatchObject({ name: "AES-GCM" });
   });
 
-  it("rejects odd-length hex string", async () => {
-    await expect(importMasterKey("abc")).rejects.toThrow(/odd length/);
+  it("uses SHA-256 fallback for odd-length string", async () => {
+    // "abc" is not 64-char hex, so SHA-256 fallback is used.
+    const key = await importMasterKey("abc");
+    expect(key).toBeDefined();
+    expect(key.type).toBe("secret");
+    expect(key.algorithm).toMatchObject({ name: "AES-GCM" });
+  });
+
+  it("SHA-256 fallback is deterministic (same input yields same key)", async () => {
+    // Two calls with the same non-hex input must produce keys that
+    // encrypt/decrypt identically, proving determinism.
+    const key1 = await importMasterKey("my-base64-secret");
+    const key2 = await importMasterKey("my-base64-secret");
+
+    const envelope = await encryptTokens(key1, TEST_TOKENS);
+    const decrypted = await decryptTokens(key2, envelope);
+    expect(decrypted).toEqual(TEST_TOKENS);
+  });
+
+  it("SHA-256 fallback produces different keys for different inputs", async () => {
+    // Different inputs must produce different keys (security property).
+    const keyA = await importMasterKey("secret-A");
+    const keyB = await importMasterKey("secret-B");
+
+    const envelope = await encryptTokens(keyA, TEST_TOKENS);
+    // Decrypting with a different key must fail (GCM authentication).
+    await expect(decryptTokens(keyB, envelope)).rejects.toThrow();
+  });
+
+  it("SHA-256 fallback key works for full encrypt/decrypt round-trip", async () => {
+    // Prove the fallback path produces a fully functional key,
+    // not just an object that passes type checks.
+    const key = await importMasterKey("not-hex-at-all!");
+    const envelope = await encryptTokens(key, TEST_TOKENS);
+    const decrypted = await decryptTokens(key, envelope);
+    expect(decrypted).toEqual(TEST_TOKENS);
   });
 });
 
