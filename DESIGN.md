@@ -538,9 +538,12 @@ blocks to Account B and Account C.
          |
          +---> Channel Renewal
          |     Query D1: channels expiring within 24h
-         |     For each: call AccountDO.renewChannel()
-         |     AccountDO calls Google events/watch
-         |     Update channel_id + expiry in D1
+         |       OR channels with no sync in 12h
+         |     For each: call reRegisterChannel() in cron worker
+         |       1. Stop old channel with Google (best-effort)
+         |       2. Register new channel via Google watchEvents API
+         |       3. Store new channel in AccountDO via storeWatchChannel()
+         |       4. Update D1 with new channel_id, token, expiry, resource_id
          |
          +---> Token Health Check
          |     Query D1: all active accounts
@@ -759,7 +762,7 @@ interface AccountDO {
 
   // Watch channel lifecycle
   registerChannel(calendar_id: string): Promise<ChannelInfo>;
-  renewChannel(): Promise<ChannelInfo>;
+  storeWatchChannel(channelId: string, resourceId: string, expiration: string, calendarId: string): Promise<void>;
   getChannelStatus(): Promise<ChannelStatus>;
 
   // Health

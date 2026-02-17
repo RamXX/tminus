@@ -200,7 +200,7 @@ export async function handleIncrementalSync(
   }
 
   // Steps 6-8: Process events and update state using provider-specific classification/normalization
-  await processAndApplyDeltas(account_id, events, env, provider);
+  const deltasApplied = await processAndApplyDeltas(account_id, events, env, provider);
 
   // Update sync cursor (syncToken for Google, deltaLink URL for Microsoft)
   if (nextSyncToken) {
@@ -209,6 +209,10 @@ export async function handleIncrementalSync(
 
   // Mark sync success
   await markSyncSuccess(account_id, env);
+
+  console.log(
+    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id} -- ${events.length} events fetched, ${deltasApplied} deltas applied`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +293,7 @@ export async function handleFullSync(
   }
 
   // Process all events using provider-specific classification/normalization
-  await processAndApplyDeltas(account_id, allEvents, env, provider);
+  const deltasApplied = await processAndApplyDeltas(account_id, allEvents, env, provider);
 
   // Update sync cursor (syncToken for Google, deltaLink for Microsoft)
   if (lastSyncToken) {
@@ -298,6 +302,10 @@ export async function handleFullSync(
 
   // Mark sync success
   await markSyncSuccess(account_id, env);
+
+  console.log(
+    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +327,7 @@ async function processAndApplyDeltas(
   events: GoogleCalendarEvent[],
   env: Env,
   provider: ProviderType = "google",
-): Promise<void> {
+): Promise<number> {
   const deltas: ProviderDelta[] = [];
   const classificationStrategy = getClassificationStrategy(provider);
 
@@ -341,7 +349,7 @@ async function processAndApplyDeltas(
   }
 
   if (deltas.length === 0) {
-    return;
+    return 0;
   }
 
   // Look up user_id from D1 accounts table for the account_id
@@ -370,6 +378,8 @@ async function processAndApplyDeltas(
       `UserGraphDO.applyProviderDelta failed (${response.status}): ${body}`,
     );
   }
+
+  return deltas.length;
 }
 
 /**
