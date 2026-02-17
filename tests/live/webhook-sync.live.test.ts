@@ -228,34 +228,26 @@ interface EventsResponse {
 }
 
 /**
- * Search all events (paginating) for one matching the given origin_event_id.
+ * Find event by origin_event_id using the server-side query parameter.
+ *
+ * Uses GET /v1/events?origin_event_id=<id>&limit=10 which delegates filtering
+ * to a SQL WHERE clause (see UserGraphDO.listCanonicalEvents). This is both
+ * faster and race-free compared to the previous approach of paginating through
+ * all events with client-side filtering, which could miss events that shifted
+ * position in cursor-based pagination during concurrent sync batches.
  */
 async function findEventByOriginId(
   client: LiveTestClient,
   originEventId: string,
 ): Promise<TMinusEvent | null> {
-  let cursor: string | undefined;
-  const maxPages = 25; // Safety limit -- account may have 2500+ events
+  const path = `/v1/events?origin_event_id=${encodeURIComponent(originEventId)}&limit=10`;
+  const resp = await client.get(path);
+  if (!resp.ok) return null;
 
-  for (let page = 0; page < maxPages; page++) {
-    const path = cursor
-      ? `/v1/events?limit=200&cursor=${encodeURIComponent(cursor)}`
-      : "/v1/events?limit=200";
+  const body = (await resp.json()) as EventsResponse;
+  if (!body.ok || !body.data || body.data.length === 0) return null;
 
-    const resp = await client.get(path);
-    if (!resp.ok) return null;
-
-    const body = (await resp.json()) as EventsResponse;
-    if (!body.ok || !body.data) return null;
-
-    const match = body.data.find((e) => e.origin_event_id === originEventId);
-    if (match) return match;
-
-    if (!body.meta?.next_cursor) break;
-    cursor = body.meta.next_cursor;
-  }
-
-  return null;
+  return body.data[0];
 }
 
 /**
@@ -461,7 +453,9 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
         `  [CREATE] Event created in Google Calendar: id=${createdEventId}, title="${created.summary}"`,
       );
 
-      // Step 3: Wait for webhook + incremental sync to propagate
+      // Step 3: Wait for webhook + incremental sync to propagate.
+      // Capture the found event in the callback to avoid a TOCTOU re-fetch race.
+      let capturedCreateEvent: TMinusEvent | null = null;
       const createLatency = await pollUntil(
         "event appears in GET /v1/events after CREATE",
         async () => {
@@ -470,6 +464,7 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
             console.log(
               `  [CREATE] Found event: canonical_id=${found.canonical_event_id}, title="${found.title}"`,
             );
+            capturedCreateEvent = found;
             return true;
           }
           return false;
@@ -478,12 +473,11 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
 
       latencies["CREATE"] = createLatency;
 
-      // Step 4: Verify the propagated event
-      const createdEvent = await findEventByOriginId(client, createdEventId);
-      expect(createdEvent).not.toBeNull();
-      expect(createdEvent!.title).toContain(TEST_EVENT_MARKER);
-      expect(createdEvent!.origin_event_id).toBe(createdEventId);
-      expect(createdEvent!.status).toBe("confirmed");
+      // Step 4: Verify the propagated event using the captured result (no re-fetch)
+      expect(capturedCreateEvent).not.toBeNull();
+      expect(capturedCreateEvent!.title).toContain(TEST_EVENT_MARKER);
+      expect(capturedCreateEvent!.origin_event_id).toBe(createdEventId);
+      expect(capturedCreateEvent!.status).toBe("confirmed");
 
       console.log(
         `  [AC2-5] CREATE propagation verified in ${createLatency}ms (${(createLatency / 1000).toFixed(1)}s)`,
@@ -516,7 +510,12 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
       await modifyGoogleEvent(googleAccessToken, createdEventId, modifiedTitle);
       console.log(`  [MODIFY] Event updated in Google Calendar to: "${modifiedTitle}"`);
 
-      // Wait for propagation
+      // Wait for propagation.
+      // Capture the found event in the callback to avoid a TOCTOU re-fetch race.
+      // This was the root cause of the intermittent AC6 failure (TM-7d9b):
+      // the post-poll findEventByOriginId() call could miss the event due to
+      // cursor-based pagination races when the event's sort key shifted.
+      let capturedModifyEvent: TMinusEvent | null = null;
       const modifyLatency = await pollUntil(
         "modified title propagates to GET /v1/events",
         async () => {
@@ -525,6 +524,7 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
             console.log(
               `  [MODIFY] Title updated: "${found.title}"`,
             );
+            capturedModifyEvent = found;
             return true;
           }
           return false;
@@ -533,10 +533,9 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
 
       latencies["MODIFY"] = modifyLatency;
 
-      // Verify the modification propagated
-      const modifiedEvent = await findEventByOriginId(client, createdEventId);
-      expect(modifiedEvent).not.toBeNull();
-      expect(modifiedEvent!.title).toContain("MODIFIED");
+      // Verify the modification propagated using the captured result (no re-fetch)
+      expect(capturedModifyEvent).not.toBeNull();
+      expect(capturedModifyEvent!.title).toContain("MODIFIED");
 
       console.log(
         `  [AC6] MODIFY propagation verified in ${modifyLatency}ms (${(modifyLatency / 1000).toFixed(1)}s)`,
@@ -576,19 +575,23 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
       await deleteGoogleEvent(googleAccessToken, createdEventId);
       console.log("  [DELETE] Event deleted from Google Calendar");
 
-      // Wait for propagation -- event should either disappear or status becomes "cancelled"
+      // Wait for propagation -- event should either disappear or status becomes "cancelled".
+      // Capture the final state in the callback to avoid a TOCTOU re-fetch race.
+      let capturedDeleteEvent: TMinusEvent | null | undefined = undefined;
       const deleteLatency = await pollUntil(
         "deleted event propagates to GET /v1/events",
         async () => {
           const found = await findEventByOriginId(client, createdEventId);
           if (!found) {
             console.log("  [DELETE] Event no longer in T-Minus API response");
+            capturedDeleteEvent = null;
             return true;
           }
           if (found.status === "cancelled") {
             console.log(
               "  [DELETE] Event status changed to 'cancelled' in T-Minus",
             );
+            capturedDeleteEvent = found;
             return true;
           }
           return false;
@@ -597,11 +600,11 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
 
       latencies["DELETE"] = deleteLatency;
 
-      // Verify deletion propagated
-      const afterEvent = await findEventByOriginId(client, createdEventId);
-      // Event should be either gone entirely or marked as cancelled
-      if (afterEvent) {
-        expect(afterEvent.status).toBe("cancelled");
+      // Verify deletion propagated using the captured result (no re-fetch).
+      // Event should be either gone entirely (null) or marked as cancelled.
+      expect(capturedDeleteEvent).not.toBeUndefined();
+      if (capturedDeleteEvent !== null) {
+        expect(capturedDeleteEvent!.status).toBe("cancelled");
       }
       // else it was fully removed -- also acceptable
 
