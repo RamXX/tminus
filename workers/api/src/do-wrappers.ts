@@ -19,6 +19,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { UserGraphDO as UserGraphDOCore } from "@tminus/do-user-graph";
 import { AccountDO as AccountDOCore } from "@tminus/do-account";
+import type { OAuthCredentials } from "@tminus/do-account";
 import type { SqlStorageLike } from "@tminus/shared";
 
 /**
@@ -47,7 +48,7 @@ export class UserGraphDO extends DurableObject<Env> {
  * Production wrapper for AccountDO.
  *
  * Extracts ctx.storage.sql (SqlStorage), env.MASTER_KEY (string),
- * and uses globalThis.fetch for HTTP calls.
+ * OAuth client credentials, and uses globalThis.fetch for HTTP calls.
  */
 export class AccountDO extends DurableObject<Env> {
   private readonly inner: AccountDOCore;
@@ -56,10 +57,18 @@ export class AccountDO extends DurableObject<Env> {
     super(ctx, env);
     // Cast SqlStorage to SqlStorageLike: structurally compatible at runtime.
     const sql = ctx.storage.sql as unknown as SqlStorageLike;
+    const oauthCredentials: OAuthCredentials = {
+      googleClientId: env.GOOGLE_CLIENT_ID ?? "",
+      googleClientSecret: env.GOOGLE_CLIENT_SECRET ?? "",
+      msClientId: env.MS_CLIENT_ID ?? "",
+      msClientSecret: env.MS_CLIENT_SECRET ?? "",
+    };
     this.inner = new AccountDOCore(
       sql,
       env.MASTER_KEY ?? "",
       globalThis.fetch.bind(globalThis),
+      undefined, // provider -- determined per-account, not per-worker
+      oauthCredentials,
     );
   }
 

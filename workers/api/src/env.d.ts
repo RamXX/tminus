@@ -25,6 +25,14 @@ interface Env {
   JWT_SECRET: string;
   /** MASTER_KEY secret for signing deletion certificates (HMAC-SHA-256). */
   MASTER_KEY?: string;
+  /** Google OAuth2 client ID (used by AccountDO for token refresh). */
+  GOOGLE_CLIENT_ID?: string;
+  /** Google OAuth2 client secret (used by AccountDO for token refresh). */
+  GOOGLE_CLIENT_SECRET?: string;
+  /** Microsoft Entra ID client ID (used by AccountDO for token refresh). */
+  MS_CLIENT_ID?: string;
+  /** Microsoft Entra ID client secret (used by AccountDO for token refresh). */
+  MS_CLIENT_SECRET?: string;
   /** Deployment environment: "production", "staging", or "development" (default). */
   ENVIRONMENT?: string;
   /** Stripe API secret key (sk_test_... or sk_live_...). */

@@ -53,6 +53,18 @@ const ACCOUNT_ROW_KEY = "self";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * OAuth client credentials needed for token refresh requests.
+ * Both Google and Microsoft require client_id and client_secret
+ * in token refresh requests for web application OAuth clients.
+ */
+export interface OAuthCredentials {
+  readonly googleClientId: string;
+  readonly googleClientSecret: string;
+  readonly msClientId: string;
+  readonly msClientSecret: string;
+}
+
 export interface ChannelInfo {
   readonly channelId: string;
   readonly calendarId: string;
@@ -94,6 +106,7 @@ export class AccountDO {
   private readonly sql: SqlStorageLike;
   private readonly masterKeyHex: string;
   private readonly fetchFn: FetchFn;
+  private readonly oauthCredentials?: OAuthCredentials;
   private migrated = false;
 
   /**
@@ -110,17 +123,20 @@ export class AccountDO {
    * @param masterKeyHex - Hex-encoded 256-bit master key
    * @param fetchFn - Fetch function for API calls (defaults to globalThis.fetch)
    * @param provider - Calendar provider type (defaults to 'google')
+   * @param oauthCredentials - OAuth client credentials for token refresh (required in production)
    */
   constructor(
     sql: SqlStorageLike,
     masterKeyHex: string,
     fetchFn?: FetchFn,
     provider?: ProviderType,
+    oauthCredentials?: OAuthCredentials,
   ) {
     this.sql = sql;
     this.masterKeyHex = masterKeyHex;
     this.fetchFn = fetchFn ?? globalThis.fetch.bind(globalThis);
     this.provider = provider ?? "google";
+    this.oauthCredentials = oauthCredentials;
   }
 
   // -------------------------------------------------------------------------
@@ -534,13 +550,29 @@ export class AccountDO {
   ): Promise<TokenPayload> {
     const tokenUrl = this.getTokenRefreshUrl();
 
+    // Build request body with client credentials per OAuth2 spec.
+    // Google and Microsoft both require client_id and client_secret
+    // for web application type OAuth clients.
+    const params: Record<string, string> = {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    };
+
+    if (this.oauthCredentials) {
+      if (this.provider === "microsoft") {
+        params.client_id = this.oauthCredentials.msClientId;
+        params.client_secret = this.oauthCredentials.msClientSecret;
+      } else {
+        // google (default)
+        params.client_id = this.oauthCredentials.googleClientId;
+        params.client_secret = this.oauthCredentials.googleClientSecret;
+      }
+    }
+
     const response = await this.fetchFn(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      }).toString(),
+      body: new URLSearchParams(params).toString(),
     });
 
     if (!response.ok) {

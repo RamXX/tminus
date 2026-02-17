@@ -18,7 +18,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { SqlStorageLike, SqlStorageCursorLike } from "@tminus/shared";
 import { AccountDO } from "./index";
-import type { FetchFn } from "./index";
+import type { FetchFn, OAuthCredentials } from "./index";
 import { encryptTokens, importMasterKey, decryptTokens, reEncryptDek } from "./crypto";
 import type { EncryptedEnvelope, DekBackupEntry } from "./crypto";
 
@@ -46,6 +46,13 @@ const EXPIRED_TOKENS = {
 };
 
 const TEST_SCOPES = "https://www.googleapis.com/auth/calendar";
+
+const TEST_OAUTH_CREDENTIALS: OAuthCredentials = {
+  googleClientId: "test-google-client-id.apps.googleusercontent.com",
+  googleClientSecret: "test-google-client-secret",
+  msClientId: "test-ms-client-id-uuid",
+  msClientSecret: "test-ms-client-secret",
+};
 
 // ---------------------------------------------------------------------------
 // SqlStorage adapter (same pattern as shared package tests)
@@ -346,7 +353,7 @@ describe("AccountDO integration", () => {
         );
       };
 
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "google", TEST_OAUTH_CREDENTIALS);
       await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
       await acct.getAccessToken();
 
@@ -356,6 +363,8 @@ describe("AccountDO integration", () => {
       expect(params.get("refresh_token")).toBe(
         EXPIRED_TOKENS.refresh_token,
       );
+      expect(params.get("client_id")).toBe(TEST_OAUTH_CREDENTIALS.googleClientId);
+      expect(params.get("client_secret")).toBe(TEST_OAUTH_CREDENTIALS.googleClientSecret);
     });
   });
 
@@ -379,7 +388,7 @@ describe("AccountDO integration", () => {
         );
       };
 
-      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft");
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft", TEST_OAUTH_CREDENTIALS);
       await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
       const token = await acct.getAccessToken();
 
@@ -390,6 +399,8 @@ describe("AccountDO integration", () => {
       const params = new URLSearchParams(capturedBody!);
       expect(params.get("grant_type")).toBe("refresh_token");
       expect(params.get("refresh_token")).toBe(EXPIRED_TOKENS.refresh_token);
+      expect(params.get("client_id")).toBe(TEST_OAUTH_CREDENTIALS.msClientId);
+      expect(params.get("client_secret")).toBe(TEST_OAUTH_CREDENTIALS.msClientSecret);
     });
 
     it("sends refresh request to Google token endpoint when provider is google", async () => {
@@ -461,6 +472,109 @@ describe("AccountDO integration", () => {
         .prepare("SELECT COUNT(*) as cnt FROM auth")
         .get() as { cnt: number };
       expect(row.cnt).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // OAuth client credentials in token refresh (TM-3fe5)
+  // -------------------------------------------------------------------------
+
+  describe("OAuth client credentials in token refresh (TM-3fe5)", () => {
+    it("includes Google client_id and client_secret in refresh request body", async () => {
+      let capturedBody: string | undefined;
+      const spyFetch: FetchFn = async (_input, init) => {
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({ access_token: "ya29.refreshed", expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(
+        sql, TEST_MASTER_KEY_HEX, spyFetch, "google", TEST_OAUTH_CREDENTIALS,
+      );
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      expect(capturedBody).toBeDefined();
+      const params = new URLSearchParams(capturedBody!);
+      expect(params.get("client_id")).toBe("test-google-client-id.apps.googleusercontent.com");
+      expect(params.get("client_secret")).toBe("test-google-client-secret");
+      // Verify the other required params are also present
+      expect(params.get("grant_type")).toBe("refresh_token");
+      expect(params.get("refresh_token")).toBe(EXPIRED_TOKENS.refresh_token);
+    });
+
+    it("includes Microsoft client_id and client_secret in refresh request body", async () => {
+      let capturedBody: string | undefined;
+      const spyFetch: FetchFn = async (_input, init) => {
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({ access_token: "EwB0A8l6_refreshed", expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(
+        sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft", TEST_OAUTH_CREDENTIALS,
+      );
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      expect(capturedBody).toBeDefined();
+      const params = new URLSearchParams(capturedBody!);
+      expect(params.get("client_id")).toBe("test-ms-client-id-uuid");
+      expect(params.get("client_secret")).toBe("test-ms-client-secret");
+      // Must NOT contain Google credentials
+      expect(capturedBody).not.toContain("google-client");
+    });
+
+    it("does not include client credentials when OAuthCredentials is not provided (backward compat)", async () => {
+      let capturedBody: string | undefined;
+      const spyFetch: FetchFn = async (_input, init) => {
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({ access_token: "ya29.no-creds", expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      // Construct WITHOUT oauthCredentials (backward compatibility for tests)
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      expect(capturedBody).toBeDefined();
+      const params = new URLSearchParams(capturedBody!);
+      expect(params.get("grant_type")).toBe("refresh_token");
+      expect(params.get("refresh_token")).toBe(EXPIRED_TOKENS.refresh_token);
+      // No client credentials should be present
+      expect(params.get("client_id")).toBeNull();
+      expect(params.get("client_secret")).toBeNull();
+    });
+
+    it("uses correct provider-specific credentials (Google creds NOT used for Microsoft)", async () => {
+      let capturedBody: string | undefined;
+      const spyFetch: FetchFn = async (_input, init) => {
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({ access_token: "refreshed", expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(
+        sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft", TEST_OAUTH_CREDENTIALS,
+      );
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      const params = new URLSearchParams(capturedBody!);
+      // Microsoft account must use MS credentials, not Google
+      expect(params.get("client_id")).toBe(TEST_OAUTH_CREDENTIALS.msClientId);
+      expect(params.get("client_id")).not.toBe(TEST_OAUTH_CREDENTIALS.googleClientId);
+      expect(params.get("client_secret")).toBe(TEST_OAUTH_CREDENTIALS.msClientSecret);
+      expect(params.get("client_secret")).not.toBe(TEST_OAUTH_CREDENTIALS.googleClientSecret);
     });
   });
 
