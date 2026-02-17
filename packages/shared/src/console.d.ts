@@ -1,5 +1,5 @@
 /**
- * Minimal ambient type declaration for console.warn.
+ * Minimal ambient type declarations for console methods.
  *
  * console is a standardized API available in all JavaScript runtimes
  * (browsers, Node.js, Cloudflare Workers, Deno, Bun). The shared package
@@ -8,5 +8,6 @@
  */
 
 declare const console: {
+  log(...data: unknown[]): void;
   warn(...data: unknown[]): void;
 };

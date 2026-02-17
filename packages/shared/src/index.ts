@@ -791,3 +791,25 @@ export type {
   HealthCheckData,
   HealthCheckResponse,
 } from "./health";
+
+// Re-export funnel event instrumentation (TM-zf91.6: GTM validation loop)
+export {
+  FUNNEL_STAGES,
+  FunnelEmitter,
+  MemoryEventSink,
+  ConsoleEventSink,
+  CompositeEventSink,
+  NoopEventSink,
+  parseFunnelConfig,
+  createFunnelEmitter,
+  isValidFunnelStage,
+  getFunnelStageIndex,
+  getNextFunnelStage,
+  DEFAULT_FUNNEL_CONFIG,
+} from "./funnel-events";
+export type {
+  FunnelStage,
+  FunnelEvent,
+  FunnelConfig,
+  EventSink,
+} from "./funnel-events";

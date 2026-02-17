@@ -104,3 +104,72 @@
 - Probabilistic availability modeling
 - Multi-tenant B2B (org-wide policies, shared constraints)
 - Temporal Graph API (for third-party integrations)
+
+---
+
+## Weekly Review Cadence & Decision Rubric
+
+**Cadence:** Every Monday at 10:00 AM (local time of the product lead).
+
+### Purpose
+
+Close the loop between product behavior and buyer outcomes. The review uses
+funnel instrumentation data (see `scripts/funnel-report.mjs`) to make
+evidence-based prioritization decisions rather than relying on intuition.
+
+### Review Inputs
+
+1. **Weekly Funnel Report** -- Generated via `node scripts/funnel-report.mjs --sample`
+   (or `--d1` when connected to production). Shows:
+   - Unique users per funnel stage (landing CTA click -> first insight viewed)
+   - Stage-to-stage conversion rates
+   - Week-over-week trends
+   - Overall funnel efficiency
+
+2. **Operational Metrics** -- From production monitoring:
+   - Sync latency (p50, p95, p99)
+   - Sync reliability (success rate)
+   - Error rates by worker
+   - API response times
+
+3. **Qualitative Signals** -- User feedback, support requests, feature requests.
+
+### Decision Rubric: What Triggers Prioritization Changes
+
+| Signal | Threshold | Action |
+|--------|-----------|--------|
+| CTA -> Signup conversion drops below 40% | 2 consecutive weeks | Prioritize landing page copy/UX improvements |
+| Signup -> Provider Connect drops below 30% | 2 consecutive weeks | Prioritize onboarding flow simplification |
+| Provider Connect -> Sync Complete drops below 50% | 1 week | Investigate sync reliability; may be a bug |
+| Sync Complete -> Insight Viewed drops below 30% | 2 consecutive weeks | Prioritize insight visibility and value demonstration |
+| Overall funnel efficiency drops below 5% | 1 week | Emergency review: identify and fix the largest drop-off |
+| Sync latency p95 exceeds 30 seconds | 1 week | Prioritize performance optimization |
+| Sync reliability drops below 98% | 1 week | Prioritize reliability fix (P0) |
+| New qualitative signal from 3+ users | As received | Add to next review agenda |
+
+### Review Outputs
+
+After each review, the product lead produces:
+
+1. **Prioritization adjustment** -- Which backlog stories move up or down.
+2. **New stories** (if needed) -- Filed with clear acceptance criteria.
+3. **Metric targets** for the coming week -- What "good" looks like.
+4. **Risk flags** -- Anything that needs engineering or architecture attention.
+
+### Tooling
+
+- **Report generation:** `node scripts/funnel-report.mjs --sample` (dry-run) or
+  `make funnel-report` when Makefile target is available.
+- **Funnel events library:** `packages/shared/src/funnel-events.ts`
+- **Operational proof (public site):** `site/index.html` section `#proof`
+- **D1 SQL reference:** Included in the report script output.
+
+### First Review Checklist
+
+For the inaugural review:
+
+- [ ] Generate first weekly report (even with sample data)
+- [ ] Confirm instrumentation is enabled in staging
+- [ ] Verify operational metrics are accessible
+- [ ] Establish baseline conversion rates (even if from sample data)
+- [ ] Identify top-of-funnel acquisition channel (organic, referral, direct)
