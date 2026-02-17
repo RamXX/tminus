@@ -77,11 +77,9 @@ User Browser
 
 ### Per-User Isolation
 
-T-Minus uses Cloudflare Durable Objects for per-user data isolation:
-
-- **UserGraphDO:** One instance per user. Contains all calendar events, policies, and metadata for that user only. Named by `user_id`.
-- **AccountDO:** One instance per connected calendar account. Contains encrypted OAuth tokens and sync state. Named by `account_id`.
-- **No cross-user access:** A user's DO can only be accessed with a valid JWT containing their `user_id`. There is no API endpoint that returns another user's data.
+- **UserGraphDO:** One instance per user. Contains all calendar events, policies, and metadata for that user only.
+- **AccountDO:** One instance per connected calendar account. Contains encrypted OAuth tokens and sync state.
+- **No cross-user access:** A user's DO can only be accessed with a valid JWT containing their `user_id`.
 
 ### Authentication
 

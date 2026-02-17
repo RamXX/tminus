@@ -1,6 +1,9 @@
-# T-Minus Secrets Management
+# Secrets Management
 
-This document describes all secrets required by T-Minus workers, which workers need them, and how to deploy them across environments.
+This document describes all secrets required by T-Minus workers, which workers
+need them, and how to deploy them across environments.
+
+---
 
 ## Quick Start
 
@@ -19,6 +22,8 @@ make secrets-setup
 make secrets-setup-staging
 make secrets-setup-production
 ```
+
+---
 
 ## Secret Registry
 
@@ -42,7 +47,7 @@ JWT_SECRET must be **identical** across tminus-api and tminus-oauth to ensure to
 | **Generate** | `openssl rand -base64 32` |
 | **Rotation** | Requires re-encryption of all stored DEKs. NOT a simple rotation -- requires migration. |
 
-MASTER_KEY is used by AccountDO (hosted on tminus-api) to encrypt OAuth tokens at rest using envelope encryption. The same key must be available on tminus-oauth for shared encryption operations. **Losing this key means losing access to all encrypted OAuth tokens.**
+MASTER_KEY is used by AccountDO (hosted on tminus-api) to encrypt OAuth tokens at rest using envelope encryption. **Losing this key means losing access to all encrypted OAuth tokens.**
 
 ### GOOGLE_CLIENT_ID
 
@@ -52,8 +57,6 @@ MASTER_KEY is used by AccountDO (hosted on tminus-api) to encrypt OAuth tokens a
 | **Workers** | tminus-api, tminus-oauth |
 | **Source** | [Google Cloud Console](https://console.cloud.google.com/apis/credentials) |
 | **Rotation** | Create new OAuth client, update secret, update redirect URIs. |
-
-Used by tminus-oauth for OAuth authorization code exchange and by tminus-api (AccountDO) for token refresh of connected Google Calendar accounts.
 
 ### GOOGLE_CLIENT_SECRET
 
@@ -73,8 +76,6 @@ Used by tminus-oauth for OAuth authorization code exchange and by tminus-api (Ac
 | **Source** | [Microsoft Entra Admin Center](https://entra.microsoft.com/) > App registrations |
 | **Rotation** | Create new app registration, update secret, update redirect URIs. |
 
-Used by tminus-oauth for Microsoft OAuth flows and by tminus-api (AccountDO) for token refresh of connected Microsoft 365 calendar accounts.
-
 ### MS_CLIENT_SECRET
 
 | Property | Value |
@@ -84,6 +85,8 @@ Used by tminus-oauth for Microsoft OAuth flows and by tminus-api (AccountDO) for
 | **Source** | [Microsoft Entra Admin Center](https://entra.microsoft.com/) > App registrations > Certificates & secrets |
 | **Rotation** | Microsoft client secrets have configurable expiry (max 2 years). Rotate before expiry. |
 
+---
+
 ## Workers and Their Secrets
 
 ### tminus-api
@@ -92,7 +95,7 @@ Hosts UserGraphDO and AccountDO. AccountDO handles calendar account management i
 
 | Secret | Purpose on this worker |
 |--------|----------------------|
-| JWT_SECRET | Auth middleware: JWT signing and verification for API requests |
+| JWT_SECRET | Auth middleware: JWT signing and verification |
 | MASTER_KEY | AccountDO: DEK encryption for OAuth token storage |
 | GOOGLE_CLIENT_ID | AccountDO: Google Calendar token refresh |
 | GOOGLE_CLIENT_SECRET | AccountDO: Google Calendar token refresh |
@@ -112,9 +115,11 @@ Handles OAuth authorization flows (redirect, callback, token exchange). Hosts On
 | MS_CLIENT_ID | Microsoft OAuth authorization code exchange |
 | MS_CLIENT_SECRET | Microsoft OAuth authorization code exchange |
 
+---
+
 ## Environments
 
-Secrets must be set **independently** for each environment because wrangler environments create separate worker instances (e.g., `tminus-api-staging` and `tminus-api-production`).
+Secrets must be set **independently** for each environment because wrangler environments create separate worker instances.
 
 | Environment | Worker naming | Example |
 |-------------|--------------|---------|
@@ -123,12 +128,12 @@ Secrets must be set **independently** for each environment because wrangler envi
 
 ### Staging vs Production Values
 
-- **JWT_SECRET** and **MASTER_KEY**: Use DIFFERENT values for staging and production. This ensures staging tokens cannot be used in production.
+- **JWT_SECRET** and **MASTER_KEY**: Use DIFFERENT values for staging and production.
 - **OAuth credentials**: Can use the same Google/Microsoft OAuth app for both (with redirect URIs for both environments), or separate apps for complete isolation.
 
-## Deployment Matrix
+---
 
-The full matrix of secrets across workers and environments:
+## Deployment Matrix
 
 | Secret | tminus-api-staging | tminus-api-production | tminus-oauth-staging | tminus-oauth-production |
 |--------|:--:|:--:|:--:|:--:|
@@ -141,20 +146,15 @@ The full matrix of secrets across workers and environments:
 
 **Total: 24 secret deployments** (6 secrets x 2 workers x 2 environments)
 
+---
+
 ## CLI Reference
 
 ```bash
-# Deploy all secrets to all environments
-make secrets-setup
-
-# Deploy to staging only
-make secrets-setup-staging
-
-# Deploy to production only
-make secrets-setup-production
-
-# Preview without making changes
-make secrets-setup-dry-run
+make secrets-setup              # Deploy all secrets to all environments
+make secrets-setup-staging      # Deploy to staging only
+make secrets-setup-production   # Deploy to production only
+make secrets-setup-dry-run      # Preview without making changes
 
 # Advanced: filter by worker
 . ./.env && node scripts/setup-secrets.mjs --env production --worker api
@@ -163,16 +163,17 @@ make secrets-setup-dry-run
 . ./.env && node scripts/setup-secrets.mjs --verbose
 ```
 
+---
+
 ## How It Works
 
 1. Reads secret values from `.env` file in project root
 2. Builds a deployment plan based on the SECRETS_REGISTRY (which maps secrets to workers)
-3. For each secret/worker/environment combination, executes:
-   ```
-   npx wrangler secret put SECRET_NAME --name tminus-WORKER --env ENVIRONMENT
-   ```
+3. For each secret/worker/environment combination, executes `npx wrangler secret put`
 4. Secret values are piped via stdin (never exposed on command line or in logs)
-5. Wrangler `secret put` is an upsert operation -- **idempotent and safe to re-run**
+5. Wrangler `secret put` is an upsert operation -- idempotent and safe to re-run
+
+---
 
 ## Security Notes
 
