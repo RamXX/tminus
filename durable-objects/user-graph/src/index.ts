@@ -653,12 +653,63 @@ export class UserGraphDO {
       throw new Error("Created delta must include event payload");
     }
 
-    const canonicalId = generateId("event");
     const evt = delta.event;
 
     // Extract start/end timestamps from EventDateTime
     const startTs = evt.start.dateTime ?? evt.start.date ?? "";
     const endTs = evt.end.dateTime ?? evt.end.date ?? "";
+
+    // Check if event already exists for this (origin_account_id, origin_event_id).
+    // This handles deduplication: retries, overlapping syncs, or repeated
+    // "created" deltas for the same provider event won't produce duplicates.
+    const existingRows = this.sql
+      .exec<{ canonical_event_id: string; version: number }>(
+        `SELECT canonical_event_id, version FROM canonical_events
+         WHERE origin_account_id = ? AND origin_event_id = ?`,
+        accountId,
+        delta.origin_event_id,
+      )
+      .toArray();
+
+    if (existingRows.length > 0) {
+      // Event already exists -- update it instead of inserting a duplicate.
+      // Delegate to handleUpdated which already handles the update logic.
+      const canonicalId = existingRows[0].canonical_event_id;
+      const newVersion = existingRows[0].version + 1;
+
+      this.sql.exec(
+        `UPDATE canonical_events SET
+          title = ?, description = ?, location = ?,
+          start_ts = ?, end_ts = ?, timezone = ?,
+          all_day = ?, status = ?, visibility = ?,
+          transparency = ?, recurrence_rule = ?,
+          version = ?, updated_at = datetime('now')
+         WHERE canonical_event_id = ?`,
+        evt.title ?? null,
+        evt.description ?? null,
+        evt.location ?? null,
+        startTs,
+        endTs,
+        evt.start.timeZone ?? null,
+        evt.all_day ? 1 : 0,
+        evt.status ?? "confirmed",
+        evt.visibility ?? "default",
+        evt.transparency ?? "opaque",
+        evt.recurrence_rule ?? null,
+        newVersion,
+        canonicalId,
+      );
+
+      this.writeJournal(canonicalId, "updated", `provider:${accountId}`, {
+        origin_event_id: delta.origin_event_id,
+        dedup: true,
+      });
+
+      return canonicalId;
+    }
+
+    // New event -- insert with a fresh canonical_event_id
+    const canonicalId = generateId("event");
 
     this.sql.exec(
       `INSERT INTO canonical_events (

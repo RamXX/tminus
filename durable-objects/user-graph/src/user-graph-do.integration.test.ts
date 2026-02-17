@@ -272,6 +272,168 @@ describe("UserGraphDO integration", () => {
   });
 
   // -------------------------------------------------------------------------
+  // applyProviderDelta -- event deduplication (TM-sqr4)
+  // -------------------------------------------------------------------------
+
+  describe("applyProviderDelta event deduplication", () => {
+    it("deduplicates when same 'created' delta is applied twice for same origin keys", async () => {
+      const delta = makeCreatedDelta();
+
+      // First apply -- should insert
+      const result1 = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      expect(result1.created).toBe(1);
+      expect(result1.errors).toHaveLength(0);
+
+      // Second apply with same origin_event_id -- should NOT crash, should update
+      const result2 = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      expect(result2.created).toBe(1); // Counter still reports delta type
+      expect(result2.errors).toHaveLength(0);
+
+      // Only ONE canonical event should exist (not two)
+      const events = db
+        .prepare("SELECT * FROM canonical_events")
+        .all() as Array<Record<string, unknown>>;
+      expect(events).toHaveLength(1);
+      expect(events[0].origin_event_id).toBe("google_evt_001");
+      expect(events[0].title).toBe("Team Standup");
+      // Version should be bumped because dedup performed an update
+      expect(events[0].version).toBe(2);
+    });
+
+    it("preserves canonical_event_id on dedup (Invariant B: ULID stable)", async () => {
+      const delta = makeCreatedDelta();
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const eventsBefore = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+      const originalId = eventsBefore[0].canonical_event_id;
+
+      // Apply same delta again
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const eventsAfter = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+      expect(eventsAfter).toHaveLength(1);
+      // canonical_event_id must be the SAME (not a new ULID)
+      expect(eventsAfter[0].canonical_event_id).toBe(originalId);
+    });
+
+    it("updates event data on dedup when payload differs", async () => {
+      const delta1 = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+
+      // Second "created" delta with updated title and time
+      const delta2 = makeCreatedDelta({
+        event: {
+          ...makeCreatedDelta().event!,
+          title: "Team Standup v2",
+          start: { dateTime: "2026-02-15T11:00:00Z" },
+          end: { dateTime: "2026-02-15T11:30:00Z" },
+        },
+      });
+      const result = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta2]);
+      expect(result.errors).toHaveLength(0);
+
+      const events = db
+        .prepare("SELECT * FROM canonical_events")
+        .all() as Array<Record<string, unknown>>;
+      expect(events).toHaveLength(1);
+      expect(events[0].title).toBe("Team Standup v2");
+      expect(events[0].start_ts).toBe("2026-02-15T11:00:00Z");
+    });
+
+    it("writes dedup journal entry on duplicate create", async () => {
+      const delta = makeCreatedDelta();
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const journal = db
+        .prepare("SELECT * FROM event_journal ORDER BY journal_id")
+        .all() as Array<Record<string, unknown>>;
+      // First entry: "created", second entry: "updated" (dedup)
+      expect(journal).toHaveLength(2);
+      expect(journal[0].change_type).toBe("created");
+      expect(journal[1].change_type).toBe("updated");
+
+      // The dedup journal entry should note it was a dedup
+      const patchJson = JSON.parse(journal[1].patch_json as string);
+      expect(patchJson.dedup).toBe(true);
+    });
+
+    it("handles batch with mixed new and duplicate events", async () => {
+      // Insert first event
+      const delta1 = makeCreatedDelta({ origin_event_id: "google_evt_001" });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+
+      // Batch with duplicate of first + new second
+      const delta1Again = makeCreatedDelta({ origin_event_id: "google_evt_001" });
+      const delta2 = makeCreatedDelta({
+        origin_event_id: "google_evt_002",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "google_evt_002",
+          title: "Lunch Break",
+        },
+      });
+      const result = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        delta1Again,
+        delta2,
+      ]);
+
+      expect(result.created).toBe(2); // Both processed as "created" deltas
+      expect(result.errors).toHaveLength(0);
+
+      // Should have exactly 2 events (not 3)
+      const events = db
+        .prepare("SELECT * FROM canonical_events ORDER BY origin_event_id")
+        .all() as Array<Record<string, unknown>>;
+      expect(events).toHaveLength(2);
+      expect(events[0].origin_event_id).toBe("google_evt_001");
+      expect(events[1].origin_event_id).toBe("google_evt_002");
+    });
+
+    it("does not create duplicates from different account for same origin_event_id", async () => {
+      // Two different accounts syncing the same provider event ID
+      // (this is the legitimate case where the same Google event shows
+      // up via two different accounts)
+      const delta1 = makeCreatedDelta({
+        origin_account_id: TEST_ACCOUNT_ID,
+        origin_event_id: "shared_evt_001",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: "shared_evt_001",
+          title: "Shared Meeting",
+        },
+      });
+      const delta2 = makeCreatedDelta({
+        origin_account_id: OTHER_ACCOUNT_ID,
+        origin_event_id: "shared_evt_001",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: "shared_evt_001",
+          title: "Shared Meeting",
+        },
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta1]);
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [delta2]);
+
+      // These ARE different origin keys (different account_id), so two events
+      // is correct. The dedup only prevents duplicates within the same account.
+      const events = db
+        .prepare("SELECT * FROM canonical_events ORDER BY origin_account_id")
+        .all() as Array<Record<string, unknown>>;
+      expect(events).toHaveLength(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // applyProviderDelta -- updated
   // -------------------------------------------------------------------------
 
