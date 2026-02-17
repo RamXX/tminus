@@ -179,10 +179,11 @@ describe("wrangler.toml configuration validation", () => {
       expect(producers).toContain("SYNC_QUEUE");
     });
 
-    it("cron-worker produces to reconcile-queue and sync-queue", () => {
+    it("cron-worker produces to reconcile-queue, sync-queue, and write-queue", () => {
       const producers = queueProducerNames(configs["cron"]);
       expect(producers).toContain("RECONCILE_QUEUE");
       expect(producers).toContain("SYNC_QUEUE");
+      expect(producers).toContain("WRITE_QUEUE");
     });
 
     it("sync-consumer produces to write-queue and sync-queue (for 410 re-enqueue)", () => {
@@ -523,7 +524,7 @@ describe("wrangler.toml configuration validation", () => {
       expect(d1Names).toContain("DB");
     });
 
-    it("cron-worker has all required bindings: AccountDO, D1, reconcile-queue, sync-queue", () => {
+    it("cron-worker has all required bindings: AccountDO, D1, reconcile-queue, sync-queue, write-queue", () => {
       const doNames = doBindingNames(configs["cron"]);
       const d1Names = d1BindingNames(configs["cron"]);
       const producers = queueProducerNames(configs["cron"]);
@@ -532,6 +533,7 @@ describe("wrangler.toml configuration validation", () => {
       expect(d1Names).toContain("DB");
       expect(producers).toContain("RECONCILE_QUEUE");
       expect(producers).toContain("SYNC_QUEUE");
+      expect(producers).toContain("WRITE_QUEUE");
     });
   });
 
@@ -753,7 +755,7 @@ describe("wrangler.toml configuration validation", () => {
         api: ["SYNC_QUEUE", "WRITE_QUEUE"],
         webhook: ["SYNC_QUEUE"],
         "sync-consumer": ["WRITE_QUEUE", "SYNC_QUEUE"],
-        cron: ["RECONCILE_QUEUE", "SYNC_QUEUE"],
+        cron: ["RECONCILE_QUEUE", "SYNC_QUEUE", "WRITE_QUEUE"],
       };
 
       for (const [workerName, expectedBindings] of Object.entries(
