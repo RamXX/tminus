@@ -47,6 +47,7 @@ function createMockAuth() {
 
 function createMockD1(opts?: {
   runShouldFail?: boolean;
+  runErrorMessage?: string;
 }): D1Database {
   return {
     prepare(sql: string) {
@@ -55,7 +56,7 @@ function createMockD1(opts?: {
           return {
             run() {
               if (opts?.runShouldFail) {
-                return Promise.reject(new Error("D1 write failed"));
+                return Promise.reject(new Error(opts.runErrorMessage ?? "D1 write failed"));
               }
               return Promise.resolve({
                 success: true,
@@ -257,6 +258,58 @@ describe("handleImportFeed", () => {
     });
 
     expect(resp.status).toBe(500);
+  });
+
+  it("returns 409 CONFLICT with FEED_ALREADY_EXISTS when feed URL already imported (UNIQUE constraint failed)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(VALID_ICS, { status: 200, headers: { "Content-Type": "text/calendar" } }),
+    );
+
+    const request = new Request("https://api.test/v1/feeds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com/public.ics" }),
+    });
+
+    const resp = await handleImportFeed(request, createMockAuth(), {
+      DB: createMockD1({
+        runShouldFail: true,
+        runErrorMessage: "UNIQUE constraint failed: accounts.provider, accounts.provider_subject",
+      }),
+      USER_GRAPH: createMockDONamespace(),
+    });
+
+    expect(resp.status).toBe(409);
+    const body = await resp.json() as { ok: boolean; error_code: string; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error_code).toBe("FEED_ALREADY_EXISTS");
+    expect(body.error).toContain("already imported");
+  });
+
+  it("returns 409 CONFLICT when SQLITE_CONSTRAINT error is thrown (D1 variant)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(VALID_ICS, { status: 200, headers: { "Content-Type": "text/calendar" } }),
+    );
+
+    const request = new Request("https://api.test/v1/feeds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com/public.ics" }),
+    });
+
+    const resp = await handleImportFeed(request, createMockAuth(), {
+      DB: createMockD1({
+        runShouldFail: true,
+        runErrorMessage: "D1_ERROR: SQLITE_CONSTRAINT",
+      }),
+      USER_GRAPH: createMockDONamespace(),
+    });
+
+    expect(resp.status).toBe(409);
+    const body = await resp.json() as { ok: boolean; error_code: string; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error_code).toBe("FEED_ALREADY_EXISTS");
+    expect(body.error).toBe("This feed URL is already imported for your account.");
   });
 });
 

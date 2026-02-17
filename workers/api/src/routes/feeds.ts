@@ -139,9 +139,20 @@ export async function handleImportFeed(
       )
       .run();
   } catch (err) {
+    // Detect UNIQUE constraint violation on (provider, provider_subject) --
+    // this means the feed URL is already imported. Return 409 CONFLICT with a
+    // user-friendly message instead of leaking raw SQLITE_CONSTRAINT to the client.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("UNIQUE constraint failed") || message.includes("SQLITE_CONSTRAINT")) {
+      return apiErrorResponse(
+        "FEED_ALREADY_EXISTS",
+        "This feed URL is already imported for your account.",
+        409,
+      );
+    }
     return apiErrorResponse(
       "INTERNAL_ERROR",
-      `Failed to register feed account: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to register feed account: ${message}`,
       500,
     );
   }

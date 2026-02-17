@@ -527,6 +527,129 @@ describe("Integration: ICS Feed Import (Phase 6C)", () => {
     expect(body.error).toContain("No events");
   });
 
+  // -------------------------------------------------------------------------
+  // POST /v1/feeds -- duplicate feed returns 409 CONFLICT (TM-1mr7)
+  // -------------------------------------------------------------------------
+
+  it("POST /v1/feeds returns 409 CONFLICT with FEED_ALREADY_EXISTS when the same URL is imported twice", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("calendar.google.com")) {
+        return new Response(VALID_ICS, {
+          status: 200,
+          headers: { "Content-Type": "text/calendar" },
+        });
+      }
+      return originalFetch(input, init);
+    });
+
+    const pathResponses = new Map<string, unknown>();
+    pathResponses.set("/applyProviderDelta", {
+      created: 3, updated: 0, deleted: 0, mirrors_enqueued: 0, errors: [],
+    });
+
+    const userGraphDO = createMockDONamespace({ pathResponses });
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const feedUrl = "https://calendar.google.com/calendar/ical/duplicate-test/public/basic.ics";
+
+    // First import should succeed with 201
+    const firstResp = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/feeds", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: feedUrl }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(firstResp.status).toBe(201);
+    const firstBody = await firstResp.json() as { ok: boolean; data: { account_id: string; events_imported: number } };
+    expect(firstBody.ok).toBe(true);
+    expect(firstBody.data.events_imported).toBe(3);
+
+    // Second import of the SAME URL should return 409 CONFLICT
+    const secondResp = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/feeds", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: feedUrl }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(secondResp.status).toBe(409);
+    const secondBody = await secondResp.json() as { ok: boolean; error_code: string; error: string };
+    expect(secondBody.ok).toBe(false);
+    expect(secondBody.error_code).toBe("FEED_ALREADY_EXISTS");
+    expect(secondBody.error).toBe("This feed URL is already imported for your account.");
+  });
+
+  it("POST /v1/feeds returns 409 (not 500) when feed account row already exists in D1", async () => {
+    // Pre-seed a feed account directly in D1 to simulate prior import
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "acc_01HXY0000000000000000DUPE1",
+      TEST_USER.user_id,
+      "ics_feed",
+      "https://calendar.google.com/calendar/ical/preseeded/public/basic.ics",
+      "https://calendar.google.com/calendar/ical/preseeded/public/basic.ics",
+      "active",
+    );
+
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      return new Response(VALID_ICS, {
+        status: 200,
+        headers: { "Content-Type": "text/calendar" },
+      });
+    });
+
+    const pathResponses = new Map<string, unknown>();
+    pathResponses.set("/applyProviderDelta", {
+      created: 3, updated: 0, deleted: 0, mirrors_enqueued: 0, errors: [],
+    });
+
+    const userGraphDO = createMockDONamespace({ pathResponses });
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    // Attempt to import the same pre-seeded feed URL
+    const resp = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/feeds", {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: "https://calendar.google.com/calendar/ical/preseeded/public/basic.ics",
+        }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    // Should be 409, NOT 500
+    expect(resp.status).toBe(409);
+    const body = await resp.json() as { ok: boolean; error_code: string; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error_code).toBe("FEED_ALREADY_EXISTS");
+    expect(body.error).toContain("already imported");
+  });
+
   it("POST /v1/feeds returns 401 without auth token", async () => {
     const handler = createHandler();
     const env = buildEnv(d1);
