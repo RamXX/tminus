@@ -15,6 +15,9 @@ export default defineConfig({
     alias: {
       "@tminus/shared": path.resolve(__dirname, "../../packages/shared/src"),
       "@tminus/d1-registry": path.resolve(__dirname, "../../packages/d1-registry/src"),
+      // Stub the Cloudflare runtime-only module so transitive imports
+      // (workflow-wrapper.ts -> cloudflare:workers) resolve in vitest.
+      "cloudflare:workers": path.resolve(__dirname, "src/__stubs__/cloudflare-workers.ts"),
     },
   },
 });
