@@ -40,6 +40,7 @@ protocol APIClientProtocol {
     func createEvent(_ request: CreateEventRequest) async throws -> CreateEventResponse
     func proposeTimes(_ request: ProposeTimesRequest) async throws -> ProposeTimesResponse
     func commitCandidate(_ request: CommitCandidateRequest) async throws -> CommitCandidateResponse
+    func registerDeviceToken(_ token: String, userId: String) async throws
     var isAuthenticated: Bool { get }
     func logout()
 }
@@ -240,6 +241,57 @@ final class APIClient: APIClientProtocol {
         }
 
         return result
+    }
+
+    // MARK: - Device Token Registration
+
+    func registerDeviceToken(_ token: String, userId: String) async throws {
+        let body: [String: String] = [
+            "user_id": userId,
+            "device_token": token,
+            "platform": "ios",
+        ]
+
+        let bodyData = try JSONEncoder().encode(body)
+
+        let urlComponents = URLComponents(
+            url: baseURL.appendingPathComponent("/v1/device-tokens"),
+            resolvingAgainstBaseURL: false
+        )!
+
+        guard let url = urlComponents.url else {
+            throw APIError.networkError("Invalid URL for device token registration")
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if let jwt = keychain.load(key: TokenKeys.jwt) {
+            urlRequest.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        }
+
+        urlRequest.httpBody = bodyData
+
+        let response: URLResponse
+
+        do {
+            (_, response) = try await session.data(for: urlRequest)
+        } catch {
+            throw APIError.networkError(error.localizedDescription)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+
+        // 201 Created is the expected success status for device token registration.
+        guard httpResponse.statusCode == 201 else {
+            throw APIError.serverError(
+                httpResponse.statusCode,
+                "Device token registration failed"
+            )
+        }
     }
 
     // MARK: - Generic Request

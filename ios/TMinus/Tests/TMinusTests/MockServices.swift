@@ -48,6 +48,7 @@ final class MockAPIClient: APIClientProtocol {
     var commitCandidateResult: Result<CommitCandidateResponse, Error> = .success(
         CommitCandidateResponse(canonicalEventId: "evt_committed_001", originEventId: "google_evt_committed")
     )
+    var registerDeviceTokenResult: Result<Void, Error> = .success(())
     var _isAuthenticated = false
     var logoutCalled = false
 
@@ -58,6 +59,9 @@ final class MockAPIClient: APIClientProtocol {
     var lastProposeTimesRequest: ProposeTimesRequest?
     var commitCandidateCalled = false
     var lastCommitCandidateRequest: CommitCandidateRequest?
+    var registerDeviceTokenCalled = false
+    var lastRegisteredToken: String?
+    var lastRegisteredUserId: String?
 
     var isAuthenticated: Bool { _isAuthenticated }
 
@@ -126,6 +130,18 @@ final class MockAPIClient: APIClientProtocol {
         switch commitCandidateResult {
         case .success(let response):
             return response
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func registerDeviceToken(_ token: String, userId: String) async throws {
+        registerDeviceTokenCalled = true
+        lastRegisteredToken = token
+        lastRegisteredUserId = userId
+        switch registerDeviceTokenResult {
+        case .success:
+            return
         case .failure(let error):
             throw error
         }

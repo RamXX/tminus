@@ -98,27 +98,10 @@ final class PushNotificationService: NSObject, @unchecked Sendable {
             return
         }
 
-        guard let apiClient = apiClient as? APIClient else { return }
-
-        let url = apiClient.baseURL.appendingPathComponent("/v1/device-tokens")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: String] = [
-            "user_id": userId,
-            "device_token": hexToken,
-            "platform": "ios",
-        ]
-
         do {
-            request.httpBody = try JSONEncoder().encode(body)
-            let (_, response) = try await URLSession.shared.data(for: request)
-
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 201 {
-                print("[PushNotificationService] Device token registered successfully")
-                return
-            }
+            try await apiClient.registerDeviceToken(hexToken, userId: userId)
+            print("[PushNotificationService] Device token registered successfully")
+            return
         } catch {
             print("[PushNotificationService] Token registration attempt \(attempt) failed: \(error)")
         }
