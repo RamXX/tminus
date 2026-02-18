@@ -54,7 +54,8 @@ async function handleAggregateStatus(
         .prepare(
           `SELECT account_id, email, provider, status, channel_expiry_ts, error_count
            FROM accounts
-           WHERE user_id = ?1`,
+           WHERE user_id = ?1
+             AND status != 'revoked'`,
         )
         .bind(auth.userId)
         .all<AccountStatusRow>();
@@ -68,7 +69,8 @@ async function handleAggregateStatus(
         .prepare(
           `SELECT account_id, email, provider, status, channel_expiry_ts
            FROM accounts
-           WHERE user_id = ?1`,
+           WHERE user_id = ?1
+             AND status != 'revoked'`,
         )
         .bind(auth.userId)
         .all<Omit<AccountStatusRow, "error_count">>();

@@ -480,6 +480,33 @@ describe("Integration: Account endpoints", () => {
     expect(body.data).toHaveLength(0);
   });
 
+  it("GET /v1/accounts excludes revoked accounts from default list", async () => {
+    insertAccount(db, ACCOUNT_A);
+    insertAccount(db, { ...ACCOUNT_B, status: "revoked" });
+
+    const handler = createHandler();
+    const env = buildEnv(d1);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/accounts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ account_id: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].account_id).toBe(ACCOUNT_A.account_id);
+  });
+
   // -----------------------------------------------------------------------
   // GET /v1/accounts/:id
   // -----------------------------------------------------------------------
@@ -1830,6 +1857,57 @@ describe("Integration: Sync status endpoints", () => {
     // Verify UserGraphDO was called
     expect(userGraphDO.calls).toHaveLength(1);
     expect(userGraphDO.calls[0].path).toBe("/getSyncHealth");
+  });
+
+  it("GET /v1/sync/status excludes revoked accounts from health rollup", async () => {
+    insertAccount(db, ACCOUNT_A);
+    insertAccount(db, { ...ACCOUNT_B, status: "revoked" });
+
+    const accountDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getHealth", {
+          lastSyncTs: "2026-01-01T00:00:00Z",
+          lastSuccessTs: "2026-01-01T00:00:00Z",
+          fullSyncNeeded: false,
+        }],
+      ]),
+    });
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getSyncHealth", {
+          total_events: 1,
+          total_mirrors: 1,
+          total_journal_entries: 1,
+          pending_mirrors: 0,
+          error_mirrors: 0,
+          last_journal_ts: "2026-01-01T12:00:00Z",
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO, accountDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/status", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { accounts: Array<{ account_id: string }> };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.accounts).toHaveLength(1);
+    expect(body.data.accounts[0].account_id).toBe(ACCOUNT_A.account_id);
+    expect(accountDO.calls).toHaveLength(1);
   });
 
   // -----------------------------------------------------------------------

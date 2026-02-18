@@ -39,7 +39,10 @@ async function handleListAccounts(
   try {
     const result = await env.DB
       .prepare(
-        "SELECT account_id, user_id, provider, email, status, created_at FROM accounts WHERE user_id = ?1",
+        `SELECT account_id, user_id, provider, email, status, created_at
+         FROM accounts
+         WHERE user_id = ?1
+           AND status != 'revoked'`,
       )
       .bind(auth.userId)
       .all<{
@@ -356,4 +359,3 @@ export const routeAccountRoutes: RouteGroupHandler = async (request, method, pat
 
   return null;
 };
-
