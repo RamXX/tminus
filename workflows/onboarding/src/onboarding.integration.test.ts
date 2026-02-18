@@ -1105,3 +1105,500 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
     expect(accountRow.status).toBe("error");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Microsoft onboarding integration tests
+// ---------------------------------------------------------------------------
+
+const MS_ACCOUNT = {
+  account_id: "acc_01HXYZ0000000000000000000M" as AccountId,
+  user_id: TEST_USER.user_id,
+  provider: "microsoft",
+  provider_subject: "ms-sub-user-m",
+  email: "ramiro@cibertrend.com",
+} as const;
+
+const MS_ACCESS_TOKEN = "eyJ0eXAiOiJKV1Q.ms-test-access-token";
+const MS_PRIMARY_CALENDAR_ID = "AAMkADQ0ZGJmPrimaryCalId";
+const MS_OVERLAY_CALENDAR_ID = "AAMkADQ0ZGJmOverlayCalId";
+const MS_SUBSCRIPTION_ID = "sub-id-from-microsoft-graph";
+const MS_SUBSCRIPTION_RESOURCE = "/me/calendars/AAMkADQ0ZGJmPrimaryCalId/events";
+const MS_SUBSCRIPTION_EXPIRY = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+const MS_SYNC_TOKEN = "https://graph.microsoft.com/v1.0/me/calendars/x/events?$deltatoken=abcdef123";
+
+// ---------------------------------------------------------------------------
+// Microsoft Graph API mock events
+// ---------------------------------------------------------------------------
+
+function makeMicrosoftEvent(overrides?: Record<string, unknown>) {
+  return {
+    id: "AAMkADQ0ZGJm_evt_100",
+    subject: "Standup",
+    body: { contentType: "text", content: "Daily sync" },
+    location: { displayName: "Teams" },
+    start: { dateTime: "2026-02-15T09:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-02-15T09:30:00.0000000", timeZone: "UTC" },
+    isAllDay: false,
+    isCancelled: false,
+    showAs: "busy",
+    sensitivity: "normal",
+    ...overrides,
+  };
+}
+
+function makeMsManagedMirrorEvent(overrides?: Record<string, unknown>) {
+  return {
+    id: "AAMkADQ0ZGJm_evt_mirror_200",
+    subject: "Busy",
+    start: { dateTime: "2026-02-15T11:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-02-15T12:00:00.0000000", timeZone: "UTC" },
+    isCancelled: false,
+    extensions: [
+      {
+        "@odata.type": "microsoft.graph.openExtension",
+        extensionName: "com.tminus.metadata",
+        tminus: "true",
+        managed: "true",
+        canonicalId: "evt_01HXYZ00000000000000000001",
+        originAccount: "acc_01HXYZ0000000000000000000B",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Graph API fetch mock factory
+// ---------------------------------------------------------------------------
+
+function createOnboardingMicrosoftApiFetch(options: {
+  calendars?: Array<{
+    id: string;
+    name: string;
+    isDefaultCalendar?: boolean;
+    canEdit?: boolean;
+  }>;
+  overlayCalendarId?: string;
+  eventPages?: Array<{
+    events: unknown[];
+    nextLink?: string;
+    deltaLink?: string;
+  }>;
+  subscriptionResponse?: {
+    id: string;
+    resource: string;
+    expirationDateTime: string;
+  };
+}) {
+  let eventsCallIndex = 0;
+
+  return async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const method =
+      (typeof input === "object" && "method" in input
+        ? (input as Request).method
+        : init?.method) ?? "GET";
+
+    // GET /me/calendars (list calendars)
+    if (url.endsWith("/me/calendars") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          value:
+            options.calendars ?? [
+              {
+                id: MS_PRIMARY_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // POST /me/calendars (create calendar)
+    if (url.endsWith("/me/calendars") && method === "POST") {
+      return new Response(
+        JSON.stringify({
+          id: options.overlayCalendarId ?? MS_OVERLAY_CALENDAR_ID,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // POST /subscriptions (watch events)
+    if (url.endsWith("/subscriptions") && method === "POST") {
+      const subResp = options.subscriptionResponse ?? {
+        id: MS_SUBSCRIPTION_ID,
+        resource: MS_SUBSCRIPTION_RESOURCE,
+        expirationDateTime: MS_SUBSCRIPTION_EXPIRY,
+      };
+      return new Response(JSON.stringify(subResp), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // GET /me/calendars/{id}/events (list events) -- with optional $expand for extensions
+    if (url.includes("/me/calendars/") && url.includes("/events") && method === "GET") {
+      const pages = options.eventPages ?? [
+        {
+          events: [makeMicrosoftEvent()],
+          deltaLink: MS_SYNC_TOKEN,
+        },
+      ];
+      const page = pages[eventsCallIndex] ?? pages[pages.length - 1];
+      eventsCallIndex++;
+
+      return new Response(
+        JSON.stringify({
+          value: page.events,
+          "@odata.nextLink": page.nextLink,
+          "@odata.deltaLink": page.deltaLink,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response("Not found", { status: 404 });
+  };
+}
+
+describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let writeQueue: Queue & { messages: unknown[] };
+  let accountDOState: AccountDOState;
+  let userGraphDOState: UserGraphDOState;
+  let env: OnboardingEnv;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+
+    // Seed prerequisite rows
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+
+    // Seed Microsoft account (provider='microsoft' -- critical for the fix)
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+    ).run(
+      MS_ACCOUNT.account_id,
+      MS_ACCOUNT.user_id,
+      MS_ACCOUNT.provider,
+      MS_ACCOUNT.provider_subject,
+      MS_ACCOUNT.email,
+    );
+
+    d1 = createRealD1(db);
+    writeQueue = createMockQueue();
+
+    accountDOState = {
+      accessToken: MS_ACCESS_TOKEN,
+      setSyncTokenCalls: [],
+      storeWatchChannelCalls: [],
+    };
+
+    userGraphDOState = {
+      applyDeltaCalls: [],
+      storeCalendarsCalls: [],
+      ensureDefaultPolicyCalls: [],
+      recomputeProjectionsCalls: 0,
+    };
+
+    env = createMockEnv({
+      d1,
+      writeQueue,
+      accountDOState,
+      userGraphDOState,
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-1. Full Microsoft onboarding flow happy path
+  // -------------------------------------------------------------------------
+
+  it("full Microsoft onboarding: calendar setup, sync, subscription, activate", async () => {
+    const msFetch = createOnboardingMicrosoftApiFetch({
+      eventPages: [
+        {
+          events: [makeMicrosoftEvent()],
+          deltaLink: MS_SYNC_TOKEN,
+        },
+      ],
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    const params: OnboardingParams = {
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    };
+
+    const result = await workflow.run(params);
+
+    // Calendar setup
+    expect(result.calendarSetup.primaryCalendarId).toBe(MS_PRIMARY_CALENDAR_ID);
+    expect(result.calendarSetup.overlayCalendarId).toBe(MS_OVERLAY_CALENDAR_ID);
+    expect(result.calendarSetup.allCalendars).toHaveLength(1);
+
+    // Event sync
+    expect(result.eventSync.totalEvents).toBe(1);
+    expect(result.eventSync.totalDeltas).toBe(1);
+    expect(result.eventSync.syncToken).toBe(MS_SYNC_TOKEN);
+    expect(result.eventSync.pagesProcessed).toBe(1);
+
+    // Watch registration (subscription)
+    expect(result.watchRegistration.channelId).toBe(MS_SUBSCRIPTION_ID);
+    expect(result.watchRegistration.resourceId).toBe(MS_SUBSCRIPTION_RESOURCE);
+    expect(result.watchRegistration.expiration).toBe(MS_SUBSCRIPTION_EXPIRY);
+
+    // Account activated
+    expect(result.accountActivated).toBe(true);
+
+    // Verify account is active in D1
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(MS_ACCOUNT.account_id) as { status: string };
+    expect(accountRow.status).toBe("active");
+
+    // Projection triggered
+    expect(result.projectionEnqueued).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-2. Microsoft events normalized correctly (subject -> title, etc.)
+  // -------------------------------------------------------------------------
+
+  it("Microsoft events normalized with correct field mappings", async () => {
+    const msEvent = makeMicrosoftEvent({
+      id: "AAMkADQ0_detailed_evt",
+      subject: "Sprint Review",
+      body: { contentType: "text", content: "End of sprint demo" },
+      location: { displayName: "Room 42" },
+      start: { dateTime: "2026-03-01T14:00:00.0000000", timeZone: "Pacific Standard Time" },
+      end: { dateTime: "2026-03-01T16:00:00.0000000", timeZone: "Pacific Standard Time" },
+      showAs: "busy",
+      sensitivity: "private",
+    });
+
+    const msFetch = createOnboardingMicrosoftApiFetch({
+      eventPages: [{ events: [msEvent], deltaLink: MS_SYNC_TOKEN }],
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    const delta = userGraphDOState.applyDeltaCalls[0].deltas[0] as Record<string, unknown>;
+    expect(delta.type).toBe("updated");
+    expect(delta.origin_event_id).toBe("AAMkADQ0_detailed_evt");
+    expect(delta.origin_account_id).toBe(MS_ACCOUNT.account_id);
+
+    const eventPayload = delta.event as Record<string, unknown>;
+    expect(eventPayload.title).toBe("Sprint Review");
+    expect(eventPayload.description).toBe("End of sprint demo");
+    expect(eventPayload.location).toBe("Room 42");
+    expect(eventPayload.start).toEqual({
+      dateTime: "2026-03-01T14:00:00.0000000",
+      timeZone: "Pacific Standard Time",
+    });
+    expect(eventPayload.transparency).toBe("opaque");
+    expect(eventPayload.visibility).toBe("private");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-3. Microsoft managed mirrors filtered (Invariant E)
+  // -------------------------------------------------------------------------
+
+  it("Microsoft managed mirrors filtered out during onboarding (Invariant E)", async () => {
+    const msFetch = createOnboardingMicrosoftApiFetch({
+      eventPages: [
+        {
+          events: [
+            makeMicrosoftEvent({ id: "real_ms_evt_1", subject: "Real Event" }),
+            makeMsManagedMirrorEvent(), // Should be filtered
+            makeMicrosoftEvent({ id: "real_ms_evt_2", subject: "Another Event" }),
+          ],
+          deltaLink: MS_SYNC_TOKEN,
+        },
+      ],
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    const result = await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // 3 events fetched, but only 2 deltas (mirror filtered out)
+    expect(result.eventSync.totalEvents).toBe(3);
+    expect(result.eventSync.totalDeltas).toBe(2);
+
+    // Only origin events passed to UserGraphDO
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas;
+    expect(deltas).toHaveLength(2);
+    const eventIds = deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toContain("real_ms_evt_1");
+    expect(eventIds).toContain("real_ms_evt_2");
+    expect(eventIds).not.toContain("AAMkADQ0ZGJm_evt_mirror_200");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-4. Microsoft subscription expiry stored as ISO string (not Unix ms)
+  // -------------------------------------------------------------------------
+
+  it("Microsoft subscription expiry stored correctly as ISO string", async () => {
+    const isoExpiry = "2026-02-20T12:00:00.000Z";
+    const msFetch = createOnboardingMicrosoftApiFetch({
+      subscriptionResponse: {
+        id: "sub-custom-id",
+        resource: "/me/calendars/cal/events",
+        expirationDateTime: isoExpiry,
+      },
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // channel_expiry_ts should be the ISO string (not corrupted by parseInt)
+    const accountRow = db
+      .prepare("SELECT channel_expiry_ts FROM accounts WHERE account_id = ?")
+      .get(MS_ACCOUNT.account_id) as { channel_expiry_ts: string };
+    expect(accountRow.channel_expiry_ts).toBe(isoExpiry);
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-5. Error handling: Microsoft API failure marks account as error
+  // -------------------------------------------------------------------------
+
+  it("account marked as error when Microsoft API fails", async () => {
+    const failingFetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({ error: { code: "InvalidAuthenticationToken", message: "Access token has expired" } }),
+        { status: 401 },
+      );
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: failingFetch });
+
+    await expect(
+      workflow.run({
+        account_id: MS_ACCOUNT.account_id,
+        user_id: TEST_USER.user_id,
+      }),
+    ).rejects.toThrow();
+
+    // Account should be marked as error in D1
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(MS_ACCOUNT.account_id) as { status: string };
+    expect(accountRow.status).toBe("error");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-6. Cross-provider policy edges: Google + Microsoft accounts
+  // -------------------------------------------------------------------------
+
+  it("creates bidirectional policy edges between Google and Microsoft accounts", async () => {
+    // Add an existing Google account for the same user
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, 'active')",
+    ).run(
+      ACCOUNT_NEW.account_id,
+      ACCOUNT_NEW.user_id,
+      ACCOUNT_NEW.provider,
+      ACCOUNT_NEW.provider_subject,
+      ACCOUNT_NEW.email,
+    );
+
+    const msFetch = createOnboardingMicrosoftApiFetch({});
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+
+    const result = await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    expect(result.policyEdgesCreated).toBe(true);
+
+    // UserGraphDO received ensureDefaultPolicy with both accounts
+    expect(userGraphDOState.ensureDefaultPolicyCalls).toHaveLength(1);
+    const policyCall = userGraphDOState.ensureDefaultPolicyCalls[0];
+    expect(policyCall.accounts).toHaveLength(2);
+    expect(policyCall.accounts).toContain(MS_ACCOUNT.account_id);
+    expect(policyCall.accounts).toContain(ACCOUNT_NEW.account_id);
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-7. Unsupported provider throws descriptive error
+  // -------------------------------------------------------------------------
+
+  it("throws descriptive error for unsupported provider", async () => {
+    // Insert an account with a bogus provider
+    const bogusAccountId = "acc_01HXYZ0000000000000000BOGX" as AccountId;
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+    ).run(bogusAccountId, TEST_USER.user_id, "yahoo", "yahoo-sub", "user@yahoo.com");
+
+    const msFetch = createOnboardingMicrosoftApiFetch({});
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+
+    await expect(
+      workflow.run({
+        account_id: bogusAccountId,
+        user_id: TEST_USER.user_id,
+      }),
+    ).rejects.toThrow(/Unsupported provider/);
+
+    // Account should be marked as error
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(bogusAccountId) as { status: string };
+    expect(accountRow.status).toBe("error");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-8. Account not found in D1 throws
+  // -------------------------------------------------------------------------
+
+  it("throws when account does not exist in D1", async () => {
+    const nonexistentId = "acc_01HXYZ000000000000000NOTEX" as AccountId;
+    const msFetch = createOnboardingMicrosoftApiFetch({});
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+
+    await expect(
+      workflow.run({
+        account_id: nonexistentId,
+        user_id: TEST_USER.user_id,
+      }),
+    ).rejects.toThrow(/Account not found/);
+  });
+});

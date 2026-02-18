@@ -1,34 +1,36 @@
 /**
  * OnboardingWorkflow -- orchestrates the initial account setup flow.
  *
- * Runs after a new Google account is linked via OAuth. Steps:
- * 1. Fetch calendar list, identify primary, create busy overlay calendar
- * 2. Paginated full event sync (classify, normalize, apply deltas)
- * 3. Register watch channel with Google
- * 4. Store initial syncToken in AccountDO
- * 5. Mark account active in D1
- * 6. Create default bidirectional BUSY policy edges
- * 7. Project existing canonical events to new account
+ * Runs after a new account is linked via OAuth (Google or Microsoft). Steps:
+ * 1. Look up account provider from D1
+ * 2. Fetch calendar list, identify primary, create busy overlay calendar
+ * 3. Paginated full event sync (classify, normalize, apply deltas)
+ * 4. Register watch channel / subscription with provider
+ * 5. Store initial syncToken in AccountDO
+ * 6. Mark account active in D1
+ * 7. Create default bidirectional BUSY policy edges
+ * 8. Project existing canonical events to new account
  *
  * Error handling: if any step fails, the account is marked with error status
  * in D1 and the error is logged. The workflow can be retried manually.
  *
  * Follows the same injectable-dependency pattern as sync-consumer for
- * testability: Google API via injectable FetchFn, DOs via fetch stubs.
+ * testability: provider API via injectable FetchFn, DOs via fetch stubs.
  */
 
 import {
-  GoogleCalendarClient,
-  classifyEvent,
-  normalizeGoogleEvent,
+  createCalendarProvider,
+  getClassificationStrategy,
+  normalizeProviderEvent,
   BUSY_OVERLAY_CALENDAR_NAME,
   generateId,
 } from "@tminus/shared";
 import type {
-  GoogleCalendarEvent,
+  ProviderType,
   ProviderDelta,
   AccountId,
   FetchFn,
+  CalendarProvider,
   CalendarListEntry,
   WatchResponse,
 } from "@tminus/shared";
@@ -60,7 +62,7 @@ export interface OnboardingParams {
 // ---------------------------------------------------------------------------
 
 export interface OnboardingDeps {
-  /** Fetch function for GoogleCalendarClient (injectable for mocking Google API). */
+  /** Fetch function for calendar provider client (injectable for mocking provider APIs). */
   fetchFn?: FetchFn;
 }
 
@@ -107,7 +109,7 @@ export interface OnboardingResult {
 
 /**
  * OnboardingWorkflow orchestrates the full onboarding sequence for a new
- * Google Calendar account.
+ * calendar account (Google, Microsoft, or CalDAV).
  *
  * In production, each step would be a Workflow step (ctx.step.do()).
  * For testability, the logic is implemented as a plain class with
@@ -133,9 +135,10 @@ export class OnboardingWorkflow {
     const { account_id, user_id } = params;
 
     try {
-      // Step 1: Get access token from AccountDO
+      // Step 1: Determine provider from D1 and create appropriate client
+      const provider = await this.getAccountProvider(account_id);
       const accessToken = await this.getAccessToken(account_id);
-      const client = new GoogleCalendarClient(accessToken, this.deps.fetchFn);
+      const client = createCalendarProvider(provider, accessToken, this.deps.fetchFn);
 
       // Step 2: Fetch calendar list and create overlay calendar
       const calendarSetup = await this.setupCalendars(
@@ -150,9 +153,10 @@ export class OnboardingWorkflow {
         calendarSetup.primaryCalendarId,
         account_id,
         user_id,
+        provider,
       );
 
-      // Step 4: Register watch channel
+      // Step 4: Register watch channel / subscription
       const watchRegistration = await this.registerWatchChannel(
         client,
         calendarSetup.primaryCalendarId,
@@ -208,7 +212,7 @@ export class OnboardingWorkflow {
    * and store calendar IDs in UserGraphDO.
    */
   async setupCalendars(
-    client: GoogleCalendarClient,
+    client: CalendarProvider,
     accountId: AccountId,
     userId: string,
   ): Promise<CalendarSetupResult> {
@@ -280,10 +284,11 @@ export class OnboardingWorkflow {
    * Classify, normalize, and apply deltas to UserGraphDO.
    */
   async fullEventSync(
-    client: GoogleCalendarClient,
+    client: CalendarProvider,
     primaryCalendarId: string,
     accountId: AccountId,
     userId: string,
+    provider: ProviderType,
   ): Promise<EventSyncResult> {
     let pageToken: string | undefined;
     let syncToken: string | null = null;
@@ -301,8 +306,8 @@ export class OnboardingWorkflow {
       totalEvents += response.events.length;
       pagesProcessed++;
 
-      // Classify and normalize events
-      const deltas = this.classifyAndNormalize(response.events, accountId);
+      // Classify and normalize events using provider-aware strategy
+      const deltas = this.classifyAndNormalize(response.events, accountId, provider);
       totalDeltas += deltas.length;
 
       // Apply deltas to UserGraphDO (per page, to avoid excessive memory)
@@ -329,10 +334,11 @@ export class OnboardingWorkflow {
   // -------------------------------------------------------------------------
 
   /**
-   * Generate channel ID and token, register with Google, store in AccountDO.
+   * Generate channel ID and token, register watch channel / subscription
+   * with the provider, store in AccountDO.
    */
   async registerWatchChannel(
-    client: GoogleCalendarClient,
+    client: CalendarProvider,
     primaryCalendarId: string,
     accountId: AccountId,
   ): Promise<WatchRegistrationResult> {
@@ -342,7 +348,7 @@ export class OnboardingWorkflow {
 
     const webhookUrl = this.env.WEBHOOK_URL;
 
-    // Register with Google
+    // Register watch channel / subscription with provider
     const watchResponse: WatchResponse = await client.watchEvents(
       primaryCalendarId,
       webhookUrl,
@@ -453,22 +459,35 @@ export class OnboardingWorkflow {
   /**
    * Classify events and normalize origin events to ProviderDelta.
    * Managed mirrors are filtered out (Invariant E).
+   *
+   * Uses provider-aware classification and normalization strategies
+   * so the same logic works for Google, Microsoft, and CalDAV events.
+   *
+   * For Microsoft events, the MicrosoftCalendarClient stores raw event data
+   * under _msRaw (since listEvents maps to GoogleCalendarEvent shape for
+   * CalendarProvider interface compatibility). We use the raw data for
+   * classification and normalization. Same pattern as sync-consumer.
    */
   classifyAndNormalize(
-    events: GoogleCalendarEvent[],
+    events: unknown[],
     accountId: AccountId,
+    provider: ProviderType,
   ): ProviderDelta[] {
+    const strategy = getClassificationStrategy(provider);
     const deltas: ProviderDelta[] = [];
 
     for (const event of events) {
-      const classification = classifyEvent(event);
+      // For Microsoft events, use raw event data from _msRaw for correct
+      // classification and normalization (subject, extensions, etc.).
+      const rawEvent = (event as Record<string, unknown>)._msRaw ?? event;
+      const classification = strategy.classify(rawEvent);
 
       if (classification === "managed_mirror") {
         // Invariant E: managed mirrors are NOT treated as new origins.
         continue;
       }
 
-      const delta = normalizeGoogleEvent(event, accountId, classification);
+      const delta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
       deltas.push(delta);
     }
 
@@ -587,6 +606,29 @@ export class OnboardingWorkflow {
   // -------------------------------------------------------------------------
 
   /**
+   * Look up the provider type for an account from D1.
+   * Throws if the account is not found or the provider is unsupported.
+   */
+  private async getAccountProvider(accountId: AccountId): Promise<ProviderType> {
+    const row = await this.env.DB.prepare(
+      "SELECT provider FROM accounts WHERE account_id = ?1",
+    )
+      .bind(accountId)
+      .first<{ provider: string }>();
+
+    if (!row) {
+      throw new Error(`Account not found in D1: ${accountId}`);
+    }
+
+    const provider = row.provider;
+    if (provider !== "google" && provider !== "microsoft" && provider !== "caldav") {
+      throw new Error(`Unsupported provider for account ${accountId}: ${provider}`);
+    }
+
+    return provider as ProviderType;
+  }
+
+  /**
    * Mark account as active in D1 and store channel info.
    */
   private async activateAccount(
@@ -595,8 +637,13 @@ export class OnboardingWorkflow {
     channelToken: string,
     channelExpiry: string,
   ): Promise<void> {
-    // Convert Google's millisecond timestamp to ISO string
-    const expiryTs = new Date(parseInt(channelExpiry, 10)).toISOString();
+    // Convert provider's expiry to ISO string.
+    // Google sends Unix-millisecond timestamps; Microsoft sends ISO strings.
+    // We handle both: if it parses as a number, treat as Unix ms; otherwise use as-is.
+    const parsed = Number(channelExpiry);
+    const expiryTs = Number.isNaN(parsed)
+      ? channelExpiry // Already an ISO string (Microsoft)
+      : new Date(parsed).toISOString(); // Unix ms (Google)
 
     await this.env.DB.prepare(
       `UPDATE accounts
