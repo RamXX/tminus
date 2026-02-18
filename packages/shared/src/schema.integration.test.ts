@@ -360,8 +360,11 @@ describe("AccountDO schema via migration runner", () => {
     expect(tables.map((t) => t.name)).toEqual([
       "auth",
       "caldav_calendar_state",
+      "calendar_scopes",
       "encryption_monitor",
       "ms_subscriptions",
+      "scoped_sync_state",
+      "scoped_watch_lifecycle",
       "sync_state",
       "watch_channels",
     ]);
@@ -504,6 +507,158 @@ describe("AccountDO schema via migration runner", () => {
       .get("ch_001") as Record<string, unknown>;
 
     expect(row.status).toBe("expired");
+  });
+
+  it("calendar_scopes supports per-calendar scope records", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+
+    db.prepare(
+      `INSERT INTO calendar_scopes
+       (scope_id, account_id, provider_calendar_id, display_name, calendar_role, enabled, sync_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("scope_1", "self", "work@example.com", "Work", "secondary", 1, 1);
+
+    const row = db
+      .prepare("SELECT * FROM calendar_scopes WHERE scope_id = ?")
+      .get("scope_1") as Record<string, unknown>;
+
+    expect(row.provider_calendar_id).toBe("work@example.com");
+    expect(row.display_name).toBe("Work");
+    expect(row.enabled).toBe(1);
+    expect(row.sync_enabled).toBe(1);
+  });
+
+  it("scoped_sync_state stores independent cursors by provider_calendar_id", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+
+    db.prepare(
+      `INSERT INTO scoped_sync_state
+       (account_id, provider_calendar_id, sync_token, full_sync_needed)
+       VALUES (?, ?, ?, ?)`,
+    ).run("self", "primary", "tok_primary", 0);
+
+    db.prepare(
+      `INSERT INTO scoped_sync_state
+       (account_id, provider_calendar_id, sync_token, full_sync_needed)
+       VALUES (?, ?, ?, ?)`,
+    ).run("self", "work@example.com", "tok_work", 0);
+
+    const rows = db
+      .prepare(
+        "SELECT provider_calendar_id, sync_token FROM scoped_sync_state WHERE account_id = ? ORDER BY provider_calendar_id",
+      )
+      .all("self") as Array<{ provider_calendar_id: string; sync_token: string | null }>;
+
+    expect(rows).toEqual([
+      { provider_calendar_id: "primary", sync_token: "tok_primary" },
+      { provider_calendar_id: "work@example.com", sync_token: "tok_work" },
+    ]);
+  });
+
+  it("scoped_watch_lifecycle stores provider-neutral lifecycle with provider-specific IDs", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+
+    db.prepare(
+      `INSERT INTO scoped_watch_lifecycle
+       (lifecycle_id, account_id, provider_calendar_id, provider, lifecycle_kind, status, provider_channel_id, provider_resource_id, expiry_ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "watch:ch_1",
+      "self",
+      "primary",
+      "google",
+      "watch",
+      "active",
+      "ch_1",
+      "res_1",
+      "2026-02-21T10:00:00Z",
+    );
+
+    db.prepare(
+      `INSERT INTO scoped_watch_lifecycle
+       (lifecycle_id, account_id, provider_calendar_id, provider, lifecycle_kind, status, provider_subscription_id, client_state, provider_resource_id, expiry_ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "subscription:sub_1",
+      "self",
+      "cal-1",
+      "microsoft",
+      "subscription",
+      "active",
+      "sub_1",
+      "state_1",
+      "/me/calendars/cal-1/events",
+      "2026-02-21T10:00:00Z",
+    );
+
+    const rows = db
+      .prepare(
+        "SELECT lifecycle_id, provider, provider_channel_id, provider_subscription_id FROM scoped_watch_lifecycle ORDER BY lifecycle_id",
+      )
+      .all() as Array<{
+        lifecycle_id: string;
+        provider: string;
+        provider_channel_id: string | null;
+        provider_subscription_id: string | null;
+      }>;
+
+    expect(rows).toEqual([
+      {
+        lifecycle_id: "subscription:sub_1",
+        provider: "microsoft",
+        provider_channel_id: null,
+        provider_subscription_id: "sub_1",
+      },
+      {
+        lifecycle_id: "watch:ch_1",
+        provider: "google",
+        provider_channel_id: "ch_1",
+        provider_subscription_id: null,
+      },
+    ]);
+  });
+
+  it("migrates legacy account schema to scoped v6 without data loss and remains idempotent", () => {
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS.slice(0, 5), "account");
+
+    db.prepare(
+      "INSERT INTO auth (account_id, encrypted_tokens, scopes) VALUES (?, ?, ?)",
+    ).run("self", "enc", "calendar");
+    db.prepare(
+      "INSERT INTO sync_state (account_id, sync_token, full_sync_needed) VALUES (?, ?, ?)",
+    ).run("self", "legacy_tok", 0);
+    db.prepare(
+      `INSERT INTO watch_channels
+       (channel_id, account_id, expiry_ts, calendar_id, status)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run("ch_legacy", "self", "2026-02-21T10:00:00Z", "primary", "active");
+
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+    expect(getSchemaVersion(sql, "account")).toBe(6);
+
+    // Re-running should be safe and preserve legacy rows.
+    applyMigrations(sql, ACCOUNT_DO_MIGRATIONS, "account");
+    expect(getSchemaVersion(sql, "account")).toBe(6);
+
+    const auth = db
+      .prepare("SELECT account_id, encrypted_tokens FROM auth WHERE account_id = ?")
+      .get("self") as { account_id: string; encrypted_tokens: string };
+    expect(auth.account_id).toBe("self");
+    expect(auth.encrypted_tokens).toBe("enc");
+  });
+
+  it("account migration version does not advance when a post-v6 migration fails", () => {
+    const badMigration: Migration = {
+      version: 7,
+      sql: "THIS IS NOT VALID SQL;",
+      description: "Intentional failure for rollback safety validation",
+    };
+
+    expect(() =>
+      applyMigrations(sql, [...ACCOUNT_DO_MIGRATIONS, badMigration], "account"),
+    ).toThrow();
+
+    expect(getSchemaVersion(sql, "account")).toBe(6);
   });
 });
 

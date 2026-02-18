@@ -319,7 +319,7 @@ CREATE TABLE auth (
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Sync state
+-- Legacy sync state (compatibility during scoped rollout)
 CREATE TABLE sync_state (
   account_id       TEXT PRIMARY KEY,
   sync_token       TEXT,           -- Google incremental sync token
@@ -329,7 +329,7 @@ CREATE TABLE sync_state (
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Watch channel state
+-- Legacy Google watch channel state (compatibility during scoped rollout)
 CREATE TABLE watch_channels (
   channel_id       TEXT PRIMARY KEY,
   account_id       TEXT NOT NULL,
@@ -339,7 +339,57 @@ CREATE TABLE watch_channels (
   status           TEXT NOT NULL DEFAULT 'active',  -- active | expired | error
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Scoped calendar registry (federated SoR foundation)
+CREATE TABLE calendar_scopes (
+  scope_id              TEXT PRIMARY KEY,
+  account_id            TEXT NOT NULL,
+  provider_calendar_id  TEXT NOT NULL,
+  display_name          TEXT,
+  calendar_role         TEXT NOT NULL DEFAULT 'primary',
+  enabled               INTEGER NOT NULL DEFAULT 1,
+  sync_enabled          INTEGER NOT NULL DEFAULT 1,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(account_id, provider_calendar_id)
+);
+
+-- Per-calendar incremental cursor state
+CREATE TABLE scoped_sync_state (
+  account_id            TEXT NOT NULL,
+  provider_calendar_id  TEXT NOT NULL,
+  sync_token            TEXT,
+  last_sync_ts          TEXT,
+  last_success_ts       TEXT,
+  full_sync_needed      INTEGER NOT NULL DEFAULT 1,
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (account_id, provider_calendar_id)
+);
+
+-- Provider-neutral watch/subscription lifecycle tracking
+CREATE TABLE scoped_watch_lifecycle (
+  lifecycle_id              TEXT PRIMARY KEY,
+  account_id                TEXT NOT NULL,
+  provider_calendar_id      TEXT NOT NULL,
+  provider                  TEXT NOT NULL,     -- google | microsoft | caldav
+  lifecycle_kind            TEXT NOT NULL,     -- watch | subscription
+  status                    TEXT NOT NULL DEFAULT 'active',
+  provider_channel_id       TEXT,              -- Google
+  provider_resource_id      TEXT,              -- Google/Microsoft resource ID
+  provider_subscription_id  TEXT,              -- Microsoft
+  client_state              TEXT,              -- Microsoft validation secret
+  expiry_ts                 TEXT NOT NULL,
+  metadata_json             TEXT NOT NULL DEFAULT '{}',
+  created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
+
+### Migration Notes (TM-8gfd.1)
+
+1. Migration v6 adds `calendar_scopes`, `scoped_sync_state`, and `scoped_watch_lifecycle`.
+2. Runtime seed logic in `AccountDO` auto-populates scoped rows from existing `sync_state`, `watch_channels`, and `ms_subscriptions`.
+3. Legacy endpoints (`/getSyncToken`, `/setSyncToken`) continue to function and mirror to a default scoped calendar for mixed-mode compatibility.
 
 ---
 

@@ -1453,8 +1453,9 @@ describe("AccountDO Migration V5", () => {
 
   it("AccountDO migrations include V5", async () => {
     const { ACCOUNT_DO_MIGRATIONS } = await import("./schema");
-    expect(ACCOUNT_DO_MIGRATIONS).toHaveLength(5);
-    expect(ACCOUNT_DO_MIGRATIONS[4].version).toBe(5);
-    expect(ACCOUNT_DO_MIGRATIONS[4].description).toContain("CalDAV");
+    expect(ACCOUNT_DO_MIGRATIONS.length).toBeGreaterThanOrEqual(5);
+    const v5 = ACCOUNT_DO_MIGRATIONS.find((m) => m.version === 5);
+    expect(v5).toBeDefined();
+    expect(v5?.description).toContain("CalDAV");
   });
 });

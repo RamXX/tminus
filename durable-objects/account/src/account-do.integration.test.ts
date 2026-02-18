@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
+import { ACCOUNT_DO_MIGRATIONS, applyMigrations } from "@tminus/shared";
 import type { SqlStorageLike, SqlStorageCursorLike } from "@tminus/shared";
 import { AccountDO } from "./index";
 import type { FetchFn, OAuthCredentials } from "./index";
@@ -811,6 +812,78 @@ describe("AccountDO integration", () => {
       const token = await acct.getSyncToken();
       expect(token).toBeNull();
     });
+
+    it("stores and retrieves scoped sync token per provider calendar", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.upsertCalendarScope({ providerCalendarId: "primary" });
+      await acct.upsertCalendarScope({ providerCalendarId: "work@example.com" });
+
+      await acct.setScopedSyncToken("primary", "tok_primary");
+      await acct.setScopedSyncToken("work@example.com", "tok_work");
+
+      expect(await acct.getScopedSyncToken("primary")).toBe("tok_primary");
+      expect(await acct.getScopedSyncToken("work@example.com")).toBe("tok_work");
+    });
+
+    it("legacy setSyncToken keeps default scoped cursor updated", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.setSyncToken("legacy_token");
+
+      expect(await acct.getScopedSyncToken("primary")).toBe("legacy_token");
+    });
+
+    it("seeds scoped model from legacy rows during migration", async () => {
+      applyMigrations(sql, ACCOUNT_DO_MIGRATIONS.slice(0, 5), "account");
+
+      db.prepare(
+        "INSERT INTO sync_state (account_id, sync_token, last_sync_ts, last_success_ts, full_sync_needed) VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        "self",
+        "legacy_sync_token",
+        "2026-02-18T10:00:00Z",
+        "2026-02-18T10:00:00Z",
+        0,
+      );
+
+      db.prepare(
+        "INSERT INTO watch_channels (channel_id, account_id, resource_id, expiry_ts, calendar_id, status) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        "ch_legacy_1",
+        "self",
+        "res_legacy_1",
+        "2026-02-25T10:00:00Z",
+        "work@example.com",
+        "active",
+      );
+
+      db.prepare(
+        "INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration) VALUES (?, ?, ?, ?)",
+      ).run(
+        "sub_legacy_1",
+        "/me/calendars/ms-cal-1/events",
+        "state_1",
+        "2026-02-25T10:00:00Z",
+      );
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, createMockFetch());
+      await acct.getSyncToken(); // triggers v6 migration + seeding
+
+      const scopes = await acct.listCalendarScopes();
+      expect(scopes.some((s) => s.providerCalendarId === "work@example.com")).toBe(true);
+      expect(scopes.some((s) => s.providerCalendarId === "ms-cal-1")).toBe(true);
+
+      expect(await acct.getScopedSyncToken("work@example.com")).toBe("legacy_sync_token");
+
+      const scopedLifecycle = await acct.getScopedWatchLifecycle();
+      expect(scopedLifecycle.some((l) => l.lifecycleId === "watch:ch_legacy_1")).toBe(true);
+      expect(scopedLifecycle.some((l) => l.lifecycleId === "subscription:sub_legacy_1")).toBe(true);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -851,6 +924,21 @@ describe("AccountDO integration", () => {
       expect(row.calendar_id).toBe("work@gmail.com");
       expect(row.status).toBe("active");
       expect(row.account_id).toBe("self");
+    });
+
+    it("registerChannel also creates scoped lifecycle row", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      const result = await acct.registerChannel("primary");
+
+      const scoped = await acct.getScopedWatchLifecycle("primary");
+      expect(scoped).toHaveLength(1);
+      expect(scoped[0].lifecycleId).toBe(`watch:${result.channelId}`);
+      expect(scoped[0].provider).toBe("google");
+      expect(scoped[0].providerChannelId).toBe(result.channelId);
+      expect(scoped[0].status).toBe("active");
     });
 
     it("registers multiple channels for different calendars", async () => {
@@ -1017,8 +1105,11 @@ describe("AccountDO integration", () => {
       expect(tablesAfter.map((t) => t.name)).toEqual([
         "auth",
         "caldav_calendar_state",
+        "calendar_scopes",
         "encryption_monitor",
         "ms_subscriptions",
+        "scoped_sync_state",
+        "scoped_watch_lifecycle",
         "sync_state",
         "watch_channels",
       ]);
@@ -1197,6 +1288,13 @@ describe("AccountDO integration", () => {
       expect(row.resource).toBe("/me/calendars/cal-1/events");
       expect(row.client_state).toBe("test-client-state-secret");
       expect(row.expiration).toBe("2026-02-17T12:00:00Z");
+
+      const scoped = await acct.getScopedWatchLifecycle("cal-1");
+      expect(scoped).toHaveLength(1);
+      expect(scoped[0].lifecycleId).toBe("subscription:ms-sub-created-123");
+      expect(scoped[0].provider).toBe("microsoft");
+      expect(scoped[0].providerSubscriptionId).toBe("ms-sub-created-123");
+      expect(scoped[0].clientState).toBe("test-client-state-secret");
 
       // Verify correct API call
       expect(capturedUrl).toContain("graph.microsoft.com/v1.0/subscriptions");

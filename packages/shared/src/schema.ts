@@ -513,6 +513,61 @@ CREATE TABLE caldav_calendar_state (
 );
 ` as const;
 
+/**
+ * AccountDO migration v6: Scoped calendar foundation for federated SoR.
+ *
+ * Adds provider-calendar scope records, per-calendar sync cursor state,
+ * and provider-neutral watch/subscription lifecycle rows while retaining
+ * legacy tables for backward compatibility during rollout.
+ */
+export const ACCOUNT_DO_MIGRATION_V6 = `
+CREATE TABLE calendar_scopes (
+  scope_id              TEXT PRIMARY KEY,
+  account_id            TEXT NOT NULL,
+  provider_calendar_id  TEXT NOT NULL,
+  display_name          TEXT,
+  calendar_role         TEXT NOT NULL DEFAULT 'primary',
+  enabled               INTEGER NOT NULL DEFAULT 1,
+  sync_enabled          INTEGER NOT NULL DEFAULT 1,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(account_id, provider_calendar_id)
+);
+
+CREATE TABLE scoped_sync_state (
+  account_id            TEXT NOT NULL,
+  provider_calendar_id  TEXT NOT NULL,
+  sync_token            TEXT,
+  last_sync_ts          TEXT,
+  last_success_ts       TEXT,
+  full_sync_needed      INTEGER NOT NULL DEFAULT 1,
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (account_id, provider_calendar_id)
+);
+
+CREATE TABLE scoped_watch_lifecycle (
+  lifecycle_id              TEXT PRIMARY KEY,
+  account_id                TEXT NOT NULL,
+  provider_calendar_id      TEXT NOT NULL,
+  provider                  TEXT NOT NULL,
+  lifecycle_kind            TEXT NOT NULL,
+  status                    TEXT NOT NULL DEFAULT 'active',
+  provider_channel_id       TEXT,
+  provider_resource_id      TEXT,
+  provider_subscription_id  TEXT,
+  client_state              TEXT,
+  expiry_ts                 TEXT NOT NULL,
+  metadata_json             TEXT NOT NULL DEFAULT '{}',
+  created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_calendar_scopes_account ON calendar_scopes(account_id);
+CREATE INDEX idx_scoped_sync_state_account ON scoped_sync_state(account_id);
+CREATE INDEX idx_scoped_watch_calendar ON scoped_watch_lifecycle(account_id, provider_calendar_id);
+CREATE INDEX idx_scoped_watch_expiry ON scoped_watch_lifecycle(expiry_ts);
+` as const;
+
 /** Ordered migrations for AccountDO. Apply sequentially. */
 export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -539,6 +594,11 @@ export const ACCOUNT_DO_MIGRATIONS: readonly Migration[] = [
     version: 5,
     sql: ACCOUNT_DO_MIGRATION_V5,
     description: "CalDAV calendar sync state table for ctag/etag incremental sync",
+  },
+  {
+    version: 6,
+    sql: ACCOUNT_DO_MIGRATION_V6,
+    description: "Scoped calendar, sync cursor, and watch lifecycle tables for federated SoR",
   },
 ] as const;
 

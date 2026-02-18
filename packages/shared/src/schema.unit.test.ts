@@ -418,6 +418,26 @@ describe("migration lists", () => {
     expect(m3.sql).toContain("expiration");
     expect(typeof m3.description).toBe("string");
     expect(m3.description.length).toBeGreaterThan(0);
+
+    const m4 = ACCOUNT_DO_MIGRATIONS[3];
+    expect(m4.version).toBe(4);
+    expect(m4.sql).toContain("CREATE TABLE encryption_monitor");
+    expect(typeof m4.description).toBe("string");
+    expect(m4.description.length).toBeGreaterThan(0);
+
+    const m5 = ACCOUNT_DO_MIGRATIONS[4];
+    expect(m5.version).toBe(5);
+    expect(m5.sql).toContain("CREATE TABLE caldav_calendar_state");
+    expect(typeof m5.description).toBe("string");
+    expect(m5.description.length).toBeGreaterThan(0);
+
+    const m6 = ACCOUNT_DO_MIGRATIONS[5];
+    expect(m6.version).toBe(6);
+    expect(m6.sql).toContain("CREATE TABLE calendar_scopes");
+    expect(m6.sql).toContain("CREATE TABLE scoped_sync_state");
+    expect(m6.sql).toContain("CREATE TABLE scoped_watch_lifecycle");
+    expect(typeof m6.description).toBe("string");
+    expect(m6.description.length).toBeGreaterThan(0);
   });
 
   it("migration versions are monotonically increasing", () => {

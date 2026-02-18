@@ -49,6 +49,9 @@ const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 /** The account_id key used in single-row tables. */
 const ACCOUNT_ROW_KEY = "self";
 
+/** Compatibility default for legacy single-cursor callers. */
+const DEFAULT_SCOPE_CALENDAR_ID = "primary";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -88,6 +91,28 @@ export interface MsSubscriptionInfo {
   readonly resource: string;
   readonly clientState: string;
   readonly expiration: string;
+}
+
+export interface CalendarScopeInfo {
+  readonly scopeId: string;
+  readonly providerCalendarId: string;
+  readonly displayName: string | null;
+  readonly calendarRole: string;
+  readonly enabled: boolean;
+  readonly syncEnabled: boolean;
+}
+
+export interface ScopedWatchLifecycleInfo {
+  readonly lifecycleId: string;
+  readonly providerCalendarId: string;
+  readonly provider: string;
+  readonly lifecycleKind: string;
+  readonly status: string;
+  readonly providerChannelId: string | null;
+  readonly providerResourceId: string | null;
+  readonly providerSubscriptionId: string | null;
+  readonly clientState: string | null;
+  readonly expiryTs: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +172,273 @@ export class AccountDO {
   private ensureMigrated(): void {
     if (this.migrated) return;
     applyMigrations(this.sql, ACCOUNT_DO_MIGRATIONS, "account");
+    this.seedScopedStateFromLegacy();
     this.migrated = true;
+  }
+
+  /**
+   * Seed scoped tables from legacy rows.
+   *
+   * This runs once on first DO access after migration and is idempotent.
+   * Existing scoped rows are preserved.
+   */
+  private seedScopedStateFromLegacy(): void {
+    const existingScopes = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM calendar_scopes WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if ((existingScopes[0]?.cnt ?? 0) === 0) {
+      const calendarIds = new Set<string>();
+
+      const googleCalendars = this.sql
+        .exec<{ calendar_id: string }>(
+          "SELECT DISTINCT calendar_id FROM watch_channels WHERE account_id = ?",
+          ACCOUNT_ROW_KEY,
+        )
+        .toArray();
+      for (const row of googleCalendars) {
+        if (row.calendar_id) calendarIds.add(row.calendar_id);
+      }
+
+      const msResources = this.sql
+        .exec<{ resource: string }>(
+          "SELECT resource FROM ms_subscriptions",
+        )
+        .toArray();
+      for (const row of msResources) {
+        const parsed = this.parseMsCalendarIdFromResource(row.resource);
+        if (parsed) calendarIds.add(parsed);
+      }
+
+      if (calendarIds.size === 0) {
+        calendarIds.add(DEFAULT_SCOPE_CALENDAR_ID);
+      }
+
+      for (const calendarId of calendarIds) {
+        const role = calendarId === DEFAULT_SCOPE_CALENDAR_ID
+          ? "primary"
+          : "secondary";
+        this.upsertCalendarScopeRow({
+          providerCalendarId: calendarId,
+          calendarRole: role,
+          displayName: null,
+          enabled: true,
+          syncEnabled: true,
+        });
+      }
+    }
+
+    const legacySyncRows = this.sql
+      .exec<{
+        sync_token: string | null;
+        last_sync_ts: string | null;
+        last_success_ts: string | null;
+        full_sync_needed: number;
+      }>(
+        `SELECT sync_token, last_sync_ts, last_success_ts, full_sync_needed
+         FROM sync_state
+         WHERE account_id = ?`,
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (legacySyncRows.length > 0) {
+      const legacy = legacySyncRows[0];
+      const scopes = this.sql
+        .exec<{ provider_calendar_id: string }>(
+          "SELECT provider_calendar_id FROM calendar_scopes WHERE account_id = ?",
+          ACCOUNT_ROW_KEY,
+        )
+        .toArray();
+
+      for (const scope of scopes) {
+        this.sql.exec(
+          `INSERT OR IGNORE INTO scoped_sync_state
+           (account_id, provider_calendar_id, sync_token, last_sync_ts, last_success_ts, full_sync_needed, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+          ACCOUNT_ROW_KEY,
+          scope.provider_calendar_id,
+          legacy.sync_token,
+          legacy.last_sync_ts,
+          legacy.last_success_ts,
+          legacy.full_sync_needed,
+        );
+      }
+    }
+
+    const legacyWatches = this.sql
+      .exec<{
+        channel_id: string;
+        calendar_id: string;
+        status: string;
+        resource_id: string | null;
+        expiry_ts: string;
+      }>(
+        `SELECT channel_id, calendar_id, status, resource_id, expiry_ts
+         FROM watch_channels
+         WHERE account_id = ?`,
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    for (const row of legacyWatches) {
+      this.upsertScopedWatchLifecycle({
+        lifecycleId: `watch:${row.channel_id}`,
+        providerCalendarId: row.calendar_id,
+        provider: "google",
+        lifecycleKind: "watch",
+        status: row.status,
+        providerChannelId: row.channel_id,
+        providerResourceId: row.resource_id,
+        providerSubscriptionId: null,
+        clientState: null,
+        expiryTs: row.expiry_ts,
+      });
+    }
+
+    const legacySubs = this.sql
+      .exec<{
+        subscription_id: string;
+        resource: string;
+        client_state: string;
+        expiration: string;
+      }>(
+        "SELECT subscription_id, resource, client_state, expiration FROM ms_subscriptions",
+      )
+      .toArray();
+
+    for (const row of legacySubs) {
+      const calendarId = this.parseMsCalendarIdFromResource(row.resource)
+        ?? DEFAULT_SCOPE_CALENDAR_ID;
+      this.upsertCalendarScopeRow({
+        providerCalendarId: calendarId,
+        calendarRole: calendarId === DEFAULT_SCOPE_CALENDAR_ID ? "primary" : "secondary",
+        displayName: null,
+        enabled: true,
+        syncEnabled: true,
+      });
+      this.upsertScopedWatchLifecycle({
+        lifecycleId: `subscription:${row.subscription_id}`,
+        providerCalendarId: calendarId,
+        provider: "microsoft",
+        lifecycleKind: "subscription",
+        status: "active",
+        providerChannelId: null,
+        providerResourceId: row.resource,
+        providerSubscriptionId: row.subscription_id,
+        clientState: row.client_state,
+        expiryTs: row.expiration,
+      });
+    }
+  }
+
+  private parseMsCalendarIdFromResource(resource: string): string | null {
+    const match = /^\/me\/calendars\/([^/]+)\/events$/.exec(resource);
+    return match?.[1] ?? null;
+  }
+
+  private upsertCalendarScopeRow(scope: {
+    providerCalendarId: string;
+    displayName: string | null;
+    calendarRole: string;
+    enabled: boolean;
+    syncEnabled: boolean;
+  }): void {
+    const existing = this.sql
+      .exec<{ scope_id: string }>(
+        `SELECT scope_id FROM calendar_scopes
+         WHERE account_id = ? AND provider_calendar_id = ?`,
+        ACCOUNT_ROW_KEY,
+        scope.providerCalendarId,
+      )
+      .toArray();
+
+    const scopeId = existing[0]?.scope_id ?? generateId("calendar");
+    this.sql.exec(
+      `INSERT OR REPLACE INTO calendar_scopes
+       (scope_id, account_id, provider_calendar_id, display_name, calendar_role, enabled, sync_enabled, created_at, updated_at)
+       VALUES (
+         ?, ?, ?, ?, ?, ?, ?,
+         COALESCE((SELECT created_at FROM calendar_scopes WHERE scope_id = ?), datetime('now')),
+         datetime('now')
+       )`,
+      scopeId,
+      ACCOUNT_ROW_KEY,
+      scope.providerCalendarId,
+      scope.displayName,
+      scope.calendarRole,
+      scope.enabled ? 1 : 0,
+      scope.syncEnabled ? 1 : 0,
+      scopeId,
+    );
+  }
+
+  private ensureScopedSyncRow(providerCalendarId: string): void {
+    this.sql.exec(
+      `INSERT OR IGNORE INTO scoped_sync_state (account_id, provider_calendar_id)
+       VALUES (?, ?)`,
+      ACCOUNT_ROW_KEY,
+      providerCalendarId,
+    );
+  }
+
+  private upsertScopedWatchLifecycle(row: {
+    lifecycleId: string;
+    providerCalendarId: string;
+    provider: string;
+    lifecycleKind: string;
+    status: string;
+    providerChannelId: string | null;
+    providerResourceId: string | null;
+    providerSubscriptionId: string | null;
+    clientState: string | null;
+    expiryTs: string;
+  }): void {
+    this.sql.exec(
+      `INSERT OR REPLACE INTO scoped_watch_lifecycle
+       (lifecycle_id, account_id, provider_calendar_id, provider, lifecycle_kind, status,
+        provider_channel_id, provider_resource_id, provider_subscription_id, client_state,
+        expiry_ts, metadata_json, created_at, updated_at)
+       VALUES (
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}',
+         COALESCE((SELECT created_at FROM scoped_watch_lifecycle WHERE lifecycle_id = ?), datetime('now')),
+         datetime('now')
+       )`,
+      row.lifecycleId,
+      ACCOUNT_ROW_KEY,
+      row.providerCalendarId,
+      row.provider,
+      row.lifecycleKind,
+      row.status,
+      row.providerChannelId,
+      row.providerResourceId,
+      row.providerSubscriptionId,
+      row.clientState,
+      row.expiryTs,
+      row.lifecycleId,
+    );
+  }
+
+  private getDefaultScopeCalendarId(): string {
+    const scoped = this.sql
+      .exec<{ provider_calendar_id: string }>(
+        `SELECT provider_calendar_id
+         FROM calendar_scopes
+         WHERE account_id = ? AND enabled = 1 AND sync_enabled = 1
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (scoped.length > 0) {
+      return scoped[0].provider_calendar_id;
+    }
+
+    return DEFAULT_SCOPE_CALENDAR_ID;
   }
 
   // -------------------------------------------------------------------------
@@ -184,6 +475,15 @@ export class AccountDO {
       `INSERT OR IGNORE INTO sync_state (account_id) VALUES (?)`,
       ACCOUNT_ROW_KEY,
     );
+
+    this.upsertCalendarScopeRow({
+      providerCalendarId: DEFAULT_SCOPE_CALENDAR_ID,
+      displayName: null,
+      calendarRole: "primary",
+      enabled: true,
+      syncEnabled: true,
+    });
+    this.ensureScopedSyncRow(DEFAULT_SCOPE_CALENDAR_ID);
   }
 
   // -------------------------------------------------------------------------
@@ -614,6 +914,109 @@ export class AccountDO {
   // Sync cursor management
   // -------------------------------------------------------------------------
 
+  /**
+   * Create or update a scoped calendar record for this account.
+   */
+  async upsertCalendarScope(scope: {
+    providerCalendarId: string;
+    displayName?: string | null;
+    calendarRole?: string;
+    enabled?: boolean;
+    syncEnabled?: boolean;
+  }): Promise<void> {
+    this.ensureMigrated();
+
+    this.upsertCalendarScopeRow({
+      providerCalendarId: scope.providerCalendarId,
+      displayName: scope.displayName ?? null,
+      calendarRole: scope.calendarRole ?? (
+        scope.providerCalendarId === DEFAULT_SCOPE_CALENDAR_ID
+          ? "primary"
+          : "secondary"
+      ),
+      enabled: scope.enabled ?? true,
+      syncEnabled: scope.syncEnabled ?? true,
+    });
+    this.ensureScopedSyncRow(scope.providerCalendarId);
+  }
+
+  /**
+   * List all scoped calendars associated with this account.
+   */
+  async listCalendarScopes(): Promise<CalendarScopeInfo[]> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{
+        scope_id: string;
+        provider_calendar_id: string;
+        display_name: string | null;
+        calendar_role: string;
+        enabled: number;
+        sync_enabled: number;
+      }>(
+        `SELECT scope_id, provider_calendar_id, display_name, calendar_role, enabled, sync_enabled
+         FROM calendar_scopes
+         WHERE account_id = ?
+         ORDER BY created_at`,
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    return rows.map((row) => ({
+      scopeId: row.scope_id,
+      providerCalendarId: row.provider_calendar_id,
+      displayName: row.display_name,
+      calendarRole: row.calendar_role,
+      enabled: row.enabled === 1,
+      syncEnabled: row.sync_enabled === 1,
+    }));
+  }
+
+  /**
+   * Get a scoped sync token by provider calendar ID.
+   */
+  async getScopedSyncToken(providerCalendarId: string): Promise<string | null> {
+    this.ensureMigrated();
+
+    const rows = this.sql
+      .exec<{ sync_token: string | null }>(
+        `SELECT sync_token
+         FROM scoped_sync_state
+         WHERE account_id = ? AND provider_calendar_id = ?`,
+        ACCOUNT_ROW_KEY,
+        providerCalendarId,
+      )
+      .toArray();
+
+    if (rows.length === 0) return null;
+    return rows[0].sync_token;
+  }
+
+  /**
+   * Set scoped sync cursor state for a specific provider calendar.
+   */
+  async setScopedSyncToken(providerCalendarId: string, token: string): Promise<void> {
+    this.ensureMigrated();
+
+    this.upsertCalendarScopeRow({
+      providerCalendarId,
+      displayName: null,
+      calendarRole: providerCalendarId === DEFAULT_SCOPE_CALENDAR_ID ? "primary" : "secondary",
+      enabled: true,
+      syncEnabled: true,
+    });
+
+    this.sql.exec(
+      `INSERT OR REPLACE INTO scoped_sync_state
+       (account_id, provider_calendar_id, sync_token, full_sync_needed, updated_at)
+       VALUES (?, ?, ?, 0, datetime('now'))`,
+      ACCOUNT_ROW_KEY,
+      providerCalendarId,
+      token,
+    );
+  }
+
   /** Get the current sync token, or null if none set. */
   async getSyncToken(): Promise<string | null> {
     this.ensureMigrated();
@@ -625,8 +1028,13 @@ export class AccountDO {
       )
       .toArray();
 
-    if (rows.length === 0) return null;
-    return rows[0].sync_token;
+    if (rows.length > 0 && rows[0].sync_token !== null) {
+      return rows[0].sync_token;
+    }
+
+    // Backfill compatibility: if legacy row is empty, try scoped default.
+    const defaultScope = this.getDefaultScopeCalendarId();
+    return this.getScopedSyncToken(defaultScope);
   }
 
   /** Set the sync token after a successful incremental sync. */
@@ -640,6 +1048,77 @@ export class AccountDO {
       ACCOUNT_ROW_KEY,
       token,
     );
+
+    // Keep scoped cursor in sync for legacy callers.
+    const defaultScope = this.getDefaultScopeCalendarId();
+    await this.setScopedSyncToken(defaultScope, token);
+  }
+
+  /**
+   * List provider-neutral scoped watch/subscription lifecycle rows.
+   */
+  async getScopedWatchLifecycle(
+    providerCalendarId?: string,
+  ): Promise<ScopedWatchLifecycleInfo[]> {
+    this.ensureMigrated();
+
+    const rows = providerCalendarId
+      ? this.sql
+        .exec<{
+          lifecycle_id: string;
+          provider_calendar_id: string;
+          provider: string;
+          lifecycle_kind: string;
+          status: string;
+          provider_channel_id: string | null;
+          provider_resource_id: string | null;
+          provider_subscription_id: string | null;
+          client_state: string | null;
+          expiry_ts: string;
+        }>(
+          `SELECT lifecycle_id, provider_calendar_id, provider, lifecycle_kind, status,
+                  provider_channel_id, provider_resource_id, provider_subscription_id, client_state, expiry_ts
+           FROM scoped_watch_lifecycle
+           WHERE account_id = ? AND provider_calendar_id = ?
+           ORDER BY created_at`,
+          ACCOUNT_ROW_KEY,
+          providerCalendarId,
+        )
+        .toArray()
+      : this.sql
+        .exec<{
+          lifecycle_id: string;
+          provider_calendar_id: string;
+          provider: string;
+          lifecycle_kind: string;
+          status: string;
+          provider_channel_id: string | null;
+          provider_resource_id: string | null;
+          provider_subscription_id: string | null;
+          client_state: string | null;
+          expiry_ts: string;
+        }>(
+          `SELECT lifecycle_id, provider_calendar_id, provider, lifecycle_kind, status,
+                  provider_channel_id, provider_resource_id, provider_subscription_id, client_state, expiry_ts
+           FROM scoped_watch_lifecycle
+           WHERE account_id = ?
+           ORDER BY created_at`,
+          ACCOUNT_ROW_KEY,
+        )
+        .toArray();
+
+    return rows.map((row) => ({
+      lifecycleId: row.lifecycle_id,
+      providerCalendarId: row.provider_calendar_id,
+      provider: row.provider,
+      lifecycleKind: row.lifecycle_kind,
+      status: row.status,
+      providerChannelId: row.provider_channel_id,
+      providerResourceId: row.provider_resource_id,
+      providerSubscriptionId: row.provider_subscription_id,
+      clientState: row.client_state,
+      expiryTs: row.expiry_ts,
+    }));
   }
 
   // -------------------------------------------------------------------------
@@ -670,6 +1149,27 @@ export class AccountDO {
       expiry,
       calendarId,
     );
+
+    this.upsertCalendarScopeRow({
+      providerCalendarId: calendarId,
+      displayName: null,
+      calendarRole: calendarId === DEFAULT_SCOPE_CALENDAR_ID ? "primary" : "secondary",
+      enabled: true,
+      syncEnabled: true,
+    });
+    this.ensureScopedSyncRow(calendarId);
+    this.upsertScopedWatchLifecycle({
+      lifecycleId: `watch:${channelId}`,
+      providerCalendarId: calendarId,
+      provider: "google",
+      lifecycleKind: "watch",
+      status: "active",
+      providerChannelId: channelId,
+      providerResourceId: null,
+      providerSubscriptionId: null,
+      clientState: null,
+      expiryTs: expiry,
+    });
 
     return { channelId, expiry };
   }
@@ -727,6 +1227,27 @@ export class AccountDO {
       expiration,
       calendarId,
     );
+
+    this.upsertCalendarScopeRow({
+      providerCalendarId: calendarId,
+      displayName: null,
+      calendarRole: calendarId === DEFAULT_SCOPE_CALENDAR_ID ? "primary" : "secondary",
+      enabled: true,
+      syncEnabled: true,
+    });
+    this.ensureScopedSyncRow(calendarId);
+    this.upsertScopedWatchLifecycle({
+      lifecycleId: `watch:${channelId}`,
+      providerCalendarId: calendarId,
+      provider: "google",
+      lifecycleKind: "watch",
+      status: "active",
+      providerChannelId: channelId,
+      providerResourceId: resourceId,
+      providerSubscriptionId: null,
+      clientState: null,
+      expiryTs: expiration,
+    });
   }
 
 
@@ -778,6 +1299,19 @@ export class AccountDO {
           errors++;
         }
       }
+
+      this.upsertScopedWatchLifecycle({
+        lifecycleId: `watch:${row.channel_id}`,
+        providerCalendarId: row.calendar_id,
+        provider: "google",
+        lifecycleKind: "watch",
+        status: "stopped",
+        providerChannelId: row.channel_id,
+        providerResourceId: row.resource_id,
+        providerSubscriptionId: null,
+        clientState: null,
+        expiryTs: new Date().toISOString(),
+      });
     }
 
     // Delete all channel rows regardless of stop success
@@ -866,6 +1400,27 @@ export class AccountDO {
       data.expirationDateTime,
     );
 
+    this.upsertCalendarScopeRow({
+      providerCalendarId: calendarId,
+      displayName: null,
+      calendarRole: calendarId === DEFAULT_SCOPE_CALENDAR_ID ? "primary" : "secondary",
+      enabled: true,
+      syncEnabled: true,
+    });
+    this.ensureScopedSyncRow(calendarId);
+    this.upsertScopedWatchLifecycle({
+      lifecycleId: `subscription:${data.id}`,
+      providerCalendarId: calendarId,
+      provider: "microsoft",
+      lifecycleKind: "subscription",
+      status: "active",
+      providerChannelId: null,
+      providerResourceId: data.resource,
+      providerSubscriptionId: data.id,
+      clientState,
+      expiryTs: data.expirationDateTime,
+    });
+
     return {
       subscriptionId: data.id,
       resource: data.resource,
@@ -930,6 +1485,21 @@ export class AccountDO {
       subscriptionId,
     );
 
+    const calendarId = this.parseMsCalendarIdFromResource(rows[0].resource)
+      ?? DEFAULT_SCOPE_CALENDAR_ID;
+    this.upsertScopedWatchLifecycle({
+      lifecycleId: `subscription:${subscriptionId}`,
+      providerCalendarId: calendarId,
+      provider: "microsoft",
+      lifecycleKind: "subscription",
+      status: "active",
+      providerChannelId: null,
+      providerResourceId: rows[0].resource,
+      providerSubscriptionId: subscriptionId,
+      clientState: rows[0].client_state,
+      expiryTs: newExpiration,
+    });
+
     return { subscriptionId, expiration: newExpiration };
   }
 
@@ -960,10 +1530,34 @@ export class AccountDO {
     }
 
     // Always delete locally
+    const rows = this.sql
+      .exec<{ resource: string; client_state: string }>(
+        "SELECT resource, client_state FROM ms_subscriptions WHERE subscription_id = ?",
+        subscriptionId,
+      )
+      .toArray();
+
     this.sql.exec(
       "DELETE FROM ms_subscriptions WHERE subscription_id = ?",
       subscriptionId,
     );
+
+    if (rows.length > 0) {
+      const calendarId = this.parseMsCalendarIdFromResource(rows[0].resource)
+        ?? DEFAULT_SCOPE_CALENDAR_ID;
+      this.upsertScopedWatchLifecycle({
+        lifecycleId: `subscription:${subscriptionId}`,
+        providerCalendarId: calendarId,
+        provider: "microsoft",
+        lifecycleKind: "subscription",
+        status: "deleted",
+        providerChannelId: null,
+        providerResourceId: rows[0].resource,
+        providerSubscriptionId: subscriptionId,
+        clientState: rows[0].client_state,
+        expiryTs: new Date().toISOString(),
+      });
+    }
   }
 
   /**
@@ -1039,7 +1633,30 @@ export class AccountDO {
       )
       .toArray();
 
-    if (rows.length === 0) {
+    if (rows.length > 0) {
+      return {
+        lastSyncTs: rows[0].last_sync_ts,
+        lastSuccessTs: rows[0].last_success_ts,
+        fullSyncNeeded: rows[0].full_sync_needed === 1,
+      };
+    }
+
+    const defaultScope = this.getDefaultScopeCalendarId();
+    const scopedRows = this.sql
+      .exec<{
+        last_sync_ts: string | null;
+        last_success_ts: string | null;
+        full_sync_needed: number;
+      }>(
+        `SELECT last_sync_ts, last_success_ts, full_sync_needed
+         FROM scoped_sync_state
+         WHERE account_id = ? AND provider_calendar_id = ?`,
+        ACCOUNT_ROW_KEY,
+        defaultScope,
+      )
+      .toArray();
+
+    if (scopedRows.length === 0) {
       return {
         lastSyncTs: null,
         lastSuccessTs: null,
@@ -1048,9 +1665,9 @@ export class AccountDO {
     }
 
     return {
-      lastSyncTs: rows[0].last_sync_ts,
-      lastSuccessTs: rows[0].last_success_ts,
-      fullSyncNeeded: rows[0].full_sync_needed === 1,
+      lastSyncTs: scopedRows[0].last_sync_ts,
+      lastSuccessTs: scopedRows[0].last_success_ts,
+      fullSyncNeeded: scopedRows[0].full_sync_needed === 1,
     };
   }
 
@@ -1086,6 +1703,22 @@ export class AccountDO {
         ACCOUNT_ROW_KEY,
       );
     }
+
+    const defaultScope = this.getDefaultScopeCalendarId();
+    this.sql.exec(
+      `INSERT INTO scoped_sync_state
+       (account_id, provider_calendar_id, last_sync_ts, last_success_ts, full_sync_needed, updated_at)
+       VALUES (?, ?, ?, ?, 0, datetime('now'))
+       ON CONFLICT(account_id, provider_calendar_id) DO UPDATE SET
+         last_sync_ts = excluded.last_sync_ts,
+         last_success_ts = excluded.last_success_ts,
+         full_sync_needed = 0,
+         updated_at = datetime('now')`,
+      ACCOUNT_ROW_KEY,
+      defaultScope,
+      ts,
+      ts,
+    );
   }
 
   /** Mark a sync attempt as failed (updates last_sync_ts but not last_success_ts). */
@@ -1123,6 +1756,19 @@ export class AccountDO {
         ACCOUNT_ROW_KEY,
       );
     }
+
+    const defaultScope = this.getDefaultScopeCalendarId();
+    this.sql.exec(
+      `INSERT INTO scoped_sync_state
+       (account_id, provider_calendar_id, last_sync_ts, full_sync_needed, updated_at)
+       VALUES (?, ?, ?, 1, datetime('now'))
+       ON CONFLICT(account_id, provider_calendar_id) DO UPDATE SET
+         last_sync_ts = excluded.last_sync_ts,
+         updated_at = datetime('now')`,
+      ACCOUNT_ROW_KEY,
+      defaultScope,
+      now,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1155,6 +1801,44 @@ export class AccountDO {
         case "/setSyncToken": {
           const body = (await request.json()) as { sync_token: string };
           await this.setSyncToken(body.sync_token);
+          return Response.json({ ok: true });
+        }
+
+        case "/upsertCalendarScope": {
+          const body = (await request.json()) as {
+            provider_calendar_id: string;
+            display_name?: string | null;
+            calendar_role?: string;
+            enabled?: boolean;
+            sync_enabled?: boolean;
+          };
+          await this.upsertCalendarScope({
+            providerCalendarId: body.provider_calendar_id,
+            displayName: body.display_name ?? null,
+            calendarRole: body.calendar_role,
+            enabled: body.enabled,
+            syncEnabled: body.sync_enabled,
+          });
+          return Response.json({ ok: true });
+        }
+
+        case "/listCalendarScopes": {
+          const scopes = await this.listCalendarScopes();
+          return Response.json({ scopes });
+        }
+
+        case "/getScopedSyncToken": {
+          const body = (await request.json()) as { provider_calendar_id: string };
+          const syncToken = await this.getScopedSyncToken(body.provider_calendar_id);
+          return Response.json({ sync_token: syncToken });
+        }
+
+        case "/setScopedSyncToken": {
+          const body = (await request.json()) as {
+            provider_calendar_id: string;
+            sync_token: string;
+          };
+          await this.setScopedSyncToken(body.provider_calendar_id, body.sync_token);
           return Response.json({ ok: true });
         }
 
@@ -1213,6 +1897,14 @@ export class AccountDO {
         case "/getChannelStatus": {
           const result = await this.getChannelStatus();
           return Response.json(result);
+        }
+
+        case "/getScopedWatchLifecycle": {
+          const body = request.method === "POST"
+            ? (await request.json()) as { provider_calendar_id?: string }
+            : {};
+          const lifecycle = await this.getScopedWatchLifecycle(body.provider_calendar_id);
+          return Response.json({ lifecycle });
         }
 
         case "/getHealth": {
