@@ -17,6 +17,7 @@ import { encryptState, decryptState, type StatePayload } from "./state";
 import { createHandler, type FetchFn } from "./index";
 import { GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL, GOOGLE_USERINFO_URL, GOOGLE_SCOPES } from "./google";
 import { MS_AUTH_URL, MS_TOKEN_URL, MS_USERINFO_URL, MS_SCOPES, MS_CALLBACK_PATH } from "./microsoft";
+import { renderOAuthSuccessPage, handleOAuthSuccess } from "./oauth-success";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -1255,5 +1256,285 @@ describe("Google OAuth constants", () => {
     expect(GOOGLE_SCOPES).toContain("openid");
     expect(GOOGLE_SCOPES).toContain("email");
     expect(GOOGLE_SCOPES).toContain("profile");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OAuth success page unit tests (TM-s8gz)
+// ---------------------------------------------------------------------------
+
+describe("renderOAuthSuccessPage", () => {
+  it("renders Google provider name for new account", () => {
+    const html = renderOAuthSuccessPage("google", "user@gmail.com", false);
+    expect(html).toContain("Google Account Linked");
+    expect(html).toContain("user@gmail.com");
+    expect(html).toContain("Calendar sync is starting");
+    expect(html).toContain("Connected");
+    expect(html).not.toContain("Reconnected");
+  });
+
+  it("renders Microsoft provider name for new account", () => {
+    const html = renderOAuthSuccessPage("microsoft", "user@outlook.com", false);
+    expect(html).toContain("Microsoft Account Linked");
+    expect(html).toContain("user@outlook.com");
+    expect(html).toContain("Calendar sync is starting");
+  });
+
+  it("renders reactivated status message for reconnected account", () => {
+    const html = renderOAuthSuccessPage("google", "user@gmail.com", true);
+    expect(html).toContain("reconnected");
+    expect(html).toContain("Calendar sync is resuming");
+    expect(html).toContain("Reconnected");
+    expect(html).not.toContain("Connected</");
+  });
+
+  it("renders without email when email is null", () => {
+    const html = renderOAuthSuccessPage("google", null, false);
+    expect(html).toContain("Google Account Linked");
+    expect(html).not.toContain("<strong>Email:</strong>");
+    // Should still have provider and status
+    expect(html).toContain("Provider:");
+    expect(html).toContain("Status:");
+  });
+
+  it("includes close-tab instruction", () => {
+    const html = renderOAuthSuccessPage("google", "test@test.com", false);
+    expect(html).toContain("close this tab");
+  });
+
+  it("escapes HTML special characters in email to prevent XSS", () => {
+    const html = renderOAuthSuccessPage("google", '<script>alert("xss")</script>', false);
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("includes proper HTML structure", () => {
+    const html = renderOAuthSuccessPage("google", "user@gmail.com", false);
+    expect(html).toContain("<!DOCTYPE html>");
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("<title>Account Linked - T-Minus</title>");
+    expect(html).toContain("</html>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OAuth success page handler tests (TM-s8gz)
+// ---------------------------------------------------------------------------
+
+describe("handleOAuthSuccess", () => {
+  it("returns 200 HTML for /oauth/google/done", () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123&email=user@gmail.com",
+    );
+    const response = handleOAuthSuccess(request);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+  });
+
+  it("returns 200 HTML for /oauth/microsoft/done", () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/microsoft/done?account_id=acc_456&email=user@outlook.com",
+    );
+    const response = handleOAuthSuccess(request);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+  });
+
+  it("returns 404 for unrecognized path", () => {
+    const request = new Request("https://oauth.tminus.dev/oauth/apple/done");
+    const response = handleOAuthSuccess(request);
+
+    expect(response.status).toBe(404);
+  });
+
+  it("includes provider-specific content in Google response body", async () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123&email=user@gmail.com",
+    );
+    const response = handleOAuthSuccess(request);
+    const body = await response.text();
+
+    expect(body).toContain("Google Account Linked");
+    expect(body).toContain("user@gmail.com");
+  });
+
+  it("includes provider-specific content in Microsoft response body", async () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/microsoft/done?account_id=acc_456&email=user@outlook.com",
+    );
+    const response = handleOAuthSuccess(request);
+    const body = await response.text();
+
+    expect(body).toContain("Microsoft Account Linked");
+    expect(body).toContain("user@outlook.com");
+  });
+
+  it("handles reactivated flag correctly", async () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123&email=user@gmail.com&reactivated=true",
+    );
+    const response = handleOAuthSuccess(request);
+    const body = await response.text();
+
+    expect(body).toContain("reconnected");
+    expect(body).toContain("Calendar sync is resuming");
+  });
+
+  it("handles missing email gracefully", async () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123",
+    );
+    const response = handleOAuthSuccess(request);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("Google Account Linked");
+    expect(body).not.toContain("<strong>Email:</strong>");
+  });
+
+  it("sets no-store cache control to prevent caching dynamic content", () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123",
+    );
+    const response = handleOAuthSuccess(request);
+
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /oauth/{provider}/done routing tests via worker handler (TM-s8gz)
+// ---------------------------------------------------------------------------
+
+describe("GET /oauth/google/done (routed via worker)", () => {
+  it("returns success HTML page (not 404)", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done?account_id=acc_123&email=user@gmail.com",
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    const body = await response.text();
+    expect(body).toContain("Google Account Linked");
+    expect(body).toContain("user@gmail.com");
+  });
+});
+
+describe("GET /oauth/microsoft/done (routed via worker)", () => {
+  it("returns success HTML page (not 404)", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/microsoft/done?account_id=acc_456&email=user@outlook.com",
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    const body = await response.text();
+    expect(body).toContain("Microsoft Account Linked");
+    expect(body).toContain("user@outlook.com");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Callback redirect includes email param (TM-s8gz)
+// ---------------------------------------------------------------------------
+
+describe("Google callback redirect includes email", () => {
+  async function createValidState(userId?: string, redirectUri?: string) {
+    const verifier = generateCodeVerifier();
+    const state = await encryptState(
+      TEST_JWT_SECRET,
+      verifier,
+      userId || TEST_USER_ID,
+      redirectUri || "https://app.tminus.dev/done",
+    );
+    return { verifier, state };
+  }
+
+  it("includes email query param in the success redirect", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+    const env = createMockEnv({ d1, accountDO, workflow });
+    const mockFetch = createMockGoogleFetch();
+    const handler = createHandler(mockFetch);
+
+    const { state } = await createValidState();
+
+    const request = new Request(
+      `https://oauth.tminus.dev/oauth/google/callback?code=${TEST_AUTH_CODE}&state=${state}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("Location")!);
+    expect(location.searchParams.get("email")).toBe(TEST_GOOGLE_EMAIL);
+  });
+});
+
+describe("Microsoft callback redirect includes email", () => {
+  async function createValidMsState(userId?: string, redirectUri?: string) {
+    const state = await encryptState(
+      TEST_JWT_SECRET,
+      "not-used-for-ms",
+      userId || TEST_USER_ID,
+      redirectUri || "https://app.tminus.dev/done",
+    );
+    return { state };
+  }
+
+  it("includes email query param in the success redirect", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+    const env = createMockEnv({ d1, accountDO, workflow });
+    const mockFetch = createMockMicrosoftFetch();
+    const handler = createHandler(mockFetch);
+
+    const { state } = await createValidMsState();
+
+    const request = new Request(
+      `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("Location")!);
+    expect(location.searchParams.get("email")).toBe(TEST_MS_EMAIL);
+  });
+
+  it("includes userPrincipalName fallback email in redirect", async () => {
+    const d1 = createMockD1();
+    const accountDO = createMockAccountDO();
+    const workflow = createMockWorkflow();
+    const env = createMockEnv({ d1, accountDO, workflow });
+
+    const mockFetch = createMockMicrosoftFetch({
+      userInfoResponse: {
+        id: TEST_MS_SUB,
+        mail: null as any,
+        userPrincipalName: "user@contoso.onmicrosoft.com",
+      },
+    });
+    const handler = createHandler(mockFetch);
+    const { state } = await createValidMsState();
+
+    const request = new Request(
+      `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("Location")!);
+    expect(location.searchParams.get("email")).toBe("user@contoso.onmicrosoft.com");
   });
 });

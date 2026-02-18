@@ -4,8 +4,10 @@
  * Endpoints:
  *   GET /oauth/google/start        -- Initiate Google PKCE flow
  *   GET /oauth/google/callback     -- Handle Google redirect, exchange tokens
+ *   GET /oauth/google/done         -- Success page after Google OAuth linking
  *   GET /oauth/microsoft/start     -- Initiate Microsoft OAuth flow
  *   GET /oauth/microsoft/callback  -- Handle Microsoft redirect, exchange tokens
+ *   GET /oauth/microsoft/done      -- Success page after Microsoft OAuth linking
  *   GET /health                    -- Health check
  *
  * This worker is stateless: user context is encrypted into the state
@@ -43,6 +45,7 @@ import { handleAdminInstall, handleOrgUserActivation } from "./marketplace-admin
 import { handleMarketplaceUninstall } from "./marketplace-uninstall";
 import { handlePrivacyPolicy, handleTermsOfService } from "./legal";
 import { handleSupportPage } from "./support";
+import { handleOAuthSuccess } from "./oauth-success";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -311,6 +314,7 @@ async function handleCallback(
   // Step 6: Redirect to success URL
   const successUrl = new URL(redirect_uri);
   successUrl.searchParams.set("account_id", accountId);
+  successUrl.searchParams.set("email", userInfo.email);
   if (!isNewAccount) {
     successUrl.searchParams.set("reactivated", "true");
   }
@@ -533,6 +537,7 @@ async function handleMicrosoftCallback(
   // Step 6: Redirect to success URL
   const successUrl = new URL(redirect_uri);
   successUrl.searchParams.set("account_id", accountId);
+  successUrl.searchParams.set("email", email);
   if (!isNewAccount) {
     successUrl.searchParams.set("reactivated", "true");
   }
@@ -586,10 +591,14 @@ export function createHandler(fetchFn?: FetchFn) {
           return handleStart(request, env);
         case "/oauth/google/callback":
           return handleCallback(request, env, fetchFn);
+        case "/oauth/google/done":
+          return handleOAuthSuccess(request);
         case "/oauth/microsoft/start":
           return handleMicrosoftStart(request, env);
         case "/oauth/microsoft/callback":
           return handleMicrosoftCallback(request, env, fetchFn);
+        case "/oauth/microsoft/done":
+          return handleOAuthSuccess(request);
         case "/marketplace/install":
           return handleMarketplaceInstall(request, env, fetchFn);
         case "/marketplace/admin-install":
