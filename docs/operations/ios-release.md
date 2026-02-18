@@ -23,6 +23,12 @@ to TestFlight and eventually the App Store.
 
 ## Build Environment Prerequisites
 
+> **Xcode 16.0+ is required.** The project file (`project.pbxproj`) uses
+> `objectVersion = 77`, which is an Xcode 16-only format. Xcode 15 and earlier
+> **cannot open this project** and will produce parse errors. This also means the
+> build host must run macOS 14.0+ (Sonoma) or later, since Xcode 16 does not
+> support earlier macOS versions.
+
 | Requirement | Minimum | Current |
 |-------------|---------|---------|
 | Xcode | 16.0+ | 16.2 (Swift 6.2.3) |

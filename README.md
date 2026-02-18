@@ -8,6 +8,24 @@ multiple Google Calendar accounts into a single canonical event store.
 - **Scheduling intelligence** -- Constraint-based scheduling, commitment tracking, and relationship awareness (Phase 3+).
 - **AI-native control** -- MCP server lets AI assistants manage your calendar programmatically (Phase 2+).
 
+## Prerequisites
+
+| Requirement | Minimum | Notes |
+|-------------|---------|-------|
+| Node.js | 18+ | Runtime for Cloudflare Workers |
+| pnpm | 8+ | Package manager (monorepo workspaces) |
+
+**iOS development additionally requires:**
+
+| Requirement | Minimum | Notes |
+|-------------|---------|-------|
+| Xcode | **16.0+** | Project uses `objectVersion 77` -- Xcode 15 cannot open it |
+| Swift | 6.1+ | Required by the iOS codebase |
+| iOS Deployment Target | 17.0 | Minimum supported iOS version |
+| macOS | 14.0+ (Sonoma) | Required to run Xcode 16 |
+
+See [iOS Release Readiness](docs/operations/ios-release.md) for the full iOS build environment setup.
+
 ## Quick Start
 
 ```bash
