@@ -69,6 +69,12 @@ export const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 /** Auto-refresh interval in milliseconds (30 seconds). */
 export const REFRESH_INTERVAL_MS = 30 * 1000;
 
+/** Absolute mirror error count at which UserGraph health becomes hard error. */
+export const USER_GRAPH_ERROR_COUNT_THRESHOLD = 100;
+
+/** Mirror error ratio (error_mirrors / total_mirrors) at which health becomes hard error. */
+export const USER_GRAPH_ERROR_RATE_THRESHOLD = 0.01;
+
 // ---------------------------------------------------------------------------
 // Pure functions
 // ---------------------------------------------------------------------------
@@ -162,15 +168,22 @@ export function computeAllAccountHealth(
 /**
  * Compute health for UserGraph mirror layer.
  *
- * - error_mirrors > 0 -> error
- * - pending_mirrors > 0 -> degraded
+ * - substantial error_mirrors -> error
+ * - any pending_mirrors or residual error_mirrors -> degraded
  * - else healthy
  */
 export function computeUserGraphHealth(
   userGraph: UserGraphSyncHealth | null | undefined,
 ): HealthState {
   if (!userGraph) return "healthy";
-  if (userGraph.error_mirrors > 0) return "error";
+  const totalMirrors = Math.max(userGraph.total_mirrors, 1);
+  const errorRate = userGraph.error_mirrors / totalMirrors;
+  const hasMaterialErrors =
+    userGraph.error_mirrors >= USER_GRAPH_ERROR_COUNT_THRESHOLD ||
+    errorRate >= USER_GRAPH_ERROR_RATE_THRESHOLD;
+
+  if (hasMaterialErrors) return "error";
+  if (userGraph.error_mirrors > 0) return "degraded";
   if (userGraph.pending_mirrors > 0) return "degraded";
   return "healthy";
 }

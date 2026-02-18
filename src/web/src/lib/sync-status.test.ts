@@ -316,6 +316,18 @@ describe("computeOverallHealth", () => {
     };
     expect(computeOverallHealth([makeAccountHealth("healthy")], graph)).toBe("error");
   });
+
+  it("uses user graph residual errors as overall degraded when below hard threshold", () => {
+    const graph: UserGraphSyncHealth = {
+      total_events: 100,
+      total_mirrors: 10000,
+      active_mirrors: 9950,
+      pending_mirrors: 0,
+      error_mirrors: 20,
+      last_activity_ts: new Date().toISOString(),
+    };
+    expect(computeOverallHealth([makeAccountHealth("healthy")], graph)).toBe("degraded");
+  });
 });
 
 describe("computeUserGraphHealth", () => {
@@ -347,5 +359,18 @@ describe("computeUserGraphHealth", () => {
         last_activity_ts: new Date().toISOString(),
       }),
     ).toBe("error");
+  });
+
+  it("returns degraded when residual error mirrors are below hard threshold", () => {
+    expect(
+      computeUserGraphHealth({
+        total_events: 100,
+        total_mirrors: 10000,
+        active_mirrors: 9980,
+        pending_mirrors: 0,
+        error_mirrors: 20,
+        last_activity_ts: new Date().toISOString(),
+      }),
+    ).toBe("degraded");
   });
 });
