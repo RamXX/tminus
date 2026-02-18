@@ -1028,8 +1028,10 @@ export class UserGraphDO {
     const originEventId =
       event.origin_event_id || canonicalId;
 
-    const startTs = event.start.dateTime ?? event.start.date ?? "";
-    const endTs = event.end.dateTime ?? event.end.date ?? "";
+    // Guard against partial events (e.g. PATCH with title-only).
+    // The PATCH handler should merge before calling, but we defend here too.
+    const startTs = event.start?.dateTime ?? event.start?.date ?? "";
+    const endTs = event.end?.dateTime ?? event.end?.date ?? "";
 
     // Check if event already exists
     const existing = this.sql
@@ -1055,7 +1057,7 @@ export class UserGraphDO {
         event.location ?? null,
         startTs,
         endTs,
-        event.start.timeZone ?? null,
+        event.start?.timeZone ?? null,
         event.all_day ? 1 : 0,
         event.status ?? "confirmed",
         event.visibility ?? "default",
@@ -1087,7 +1089,7 @@ export class UserGraphDO {
         event.location ?? null,
         startTs,
         endTs,
-        event.start.timeZone ?? null,
+        event.start?.timeZone ?? null,
         event.all_day ? 1 : 0,
         event.status ?? "confirmed",
         event.visibility ?? "default",

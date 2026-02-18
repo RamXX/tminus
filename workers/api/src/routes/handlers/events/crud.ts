@@ -198,13 +198,46 @@ export async function handleUpdateEvent(
   }
 
   try {
-    // Merge the event ID into the body for the upsert
-    const event = { ...body, canonical_event_id: eventId };
+    // Merge-before-write: fetch existing event so partial bodies
+    // (e.g. title-only) don't clobber start/end with undefined.
+    const existing = await callDO<{
+      event: Record<string, unknown>;
+      mirrors: unknown[];
+    } | null>(env.USER_GRAPH, auth.userId, "/getCanonicalEvent", {
+      canonical_event_id: eventId,
+    });
+
+    if (!existing.ok || existing.data === null) {
+      return jsonResponse(
+        errorEnvelope("Event not found", "NOT_FOUND"),
+        ErrorCode.NOT_FOUND,
+      );
+    }
+
+    // Deep-merge: spread existing event, overlay partial body fields.
+    // Nested objects (start, end) need explicit merging so a partial
+    // body like { start: { timeZone: "US/Eastern" } } preserves the
+    // existing dateTime rather than clobbering the whole object.
+    const existingEvent = existing.data.event;
+    const merged: Record<string, unknown> = {
+      ...existingEvent,
+      ...body,
+      canonical_event_id: eventId,
+    };
+
+    // Deep-merge start and end if the body supplies partial overrides
+    if (body.start && typeof body.start === "object" && existingEvent.start && typeof existingEvent.start === "object") {
+      merged.start = { ...(existingEvent.start as Record<string, unknown>), ...(body.start as Record<string, unknown>) };
+    }
+    if (body.end && typeof body.end === "object" && existingEvent.end && typeof existingEvent.end === "object") {
+      merged.end = { ...(existingEvent.end as Record<string, unknown>), ...(body.end as Record<string, unknown>) };
+    }
+
     const result = await callDO<string>(
       env.USER_GRAPH,
       auth.userId,
       "/upsertCanonicalEvent",
-      { event, source: "api" },
+      { event: merged, source: "api" },
     );
 
     if (!result.ok) {

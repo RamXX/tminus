@@ -1170,8 +1170,28 @@ describe("Integration: Event endpoints", () => {
 
   it("PATCH /v1/events/:id updates event with ID merged into body", async () => {
     const eventId = "evt_01HXYZ00000000000000000001";
+    // The handler now fetches the existing event before upsert (merge-before-write).
+    const existingEvent = {
+      canonical_event_id: eventId,
+      origin_account_id: "acc_01HXY0000000000000000000AA",
+      origin_event_id: eventId,
+      title: "Original Title",
+      description: "Original Desc",
+      location: "Room A",
+      start: { dateTime: "2026-06-15T09:00:00Z" },
+      end: { dateTime: "2026-06-15T10:00:00Z" },
+      all_day: false,
+      status: "confirmed",
+      visibility: "default",
+      transparency: "opaque",
+      source: "api",
+      version: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
     const userGraphDO = createMockDONamespace({
       pathResponses: new Map([
+        ["/getCanonicalEvent", { event: existingEvent, mirrors: [] }],
         ["/upsertCanonicalEvent", eventId],
       ]),
     });
@@ -1201,12 +1221,207 @@ describe("Integration: Event endpoints", () => {
     expect(body.ok).toBe(true);
     expect(body.data.canonical_event_id).toBe(eventId);
 
-    // Verify the event ID was merged into the body
-    const doBody = userGraphDO.calls[0].body as {
+    // The first DO call should be getCanonicalEvent (merge-before-write)
+    expect(userGraphDO.calls[0].path).toBe("/getCanonicalEvent");
+    // The second DO call should be upsertCanonicalEvent with merged data
+    const doBody = userGraphDO.calls[1].body as {
       event: Record<string, unknown>;
     };
     expect(doBody.event.canonical_event_id).toBe(eventId);
     expect(doBody.event.title).toBe("Updated Title");
+    // Verify existing fields are preserved (merge-before-write)
+    expect(doBody.event.start).toEqual({ dateTime: "2026-06-15T09:00:00Z" });
+    expect(doBody.event.end).toEqual({ dateTime: "2026-06-15T10:00:00Z" });
+    expect(doBody.event.description).toBe("Original Desc");
+  });
+
+  it("PATCH /v1/events/:id with title-only body preserves start/end (TM-8diu regression)", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const existingEvent = {
+      canonical_event_id: eventId,
+      origin_account_id: "acc_01HXY0000000000000000000AA",
+      origin_event_id: eventId,
+      title: "Original Title",
+      start: { dateTime: "2026-06-15T09:00:00Z", timeZone: "America/Chicago" },
+      end: { dateTime: "2026-06-15T10:00:00Z", timeZone: "America/Chicago" },
+      all_day: false,
+      status: "confirmed",
+      visibility: "default",
+      transparency: "opaque",
+      source: "api",
+      version: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getCanonicalEvent", { event: existingEvent, mirrors: [] }],
+        ["/upsertCanonicalEvent", eventId],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    // PATCH with ONLY title -- no start, no end
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: "New Title Only" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+
+    // Verify merged event sent to DO preserves start/end
+    const upsertCall = userGraphDO.calls.find(c => c.path === "/upsertCanonicalEvent");
+    expect(upsertCall).toBeDefined();
+    const merged = (upsertCall!.body as { event: Record<string, unknown> }).event;
+    expect(merged.title).toBe("New Title Only");
+    expect(merged.start).toEqual({ dateTime: "2026-06-15T09:00:00Z", timeZone: "America/Chicago" });
+    expect(merged.end).toEqual({ dateTime: "2026-06-15T10:00:00Z", timeZone: "America/Chicago" });
+    expect(merged.status).toBe("confirmed");
+  });
+
+  it("PATCH /v1/events/:id with start-only body preserves title and end", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const existingEvent = {
+      canonical_event_id: eventId,
+      origin_account_id: "acc_01HXY0000000000000000000AA",
+      origin_event_id: eventId,
+      title: "Keep This Title",
+      start: { dateTime: "2026-06-15T09:00:00Z" },
+      end: { dateTime: "2026-06-15T10:00:00Z" },
+      all_day: false,
+      status: "confirmed",
+      visibility: "default",
+      transparency: "opaque",
+      source: "api",
+      version: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getCanonicalEvent", { event: existingEvent, mirrors: [] }],
+        ["/upsertCanonicalEvent", eventId],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    // PATCH with ONLY start -- preserves title and end
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ start: { dateTime: "2026-07-01T14:00:00Z" } }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+
+    const upsertCall = userGraphDO.calls.find(c => c.path === "/upsertCanonicalEvent");
+    const merged = (upsertCall!.body as { event: Record<string, unknown> }).event;
+    expect(merged.title).toBe("Keep This Title");
+    expect(merged.start).toEqual({ dateTime: "2026-07-01T14:00:00Z" });
+    expect(merged.end).toEqual({ dateTime: "2026-06-15T10:00:00Z" });
+  });
+
+  it("PATCH /v1/events/:id returns 404 when event does not exist", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getCanonicalEvent", null],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: "Update Missing Event" }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { ok: boolean; error: string; error_code: string };
+    expect(body.ok).toBe(false);
+    expect(body.error_code).toBe("NOT_FOUND");
+  });
+
+  it("PATCH /v1/events/:id deep-merges nested start object (partial timeZone update)", async () => {
+    const eventId = "evt_01HXYZ00000000000000000001";
+    const existingEvent = {
+      canonical_event_id: eventId,
+      origin_account_id: "acc_01HXY0000000000000000000AA",
+      origin_event_id: eventId,
+      title: "Existing",
+      start: { dateTime: "2026-06-15T09:00:00Z", timeZone: "UTC" },
+      end: { dateTime: "2026-06-15T10:00:00Z", timeZone: "UTC" },
+      all_day: false,
+      status: "confirmed",
+      visibility: "default",
+      transparency: "opaque",
+      source: "api",
+      version: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getCanonicalEvent", { event: existingEvent, mirrors: [] }],
+        ["/upsertCanonicalEvent", eventId],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    // PATCH with only timeZone inside start -- should preserve existing dateTime
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/events/${eventId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ start: { timeZone: "America/New_York" } }),
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+
+    const upsertCall = userGraphDO.calls.find(c => c.path === "/upsertCanonicalEvent");
+    const merged = (upsertCall!.body as { event: Record<string, unknown> }).event;
+    // dateTime preserved from existing, timeZone overridden
+    expect(merged.start).toEqual({ dateTime: "2026-06-15T09:00:00Z", timeZone: "America/New_York" });
   });
 
   // -----------------------------------------------------------------------

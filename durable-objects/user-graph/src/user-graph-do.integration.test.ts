@@ -1469,6 +1469,61 @@ describe("UserGraphDO integration", () => {
       expect(result!.event.title).toBe("Updated Via Patch");
       expect(result!.event.version).toBe(2);
     });
+
+    it("does not crash when start/end are omitted (TM-8diu defensive guard)", async () => {
+      // Create a full event first
+      const fullEvent = {
+        canonical_event_id: "evt_01PARTIAL0000000000000001",
+        origin_account_id: TEST_ACCOUNT_ID,
+        origin_event_id: "partial_001",
+        title: "Original Title",
+        start: { dateTime: "2026-03-01T09:00:00Z" },
+        end: { dateTime: "2026-03-01T10:00:00Z" },
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+        source: "api" as const,
+        version: 1,
+        created_at: "2026-02-14T00:00:00Z",
+        updated_at: "2026-02-14T00:00:00Z",
+      };
+      await ug.upsertCanonicalEvent(fullEvent as any, "api");
+
+      // Upsert with partial body (title only, no start/end) -- should NOT throw
+      const partialEvent = {
+        canonical_event_id: "evt_01PARTIAL0000000000000001",
+        title: "Updated Title Only",
+      };
+      const updatedId = await ug.upsertCanonicalEvent(partialEvent as any, "api");
+      expect(updatedId).toBe("evt_01PARTIAL0000000000000001");
+
+      // Title should be updated, start/end become empty (the handler merges;
+      // this test verifies the DO does not crash even without the merge).
+      const result = ug.getCanonicalEvent(updatedId);
+      expect(result).not.toBeNull();
+      expect(result!.event.title).toBe("Updated Title Only");
+      expect(result!.event.version).toBe(2);
+    });
+
+    it("creates event without start/end (defensive guard, insert path)", async () => {
+      // Simulates worst case: completely missing start/end on insert.
+      // Should not throw TypeError; fields default to empty strings.
+      const minimalEvent = {
+        title: "No Times Event",
+        all_day: false,
+        status: "confirmed" as const,
+        visibility: "default" as const,
+        transparency: "opaque" as const,
+      };
+
+      const id = await ug.upsertCanonicalEvent(minimalEvent as any, "api");
+      expect(id).toMatch(/^evt_/);
+
+      const result = ug.getCanonicalEvent(id);
+      expect(result).not.toBeNull();
+      expect(result!.event.title).toBe("No Times Event");
+    });
   });
 
   // -------------------------------------------------------------------------
