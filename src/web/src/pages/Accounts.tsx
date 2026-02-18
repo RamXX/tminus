@@ -32,6 +32,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface AccountsProps {
+  /** Authenticated user ID for OAuth start URLs. */
+  currentUserId: string;
   /** Fetch linked accounts. Injected for testability. */
   fetchAccounts: () => Promise<LinkedAccount[]>;
   /** Unlink an account by ID. Injected for testability. */
@@ -48,6 +50,7 @@ export interface AccountsProps {
 // ---------------------------------------------------------------------------
 
 export function Accounts({
+  currentUserId,
   fetchAccounts,
   unlinkAccount,
   navigateToOAuth = (url) => {
@@ -130,10 +133,14 @@ export function Accounts({
   // Handle clicking "Link Account" for a provider
   const handleLinkAccount = useCallback(
     (provider: AccountProvider) => {
-      const url = buildOAuthStartUrl(provider);
+      if (!currentUserId) {
+        showStatus("error", "Session expired. Please sign in again.");
+        return;
+      }
+      const url = buildOAuthStartUrl(provider, currentUserId);
       navigateToOAuth(url);
     },
-    [navigateToOAuth],
+    [currentUserId, navigateToOAuth, showStatus],
   );
 
   // Handle clicking "Unlink" on an account -- show confirmation dialog

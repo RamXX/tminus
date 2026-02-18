@@ -88,9 +88,11 @@ async function renderAndWait(overrides: Partial<AccountsProps> = {}) {
   const fetchAccounts = overrides.fetchAccounts ?? createMockFetch();
   const unlinkAccount = overrides.unlinkAccount ?? createMockUnlink();
   const navigateToOAuth = overrides.navigateToOAuth ?? createMockNavigate();
+  const currentUserId = overrides.currentUserId ?? "usr_test_123";
 
   const result = render(
     <Accounts
+      currentUserId={currentUserId}
       fetchAccounts={fetchAccounts}
       unlinkAccount={unlinkAccount}
       navigateToOAuth={navigateToOAuth}
@@ -221,13 +223,17 @@ describe("Accounts Page", () => {
 
   describe("OAuth URL construction", () => {
     it("builds correct Google OAuth start URL", () => {
-      const url = buildOAuthStartUrl("google");
-      expect(url).toBe(`${OAUTH_BASE_URL}/oauth/google/start`);
+      const url = buildOAuthStartUrl("google", "usr_test_123");
+      expect(url).toBe(
+        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+      );
     });
 
     it("builds correct Microsoft OAuth start URL", () => {
-      const url = buildOAuthStartUrl("microsoft");
-      expect(url).toBe(`${OAUTH_BASE_URL}/oauth/microsoft/start`);
+      const url = buildOAuthStartUrl("microsoft", "usr_test_123");
+      expect(url).toBe(
+        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+      );
     });
 
     it("OAuth base URL is oauth.tminus.ink", () => {
@@ -388,6 +394,7 @@ describe("Accounts Page", () => {
       );
       render(
         <Accounts
+          currentUserId="usr_test_123"
           fetchAccounts={fetchAccounts}
           unlinkAccount={createMockUnlink()}
           navigateToOAuth={createMockNavigate()}
@@ -444,7 +451,7 @@ describe("Accounts Page", () => {
 
       expect(navigateToOAuth).toHaveBeenCalledTimes(1);
       expect(navigateToOAuth).toHaveBeenCalledWith(
-        "https://oauth.tminus.ink/oauth/google/start",
+        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
       );
     });
 
@@ -456,7 +463,7 @@ describe("Accounts Page", () => {
 
       expect(navigateToOAuth).toHaveBeenCalledTimes(1);
       expect(navigateToOAuth).toHaveBeenCalledWith(
-        "https://oauth.tminus.ink/oauth/microsoft/start",
+        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
       );
     });
 

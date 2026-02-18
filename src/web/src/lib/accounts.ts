@@ -28,10 +28,21 @@ export const OAUTH_CALLBACK_RETURN_URL = "https://app.tminus.ink/#/accounts";
  * 4. OAuth worker redirects back to app.tminus.ink/#/accounts
  *
  * @param provider - "google" or "microsoft"
+ * @param userId - Authenticated user ID required by oauth-worker
+ * @param redirectUri - Return URL after OAuth callback
  * @returns Full URL to redirect the browser to
  */
-export function buildOAuthStartUrl(provider: AccountProvider): string {
-  return `${OAUTH_BASE_URL}/oauth/${provider}/start`;
+export function buildOAuthStartUrl(
+  provider: AccountProvider,
+  userId?: string,
+  redirectUri: string = OAUTH_CALLBACK_RETURN_URL,
+): string {
+  const url = new URL(`/oauth/${provider}/start`, OAUTH_BASE_URL);
+  if (userId) {
+    url.searchParams.set("user_id", userId);
+  }
+  url.searchParams.set("redirect_uri", redirectUri);
+  return url.toString();
 }
 
 // ---------------------------------------------------------------------------

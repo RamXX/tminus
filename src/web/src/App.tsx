@@ -499,6 +499,7 @@ function Router() {
     case "#/accounts":
       return (
         <Accounts
+          currentUserId={user?.id ?? ""}
           fetchAccounts={boundFetchAccounts}
           unlinkAccount={boundUnlinkAccount}
         />
