@@ -404,6 +404,58 @@ describe("AccountDO integration", () => {
       expect(params.get("client_secret")).toBe(TEST_OAUTH_CREDENTIALS.msClientSecret);
     });
 
+    it("persists rotated Microsoft refresh token when token endpoint returns one", async () => {
+      const rotatedRefresh = "ms-rotated-refresh-token";
+      const spyFetch: FetchFn = async () => {
+        return new Response(
+          JSON.stringify({
+            access_token: "EwB0A8l6_refreshed_ms_token",
+            expires_in: 3600,
+            refresh_token: rotatedRefresh,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft", TEST_OAUTH_CREDENTIALS);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      const authRow = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+      const envelope: EncryptedEnvelope = JSON.parse(authRow.encrypted_tokens);
+      const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+      const decrypted = await decryptTokens(masterKey, envelope);
+
+      expect(decrypted.refresh_token).toBe(rotatedRefresh);
+    });
+
+    it("preserves existing Microsoft refresh token when token endpoint omits refresh_token", async () => {
+      const spyFetch: FetchFn = async () => {
+        return new Response(
+          JSON.stringify({
+            access_token: "EwB0A8l6_refreshed_ms_token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch, "microsoft", TEST_OAUTH_CREDENTIALS);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+      await acct.getAccessToken();
+
+      const authRow = db
+        .prepare("SELECT encrypted_tokens FROM auth WHERE account_id = 'self'")
+        .get() as { encrypted_tokens: string };
+      const envelope: EncryptedEnvelope = JSON.parse(authRow.encrypted_tokens);
+      const masterKey = await importMasterKey(TEST_MASTER_KEY_HEX);
+      const decrypted = await decryptTokens(masterKey, envelope);
+
+      expect(decrypted.refresh_token).toBe(EXPIRED_TOKENS.refresh_token);
+    });
+
     it("sends refresh request to Google token endpoint when provider is google", async () => {
       let capturedUrl: string | undefined;
       const spyFetch: FetchFn = async (input, _init) => {

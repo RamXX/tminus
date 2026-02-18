@@ -50,6 +50,12 @@ describe("classifyError", () => {
     expect(result.maxRetries).toBe(0);
   });
 
+  it("403 GoogleApiError rate-limit: retry with max 5", () => {
+    const result = classifyError(new GoogleApiError("Rate Limit Exceeded", 403));
+    expect(result.shouldRetry).toBe(true);
+    expect(result.maxRetries).toBe(5);
+  });
+
   it("404 ResourceNotFoundError: no retry (permanent)", () => {
     const result = classifyError(new ResourceNotFoundError());
     expect(result.shouldRetry).toBe(false);
@@ -64,6 +70,22 @@ describe("classifyError", () => {
 
   it("other GoogleApiError (e.g. 400): no retry", () => {
     const result = classifyError(new GoogleApiError("Bad request", 400));
+    expect(result.shouldRetry).toBe(false);
+    expect(result.maxRetries).toBe(0);
+  });
+
+  it("no tokens stored error: no retry (permanent)", () => {
+    const result = classifyError(
+      new Error('AccountDO.getAccessToken failed (500): {"error":"AccountDO: no tokens stored. Call initialize() first."}'),
+    );
+    expect(result.shouldRetry).toBe(false);
+    expect(result.maxRetries).toBe(0);
+  });
+
+  it("invalid_grant refresh failure: no retry (relink required)", () => {
+    const result = classifyError(
+      new Error('AccountDO.getAccessToken failed (500): {"error":"Token refresh failed (400): {\\"error\\":\\"invalid_grant\\"}"}'),
+    );
     expect(result.shouldRetry).toBe(false);
     expect(result.maxRetries).toBe(0);
   });

@@ -885,6 +885,7 @@ export class AccountDO {
     const data = (await response.json()) as {
       access_token: string;
       expires_in: number;
+      refresh_token?: string;
     };
 
     // Compute new expiry from expires_in seconds
@@ -892,9 +893,17 @@ export class AccountDO {
       Date.now() + data.expires_in * 1000,
     ).toISOString();
 
+    // Some providers (notably Microsoft) can rotate refresh tokens during
+    // refresh flows. Persist the rotated token when present, otherwise keep
+    // using the prior refresh token.
+    const refreshedToken =
+      typeof data.refresh_token === "string" && data.refresh_token.length > 0
+        ? data.refresh_token
+        : refreshToken;
+
     const newTokens: TokenPayload = {
       access_token: data.access_token,
-      refresh_token: refreshToken, // Neither Google nor Microsoft always return a new refresh token
+      refresh_token: refreshedToken,
       expiry,
     };
 

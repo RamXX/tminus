@@ -145,6 +145,14 @@ function classifyError(err: unknown): RetryStrategy {
       return { shouldRetry: true, maxRetries: 3 };
     }
     if (err.statusCode === 403) {
+      const msg = err.message.toLowerCase();
+      if (
+        msg.includes("rate limit") ||
+        msg.includes("ratelimit") ||
+        msg.includes("quota")
+      ) {
+        return { shouldRetry: true, maxRetries: 5 };
+      }
       return { shouldRetry: false, maxRetries: 0 };
     }
     // Other 4xx errors: no retry
@@ -160,6 +168,21 @@ function classifyError(err: unknown): RetryStrategy {
     }
     // Other 4xx errors (404, etc.): no retry
     return { shouldRetry: false, maxRetries: 0 };
+  }
+  if (err instanceof Error) {
+    const message = err.message.toLowerCase();
+
+    // AccountDO "no tokens stored" means the account was never initialized
+    // or has been revoked. Retrying cannot recover this message.
+    if (message.includes("no tokens stored")) {
+      return { shouldRetry: false, maxRetries: 0 };
+    }
+
+    // OAuth refresh failures like invalid_grant require account relink.
+    // Retrying only churns the queue and delays healthy account writes.
+    if (message.includes("invalid_grant") || message.includes("token refresh failed (400)")) {
+      return { shouldRetry: false, maxRetries: 0 };
+    }
   }
   // Unknown errors: retry once
   return { shouldRetry: true, maxRetries: 1 };
