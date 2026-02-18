@@ -2319,6 +2319,56 @@ describe("UserGraphDO integration", () => {
       );
     }
 
+    async function rpcGet(path: string): Promise<Response> {
+      return ug.handleFetch(
+        new Request(`https://user-graph.internal${path}`, {
+          method: "GET",
+        }),
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // /listPolicies and /getPolicy
+    // -----------------------------------------------------------------------
+
+    describe("/listPolicies and /getPolicy", () => {
+      it("returns policies via /listPolicies", async () => {
+        ug.getSyncHealth();
+        const created = await ug.createPolicy("Policy via RPC");
+
+        const resp = await rpcGet("/listPolicies");
+        expect(resp.status).toBe(200);
+
+        const data = (await resp.json()) as Array<{ policy_id: string; name: string }>;
+        expect(data.some((p) => p.policy_id === created.policy_id)).toBe(true);
+      });
+
+      it("returns a policy with edges via /getPolicy", async () => {
+        ug.getSyncHealth();
+        const policy = await ug.createPolicy("Policy detail");
+        await ug.setPolicyEdges(policy.policy_id, [
+          {
+            from_account_id: TEST_ACCOUNT_ID,
+            to_account_id: OTHER_ACCOUNT_ID,
+            detail_level: "BUSY",
+            calendar_kind: "BUSY_OVERLAY",
+          },
+        ]);
+
+        const resp = await rpc("/getPolicy", { policy_id: policy.policy_id });
+        expect(resp.status).toBe(200);
+
+        const data = (await resp.json()) as {
+          policy_id: string;
+          edges: Array<{ from_account_id: string; to_account_id: string }>;
+        };
+        expect(data.policy_id).toBe(policy.policy_id);
+        expect(data.edges).toHaveLength(1);
+        expect(data.edges[0].from_account_id).toBe(TEST_ACCOUNT_ID);
+        expect(data.edges[0].to_account_id).toBe(OTHER_ACCOUNT_ID);
+      });
+    });
+
     // -----------------------------------------------------------------------
     // /findCanonicalByOrigin
     // -----------------------------------------------------------------------

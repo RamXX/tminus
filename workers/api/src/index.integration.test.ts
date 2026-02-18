@@ -13,7 +13,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
-import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0004_AUTH_FIELDS, MIGRATION_0012_SUBSCRIPTIONS, MIGRATION_0013_SUBSCRIPTION_LIFECYCLE } from "@tminus/d1-registry";
+import {
+  MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0004_AUTH_FIELDS,
+  MIGRATION_0008_SYNC_STATUS_COLUMNS,
+  MIGRATION_0012_SUBSCRIPTIONS,
+  MIGRATION_0013_SUBSCRIPTION_LIFECYCLE,
+} from "@tminus/d1-registry";
 import { createHandler, createJwt } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -347,6 +353,7 @@ describe("Integration: Account endpoints", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
     db.exec(MIGRATION_0012_SUBSCRIPTIONS);
     db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
@@ -1802,6 +1809,17 @@ describe("Integration: Sync status endpoints", () => {
     expect(body.data.accounts).toHaveLength(2);
     expect(body.data.accounts[0].health).not.toBeNull();
     expect(body.data.accounts[1].health).not.toBeNull();
+    // Backward-compatible account fields required by web Sync Status UI.
+    expect(body.data.accounts[0]).toEqual(
+      expect.objectContaining({
+        email: expect.any(String),
+        provider: expect.any(String),
+        last_sync_ts: expect.any(String),
+        channel_status: expect.any(String),
+        pending_writes: expect.any(Number),
+        error_count: expect.any(Number),
+      }),
+    );
 
     // UserGraph health
     expect(body.data.user_graph.total_events).toBe(42);

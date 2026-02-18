@@ -14,42 +14,114 @@ import {
   ErrorCode,
 } from "../shared";
 
+interface AccountHealthShape {
+  lastSyncTs?: string | null;
+  pendingWrites?: number;
+}
+
+interface AccountStatusRow {
+  account_id: string;
+  email: string;
+  provider: string;
+  status: string;
+  channel_expiry_ts: string | null;
+  error_count: number;
+}
+
+function computeChannelStatus(
+  account: Pick<AccountStatusRow, "provider" | "status" | "channel_expiry_ts">,
+): string {
+  if (account.status !== "active") return "revoked";
+  if (account.provider !== "google") return "active";
+  if (!account.channel_expiry_ts) return "missing";
+
+  const expiryMs = Date.parse(account.channel_expiry_ts);
+  if (Number.isNaN(expiryMs)) return "unknown";
+  return expiryMs <= Date.now() ? "expired" : "active";
+}
+
 async function handleAggregateStatus(
   _request: Request,
   auth: AuthContext,
   env: Env,
 ): Promise<Response> {
   try {
-    // Get all accounts for this user
-    const accountsResult = await env.DB
-      .prepare("SELECT account_id, status FROM accounts WHERE user_id = ?1")
-      .bind(auth.userId)
-      .all<{ account_id: string; status: string }>();
+    // Get all accounts for this user.
+    // Fallback query handles older schemas where `error_count` does not exist.
+    let accounts: AccountStatusRow[] = [];
+    try {
+      const withErrorCount = await env.DB
+        .prepare(
+          `SELECT account_id, email, provider, status, channel_expiry_ts, error_count
+           FROM accounts
+           WHERE user_id = ?1`,
+        )
+        .bind(auth.userId)
+        .all<AccountStatusRow>();
+      accounts = withErrorCount.results ?? [];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("no such column: error_count")) {
+        throw err;
+      }
+      const withoutErrorCount = await env.DB
+        .prepare(
+          `SELECT account_id, email, provider, status, channel_expiry_ts
+           FROM accounts
+           WHERE user_id = ?1`,
+        )
+        .bind(auth.userId)
+        .all<Omit<AccountStatusRow, "error_count">>();
+      accounts = (withoutErrorCount.results ?? []).map((row) => ({
+        ...row,
+        error_count: 0,
+      }));
+    }
 
-    const accounts = accountsResult.results ?? [];
     const healthResults: Array<{
       account_id: string;
+      email: string;
+      provider: string;
       status: string;
+      last_sync_ts: string | null;
+      channel_status: string;
+      pending_writes: number;
+      error_count: number;
       health: unknown;
     }> = [];
 
-    // Get health from each account's DO
+    // Get health from each account's DO and enrich with legacy fields
+    // expected by the Sync Status UI.
     for (const account of accounts) {
       try {
-        const health = await callDO(
+        const health = await callDO<AccountHealthShape>(
           env.ACCOUNT,
           account.account_id,
           "/getHealth",
         );
+
+        const healthData = health.ok ? health.data : null;
         healthResults.push({
           account_id: account.account_id,
+          email: account.email,
+          provider: account.provider,
           status: account.status,
-          health: health.ok ? health.data : null,
+          last_sync_ts: healthData?.lastSyncTs ?? null,
+          channel_status: computeChannelStatus(account),
+          pending_writes: healthData?.pendingWrites ?? 0,
+          error_count: account.error_count ?? 0,
+          health: healthData,
         });
       } catch {
         healthResults.push({
           account_id: account.account_id,
+          email: account.email,
+          provider: account.provider,
           status: account.status,
+          last_sync_ts: null,
+          channel_status: computeChannelStatus(account),
+          pending_writes: 0,
+          error_count: account.error_count ?? 0,
           health: null,
         });
       }
@@ -187,4 +259,3 @@ export const routeSyncRoutes: RouteGroupHandler = async (request, method, pathna
 
   return null;
 };
-

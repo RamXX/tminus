@@ -5132,6 +5132,17 @@ export class UserGraphDO {
           return Response.json(result);
         }
 
+        case "/getPolicy": {
+          const body = (await request.json()) as { policy_id: string };
+          const result = await this.getPolicy(body.policy_id);
+          return Response.json(result);
+        }
+
+        case "/listPolicies": {
+          const result = await this.listPolicies();
+          return Response.json(result);
+        }
+
         case "/setPolicyEdges": {
           const body = (await request.json()) as {
             policy_id: string;
