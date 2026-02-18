@@ -106,6 +106,11 @@ describe("computeAccountHealth", () => {
       const account = makeAccount({ pending_writes: 10 });
       expect(computeAccountHealth(account, NOW)).toBe("healthy");
     });
+
+    it("returns healthy when channel is active even if first sync timestamp is missing", () => {
+      const account = makeAccount({ last_sync_ts: null, channel_status: "active" });
+      expect(computeAccountHealth(account, NOW)).toBe("healthy");
+    });
   });
 
   describe("degraded state", () => {
@@ -123,29 +128,36 @@ describe("computeAccountHealth", () => {
       const account = makeAccount({ pending_writes: 50 });
       expect(computeAccountHealth(account, NOW)).toBe("degraded");
     });
+
+    it("returns degraded for active channels idle beyond threshold", () => {
+      const account = makeAccount({
+        channel_status: "active",
+        last_sync_ts: new Date(NOW - STALE_THRESHOLD_MS - 1).toISOString(),
+      });
+      expect(computeAccountHealth(account, NOW)).toBe("degraded");
+    });
   });
 
   describe("stale state", () => {
-    it("returns stale when last_sync_ts is null (never synced)", () => {
-      const account = makeAccount({ last_sync_ts: null });
+    it("returns stale when channel is not active and last_sync_ts is null", () => {
+      const account = makeAccount({ last_sync_ts: null, channel_status: "missing" });
       expect(computeAccountHealth(account, NOW)).toBe("stale");
     });
 
-    it("returns stale when last sync exceeds threshold", () => {
+    it("returns stale when non-active channel last sync exceeds threshold", () => {
       const account = makeAccount({
+        channel_status: "missing",
         last_sync_ts: new Date(NOW - STALE_THRESHOLD_MS - 1).toISOString(),
       });
       expect(computeAccountHealth(account, NOW)).toBe("stale");
     });
 
-    it("returns healthy at exactly the threshold boundary", () => {
-      // At exactly STALE_THRESHOLD_MS, the diff equals threshold,
-      // not greater-than, so it should still be healthy (or stale depending on
-      // implementation -- we define > as stale, == as healthy)
+    it("returns degraded at exactly the threshold boundary for non-active channels", () => {
       const account = makeAccount({
+        channel_status: "missing",
         last_sync_ts: new Date(NOW - STALE_THRESHOLD_MS).toISOString(),
       });
-      expect(computeAccountHealth(account, NOW)).toBe("healthy");
+      expect(computeAccountHealth(account, NOW)).toBe("degraded");
     });
   });
 

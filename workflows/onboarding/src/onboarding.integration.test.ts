@@ -302,6 +302,7 @@ function createOnboardingGoogleApiFetch(options: {
 interface AccountDOState {
   accessToken: string;
   setSyncTokenCalls: string[];
+  markSyncSuccessCalls: string[];
   storeWatchChannelCalls: Array<{
     channel_id: string;
     resource_id: string;
@@ -341,6 +342,15 @@ function createMockAccountDO(state: AccountDOState) {
       if (path === "/setSyncToken") {
         const body = (await request.json()) as { sync_token: string };
         state.setSyncTokenCalls.push(body.sync_token);
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (path === "/markSyncSuccess") {
+        const body = (await request.json()) as { ts: string };
+        state.markSyncSuccessCalls.push(body.ts);
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -505,6 +515,7 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
     accountDOState = {
       accessToken: TEST_ACCESS_TOKEN,
       setSyncTokenCalls: [],
+      markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
     };
 
@@ -560,6 +571,7 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
     expect(result.eventSync.totalDeltas).toBe(1);
     expect(result.eventSync.syncToken).toBe(TEST_SYNC_TOKEN);
     expect(result.eventSync.pagesProcessed).toBe(1);
+    expect(accountDOState.markSyncSuccessCalls).toHaveLength(1);
 
     // Watch channel
     expect(result.watchRegistration.channelId).toBe(WATCH_CHANNEL_ID);
@@ -1312,6 +1324,7 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
     accountDOState = {
       accessToken: MS_ACCESS_TOKEN,
       setSyncTokenCalls: [],
+      markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
     };
 
@@ -1367,6 +1380,7 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
     expect(result.eventSync.totalDeltas).toBe(1);
     expect(result.eventSync.syncToken).toBe(MS_SYNC_TOKEN);
     expect(result.eventSync.pagesProcessed).toBe(1);
+    expect(accountDOState.markSyncSuccessCalls).toHaveLength(1);
 
     // Watch registration (subscription)
     expect(result.watchRegistration.channelId).toBe(MS_SUBSCRIPTION_ID);

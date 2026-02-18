@@ -52,8 +52,8 @@ export interface AccountHealth {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Threshold in milliseconds beyond which a sync is considered stale (30 min). */
-export const STALE_THRESHOLD_MS = 30 * 60 * 1000;
+/** Threshold in milliseconds to consider a live channel "idle" (24h). */
+export const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 /** Auto-refresh interval in milliseconds (30 seconds). */
 export const REFRESH_INTERVAL_MS = 30 * 1000;
@@ -88,10 +88,11 @@ export function healthToColor(state: HealthState): HealthColor {
  * Priority (highest to lowest):
  *   1. error_count > 0 -> "error"
  *   2. status is "revoked" or channel_status is "error" -> "error"
- *   3. last_sync_ts is null (never synced) -> "stale"
- *   4. last_sync_ts older than STALE_THRESHOLD_MS -> "stale"
- *   5. channel_status is "expired" or pending_writes > 10 -> "degraded"
- *   6. Otherwise -> "healthy"
+ *   3. pending_writes > 10 or channel_status is "expired" -> "degraded"
+ *   4. active channel with no errors -> "healthy" (or "degraded" if idle/invalid timestamp)
+ *   5. non-active channel without sync timestamp -> "stale"
+ *   6. non-active channel older than STALE_THRESHOLD_MS -> "stale"
+ *   7. Otherwise -> "degraded"
  *
  * @param account - raw account status from API
  * @param now - current time for staleness check (default: Date.now())
@@ -100,21 +101,33 @@ export function computeAccountHealth(
   account: SyncAccountStatus,
   now: number = Date.now(),
 ): HealthState {
+  const channelStatus = account.channel_status.toLowerCase();
+
   // Error conditions
   if (account.error_count > 0) return "error";
   if (account.status === "revoked") return "error";
-  if (account.channel_status === "error") return "error";
-
-  // Stale conditions
-  if (!account.last_sync_ts) return "stale";
-  const lastSync = new Date(account.last_sync_ts).getTime();
-  if (now - lastSync > STALE_THRESHOLD_MS) return "stale";
+  if (channelStatus === "error") return "error";
 
   // Degraded conditions
-  if (account.channel_status === "expired") return "degraded";
+  if (channelStatus === "expired") return "degraded";
   if (account.pending_writes > 10) return "degraded";
 
-  return "healthy";
+  // A live channel with no errors means sync is operational.
+  if (channelStatus === "active") {
+    if (!account.last_sync_ts) return "healthy";
+    const lastSync = new Date(account.last_sync_ts).getTime();
+    if (Number.isNaN(lastSync)) return "degraded";
+    if (now - lastSync > STALE_THRESHOLD_MS) return "degraded";
+    return "healthy";
+  }
+
+  // Non-active channels use staleness checks.
+  if (!account.last_sync_ts) return "stale";
+  const lastSync = new Date(account.last_sync_ts).getTime();
+  if (Number.isNaN(lastSync)) return "stale";
+  if (now - lastSync > STALE_THRESHOLD_MS) return "stale";
+
+  return "degraded";
 }
 
 /**

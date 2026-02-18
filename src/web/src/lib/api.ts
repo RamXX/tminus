@@ -106,6 +106,145 @@ export class ApiError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Event contract adapters (UI <-> canonical API)
+// ---------------------------------------------------------------------------
+
+interface CanonicalDateTime {
+  dateTime?: string;
+  date?: string;
+  timeZone?: string;
+}
+
+interface CanonicalApiEvent {
+  canonical_event_id?: string;
+  summary?: string;
+  title?: string;
+  description?: string;
+  location?: string;
+  start?: string | CanonicalDateTime;
+  end?: string | CanonicalDateTime;
+  origin_account_id?: string;
+  origin_account_email?: string;
+  status?: string;
+  version?: number;
+  updated_at?: string;
+  mirrors?: EventMirror[];
+}
+
+function normalizeDateTime(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null) {
+    const v = value as CanonicalDateTime;
+    if (typeof v.dateTime === "string") return v.dateTime;
+    if (typeof v.date === "string") return v.date;
+  }
+  return null;
+}
+
+function toCanonicalDateTime(
+  value: string | undefined,
+  timezone?: string,
+): CanonicalDateTime | undefined {
+  if (!value) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return { date: value };
+  }
+  if (timezone) {
+    return { dateTime: value, timeZone: timezone };
+  }
+  return { dateTime: value };
+}
+
+function normalizeCalendarEvent(raw: unknown): CalendarEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const evt = raw as CanonicalApiEvent;
+  const canonicalEventId =
+    typeof evt.canonical_event_id === "string" ? evt.canonical_event_id : "";
+  if (!canonicalEventId) return null;
+
+  const start = normalizeDateTime(evt.start);
+  const end = normalizeDateTime(evt.end);
+  if (!start || !end) return null;
+
+  return {
+    canonical_event_id: canonicalEventId,
+    summary:
+      typeof evt.summary === "string"
+        ? evt.summary
+        : typeof evt.title === "string"
+          ? evt.title
+          : undefined,
+    description:
+      typeof evt.description === "string" ? evt.description : undefined,
+    location: typeof evt.location === "string" ? evt.location : undefined,
+    start,
+    end,
+    origin_account_id:
+      typeof evt.origin_account_id === "string"
+        ? evt.origin_account_id
+        : undefined,
+    origin_account_email:
+      typeof evt.origin_account_email === "string"
+        ? evt.origin_account_email
+        : undefined,
+    status: typeof evt.status === "string" ? evt.status : undefined,
+    version: typeof evt.version === "number" ? evt.version : undefined,
+    updated_at:
+      typeof evt.updated_at === "string" ? evt.updated_at : undefined,
+    mirrors: Array.isArray(evt.mirrors)
+      ? (evt.mirrors as EventMirror[])
+      : undefined,
+  };
+}
+
+async function fetchEventById(
+  token: string,
+  eventId: string,
+): Promise<CalendarEvent> {
+  const payload = await apiFetch<{ event?: unknown; mirrors?: unknown[] }>(
+    `/v1/events/${encodeURIComponent(eventId)}`,
+    { token },
+  );
+
+  const eventBody =
+    payload && typeof payload === "object" && "event" in payload
+      ? (payload.event as Record<string, unknown>)
+      : null;
+  if (!eventBody) {
+    throw new Error("Failed to parse event detail payload");
+  }
+
+  const normalized = normalizeCalendarEvent({
+    ...eventBody,
+    mirrors: Array.isArray(payload.mirrors)
+      ? (payload.mirrors as EventMirror[])
+      : undefined,
+  });
+
+  if (!normalized) {
+    throw new Error("Failed to normalize event detail payload");
+  }
+  return normalized;
+}
+
+async function normalizeMutationResult(
+  token: string,
+  payload: unknown,
+): Promise<CalendarEvent> {
+  const normalizedDirect = normalizeCalendarEvent(payload);
+  if (normalizedDirect) return normalizedDirect;
+
+  if (payload && typeof payload === "object") {
+    const maybeId = (payload as Record<string, unknown>).canonical_event_id;
+    if (typeof maybeId === "string" && maybeId.length > 0) {
+      return fetchEventById(token, maybeId);
+    }
+  }
+
+  throw new Error("Malformed event payload from API");
+}
+
+// ---------------------------------------------------------------------------
 // Core fetch wrapper
 // ---------------------------------------------------------------------------
 
@@ -186,7 +325,10 @@ export async function fetchEvents(
   if (params?.end) search.set("end", params.end);
   const qs = search.toString();
   const path = `/v1/events${qs ? `?${qs}` : ""}`;
-  return apiFetch<CalendarEvent[]>(path, { token });
+  const data = await apiFetch<unknown[]>(path, { token });
+  return (data ?? [])
+    .map((evt) => normalizeCalendarEvent(evt))
+    .filter((evt): evt is CalendarEvent => evt !== null);
 }
 
 /** POST /api/v1/events -- create a new canonical event. */
@@ -194,11 +336,21 @@ export async function createEvent(
   token: string,
   payload: CreateEventPayload,
 ): Promise<CalendarEvent> {
-  return apiFetch<CalendarEvent>("/v1/events", {
+  const requestBody = {
+    title: payload.summary,
+    start: toCanonicalDateTime(payload.start, payload.timezone),
+    end: toCanonicalDateTime(payload.end, payload.timezone),
+    description: payload.description,
+    location: payload.location,
+    source: payload.source,
+  };
+
+  const result = await apiFetch<unknown>("/v1/events", {
     method: "POST",
-    body: payload,
+    body: requestBody,
     token,
   });
+  return normalizeMutationResult(token, result);
 }
 
 /** PATCH /api/v1/events/:id -- update an existing canonical event. */
@@ -207,11 +359,30 @@ export async function updateEvent(
   eventId: string,
   payload: UpdateEventPayload,
 ): Promise<CalendarEvent> {
-  return apiFetch<CalendarEvent>(`/v1/events/${encodeURIComponent(eventId)}`, {
-    method: "PATCH",
-    body: payload,
-    token,
-  });
+  const requestBody: Record<string, unknown> = {};
+  if (payload.summary !== undefined) requestBody.title = payload.summary;
+  if (payload.start !== undefined) {
+    requestBody.start = toCanonicalDateTime(payload.start, payload.timezone);
+  }
+  if (payload.end !== undefined) {
+    requestBody.end = toCanonicalDateTime(payload.end, payload.timezone);
+  }
+  if (payload.description !== undefined) {
+    requestBody.description = payload.description;
+  }
+  if (payload.location !== undefined) {
+    requestBody.location = payload.location;
+  }
+
+  const result = await apiFetch<unknown>(
+    `/v1/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "PATCH",
+      body: requestBody,
+      token,
+    },
+  );
+  return normalizeMutationResult(token, result);
 }
 
 /** DELETE /api/v1/events/:id -- delete a canonical event. */

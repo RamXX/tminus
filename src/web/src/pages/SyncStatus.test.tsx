@@ -208,14 +208,14 @@ describe("SyncStatus Dashboard", () => {
       expect(indicator).toHaveAttribute("data-color", "red");
     });
 
-    it("shows red indicator for stale account (never synced)", async () => {
+    it("shows red indicator for stale account when channel is not active", async () => {
       const staleAccount: SyncAccountStatus = {
         account_id: "acc-stale",
         email: "stale@example.com",
         provider: "google",
         status: "active",
         last_sync_ts: null,
-        channel_status: "active",
+        channel_status: "missing",
         pending_writes: 0,
         error_count: 0,
       };

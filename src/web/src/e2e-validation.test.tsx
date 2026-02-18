@@ -249,11 +249,19 @@ function createMockFetch() {
 
     // POST /api/v1/events
     if (url === "/api/v1/events" && method === "POST") {
+      const start =
+        typeof body?.start === "string"
+          ? body.start
+          : body?.start?.dateTime ?? body?.start?.date ?? CREATED_EVENT.start;
+      const end =
+        typeof body?.end === "string"
+          ? body.end
+          : body?.end?.dateTime ?? body?.end?.date ?? CREATED_EVENT.end;
       const newEvent = {
         ...CREATED_EVENT,
-        summary: body?.summary ?? CREATED_EVENT.summary,
-        start: body?.start ?? CREATED_EVENT.start,
-        end: body?.end ?? CREATED_EVENT.end,
+        summary: body?.title ?? body?.summary ?? CREATED_EVENT.summary,
+        start,
+        end,
         description: body?.description ?? CREATED_EVENT.description,
       };
       currentEvents = [...currentEvents, newEvent];
@@ -265,7 +273,26 @@ function createMockFetch() {
       const eventId = url.split("/api/v1/events/")[1];
       const existing = currentEvents.find((e) => e.canonical_event_id === eventId);
       if (existing) {
-        const updated = { ...existing, ...body, version: (existing.version ?? 1) + 1 };
+        const start =
+          typeof body?.start === "string"
+            ? body.start
+            : body?.start?.dateTime ?? body?.start?.date ?? undefined;
+        const end =
+          typeof body?.end === "string"
+            ? body.end
+            : body?.end?.dateTime ?? body?.end?.date ?? undefined;
+
+        const updated = {
+          ...existing,
+          ...(body?.title !== undefined ? { summary: body.title } : {}),
+          ...(start !== undefined ? { start } : {}),
+          ...(end !== undefined ? { end } : {}),
+          ...(body?.description !== undefined
+            ? { description: body.description }
+            : {}),
+          ...(body?.location !== undefined ? { location: body.location } : {}),
+          version: (existing.version ?? 1) + 1,
+        };
         currentEvents = currentEvents.map((e) =>
           e.canonical_event_id === eventId ? updated : e,
         );
@@ -630,7 +657,9 @@ describe("Phase 2C E2E Validation", () => {
       );
       expect(createCalls.length).toBe(1);
       expect(createCalls[0].body).toMatchObject({
-        summary: "Coffee with Bob",
+        title: "Coffee with Bob",
+        start: expect.objectContaining({ dateTime: expect.any(String) }),
+        end: expect.objectContaining({ dateTime: expect.any(String) }),
         source: "ui",
       });
     });

@@ -167,6 +167,7 @@ export class OnboardingWorkflow {
       if (eventSync.syncToken) {
         await this.setSyncToken(account_id, eventSync.syncToken);
       }
+      await this.markSyncSuccess(account_id);
 
       // Step 6: Mark account active in D1 + store channel_id
       await this.activateAccount(
@@ -566,6 +567,26 @@ export class OnboardingWorkflow {
       const body = await response.text();
       throw new Error(
         `AccountDO.setSyncToken failed (${response.status}): ${body}`,
+      );
+    }
+  }
+
+  private async markSyncSuccess(accountId: AccountId): Promise<void> {
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    const response = await stub.fetch(
+      new Request("https://account.internal/markSyncSuccess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ts: new Date().toISOString() }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `AccountDO.markSyncSuccess failed (${response.status}): ${body}`,
       );
     }
   }
