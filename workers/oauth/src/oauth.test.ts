@@ -651,6 +651,7 @@ describe("GET /oauth/google/callback", () => {
         provider_subject: TEST_GOOGLE_SUB,
         email: "old@gmail.com",
         status: "revoked",
+        channel_id: "cal_existing_channel_01",
       }];
 
       const mockFetch = createMockGoogleFetch();
@@ -674,6 +675,37 @@ describe("GET /oauth/google/callback", () => {
 
       // OnboardingWorkflow: was NOT started (existing account)
       expect(workflow._calls.length).toBe(0);
+    });
+
+    it("starts onboarding when reactivated account has no channel", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      d1._rows["accounts"] = [{
+        account_id: "acc_REBOOT01",
+        user_id: TEST_USER_ID,
+        provider: "google",
+        provider_subject: TEST_GOOGLE_SUB,
+        email: "old@gmail.com",
+        status: "error",
+        channel_id: null,
+      }];
+
+      const mockFetch = createMockGoogleFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/google/callback?code=${TEST_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(302);
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_REBOOT01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
   });
 
@@ -1008,6 +1040,7 @@ describe("GET /oauth/microsoft/callback", () => {
         provider_subject: TEST_MS_SUB,
         email: "old@outlook.com",
         status: "revoked",
+        channel_id: "sub_existing_channel_01",
       }];
 
       const mockFetch = createMockMicrosoftFetch();
@@ -1031,6 +1064,37 @@ describe("GET /oauth/microsoft/callback", () => {
 
       // OnboardingWorkflow: was NOT started (existing account)
       expect(workflow._calls.length).toBe(0);
+    });
+
+    it("starts onboarding for reactivated Microsoft account with no channel", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      d1._rows["accounts"] = [{
+        account_id: "acc_MSREBOOT01",
+        user_id: TEST_USER_ID,
+        provider: "microsoft",
+        provider_subject: TEST_MS_SUB,
+        email: "old@outlook.com",
+        status: "error",
+        channel_id: null,
+      }];
+
+      const mockFetch = createMockMicrosoftFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(302);
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_MSREBOOT01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
   });
 

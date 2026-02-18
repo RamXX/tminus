@@ -241,14 +241,17 @@ async function handleCallback(
 
   // Step 3: Check D1 for existing account with this (provider, provider_subject)
   const existingRows = await env.DB
-    .prepare("SELECT account_id, user_id, status FROM accounts WHERE provider = ? AND provider_subject = ?")
+    .prepare(
+      "SELECT account_id, user_id, status, channel_id FROM accounts WHERE provider = ? AND provider_subject = ?",
+    )
     .bind("google", userInfo.sub)
-    .all<Pick<AccountRow, "account_id" | "user_id" | "status">>();
+    .all<Pick<AccountRow, "account_id" | "user_id" | "status" | "channel_id">>();
 
   const existing = existingRows.results.length > 0 ? existingRows.results[0] : null;
 
   let accountId: string;
   let isNewAccount = false;
+  let shouldStartOnboarding = false;
 
   if (existing) {
     if (existing.user_id !== user_id) {
@@ -262,14 +265,20 @@ async function handleCallback(
 
     // Same user -- re-activate and refresh tokens
     accountId = existing.account_id;
+    const wasActive = existing.status === "active";
+    const hasChannel = !!existing.channel_id;
 
     // Update status to active if it was revoked/error
-    if (existing.status !== "active") {
+    if (!wasActive) {
       await env.DB
         .prepare("UPDATE accounts SET status = 'active', email = ? WHERE account_id = ?")
         .bind(userInfo.email, accountId)
         .run();
     }
+
+    // If the account is being reactivated and has no watch channel, it likely
+    // never completed onboarding. Re-run onboarding to bootstrap sync.
+    shouldStartOnboarding = !wasActive && !hasChannel;
   } else {
     // New account
     accountId = generateId("account");
@@ -282,6 +291,8 @@ async function handleCallback(
       )
       .bind(accountId, user_id, userInfo.sub, userInfo.email)
       .run();
+
+    shouldStartOnboarding = true;
   }
 
   // Step 4: Initialize AccountDO with encrypted tokens
@@ -303,7 +314,7 @@ async function handleCallback(
   }));
 
   // Step 5: Start OnboardingWorkflow for new accounts
-  if (isNewAccount) {
+  if (shouldStartOnboarding) {
     try {
       await env.ONBOARDING_WORKFLOW.create({
         id: `onboard-${accountId}`,
@@ -464,14 +475,17 @@ async function handleMicrosoftCallback(
 
   // Step 3: Check D1 for existing account with this (provider, provider_subject)
   const existingRows = await env.DB
-    .prepare("SELECT account_id, user_id, status FROM accounts WHERE provider = ? AND provider_subject = ?")
+    .prepare(
+      "SELECT account_id, user_id, status, channel_id FROM accounts WHERE provider = ? AND provider_subject = ?",
+    )
     .bind("microsoft", providerSubject)
-    .all<Pick<AccountRow, "account_id" | "user_id" | "status">>();
+    .all<Pick<AccountRow, "account_id" | "user_id" | "status" | "channel_id">>();
 
   const existing = existingRows.results.length > 0 ? existingRows.results[0] : null;
 
   let accountId: string;
   let isNewAccount = false;
+  let shouldStartOnboarding = false;
 
   if (existing) {
     if (existing.user_id !== user_id) {
@@ -485,14 +499,20 @@ async function handleMicrosoftCallback(
 
     // Same user -- re-activate and refresh tokens
     accountId = existing.account_id;
+    const wasActive = existing.status === "active";
+    const hasChannel = !!existing.channel_id;
 
     // Update status to active if it was revoked/error
-    if (existing.status !== "active") {
+    if (!wasActive) {
       await env.DB
         .prepare("UPDATE accounts SET status = 'active', email = ? WHERE account_id = ?")
         .bind(email, accountId)
         .run();
     }
+
+    // If the account is being reactivated and has no subscription/channel, it
+    // likely never completed onboarding. Re-run onboarding to bootstrap sync.
+    shouldStartOnboarding = !wasActive && !hasChannel;
   } else {
     // New account
     accountId = generateId("account");
@@ -505,6 +525,8 @@ async function handleMicrosoftCallback(
       )
       .bind(accountId, user_id, providerSubject, email)
       .run();
+
+    shouldStartOnboarding = true;
   }
 
   // Step 4: Initialize AccountDO with encrypted tokens
@@ -526,7 +548,7 @@ async function handleMicrosoftCallback(
   }));
 
   // Step 5: Start OnboardingWorkflow for new accounts
-  if (isNewAccount) {
+  if (shouldStartOnboarding) {
     try {
       await env.ONBOARDING_WORKFLOW.create({
         id: `onboard-${accountId}`,
