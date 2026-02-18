@@ -43,4 +43,8 @@ interface Env {
   PROOF_BUCKET?: R2Bucket;
   /** Workers AI binding for LLM inference (excuse generator, tone adjustment). */
   AI?: Ai;
+  /** Admin key for authenticating internal/admin API endpoints. */
+  ADMIN_KEY?: string;
+  /** Webhook receiver URL for Google Calendar push notifications (used by channel renewal). */
+  WEBHOOK_URL?: string;
 }

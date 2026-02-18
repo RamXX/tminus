@@ -76,6 +76,8 @@ bucket_name = "tminus-proof-exports"
 # GOOGLE_CLIENT_SECRET-- Google OAuth client secret (AccountDO token refresh)
 # MS_CLIENT_ID        -- Microsoft Entra ID client ID (AccountDO token refresh)
 # MS_CLIENT_SECRET    -- Microsoft Entra ID client secret (AccountDO token refresh)
+# ADMIN_KEY           -- shared secret for internal/admin endpoints (channel renewal, etc.)
+# WEBHOOK_URL         -- Google Calendar webhook receiver URL (for channel re-registration)
 
 # ===========================================================================
 # Staging environment: tminus-api-staging

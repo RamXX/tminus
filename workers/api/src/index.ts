@@ -25,6 +25,7 @@ import { handleStripeWebhook } from "./routes/billing";
 import type { BillingEnv } from "./routes/billing";
 import { isApiKeyFormat, extractPrefix, hashApiKey } from "./api-keys";
 import { routeGroups } from "./routes/handlers";
+import { routeInternalRequest } from "./routes/handlers/internal";
 
 // Import shared types and helpers (used locally AND re-exported for backward compat)
 import {
@@ -74,6 +75,13 @@ export {
   VALID_CONSTRAINT_KINDS,
   validateConstraintKindAndConfig,
 } from "./routes/handlers/policies";
+
+// Re-export internal route handler for tests
+export {
+  routeInternalRequest,
+  renewChannelForAccount,
+} from "./routes/handlers/internal";
+export type { ChannelRenewalResult } from "./routes/handlers/internal";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -399,6 +407,13 @@ export function createHandler() {
           ));
         }
         return finalize(await handleStripeWebhook(request, env as unknown as BillingEnv));
+      }
+
+      // Internal/admin routes: authenticated via X-Admin-Key header (not JWT).
+      // Must be checked before the /v1/ gate since they use /internal/* prefix.
+      if (pathname.startsWith("/internal/")) {
+        const internalResponse = await routeInternalRequest(request, method, pathname, env);
+        if (internalResponse) return finalize(internalResponse);
       }
 
       // All /v1/* routes require auth (except /v1/auth/*)
