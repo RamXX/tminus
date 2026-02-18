@@ -51,6 +51,30 @@ export interface PolicyMatrixData {
   readonly edges: readonly PolicyEdgeData[];
 }
 
+interface ApiLinkedAccount {
+  readonly account_id: string;
+  readonly email: string;
+}
+
+interface ApiPolicySummary {
+  readonly policy_id: string;
+  readonly name?: string;
+  readonly is_default?: boolean | number;
+}
+
+interface ApiPolicyEdge {
+  readonly policy_id?: string;
+  readonly from_account_id: string;
+  readonly to_account_id: string;
+  readonly detail_level: DetailLevel;
+  readonly calendar_kind?: "BUSY_OVERLAY" | "TRUE_MIRROR";
+}
+
+interface ApiPolicyDetail {
+  readonly policy_id: string;
+  readonly edges?: readonly ApiPolicyEdge[];
+}
+
 /** A cell in the computed matrix grid. */
 export interface MatrixCell {
   readonly fromAccountId: string;
@@ -126,11 +150,73 @@ export function findCell(
 // API helpers
 // ---------------------------------------------------------------------------
 
+function isPolicyMatrixData(data: unknown): data is PolicyMatrixData {
+  if (!data || typeof data !== "object") return false;
+  const record = data as { accounts?: unknown; edges?: unknown };
+  return Array.isArray(record.accounts) && Array.isArray(record.edges);
+}
+
+function isDefaultPolicy(policy: ApiPolicySummary): boolean {
+  return policy.is_default === true || policy.is_default === 1;
+}
+
+function pickPolicyId(policies: readonly ApiPolicySummary[]): string | null {
+  if (policies.length === 0) return null;
+  const defaultPolicy = policies.find(isDefaultPolicy);
+  return (defaultPolicy ?? policies[0]).policy_id;
+}
+
+async function resolvePolicyId(
+  token: string,
+  policyId: string,
+): Promise<string> {
+  if (policyId && policyId !== "new") return policyId;
+  const policies = await apiFetch<ApiPolicySummary[]>("/v1/policies", { token });
+  const resolved = pickPolicyId(policies);
+  if (!resolved) {
+    throw new Error("No policy found. Link at least two accounts first.");
+  }
+  return resolved;
+}
+
 /** Fetch all policy data (accounts + edges) for the current user. */
 export async function fetchPolicies(
   token: string,
 ): Promise<PolicyMatrixData> {
-  return apiFetch<PolicyMatrixData>("/v1/policies", { token });
+  // Backward-compatible path: if API already returns the matrix shape, use it directly.
+  const policiesResponse = await apiFetch<PolicyMatrixData | ApiPolicySummary[]>(
+    "/v1/policies",
+    { token },
+  );
+  if (isPolicyMatrixData(policiesResponse)) {
+    return policiesResponse;
+  }
+
+  const policyId = pickPolicyId(policiesResponse);
+  const [accounts, policyDetail] = await Promise.all([
+    apiFetch<ApiLinkedAccount[]>("/v1/accounts", { token }),
+    policyId
+      ? apiFetch<ApiPolicyDetail>(`/v1/policies/${encodeURIComponent(policyId)}`, {
+          token,
+        })
+      : Promise.resolve<ApiPolicyDetail | null>(null),
+  ]);
+
+  const matrixAccounts: PolicyAccount[] = accounts.map((acc) => ({
+    account_id: acc.account_id,
+    email: acc.email,
+  }));
+  const matrixEdges: PolicyEdgeData[] = (policyDetail?.edges ?? []).map((edge) => ({
+    policy_id: edge.policy_id ?? policyDetail?.policy_id ?? "",
+    from_account_id: edge.from_account_id,
+    to_account_id: edge.to_account_id,
+    detail_level: edge.detail_level,
+  }));
+
+  return {
+    accounts: matrixAccounts,
+    edges: matrixEdges,
+  };
 }
 
 /** Update a policy edge's detail level. */
@@ -143,9 +229,46 @@ export async function updatePolicyEdge(
     detail_level: DetailLevel;
   },
 ): Promise<PolicyEdgeData> {
-  return apiFetch<PolicyEdgeData>(`/v1/policies/${policyId}/edges`, {
-    method: "PUT",
-    body: edge,
-    token,
-  });
+  const resolvedPolicyId = await resolvePolicyId(token, policyId);
+  const policy = await apiFetch<ApiPolicyDetail>(
+    `/v1/policies/${encodeURIComponent(resolvedPolicyId)}`,
+    { token },
+  );
+
+  const existingEdges = [...(policy.edges ?? [])];
+  const index = existingEdges.findIndex(
+    (candidate) =>
+      candidate.from_account_id === edge.from_account_id &&
+      candidate.to_account_id === edge.to_account_id,
+  );
+
+  if (index >= 0) {
+    existingEdges[index] = {
+      ...existingEdges[index],
+      detail_level: edge.detail_level,
+    };
+  } else {
+    existingEdges.push({
+      from_account_id: edge.from_account_id,
+      to_account_id: edge.to_account_id,
+      detail_level: edge.detail_level,
+      calendar_kind: "BUSY_OVERLAY",
+    });
+  }
+
+  await apiFetch<{ edges_set: number; projections_recomputed: number }>(
+    `/v1/policies/${encodeURIComponent(resolvedPolicyId)}/edges`,
+    {
+      method: "PUT",
+      body: { edges: existingEdges },
+      token,
+    },
+  );
+
+  return {
+    policy_id: resolvedPolicyId,
+    from_account_id: edge.from_account_id,
+    to_account_id: edge.to_account_id,
+    detail_level: edge.detail_level,
+  };
 }

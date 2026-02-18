@@ -123,26 +123,30 @@ const MOCK_SYNC_STATUS = {
   ],
 };
 
-const MOCK_POLICIES = {
-  accounts: [
-    { account_id: "acc-work", email: "work@example.com" },
-    { account_id: "acc-personal", email: "personal@example.com" },
-  ],
-  edges: [
-    {
-      policy_id: "pol-001",
-      from_account_id: "acc-work",
-      to_account_id: "acc-personal",
-      detail_level: "BUSY" as const,
-    },
-    {
-      policy_id: "pol-002",
-      from_account_id: "acc-personal",
-      to_account_id: "acc-work",
-      detail_level: "TITLE" as const,
-    },
-  ],
-};
+const MOCK_POLICY_LIST = [
+  {
+    policy_id: "pol-001",
+    name: "Default Policy",
+    is_default: 1,
+  },
+];
+
+const MOCK_POLICY_EDGES = [
+  {
+    policy_id: "pol-001",
+    from_account_id: "acc-work",
+    to_account_id: "acc-personal",
+    detail_level: "BUSY" as const,
+    calendar_kind: "BUSY_OVERLAY" as const,
+  },
+  {
+    policy_id: "pol-001",
+    from_account_id: "acc-personal",
+    to_account_id: "acc-work",
+    detail_level: "TITLE" as const,
+    calendar_kind: "BUSY_OVERLAY" as const,
+  },
+];
 
 const MOCK_ACCOUNTS = [
   {
@@ -193,6 +197,7 @@ function createMockFetch() {
 
   let currentEvents = [...MOCK_EVENTS];
   let currentErrors = [...MOCK_ERROR_MIRRORS];
+  let currentPolicyEdges = [...MOCK_POLICY_EDGES];
 
   const mockFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -283,18 +288,31 @@ function createMockFetch() {
 
     // GET /api/v1/policies
     if (url === "/api/v1/policies" && method === "GET") {
-      return mockResponse(200, { ok: true, data: MOCK_POLICIES });
+      return mockResponse(200, { ok: true, data: MOCK_POLICY_LIST });
     }
 
-    // PUT /api/v1/policies/:id/edges
-    if (url.match(/^\/api\/v1\/policies\//) && method === "PUT") {
+    // GET /api/v1/policies/:id
+    if (url.match(/^\/api\/v1\/policies\/[^/]+$/) && method === "GET") {
+      const policyId = url.split("/api/v1/policies/")[1];
       return mockResponse(200, {
         ok: true,
         data: {
-          policy_id: body?.policy_id ?? "pol-001",
-          from_account_id: body?.from_account_id,
-          to_account_id: body?.to_account_id,
-          detail_level: body?.detail_level,
+          policy_id: policyId,
+          edges: currentPolicyEdges,
+        },
+      });
+    }
+
+    // PUT /api/v1/policies/:id/edges
+    if (url.match(/^\/api\/v1\/policies\/[^/]+\/edges$/) && method === "PUT") {
+      if (Array.isArray(body?.edges)) {
+        currentPolicyEdges = body.edges as typeof MOCK_POLICY_EDGES;
+      }
+      return mockResponse(200, {
+        ok: true,
+        data: {
+          edges_set: currentPolicyEdges.length,
+          projections_recomputed: 1,
         },
       });
     }
@@ -764,9 +782,13 @@ describe("Phase 2C E2E Validation", () => {
       );
       expect(putCalls.length).toBe(1);
       expect(putCalls[0].body).toMatchObject({
-        from_account_id: "acc-work",
-        to_account_id: "acc-personal",
-        detail_level: "TITLE",
+        edges: expect.arrayContaining([
+          expect.objectContaining({
+            from_account_id: "acc-work",
+            to_account_id: "acc-personal",
+            detail_level: "TITLE",
+          }),
+        ]),
       });
     });
 
