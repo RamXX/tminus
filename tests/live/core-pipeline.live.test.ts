@@ -579,6 +579,14 @@ describe("Live: Full sync pipeline (synced events from Google Calendar)", () => 
 
 // ===========================================================================
 // Suite 3: Incremental Sync (Google Calendar -> T-Minus API)
+//
+// Bug fix TM-o36u: Previously this suite polled for 5 minutes with a soft
+// assertion that always passed, wasting CI time when the webhook channel was
+// expired. Now it:
+// 1. Pre-checks webhook channel health via GET /v1/accounts
+// 2. Uses origin_event_id server-side lookup (not title scanning)
+// 3. Polls for 90s max (matching webhook-sync.live.test.ts)
+// 4. Hard-skips with diagnostics when the channel is expired/dead
 // ===========================================================================
 
 describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => {
@@ -587,6 +595,8 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
   let client: LiveTestClient;
   let env: LiveEnv;
   let googleAccessToken: string;
+  /** Set to a message if webhook channel is expired/dead; tests skip. */
+  let channelSkipReason: string | null = null;
 
   // Track event IDs for cleanup
   const googleEventIdsToClean: string[] = [];
@@ -645,6 +655,100 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
 
     const tokenData = await tokenResp.json() as { access_token: string };
     googleAccessToken = tokenData.access_token;
+
+    // -----------------------------------------------------------------------
+    // Pre-flight: Check webhook channel health before expensive polling.
+    //
+    // Query the accounts list + sync status to determine if the webhook
+    // channel is likely active. If the channel is expired or last sync is
+    // very stale, skip immediately instead of waiting 90s for nothing.
+    // -----------------------------------------------------------------------
+    try {
+      const accountsResp = await client.get("/v1/accounts");
+      if (accountsResp.status === 200) {
+        const accountsBody = await accountsResp.json() as {
+          ok: boolean;
+          data: Array<{
+            account_id: string;
+            provider: string;
+            status: string;
+          }>;
+        };
+
+        if (accountsBody.ok && Array.isArray(accountsBody.data)) {
+          const googleAccount = accountsBody.data.find(
+            (a) => a.provider === "google" && a.status === "active",
+          );
+
+          if (!googleAccount) {
+            channelSkipReason =
+              "No active Google account found for test user. " +
+              "Webhook channel cannot be active without a linked account.";
+            console.warn(`  [SYNC-PREFLIGHT] ${channelSkipReason}`);
+          } else {
+            // Check sync health for this account
+            const healthResp = await client.get(
+              `/v1/sync/status/${googleAccount.account_id}`,
+            );
+            if (healthResp.status === 200) {
+              const healthBody = await healthResp.json() as {
+                ok: boolean;
+                data: {
+                  lastSyncTs: string | null;
+                  lastSuccessTs: string | null;
+                  fullSyncNeeded: boolean;
+                } | null;
+              };
+
+              if (healthBody.ok && healthBody.data) {
+                const { lastSyncTs, lastSuccessTs } = healthBody.data;
+                const staleThresholdMs = 48 * 60 * 60 * 1000; // 48 hours
+                const now = Date.now();
+
+                // If last successful sync is older than 48h, the channel
+                // is likely dead (cron renews every 6h, channels last 7 days).
+                if (lastSuccessTs) {
+                  const lastSuccessAge = now - new Date(lastSuccessTs).getTime();
+                  if (lastSuccessAge > staleThresholdMs) {
+                    channelSkipReason =
+                      `Webhook channel likely expired: last successful sync was ` +
+                      `${Math.round(lastSuccessAge / 3600_000)}h ago ` +
+                      `(${lastSuccessTs}). The cron channel renewal may have ` +
+                      `failed or the channel expired. Run the cron channel renewal ` +
+                      `or trigger a reconnect to restore webhook delivery.`;
+                    console.warn(`  [SYNC-PREFLIGHT] ${channelSkipReason}`);
+                  } else {
+                    console.log(
+                      `  [SYNC-PREFLIGHT] Channel looks healthy: ` +
+                        `last_success=${lastSuccessTs} ` +
+                        `(${Math.round(lastSuccessAge / 60_000)}min ago)`,
+                    );
+                  }
+                } else if (lastSyncTs) {
+                  // Has synced before but never successfully -- suspicious
+                  const lastSyncAge = now - new Date(lastSyncTs).getTime();
+                  if (lastSyncAge > staleThresholdMs) {
+                    channelSkipReason =
+                      `Webhook channel likely dead: last sync attempt was ` +
+                      `${Math.round(lastSyncAge / 3600_000)}h ago ` +
+                      `(${lastSyncTs}) with no successful sync ever recorded.`;
+                    console.warn(`  [SYNC-PREFLIGHT] ${channelSkipReason}`);
+                  }
+                }
+                // If no sync timestamps at all, we can't determine health;
+                // proceed and let the poll decide.
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // Pre-flight is best-effort; if it fails, proceed with the test anyway.
+      console.warn(
+        "  [SYNC-PREFLIGHT] Could not check channel health:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   });
 
   afterAll(async () => {
@@ -674,6 +778,19 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
   it.skipIf(!canRun)(
     "event created in Google Calendar appears in /v1/events after sync",
     async () => {
+      // If pre-flight detected an expired/dead channel, skip immediately
+      // instead of wasting 90s polling for a webhook that will never fire.
+      if (channelSkipReason) {
+        console.warn(
+          `  [LIVE] SKIPPING incremental sync test: ${channelSkipReason}\n` +
+            `  To fix: trigger cron channel renewal or re-onboard the test user.`,
+        );
+        // Return early -- this is NOT a test failure, it is an infrastructure
+        // issue. The webhook-sync.live.test.ts suite provides dedicated E2E
+        // coverage with hard assertions when the channel IS active.
+        return;
+      }
+
       // Create a test event 2 hours from now
       const now = Date.now();
       const startTime = new Date(now + 2 * 3600_000).toISOString();
@@ -705,31 +822,35 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
         `  [LIVE] Created Google Calendar event: ${created.id} ("${testSummary}")`,
       );
 
-      // Poll /v1/events to see if the event appears (webhook + sync pipeline).
-      // The webhook may take up to 5 minutes per BUSINESS.md latency target.
-      // We poll for up to 5 minutes.
-      const SYNC_TIMEOUT_MS = 5 * 60 * 1000;
-      const POLL_INTERVAL_MS = 10_000;
+      // Poll for the event using origin_event_id server-side lookup.
+      // This is more reliable than title-based scanning (learned in TM-7d9b):
+      // cursor-based pagination can miss events whose sort key shifts during
+      // concurrent sync batches.
+      //
+      // Timeout reduced from 5 min to 90s (TM-o36u). The full webhook E2E
+      // suite (webhook-sync.live.test.ts) uses 180s with hard assertions.
+      // This suite only needs a basic smoke test.
+      const SYNC_TIMEOUT_MS = 90_000;
+      const POLL_INTERVAL_MS = 5_000;
       const syncStart = Date.now();
 
       const found = await pollUntil(
         async () => {
-          const resp = await client.get("/v1/events");
+          // Use origin_event_id server-side query for reliable lookup
+          const resp = await client.get(
+            `/v1/events?origin_event_id=${encodeURIComponent(created.id)}&limit=10`,
+          );
           if (resp.status !== 200) return null;
 
           const body: ApiEnvelope<EventItem[]> = await resp.json();
-          if (!body.ok || !Array.isArray(body.data)) return null;
+          if (!body.ok || !Array.isArray(body.data) || body.data.length === 0) return null;
 
-          // Look for our test event by title match
-          const match = body.data.find(
-            (e) => e.title?.includes("tminus-live-test") && e.title?.includes("Incremental Sync"),
-          );
-          return match || null;
+          return body.data[0] || null;
         },
         {
           timeoutMs: SYNC_TIMEOUT_MS,
           intervalMs: POLL_INTERVAL_MS,
-          label: "waiting for Google event to sync",
+          label: "waiting for Google event to sync via webhook",
         },
       );
 
@@ -740,25 +861,34 @@ describe("Live: Incremental sync (Google Calendar create/modify/delete)", () => 
         console.log(
           `  [LIVE] Incremental sync CREATE PASS: event appeared in ${syncLatencyMs}ms`,
         );
-        // AC5: Propagation latency < 5 minutes
         expect(syncLatencyMs).toBeLessThan(SYNC_TIMEOUT_MS);
         console.log(
           `  [LIVE] Propagation latency: ${syncLatencyMs}ms < ${SYNC_TIMEOUT_MS}ms target`,
         );
       } else {
-        // If the event did not appear within the timeout, log but do not fail hard.
-        // Webhook delivery is not guaranteed in all environments.
+        // Event did not appear within timeout. Unlike the old soft assertion
+        // that always passed, this now provides clear diagnostics.
         console.warn(
-          `  [LIVE] Incremental sync CREATE: event did not appear within ${SYNC_TIMEOUT_MS}ms. ` +
-            `This may be expected if webhook delivery is delayed or the sync consumer ` +
-            `has not processed the change yet. Latency: ${syncLatencyMs}ms`,
+          `  [LIVE] Incremental sync CREATE: event did not appear within ${SYNC_TIMEOUT_MS / 1000}s.\n` +
+            `  Possible causes:\n` +
+            `  - Webhook channel expired (check channel_expiry_ts in D1 accounts table)\n` +
+            `  - Cron channel renewal failed (check cron worker logs)\n` +
+            `  - Google webhook delivery delayed (rare but documented)\n` +
+            `  - Sync consumer queue backlog\n` +
+            `  Created event ID: ${created.id}\n` +
+            `  For dedicated webhook E2E coverage, see webhook-sync.live.test.ts`,
         );
-        // Soft assertion -- record the fact but note it may be infrastructure timing
-        expect(syncLatencyMs).toBeGreaterThan(0);
+        // Fail clearly instead of soft-passing. This is an incremental sync test:
+        // if the event does not arrive, the test has failed its purpose.
+        expect.fail(
+          `Incremental sync timed out after ${SYNC_TIMEOUT_MS / 1000}s. ` +
+            `Event ${created.id} did not propagate from Google Calendar to ` +
+            `GET /v1/events. Webhook channel may be expired.`,
+        );
       }
     },
-    // 6 minute timeout for this test (5 min polling + buffer)
-    360_000,
+    // 2 minute timeout for this test (90s polling + buffer)
+    120_000,
   );
 });
 
