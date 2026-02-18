@@ -707,6 +707,37 @@ describe("GET /oauth/google/callback", () => {
       expect(workflow._calls[0].params.account_id).toBe("acc_REBOOT01");
       expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
+
+    it("starts onboarding when active Google account has no channel", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      d1._rows["accounts"] = [{
+        account_id: "acc_ACTIVE_NOCH01",
+        user_id: TEST_USER_ID,
+        provider: "google",
+        provider_subject: TEST_GOOGLE_SUB,
+        email: "active@gmail.com",
+        status: "active",
+        channel_id: null,
+      }];
+
+      const mockFetch = createMockGoogleFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/google/callback?code=${TEST_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(302);
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_ACTIVE_NOCH01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
+    });
   });
 
   describe("cross-user linking rejection", () => {
@@ -1094,6 +1125,37 @@ describe("GET /oauth/microsoft/callback", () => {
       expect(response.status).toBe(302);
       expect(workflow._calls.length).toBe(1);
       expect(workflow._calls[0].params.account_id).toBe("acc_MSREBOOT01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
+    });
+
+    it("starts onboarding for active Microsoft account with no channel", async () => {
+      const d1 = createMockD1();
+      const accountDO = createMockAccountDO();
+      const workflow = createMockWorkflow();
+      const env = createMockEnv({ d1, accountDO, workflow });
+
+      d1._rows["accounts"] = [{
+        account_id: "acc_MSACTIVE_NOCH01",
+        user_id: TEST_USER_ID,
+        provider: "microsoft",
+        provider_subject: TEST_MS_SUB,
+        email: "active@outlook.com",
+        status: "active",
+        channel_id: null,
+      }];
+
+      const mockFetch = createMockMicrosoftFetch();
+      const handler = createHandler(mockFetch);
+      const { state } = await createValidMsState();
+
+      const request = new Request(
+        `https://oauth.tminus.dev/oauth/microsoft/callback?code=${TEST_MS_AUTH_CODE}&state=${state}`,
+      );
+      const response = await handler.fetch(request, env, mockCtx);
+
+      expect(response.status).toBe(302);
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_MSACTIVE_NOCH01");
       expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
   });

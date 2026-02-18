@@ -161,6 +161,7 @@ export class OnboardingWorkflow {
         client,
         calendarSetup.primaryCalendarId,
         account_id,
+        provider,
       );
 
       // Step 5: Store syncToken in AccountDO
@@ -228,10 +229,31 @@ export class OnboardingWorkflow {
       );
     }
 
-    // Create the busy overlay calendar
-    const overlayCalendarId = await client.insertCalendar(
-      BUSY_OVERLAY_CALENDAR_NAME,
-    );
+    // Reuse existing overlay calendar when present (idempotent onboarding),
+    // otherwise create it.
+    let overlayCalendarId = calendars.find(
+      (c) => c.summary === BUSY_OVERLAY_CALENDAR_NAME,
+    )?.id;
+
+    if (!overlayCalendarId) {
+      try {
+        overlayCalendarId = await client.insertCalendar(
+          BUSY_OVERLAY_CALENDAR_NAME,
+        );
+      } catch (err) {
+        // Microsoft can return "A folder with the specified name already exists."
+        // during retries. Re-list and reuse the existing overlay if it exists.
+        if (this.isAlreadyExistsError(err)) {
+          const refreshedCalendars = await client.listCalendars();
+          overlayCalendarId = refreshedCalendars.find(
+            (c) => c.summary === BUSY_OVERLAY_CALENDAR_NAME,
+          )?.id;
+        }
+        if (!overlayCalendarId) {
+          throw err;
+        }
+      }
+    }
 
     // Store calendar entries in UserGraphDO
     const userGraphId = this.env.USER_GRAPH.idFromName(userId);
@@ -274,6 +296,11 @@ export class OnboardingWorkflow {
       overlayCalendarId,
       allCalendars: calendars,
     };
+  }
+
+  private isAlreadyExistsError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.toLowerCase().includes("already exists");
   }
 
   // -------------------------------------------------------------------------
@@ -342,12 +369,29 @@ export class OnboardingWorkflow {
     client: CalendarProvider,
     primaryCalendarId: string,
     accountId: AccountId,
+    provider: ProviderType,
   ): Promise<WatchRegistrationResult> {
     // Generate a unique channel ID and validation token
     const channelId = generateId("calendar");
     const token = generateId("calendar"); // Secure random token for validation
 
-    const webhookUrl = this.env.WEBHOOK_URL;
+    // Microsoft subscriptions are created via AccountDO so they are persisted
+    // in the account-local ms_subscriptions table for renewal and validation.
+    if (provider === "microsoft") {
+      const subscription = await this.createMsSubscription(
+        accountId,
+        primaryCalendarId,
+        token,
+      );
+      return {
+        channelId: subscription.subscriptionId,
+        resourceId: subscription.resource,
+        expiration: subscription.expiration,
+        token,
+      };
+    }
+
+    const webhookUrl = this.getWebhookUrl(provider);
 
     // Register watch channel / subscription with provider
     const watchResponse: WatchResponse = await client.watchEvents(
@@ -372,6 +416,25 @@ export class OnboardingWorkflow {
       expiration: watchResponse.expiration,
       token,
     };
+  }
+
+  private getWebhookUrl(provider: ProviderType): string {
+    if (provider !== "microsoft") {
+      return this.env.WEBHOOK_URL;
+    }
+
+    try {
+      const parsed = new URL(this.env.WEBHOOK_URL);
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      if (segments.length > 0 && segments[segments.length - 1] === "google") {
+        segments[segments.length - 1] = "microsoft";
+        parsed.pathname = `/${segments.join("/")}`;
+        return parsed.toString();
+      }
+      return `${parsed.origin}/webhook/microsoft`;
+    } catch {
+      return this.env.WEBHOOK_URL.replace(/google$/, "microsoft");
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -620,6 +683,41 @@ export class OnboardingWorkflow {
         `AccountDO.storeWatchChannel failed (${response.status}): ${body}`,
       );
     }
+  }
+
+  private async createMsSubscription(
+    accountId: AccountId,
+    calendarId: string,
+    clientState: string,
+  ): Promise<{ subscriptionId: string; resource: string; expiration: string }> {
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    const response = await stub.fetch(
+      new Request("https://account.internal/createMsSubscription", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          webhook_url: this.getWebhookUrl("microsoft"),
+          calendar_id: calendarId,
+          client_state: clientState,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `AccountDO.createMsSubscription failed (${response.status}): ${body}`,
+      );
+    }
+
+    const data = (await response.json()) as {
+      subscriptionId: string;
+      resource: string;
+      expiration: string;
+    };
+    return data;
   }
 
   // -------------------------------------------------------------------------

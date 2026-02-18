@@ -309,6 +309,11 @@ interface AccountDOState {
     expiration: string;
     calendar_id: string;
   }>;
+  createMsSubscriptionCalls: Array<{
+    webhook_url: string;
+    calendar_id: string;
+    client_state: string;
+  }>;
 }
 
 interface UserGraphDOState {
@@ -369,6 +374,26 @@ function createMockAccountDO(state: AccountDOState) {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
+      }
+
+      if (path === "/createMsSubscription") {
+        const body = (await request.json()) as {
+          webhook_url: string;
+          calendar_id: string;
+          client_state: string;
+        };
+        state.createMsSubscriptionCalls.push(body);
+        return new Response(
+          JSON.stringify({
+            subscriptionId: MS_SUBSCRIPTION_ID,
+            resource: `/me/calendars/${body.calendar_id}/events`,
+            expiration: MS_SUBSCRIPTION_EXPIRY,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
 
       return new Response("Not found", { status: 404 });
@@ -517,6 +542,7 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
       setSyncTokenCalls: [],
       markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
+      createMsSubscriptionCalls: [],
     };
 
     userGraphDOState = {
@@ -1326,6 +1352,7 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
       setSyncTokenCalls: [],
       markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
+      createMsSubscriptionCalls: [],
     };
 
     userGraphDOState = {
@@ -1386,6 +1413,12 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
     expect(result.watchRegistration.channelId).toBe(MS_SUBSCRIPTION_ID);
     expect(result.watchRegistration.resourceId).toBe(MS_SUBSCRIPTION_RESOURCE);
     expect(result.watchRegistration.expiration).toBe(MS_SUBSCRIPTION_EXPIRY);
+    expect(accountDOState.createMsSubscriptionCalls).toHaveLength(1);
+    expect(accountDOState.createMsSubscriptionCalls[0].calendar_id).toBe(MS_PRIMARY_CALENDAR_ID);
+    expect(accountDOState.createMsSubscriptionCalls[0].webhook_url).toBe(
+      "https://webhook.tminus.dev/v1/microsoft",
+    );
+    expect(accountDOState.storeWatchChannelCalls).toHaveLength(0);
 
     // Account activated
     expect(result.accountActivated).toBe(true);
@@ -1398,6 +1431,75 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
 
     // Projection triggered
     expect(result.projectionEnqueued).toBe(true);
+  });
+
+  it("reuses existing overlay calendar on Microsoft onboarding retries", async () => {
+    const existingOverlayId = "AAMkADQ0ZGJmExistingOverlayCalId";
+    let insertCalled = false;
+
+    const msFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      if (url.endsWith("/me/calendars") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_PRIMARY_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+              {
+                id: existingOverlayId,
+                name: BUSY_OVERLAY_CALENDAR_NAME,
+                isDefaultCalendar: false,
+                canEdit: true,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/me/calendars") && method === "POST") {
+        insertCalled = true;
+        return new Response("calendar-create-should-not-run", { status: 500 });
+      }
+
+      if (url.includes("/me/calendars/") && url.includes("/events") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            value: [makeMicrosoftEvent()],
+            "@odata.deltaLink": MS_SYNC_TOKEN,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    const result = await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    expect(result.calendarSetup.overlayCalendarId).toBe(existingOverlayId);
+    expect(insertCalled).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -1487,14 +1589,7 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
   // -------------------------------------------------------------------------
 
   it("Microsoft subscription expiry stored correctly as ISO string", async () => {
-    const isoExpiry = "2026-02-20T12:00:00.000Z";
-    const msFetch = createOnboardingMicrosoftApiFetch({
-      subscriptionResponse: {
-        id: "sub-custom-id",
-        resource: "/me/calendars/cal/events",
-        expirationDateTime: isoExpiry,
-      },
-    });
+    const msFetch = createOnboardingMicrosoftApiFetch({});
 
     const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
     await workflow.run({
@@ -1502,11 +1597,13 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
       user_id: TEST_USER.user_id,
     });
 
-    // channel_expiry_ts should be the ISO string (not corrupted by parseInt)
+    // channel_expiry_ts should preserve the ISO timestamp returned by AccountDO
+    // (not be corrupted by numeric parsing).
     const accountRow = db
       .prepare("SELECT channel_expiry_ts FROM accounts WHERE account_id = ?")
       .get(MS_ACCOUNT.account_id) as { channel_expiry_ts: string };
-    expect(accountRow.channel_expiry_ts).toBe(isoExpiry);
+    expect(accountRow.channel_expiry_ts).toBe(MS_SUBSCRIPTION_EXPIRY);
+    expect(Number.isNaN(Date.parse(accountRow.channel_expiry_ts))).toBe(false);
   });
 
   // -------------------------------------------------------------------------

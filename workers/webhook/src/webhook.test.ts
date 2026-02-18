@@ -39,7 +39,13 @@ const TEST_MS_SUBSCRIPTION_ID = "ms-sub-aaa-111-bbb";
 
 /** Minimal mock D1 that supports prepare().bind().first() pattern. */
 function createMockD1(
-  accounts: Array<{ account_id: string; channel_token: string }> = [],
+  accounts: Array<{
+    account_id: string;
+    channel_token: string | null;
+    channel_id?: string;
+    provider?: string;
+    status?: string;
+  }> = [],
   msSubscriptions: Array<{ subscription_id: string; account_id: string }> = [],
 ) {
   return {
@@ -48,6 +54,36 @@ function createMockD1(
         bind(...args: unknown[]) {
           return {
             async first<T>(): Promise<T | null> {
+              if (
+                sql.includes("provider = 'microsoft'") &&
+                sql.includes("channel_id = ?1")
+              ) {
+                const subscriptionId = args[0] as string;
+                const match = accounts.find(
+                  (a) =>
+                    a.provider === "microsoft" &&
+                    (a.status ?? "active") === "active" &&
+                    a.channel_id === subscriptionId,
+                );
+                if (!match) return null;
+                return ({
+                  account_id: match.account_id,
+                  channel_token: match.channel_token,
+                } as T);
+              }
+
+              if (sql.includes("FROM ms_subscriptions ms")) {
+                const subId = args[0] as string;
+                const sub = msSubscriptions.find((s) => s.subscription_id === subId);
+                if (!sub) return null;
+                const account = accounts.find((a) => a.account_id === sub.account_id);
+                if (!account) return null;
+                return ({
+                  account_id: account.account_id,
+                  channel_token: account.channel_token,
+                } as T);
+              }
+
               if (sql.includes("ms_subscriptions")) {
                 const subId = args[0] as string;
                 const match = msSubscriptions.find(
@@ -55,6 +91,7 @@ function createMockD1(
                 );
                 return (match as T) ?? null;
               }
+
               // Look up by channel_token
               const token = args[0] as string;
               const match = accounts.find((a) => a.channel_token === token);
@@ -80,7 +117,13 @@ function createMockQueue() {
 
 /** Build a mock Env with optional D1 data. */
 function createMockEnv(opts?: {
-  accounts?: Array<{ account_id: string; channel_token: string }>;
+  accounts?: Array<{
+    account_id: string;
+    channel_token: string | null;
+    channel_id?: string;
+    provider?: string;
+    status?: string;
+  }>;
   msSubscriptions?: Array<{ subscription_id: string; account_id: string }>;
   msClientState?: string;
 }) {
@@ -344,7 +387,13 @@ describe("POST /webhook/microsoft", () => {
   // AC 2: Change notification enqueues SYNC_INCREMENTAL
   it("change notification enqueues SYNC_INCREMENTAL (AC 2)", async () => {
     const { env, queue } = createMockEnv({
-      msSubscriptions: [{ subscription_id: TEST_MS_SUBSCRIPTION_ID, account_id: TEST_ACCOUNT_ID }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+      }],
     });
     const handler = createHandler();
 
@@ -371,7 +420,13 @@ describe("POST /webhook/microsoft", () => {
   // AC 3: clientState validation
   it("returns 403 when clientState does not match (AC 3)", async () => {
     const { env, queue } = createMockEnv({
-      msSubscriptions: [{ subscription_id: TEST_MS_SUBSCRIPTION_ID, account_id: TEST_ACCOUNT_ID }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+      }],
     });
     const handler = createHandler();
 
@@ -463,9 +518,21 @@ describe("POST /webhook/microsoft", () => {
   // Multiple notifications
   it("processes multiple notifications in a single payload", async () => {
     const { env, queue } = createMockEnv({
-      msSubscriptions: [
-        { subscription_id: "sub-1", account_id: "acc_01" },
-        { subscription_id: "sub-2", account_id: "acc_02" },
+      accounts: [
+        {
+          account_id: "acc_01",
+          provider: "microsoft",
+          status: "active",
+          channel_id: "sub-1",
+          channel_token: TEST_MS_CLIENT_STATE,
+        },
+        {
+          account_id: "acc_02",
+          provider: "microsoft",
+          status: "active",
+          channel_id: "sub-2",
+          channel_token: TEST_MS_CLIENT_STATE,
+        },
       ],
     });
     const handler = createHandler();

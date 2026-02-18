@@ -276,9 +276,9 @@ async function handleCallback(
         .run();
     }
 
-    // If the account is being reactivated and has no watch channel, it likely
-    // never completed onboarding. Re-run onboarding to bootstrap sync.
-    shouldStartOnboarding = !wasActive && !hasChannel;
+    // If the account has no watch channel/subscription, onboarding is incomplete
+    // regardless of status. Re-run onboarding to bootstrap sync.
+    shouldStartOnboarding = !hasChannel;
   } else {
     // New account
     accountId = generateId("account");
@@ -510,9 +510,9 @@ async function handleMicrosoftCallback(
         .run();
     }
 
-    // If the account is being reactivated and has no subscription/channel, it
-    // likely never completed onboarding. Re-run onboarding to bootstrap sync.
-    shouldStartOnboarding = !wasActive && !hasChannel;
+    // If the account has no watch channel/subscription, onboarding is incomplete
+    // regardless of status. Re-run onboarding to bootstrap sync.
+    shouldStartOnboarding = !hasChannel;
   } else {
     // New account
     accountId = generateId("account");

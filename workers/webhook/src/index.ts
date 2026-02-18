@@ -187,23 +187,34 @@ async function handleMicrosoftWebhook(
 
   // Process each notification
   for (const notification of payload.value) {
-    // Validate clientState matches the stored secret
-    if (notification.clientState !== env.MS_WEBHOOK_CLIENT_STATE) {
-      console.warn("Microsoft webhook: clientState mismatch", {
-        subscriptionId: notification.subscriptionId,
-      });
-      return new Response("Forbidden", { status: 403 });
-    }
-
-    // Look up account_id from subscriptionId via D1 ms_subscriptions table
-    let accountRow: { account_id: string } | null = null;
+    // First try direct lookup via accounts.channel_id (canonical source).
+    // Fallback to ms_subscriptions table for legacy rows.
+    let accountRow: { account_id: string; channel_token: string | null } | null = null;
     try {
       accountRow = await env.DB
-        .prepare("SELECT account_id FROM ms_subscriptions WHERE subscription_id = ?1")
+        .prepare(
+          `SELECT account_id, channel_token
+           FROM accounts
+           WHERE provider = 'microsoft'
+             AND status = 'active'
+             AND channel_id = ?1`,
+        )
         .bind(notification.subscriptionId)
-        .first<{ account_id: string }>();
+        .first<{ account_id: string; channel_token: string | null }>();
+
+      if (!accountRow) {
+        accountRow = await env.DB
+          .prepare(
+            `SELECT a.account_id, a.channel_token
+             FROM ms_subscriptions ms
+             JOIN accounts a ON a.account_id = ms.account_id
+             WHERE ms.subscription_id = ?1`,
+          )
+          .bind(notification.subscriptionId)
+          .first<{ account_id: string; channel_token: string | null }>();
+      }
     } catch (err) {
-      console.error("D1 query failed for ms_subscriptions lookup", err);
+      console.error("D1 query failed for Microsoft subscription lookup", err);
       continue;
     }
 
@@ -212,6 +223,17 @@ async function handleMicrosoftWebhook(
         subscriptionId: notification.subscriptionId,
       });
       continue;
+    }
+
+    // Validate clientState against per-account channel_token when available.
+    // Fallback to env-level secret for older subscriptions.
+    const expectedClientState = accountRow.channel_token ?? env.MS_WEBHOOK_CLIENT_STATE;
+    if (notification.clientState !== expectedClientState) {
+      console.warn("Microsoft webhook: clientState mismatch", {
+        subscriptionId: notification.subscriptionId,
+        accountId: accountRow.account_id,
+      });
+      return new Response("Forbidden", { status: 403 });
     }
 
     // Enqueue SYNC_INCREMENTAL
