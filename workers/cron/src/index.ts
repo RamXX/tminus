@@ -12,7 +12,7 @@
  * - Each responsibility is a separate function for testability
  * - Errors in one account do not block processing of others (log + continue)
  * - AccountDO communication via HTTP fetch on DO stubs (standard CF pattern)
- * - D1 queries only touch active accounts (except channel renewal which also checks expiry)
+ * - Health/reconcile queries include active+error accounts (revoked is excluded)
  * - Per ADR-6: Daily reconciliation, not weekly
  */
 
@@ -75,9 +75,10 @@ interface StaleChannelRow {
   readonly last_sync_ts: string | null;
 }
 
-interface ActiveAccountRow {
+interface AccountRow {
   readonly account_id: string;
   readonly user_id: string;
+  readonly status: string;
 }
 
 interface MsAccountRow {
@@ -338,17 +339,23 @@ async function handleMsSubscriptionRenewal(env: Env): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Query D1 for all active accounts, call AccountDO.getHealth() to check
- * token status, and attempt refresh via AccountDO.getAccessToken().
+ * Query D1 for all non-revoked accounts (active + error), call
+ * AccountDO.getHealth() to check token status, and attempt refresh via
+ * AccountDO.getAccessToken().
  * If refresh fails, mark account status='error' in D1.
+ * If refresh succeeds for a previously errored account, recover it to active.
  */
 async function handleTokenHealth(env: Env): Promise<void> {
   const { results } = await env.DB
-    .prepare("SELECT account_id, user_id FROM accounts WHERE status = ?1")
-    .bind("active")
-    .all<ActiveAccountRow>();
+    .prepare(
+      "SELECT account_id, user_id, status FROM accounts WHERE status = ?1 OR status = ?2",
+    )
+    .bind("active", "error")
+    .all<AccountRow>();
 
-  console.log(`Token health check: found ${results.length} active accounts`);
+  console.log(
+    `Token health check: found ${results.length} non-revoked accounts`,
+  );
 
   for (const row of results) {
     try {
@@ -387,6 +394,13 @@ async function handleTokenHealth(env: Env): Promise<void> {
           .bind("error", row.account_id)
           .run();
       } else {
+        if (row.status === "error") {
+          await env.DB
+            .prepare("UPDATE accounts SET status = ?1 WHERE account_id = ?2")
+            .bind("active", row.account_id)
+            .run();
+          console.log(`Token recovered for account ${row.account_id}; marked active`);
+        }
         console.log(`Token healthy for account ${row.account_id}`);
       }
     } catch (err) {
@@ -403,7 +417,7 @@ async function handleTokenHealth(env: Env): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Query D1 for all active accounts and enqueue RECONCILE_ACCOUNT messages
+ * Query D1 for all non-revoked accounts and enqueue RECONCILE_ACCOUNT messages
  * for each. Per ADR-6: daily, not weekly. Google push notifications are
  * best-effort and can silently stop.
  *
@@ -411,12 +425,14 @@ async function handleTokenHealth(env: Env): Promise<void> {
  */
 async function handleReconciliation(env: Env): Promise<void> {
   const { results } = await env.DB
-    .prepare("SELECT account_id, user_id FROM accounts WHERE status = ?1")
-    .bind("active")
-    .all<ActiveAccountRow>();
+    .prepare(
+      "SELECT account_id, user_id, status FROM accounts WHERE status = ?1 OR status = ?2",
+    )
+    .bind("active", "error")
+    .all<AccountRow>();
 
   console.log(
-    `Drift reconciliation: enqueuing ${results.length} active accounts`,
+    `Drift reconciliation: enqueuing ${results.length} non-revoked accounts`,
   );
 
   for (const row of results) {

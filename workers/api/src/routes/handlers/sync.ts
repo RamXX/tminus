@@ -28,10 +28,12 @@ interface AccountStatusRow {
   error_count: number;
 }
 
-function computeChannelStatus(
+export function computeChannelStatus(
   account: Pick<AccountStatusRow, "provider" | "status" | "channel_expiry_ts">,
 ): string {
-  if (account.status !== "active") return "revoked";
+  if (account.status === "revoked") return "revoked";
+  if (account.status === "error") return "error";
+  if (account.status !== "active") return "unknown";
   if (account.provider !== "google") return "active";
   if (!account.channel_expiry_ts) return "missing";
 

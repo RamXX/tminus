@@ -98,7 +98,7 @@ export function healthToColor(state: HealthState): HealthColor {
  *
  * Priority (highest to lowest):
  *   1. error_count > 0 -> "error"
- *   2. status is "revoked" or channel_status is "error" -> "error"
+ *   2. status is "error"/"revoked" or channel_status is "error" -> "error"
  *   3. pending_writes > 10 or channel_status is "expired" -> "degraded"
  *   4. active channel with no errors -> "healthy" (or "degraded" if idle/invalid timestamp)
  *   5. non-active channel without sync timestamp -> "stale"
@@ -113,10 +113,11 @@ export function computeAccountHealth(
   now: number = Date.now(),
 ): HealthState {
   const channelStatus = account.channel_status.toLowerCase();
+  const accountStatus = account.status.toLowerCase();
 
   // Error conditions
   if (account.error_count > 0) return "error";
-  if (account.status === "revoked") return "error";
+  if (accountStatus === "error" || accountStatus === "revoked") return "error";
   if (channelStatus === "error") return "error";
 
   // Degraded conditions

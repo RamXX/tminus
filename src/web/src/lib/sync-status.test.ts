@@ -164,6 +164,11 @@ describe("computeAccountHealth", () => {
   });
 
   describe("error state", () => {
+    it("returns error when status is error", () => {
+      const account = makeAccount({ status: "error" });
+      expect(computeAccountHealth(account, NOW)).toBe("error");
+    });
+
     it("returns error when error_count > 0", () => {
       const account = makeAccount({ error_count: 1 });
       expect(computeAccountHealth(account, NOW)).toBe("error");

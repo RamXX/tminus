@@ -522,6 +522,44 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(msg.resource_id).toBe("users/ms-user/events/evt-42");
   });
 
+  it("Microsoft change notification: status='error' account still enqueues (not blocked unless revoked)", async () => {
+    db.prepare(
+      `INSERT INTO accounts
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
+       VALUES (?, ?, ?, ?, ?, 'error', ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      "microsoft",
+      "ms-sub-error",
+      ACCOUNT_A.email,
+      "ms-sub-error-123",
+      "ms-client-state-error",
+    );
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [{
+        subscriptionId: "ms-sub-error-123",
+        changeType: "updated",
+        clientState: "ms-client-state-error",
+        resource: "users/ms-user/events/evt-99",
+      }],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages).toHaveLength(1);
+  });
+
   it("Microsoft clientState mismatch: returns 403 (AC 3)", async () => {
     db.prepare(
       `INSERT INTO accounts

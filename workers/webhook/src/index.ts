@@ -196,7 +196,7 @@ async function handleMicrosoftWebhook(
           `SELECT account_id, channel_token
            FROM accounts
            WHERE provider = 'microsoft'
-             AND status = 'active'
+             AND status != 'revoked'
              AND channel_id = ?1`,
         )
         .bind(notification.subscriptionId)
@@ -208,7 +208,8 @@ async function handleMicrosoftWebhook(
             `SELECT a.account_id, a.channel_token
              FROM ms_subscriptions ms
              JOIN accounts a ON a.account_id = ms.account_id
-             WHERE ms.subscription_id = ?1`,
+             WHERE ms.subscription_id = ?1
+               AND a.status != 'revoked'`,
           )
           .bind(notification.subscriptionId)
           .first<{ account_id: string; channel_token: string | null }>();

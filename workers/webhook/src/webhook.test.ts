@@ -62,7 +62,7 @@ function createMockD1(
                 const match = accounts.find(
                   (a) =>
                     a.provider === "microsoft" &&
-                    (a.status ?? "active") === "active" &&
+                    (a.status ?? "active") !== "revoked" &&
                     a.channel_id === subscriptionId,
                 );
                 if (!match) return null;
@@ -415,6 +415,56 @@ describe("POST /webhook/microsoft", () => {
     expect(msg.channel_id).toBe(TEST_MS_SUBSCRIPTION_ID);
     expect(msg.resource_id).toBe("users/abc123/events/evt-1");
     expect(typeof msg.ping_ts).toBe("string");
+  });
+
+  it("accepts microsoft accounts in status='error' (only revoked is excluded)", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "error",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+  });
+
+  it("excludes microsoft accounts in status='revoked'", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "revoked",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(0);
   });
 
   // AC 3: clientState validation

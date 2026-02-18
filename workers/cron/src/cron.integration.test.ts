@@ -627,7 +627,7 @@ describe("Cron integration tests: Token Health Check (every 12h)", () => {
     expect(healthCalls).toHaveLength(2);
   });
 
-  it("skips accounts with status='error'", async () => {
+  it("includes accounts with status='error' for token recovery checks", async () => {
     insertAccount(db, { ...ACCOUNT_A });
     insertAccount(db, { ...ACCOUNT_C_ERROR });
 
@@ -639,10 +639,11 @@ describe("Cron integration tests: Token Health Check (every 12h)", () => {
 
     await handler.scheduled(event, env, ctx);
 
-    // Only active accounts get health-checked
+    // Both active and error accounts get health-checked.
     const healthCalls = doNamespace.calls.filter((c) => c.path === "/getHealth");
-    expect(healthCalls).toHaveLength(1);
-    expect(healthCalls[0].accountId).toBe(ACCOUNT_A.account_id);
+    expect(healthCalls).toHaveLength(2);
+    const checked = healthCalls.map((c) => c.accountId).sort();
+    expect(checked).toEqual([ACCOUNT_A.account_id, ACCOUNT_C_ERROR.account_id].sort());
   });
 
   it("marks account as error in D1 when token refresh fails", async () => {
@@ -689,6 +690,23 @@ describe("Cron integration tests: Token Health Check (every 12h)", () => {
     const row = db
       .prepare("SELECT status FROM accounts WHERE account_id = ?")
       .get(ACCOUNT_A.account_id) as { status: string };
+    expect(row.status).toBe("active");
+  });
+
+  it("recovers account status from error to active when token refresh succeeds", async () => {
+    insertAccount(db, { ...ACCOUNT_C_ERROR });
+
+    const doNamespace = createMockAccountDONamespace();
+    const handler = createHandler();
+    const env = { DB: d1, ACCOUNT: doNamespace, RECONCILE_QUEUE: queue } as Env;
+    const event = buildScheduledEvent(CRON_TOKEN_HEALTH);
+    const ctx = buildMockCtx();
+
+    await handler.scheduled(event, env, ctx);
+
+    const row = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_C_ERROR.account_id) as { status: string };
     expect(row.status).toBe("active");
   });
 
@@ -777,7 +795,7 @@ describe("Cron integration tests: Drift Reconciliation (daily 03:00 UTC)", () =>
     }
   });
 
-  it("skips accounts with status='error'", async () => {
+  it("includes accounts with status='error' for reconciliation", async () => {
     insertAccount(db, { ...ACCOUNT_A });
     insertAccount(db, { ...ACCOUNT_C_ERROR });
 
@@ -789,13 +807,15 @@ describe("Cron integration tests: Drift Reconciliation (daily 03:00 UTC)", () =>
 
     await handler.scheduled(event, env, ctx);
 
-    // Only account A (active) should be enqueued
-    expect(queue.messages).toHaveLength(1);
-    const msg = queue.messages[0] as Record<string, unknown>;
-    expect(msg.account_id).toBe(ACCOUNT_A.account_id);
+    // Both non-revoked accounts (active + error) should be enqueued
+    expect(queue.messages).toHaveLength(2);
+    const accountIds = (queue.messages as Array<Record<string, unknown>>)
+      .map((msg) => msg.account_id as string)
+      .sort();
+    expect(accountIds).toEqual([ACCOUNT_A.account_id, ACCOUNT_C_ERROR.account_id].sort());
   });
 
-  it("enqueues nothing when no active accounts exist", async () => {
+  it("enqueues error accounts even when no active accounts exist", async () => {
     // Only error account exists
     insertAccount(db, { ...ACCOUNT_C_ERROR });
 
@@ -807,7 +827,9 @@ describe("Cron integration tests: Drift Reconciliation (daily 03:00 UTC)", () =>
 
     await handler.scheduled(event, env, ctx);
 
-    expect(queue.messages).toHaveLength(0);
+    expect(queue.messages).toHaveLength(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.account_id).toBe(ACCOUNT_C_ERROR.account_id);
   });
 
   it("enqueues nothing when accounts table is empty", async () => {
