@@ -7,7 +7,8 @@
  * Endpoints:
  * - POST /internal/accounts/:id/renew-channel
  *   Force-renew a Google Calendar webhook channel for an account.
- *   Replicates the same logic as handleChannelRenewal in the cron worker.
+ *   Delegates to the shared renewWebhookChannel() function from @tminus/shared
+ *   (TM-1s05: extracted to eliminate duplication with the cron worker).
  */
 
 import { renewWebhookChannel } from "@tminus/shared";
