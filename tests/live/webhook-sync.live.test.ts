@@ -368,7 +368,8 @@ describe("Live E2E: Webhook registration and incremental sync (TM-hpq7)", () => 
     async () => {
       // The walking skeleton (TM-qt2f) registered the webhook channel.
       // We verify by checking that the API returns events (proving the sync pipeline works).
-      // Channel registration details from TM-qt2f delivery notes:
+      // Channel registration details from TM-qt2f delivery notes (historical example values only --
+      // these are informational and not authoritative; see D1 accounts table for live values):
       // channel_id: cal_01KHMGDWA9C26P8DZDYTFZK1SC
       // channel_expiry: 2026-02-24T00:36:28.000Z
 
