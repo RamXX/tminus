@@ -266,7 +266,6 @@ async function handleCallback(
     // Same user -- re-activate and refresh tokens
     accountId = existing.account_id;
     const wasActive = existing.status === "active";
-    const hasChannel = !!existing.channel_id;
 
     // Update status to active if it was revoked/error
     if (!wasActive) {
@@ -276,9 +275,11 @@ async function handleCallback(
         .run();
     }
 
-    // If the account has no watch channel/subscription, onboarding is incomplete
-    // regardless of status. Re-run onboarding to bootstrap sync.
-    shouldStartOnboarding = !hasChannel;
+    // Re-link is an explicit recovery action. Always re-run onboarding to:
+    // - re-bootstrap provider channel/subscription if needed
+    // - run a full sync with fresh tokens
+    // - replay non-active mirrors (force_requeue_non_active)
+    shouldStartOnboarding = true;
   } else {
     // New account
     accountId = generateId("account");
@@ -317,7 +318,9 @@ async function handleCallback(
   if (shouldStartOnboarding) {
     try {
       await env.ONBOARDING_WORKFLOW.create({
-        id: `onboard-${accountId}`,
+        // Use a unique workflow id so relink recovery can be re-run
+        // for an already-onboarded account.
+        id: `onboard-${accountId}-${Date.now()}`,
         params: {
           account_id: accountId,
           user_id: user_id,
@@ -500,7 +503,6 @@ async function handleMicrosoftCallback(
     // Same user -- re-activate and refresh tokens
     accountId = existing.account_id;
     const wasActive = existing.status === "active";
-    const hasChannel = !!existing.channel_id;
 
     // Update status to active if it was revoked/error
     if (!wasActive) {
@@ -510,9 +512,11 @@ async function handleMicrosoftCallback(
         .run();
     }
 
-    // If the account has no watch channel/subscription, onboarding is incomplete
-    // regardless of status. Re-run onboarding to bootstrap sync.
-    shouldStartOnboarding = !hasChannel;
+    // Re-link is an explicit recovery action. Always re-run onboarding to:
+    // - re-bootstrap provider subscription if needed
+    // - run a full sync with fresh tokens
+    // - replay non-active mirrors (force_requeue_non_active)
+    shouldStartOnboarding = true;
   } else {
     // New account
     accountId = generateId("account");
@@ -551,7 +555,9 @@ async function handleMicrosoftCallback(
   if (shouldStartOnboarding) {
     try {
       await env.ONBOARDING_WORKFLOW.create({
-        id: `onboard-${accountId}`,
+        // Use a unique workflow id so relink recovery can be re-run
+        // for an already-onboarded account.
+        id: `onboard-${accountId}-${Date.now()}`,
         params: {
           account_id: accountId,
           user_id: user_id,

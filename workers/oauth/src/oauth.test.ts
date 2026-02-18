@@ -637,7 +637,7 @@ describe("GET /oauth/google/callback", () => {
   });
 
   describe("re-activation (same user)", () => {
-    it("reuses existing account, refreshes tokens, skips workflow", async () => {
+    it("reuses existing account, refreshes tokens, and re-runs onboarding recovery", async () => {
       const d1 = createMockD1();
       const accountDO = createMockAccountDO();
       const workflow = createMockWorkflow();
@@ -673,8 +673,10 @@ describe("GET /oauth/google/callback", () => {
       expect(accountDO._calls.length).toBe(1);
       expect(accountDO._calls[0].id).toBe("acc_EXISTING01");
 
-      // OnboardingWorkflow: was NOT started (existing account)
-      expect(workflow._calls.length).toBe(0);
+      // OnboardingWorkflow: started for relink recovery
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_EXISTING01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
 
     it("starts onboarding when reactivated account has no channel", async () => {
@@ -1057,7 +1059,7 @@ describe("GET /oauth/microsoft/callback", () => {
   });
 
   describe("re-activation (same user)", () => {
-    it("reuses existing Microsoft account, refreshes tokens, skips workflow", async () => {
+    it("reuses existing Microsoft account, refreshes tokens, and re-runs onboarding recovery", async () => {
       const d1 = createMockD1();
       const accountDO = createMockAccountDO();
       const workflow = createMockWorkflow();
@@ -1093,8 +1095,10 @@ describe("GET /oauth/microsoft/callback", () => {
       expect(accountDO._calls.length).toBe(1);
       expect(accountDO._calls[0].id).toBe("acc_MSEXISTING01");
 
-      // OnboardingWorkflow: was NOT started (existing account)
-      expect(workflow._calls.length).toBe(0);
+      // OnboardingWorkflow: started for relink recovery
+      expect(workflow._calls.length).toBe(1);
+      expect(workflow._calls[0].params.account_id).toBe("acc_MSEXISTING01");
+      expect(workflow._calls[0].params.user_id).toBe(TEST_USER_ID);
     });
 
     it("starts onboarding for reactivated Microsoft account with no channel", async () => {
