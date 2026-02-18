@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { loadLiveEnv, hasLiveCredentials } from "./setup.js";
-import { LiveTestClient } from "./helpers.js";
+import { LiveTestClient, withRateLimitRetry } from "./helpers.js";
 import type { LiveEnv } from "./setup.js";
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,10 @@ describe("Live canary: GET /health", () => {
   it.skipIf(!canRun)(
     "returns 200 with healthy status and expected envelope structure",
     async () => {
-      const resp = await client.get("/health");
+      const resp = await withRateLimitRetry(
+        () => client.get("/health"),
+        { label: "health-check" },
+      );
 
       expect(resp.status).toBe(200);
       expect(resp.headers.get("content-type")).toContain("application/json");
@@ -129,7 +132,10 @@ describe("Live canary: GET /health", () => {
   it.skipIf(!canRun)(
     "returns 404 for non-existent route",
     async () => {
-      const resp = await client.get("/nonexistent-route-12345");
+      const resp = await withRateLimitRetry(
+        () => client.get("/nonexistent-route-12345"),
+        { label: "health-404-check" },
+      );
 
       expect(resp.status).toBe(404);
       const body = await resp.json() as { ok: boolean };
@@ -144,7 +150,10 @@ describe("Live canary: GET /health", () => {
   it.skipIf(!canRun)(
     "returns 401 for protected route without authentication",
     async () => {
-      const resp = await client.get("/v1/events", { auth: false });
+      const resp = await withRateLimitRetry(
+        () => client.get("/v1/events", { auth: false }),
+        { label: "health-auth-enforcement" },
+      );
 
       expect(resp.status).toBe(401);
       const body = await resp.json() as { ok: boolean };

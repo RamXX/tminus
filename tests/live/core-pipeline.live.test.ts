@@ -23,7 +23,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { loadLiveEnv, hasLiveCredentials, hasAuthCredentials, hasGoogleCredentials, generateTestJWT } from "./setup.js";
-import { LiveTestClient } from "./helpers.js";
+import { LiveTestClient, withRateLimitRetry } from "./helpers.js";
 import type { LiveEnv } from "./setup.js";
 
 // ---------------------------------------------------------------------------
@@ -102,66 +102,6 @@ async function pollUntil<T>(
     await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
   }
   return null;
-}
-
-/**
- * Execute a request with automatic retry on 429 (rate limit).
- *
- * Production auth endpoints have rate limiting. When running tests
- * repeatedly (e.g., during development), the rate limiter may fire.
- * This helper retries with a short backoff. If the rate limit window
- * is too long (> maxWaitMs), it returns the 429 response immediately
- * so the test can handle it gracefully rather than timing out.
- */
-async function withRateLimitRetry(
-  fn: () => Promise<Response>,
-  opts: { maxRetries?: number; maxWaitMs?: number; label?: string } = {},
-): Promise<Response> {
-  const maxRetries = opts.maxRetries ?? 3;
-  const maxWaitMs = opts.maxWaitMs ?? 15_000; // max 15s per wait
-  const label = opts.label ?? "request";
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const resp = await fn();
-
-    if (resp.status !== 429) return resp;
-
-    if (attempt === maxRetries) {
-      console.warn(
-        `  [RATE-LIMIT] ${label}: still 429 after ${maxRetries} retries, returning as-is`,
-      );
-      return resp;
-    }
-
-    // Check Retry-After header. If the wait is too long, bail out immediately.
-    const retryAfterHeader = resp.headers.get("Retry-After");
-    let waitMs: number;
-    if (retryAfterHeader) {
-      const retryAfterSec = parseInt(retryAfterHeader, 10);
-      if (!isNaN(retryAfterSec) && retryAfterSec * 1000 > maxWaitMs) {
-        console.warn(
-          `  [RATE-LIMIT] ${label}: Retry-After=${retryAfterSec}s exceeds ` +
-            `maxWaitMs=${maxWaitMs}ms. Returning 429 immediately.`,
-        );
-        return resp;
-      }
-      waitMs = isNaN(retryAfterSec) ? Math.min((attempt + 1) * 3000, maxWaitMs) : retryAfterSec * 1000;
-    } else {
-      waitMs = Math.min((attempt + 1) * 3000, maxWaitMs);
-    }
-
-    // Consume the body to avoid resource leaks
-    await resp.text();
-
-    console.log(
-      `  [RATE-LIMIT] ${label}: 429 on attempt ${attempt + 1}, ` +
-        `waiting ${waitMs}ms before retry...`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-  }
-
-  // TypeScript: unreachable but satisfies compiler
-  return fn();
 }
 
 // ===========================================================================
