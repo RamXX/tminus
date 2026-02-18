@@ -1342,6 +1342,16 @@ describe("handleOAuthSuccess", () => {
     expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
   });
 
+  it("returns 200 HTML for /oauth/google/done/ with trailing slash", () => {
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/google/done/?account_id=acc_123&email=user@gmail.com",
+    );
+    const response = handleOAuthSuccess(request);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+  });
+
   it("returns 404 for unrecognized path", () => {
     const request = new Request("https://oauth.tminus.dev/oauth/apple/done");
     const response = handleOAuthSuccess(request);
@@ -1441,6 +1451,21 @@ describe("GET /oauth/microsoft/done (routed via worker)", () => {
     const body = await response.text();
     expect(body).toContain("Microsoft Account Linked");
     expect(body).toContain("user@outlook.com");
+  });
+
+  it("returns success HTML page for trailing slash route", async () => {
+    const env = createMockEnv();
+    const handler = createHandler();
+
+    const request = new Request(
+      "https://oauth.tminus.dev/oauth/microsoft/done/?account_id=acc_456&email=user@outlook.com",
+    );
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    const body = await response.text();
+    expect(body).toContain("Microsoft Account Linked");
   });
 });
 

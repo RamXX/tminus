@@ -96,6 +96,13 @@ function errorResponse(message: string, status: number): Response {
   });
 }
 
+function normalizePathname(pathname: string): string {
+  if (pathname === "/") {
+    return "/";
+  }
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
 function htmlError(title: string, message: string, status: number): Response {
   const body = `<!DOCTYPE html><html><head><title>${title}</title></head>` +
     `<body><h1>${title}</h1><p>${message}</p></body></html>`;
@@ -557,9 +564,10 @@ export function createHandler(fetchFn?: FetchFn) {
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
       const url = new URL(request.url);
+      const pathname = normalizePathname(url.pathname);
 
       // Health check -- no auth, no method restriction
-      if (url.pathname === "/health") {
+      if (pathname === "/health") {
         const healthBody = buildHealthResponse(
           "tminus-oauth",
           "0.0.1",
@@ -578,7 +586,7 @@ export function createHandler(fetchFn?: FetchFn) {
       }
 
       // POST /marketplace/uninstall -- webhook from Google (must be before GET-only check)
-      if (url.pathname === "/marketplace/uninstall") {
+      if (pathname === "/marketplace/uninstall") {
         return handleMarketplaceUninstall(request, env, fetchFn);
       }
 
@@ -586,7 +594,7 @@ export function createHandler(fetchFn?: FetchFn) {
         return errorResponse("Method not allowed", 405);
       }
 
-      switch (url.pathname) {
+      switch (pathname) {
         case "/oauth/google/start":
           return handleStart(request, env);
         case "/oauth/google/callback":
