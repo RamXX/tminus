@@ -10,7 +10,8 @@
  *   Replicates the same logic as handleChannelRenewal in the cron worker.
  */
 
-import { GoogleCalendarClient, generateId } from "@tminus/shared";
+import { renewWebhookChannel } from "@tminus/shared";
+import type { ChannelRenewalResult } from "@tminus/shared";
 import {
   matchRoute,
   jsonResponse,
@@ -40,29 +41,21 @@ function validateAdminKey(request: Request, env: Env): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Channel renewal logic
+// Channel renewal logic (delegates to @tminus/shared)
 // ---------------------------------------------------------------------------
 
-/**
- * Result of a successful channel renewal.
- */
-export interface ChannelRenewalResult {
-  account_id: string;
-  channel_id: string;
-  resource_id: string;
-  expiry: string;
-  previous_channel_id: string | null;
-}
+// Re-export ChannelRenewalResult type for consumers of this module
+export type { ChannelRenewalResult } from "@tminus/shared";
 
 /**
  * Re-register a Google Calendar watch channel for an account.
  *
- * Steps (same as reRegisterChannel in workers/cron/src/index.ts):
- * 1. Get access token from AccountDO
- * 2. Stop the old channel with Google (best-effort)
- * 3. Register a new channel with Google
- * 4. Store new channel in AccountDO via storeWatchChannel
- * 5. Update D1 with new channel_id, channel_token, channel_expiry_ts
+ * Delegates to the shared renewWebhookChannel() function from @tminus/shared
+ * (TM-1s05: extracted to eliminate duplication with the cron worker).
+ *
+ * This wrapper handles API-specific concerns:
+ * - Validating WEBHOOK_URL is configured (cron always has it)
+ * - Constructing the AccountDO stub from Env bindings
  *
  * Throws on failure with a descriptive error message.
  */
@@ -72,98 +65,22 @@ export async function renewChannelForAccount(
   oldChannelId: string | null,
   oldResourceId: string | null,
 ): Promise<ChannelRenewalResult> {
-  const doId = env.ACCOUNT.idFromName(accountId);
-  const stub = env.ACCOUNT.get(doId);
-
-  // Step 1: Get access token from AccountDO
-  const tokenResponse = await stub.fetch(
-    new Request("https://account-do.internal/getAccessToken", {
-      method: "POST",
-    }),
-  );
-
-  if (!tokenResponse.ok) {
-    throw new Error(
-      `Failed to get access token for account ${accountId}: ${tokenResponse.status}`,
-    );
-  }
-
-  const { access_token } = (await tokenResponse.json()) as {
-    access_token: string;
-  };
-  const client = new GoogleCalendarClient(access_token);
-
-  // Step 2: Stop old channel (best-effort, may already be dead/expired)
-  if (oldChannelId && oldResourceId) {
-    try {
-      await client.stopChannel(oldChannelId, oldResourceId);
-    } catch {
-      // Expected if channel already expired or was deleted
-    }
-  }
-
-  // Step 3: Register new channel with Google
   const webhookUrl = env.WEBHOOK_URL;
   if (!webhookUrl) {
     throw new Error("WEBHOOK_URL not configured");
   }
 
-  const newChannelId = generateId("calendar");
-  const newToken = generateId("calendar");
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
 
-  const watchResponse = await client.watchEvents(
-    "primary",
+  return renewWebhookChannel({
+    accountId,
+    oldChannelId,
+    oldResourceId,
+    accountDOStub: stub,
+    db: env.DB,
     webhookUrl,
-    newChannelId,
-    newToken,
-  );
-
-  // Step 4: Store new channel in AccountDO
-  const storeResponse = await stub.fetch(
-    new Request("https://account-do.internal/storeWatchChannel", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        channel_id: watchResponse.channelId,
-        resource_id: watchResponse.resourceId,
-        expiration: watchResponse.expiration,
-        calendar_id: "primary",
-      }),
-    }),
-  );
-
-  if (!storeResponse.ok) {
-    throw new Error(
-      `Failed to store new channel in AccountDO for account ${accountId}: ${storeResponse.status}`,
-    );
-  }
-
-  // Step 5: Update D1 with new channel info
-  const expiryTs = new Date(
-    parseInt(watchResponse.expiration, 10),
-  ).toISOString();
-
-  await env.DB.prepare(
-    `UPDATE accounts
-     SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
-     WHERE account_id = ?5`,
-  )
-    .bind(
-      watchResponse.channelId,
-      newToken,
-      expiryTs,
-      watchResponse.resourceId,
-      accountId,
-    )
-    .run();
-
-  return {
-    account_id: accountId,
-    channel_id: watchResponse.channelId,
-    resource_id: watchResponse.resourceId,
-    expiry: expiryTs,
-    previous_channel_id: oldChannelId,
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

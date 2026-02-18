@@ -38,6 +38,9 @@ import {
 // Track Google Calendar API calls made by mocked GoogleCalendarClient
 const googleApiCalls: Array<{ method: string; args: unknown[] }> = [];
 
+// Track calls to the shared renewWebhookChannel function
+const renewWebhookChannelCalls: Array<{ params: unknown }> = [];
+
 vi.mock("@tminus/shared", async () => {
   const actual = await vi.importActual("@tminus/shared");
   return {
@@ -64,6 +67,81 @@ vi.mock("@tminus/shared", async () => {
     })),
     // generateId is used to create channel IDs and tokens
     generateId: vi.fn((prefix: string) => `${prefix}_mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+    // Mock renewWebhookChannel -- the shared function that reRegisterChannel now delegates to.
+    // This mock simulates the full 5-step flow by calling the AccountDO stub (getAccessToken,
+    // stopChannel, watchEvents, storeWatchChannel) and updating D1, matching what the real
+    // implementation does. Without this mock, the real renewWebhookChannel would use internal
+    // imports (./google-api) that bypass the @tminus/shared-level GoogleCalendarClient mock.
+    renewWebhookChannel: vi.fn(async (params: {
+      accountId: string;
+      oldChannelId: string | null;
+      oldResourceId: string | null;
+      accountDOStub: { fetch(input: Request): Promise<Response> };
+      db: D1Database;
+      webhookUrl: string;
+    }) => {
+      renewWebhookChannelCalls.push({ params });
+
+      // Step 1: Get access token from AccountDO
+      const tokenResponse = await params.accountDOStub.fetch(
+        new Request("https://account-do.internal/getAccessToken", { method: "POST" }),
+      );
+      if (!tokenResponse.ok) {
+        throw new Error(`Failed to get access token for account ${params.accountId}: ${tokenResponse.status}`);
+      }
+      const { access_token } = (await tokenResponse.json()) as { access_token: string };
+
+      // Step 2: Stop old channel (best-effort, via GoogleCalendarClient mock)
+      if (params.oldChannelId && params.oldResourceId) {
+        try {
+          googleApiCalls.push({ method: "stopChannel", args: [params.oldChannelId, params.oldResourceId] });
+        } catch {
+          // best-effort
+        }
+      }
+
+      // Step 3: Register new channel (via GoogleCalendarClient mock)
+      const channelId = `new-channel-${Date.now()}`;
+      const resourceId = `new-resource-${Date.now()}`;
+      const expiration = String(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      googleApiCalls.push({ method: "watchEvents", args: ["primary", params.webhookUrl, channelId, channelId] });
+
+      // Step 4: Store new channel in AccountDO
+      const storeResponse = await params.accountDOStub.fetch(
+        new Request("https://account-do.internal/storeWatchChannel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel_id: channelId,
+            resource_id: resourceId,
+            expiration,
+            calendar_id: "primary",
+          }),
+        }),
+      );
+      if (!storeResponse.ok) {
+        throw new Error(`Failed to store new channel in AccountDO for account ${params.accountId}: ${storeResponse.status}`);
+      }
+
+      // Step 5: Update D1
+      const expiryTs = new Date(parseInt(expiration, 10)).toISOString();
+      await params.db
+        .prepare(
+          `UPDATE accounts
+           SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
+           WHERE account_id = ?5`,
+        )
+        .bind(channelId, channelId, expiryTs, resourceId, params.accountId)
+        .run();
+
+      return {
+        account_id: params.accountId,
+        channel_id: channelId,
+        resource_id: resourceId,
+        expiry: expiryTs,
+        previous_channel_id: params.oldChannelId,
+      };
+    }),
   };
 });
 
@@ -290,6 +368,7 @@ describe("Scheduled handler dispatch", () => {
 describe("handleChannelRenewal (via scheduled)", () => {
   beforeEach(() => {
     googleApiCalls.length = 0;
+    renewWebhookChannelCalls.length = 0;
   });
 
   it("re-registers expiring channels with Google (TM-ucl1 fix)", async () => {

@@ -792,6 +792,15 @@ export type {
   HealthCheckResponse,
 } from "./health";
 
+// Re-export webhook channel renewal (TM-1s05: shared renewal logic)
+export { renewWebhookChannel } from "./channel-renewal";
+export type {
+  AccountDOStub,
+  ChannelRenewalDB,
+  RenewWebhookChannelParams,
+  ChannelRenewalResult,
+} from "./channel-renewal";
+
 // Re-export funnel event instrumentation (TM-zf91.6: GTM validation loop)
 export {
   FUNNEL_STAGES,

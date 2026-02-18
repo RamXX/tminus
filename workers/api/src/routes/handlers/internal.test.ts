@@ -145,6 +145,67 @@ vi.mock("@tminus/shared", async () => {
       watchEvents: vi.fn(async () => watchEventsResult),
     })),
     generateId: vi.fn((prefix: string) => `${prefix}_mock_${Date.now()}`),
+    // Mock renewWebhookChannel -- the shared function that renewChannelForAccount
+    // now delegates to. Without this mock, the real renewWebhookChannel would use
+    // internal imports (./google-api) that bypass the @tminus/shared-level
+    // GoogleCalendarClient mock, causing real HTTP calls to Google.
+    renewWebhookChannel: vi.fn(async (params: {
+      accountId: string;
+      oldChannelId: string | null;
+      oldResourceId: string | null;
+      accountDOStub: { fetch(input: Request): Promise<Response> };
+      db: D1Database;
+      webhookUrl: string;
+    }) => {
+      // Step 1: Get access token from AccountDO
+      const tokenResponse = await params.accountDOStub.fetch(
+        new Request("https://account-do.internal/getAccessToken", { method: "POST" }),
+      );
+      if (!tokenResponse.ok) {
+        throw new Error(`Failed to get access token for account ${params.accountId}: ${tokenResponse.status}`);
+      }
+
+      // Step 2: Stop old channel (best-effort)
+      if (params.oldChannelId && params.oldResourceId) {
+        // best-effort, no-op in test
+      }
+
+      // Step 3 + 4: Register new channel and store in AccountDO
+      const storeResponse = await params.accountDOStub.fetch(
+        new Request("https://account-do.internal/storeWatchChannel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel_id: watchEventsResult.channelId,
+            resource_id: watchEventsResult.resourceId,
+            expiration: watchEventsResult.expiration,
+            calendar_id: "primary",
+          }),
+        }),
+      );
+      if (!storeResponse.ok) {
+        throw new Error(`Failed to store new channel in AccountDO for account ${params.accountId}: ${storeResponse.status}`);
+      }
+
+      // Step 5: Update D1
+      const expiryTs = new Date(parseInt(watchEventsResult.expiration, 10)).toISOString();
+      await params.db
+        .prepare(
+          `UPDATE accounts
+           SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
+           WHERE account_id = ?5`,
+        )
+        .bind(watchEventsResult.channelId, "token_mock", expiryTs, watchEventsResult.resourceId, params.accountId)
+        .run();
+
+      return {
+        account_id: params.accountId,
+        channel_id: watchEventsResult.channelId,
+        resource_id: watchEventsResult.resourceId,
+        expiry: expiryTs,
+        previous_channel_id: params.oldChannelId,
+      };
+    }),
   };
 });
 
