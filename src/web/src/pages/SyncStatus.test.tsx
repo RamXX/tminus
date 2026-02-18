@@ -18,7 +18,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act } from "@testing-library/react";
 import { SyncStatus } from "./SyncStatus";
-import type { SyncAccountStatus, SyncStatusResponse } from "../lib/sync-status";
+import type {
+  SyncAccountStatus,
+  SyncStatusResponse,
+  UserGraphSyncHealth,
+} from "../lib/sync-status";
 import { REFRESH_INTERVAL_MS } from "../lib/sync-status";
 
 // ---------------------------------------------------------------------------
@@ -83,8 +87,9 @@ const MOCK_ACCOUNTS: SyncAccountStatus[] = [
 
 function createMockFetchStatus(
   accounts: SyncAccountStatus[] = MOCK_ACCOUNTS,
+  userGraph: UserGraphSyncHealth | null = null,
 ) {
-  return vi.fn(async (): Promise<SyncStatusResponse> => ({ accounts }));
+  return vi.fn(async (): Promise<SyncStatusResponse> => ({ accounts, user_graph: userGraph }));
 }
 
 function createFailingFetchStatus(message = "Network error") {
@@ -271,6 +276,27 @@ describe("SyncStatus Dashboard", () => {
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner.textContent).toContain("Error");
+    });
+
+    it("reflects user graph errors even when account rows are healthy", async () => {
+      const healthyAccounts: SyncAccountStatus[] = [
+        makeHealthyAccount("acc-a", "a@test.com"),
+        makeHealthyAccount("acc-b", "b@test.com"),
+      ];
+      const userGraph: UserGraphSyncHealth = {
+        total_events: 12,
+        total_mirrors: 24,
+        active_mirrors: 20,
+        pending_mirrors: 0,
+        error_mirrors: 4,
+        last_activity_ts: new Date(NOW).toISOString(),
+      };
+      const fetchFn = createMockFetchStatus(healthyAccounts, userGraph);
+      await renderAndWaitForData(fetchFn);
+
+      const banner = screen.getByTestId("overall-health-banner");
+      expect(banner).toHaveAttribute("data-health", "error");
+      expect(screen.getByTestId("user-graph-health")).toHaveTextContent("4 errors");
     });
   });
 

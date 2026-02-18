@@ -451,7 +451,7 @@ export class OnboardingWorkflow {
   ): Promise<boolean> {
     // Look up all accounts for this user from D1
     const result = await this.env.DB.prepare(
-      "SELECT account_id FROM accounts WHERE user_id = ?1",
+      "SELECT account_id FROM accounts WHERE user_id = ?1 AND status = 'active'",
     )
       .bind(userId)
       .all<{ account_id: string }>();
@@ -502,7 +502,7 @@ export class OnboardingWorkflow {
       new Request("https://user-graph.internal/recomputeProjections", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ force_requeue_non_active: true }),
       }),
     );
 

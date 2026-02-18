@@ -15,6 +15,8 @@ import { renewWebhookChannel } from "@tminus/shared";
 import type { ChannelRenewalResult } from "@tminus/shared";
 import {
   matchRoute,
+  callDO,
+  parseJsonBody,
   jsonResponse,
   successEnvelope,
   errorEnvelope,
@@ -169,6 +171,57 @@ async function handleRenewChannel(
 }
 
 // ---------------------------------------------------------------------------
+// POST /internal/accounts/:id/recompute-projections
+// ---------------------------------------------------------------------------
+
+/**
+ * Force a projection replay for the account owner's UserGraphDO.
+ *
+ * Body (optional):
+ * - force_requeue_non_active?: boolean (default false)
+ *
+ * Returns:
+ * - { enqueued: number } count returned by UserGraphDO.recomputeProjections
+ */
+async function handleRecomputeProjections(
+  request: Request,
+  env: Env,
+  accountId: string,
+): Promise<Response> {
+  const account = await env.DB.prepare(
+    "SELECT user_id FROM accounts WHERE account_id = ?1",
+  )
+    .bind(accountId)
+    .first<{ user_id: string }>();
+
+  if (!account) {
+    return jsonResponse(
+      errorEnvelope("Account not found", "NOT_FOUND"),
+      ErrorCode.NOT_FOUND,
+    );
+  }
+
+  const body = await parseJsonBody<{ force_requeue_non_active?: boolean }>(request);
+  const force = body?.force_requeue_non_active === true;
+
+  const result = await callDO<number>(
+    env.USER_GRAPH,
+    account.user_id,
+    "/recomputeProjections",
+    { force_requeue_non_active: force },
+  );
+
+  if (!result.ok) {
+    return jsonResponse(
+      errorEnvelope("Failed to recompute projections", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+
+  return jsonResponse(successEnvelope({ enqueued: result.data }), 200);
+}
+
+// ---------------------------------------------------------------------------
 // Internal route dispatcher
 // ---------------------------------------------------------------------------
 
@@ -204,6 +257,14 @@ export async function routeInternalRequest(
   );
   if (renewMatch && method === "POST") {
     return handleRenewChannel(request, env, renewMatch.params[0]);
+  }
+
+  const recomputeMatch = matchRoute(
+    pathname,
+    "/internal/accounts/:id/recompute-projections",
+  );
+  if (recomputeMatch && method === "POST") {
+    return handleRecomputeProjections(request, env, recomputeMatch.params[0]);
   }
 
   return jsonResponse(

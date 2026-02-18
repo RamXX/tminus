@@ -18,11 +18,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   computeAllAccountHealth,
   computeOverallHealth,
+  computeUserGraphHealth,
   healthToColor,
   healthLabel,
   REFRESH_INTERVAL_MS,
   type SyncStatusResponse,
   type AccountHealth,
+  type UserGraphSyncHealth,
   type HealthState,
 } from "../lib/sync-status";
 
@@ -41,6 +43,7 @@ export interface SyncStatusProps {
 
 export function SyncStatus({ fetchSyncStatus }: SyncStatusProps) {
   const [accounts, setAccounts] = useState<AccountHealth[]>([]);
+  const [userGraph, setUserGraph] = useState<UserGraphSyncHealth | null>(null);
   const [overallHealth, setOverallHealth] = useState<HealthState>("healthy");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -54,9 +57,10 @@ export function SyncStatus({ fetchSyncStatus }: SyncStatusProps) {
       if (!mountedRef.current) return;
 
       const enriched = computeAllAccountHealth(response.accounts);
-      const overall = computeOverallHealth(enriched);
+      const overall = computeOverallHealth(enriched, response.user_graph ?? null);
 
       setAccounts(enriched);
+      setUserGraph(response.user_graph ?? null);
       setOverallHealth(overall);
       setError(null);
       setLoading(false);
@@ -146,6 +150,18 @@ export function SyncStatus({ fetchSyncStatus }: SyncStatusProps) {
         </span>
         <span>Overall: {healthLabel(overallHealth)}</span>
       </div>
+
+      {userGraph && (
+        <div
+          data-testid="user-graph-health"
+          data-health={computeUserGraphHealth(userGraph)}
+          style={styles.userGraphCard}
+        >
+          <strong>Mirror Engine:</strong>{" "}
+          {userGraph.pending_mirrors} pending, {userGraph.error_mirrors} errors,{" "}
+          {userGraph.active_mirrors} active
+        </div>
+      )}
 
       {/* Account table */}
       <div style={styles.tableWrapper}>
@@ -301,6 +317,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   bannerDot: {
     fontSize: "1.1rem",
+  },
+  userGraphCard: {
+    marginBottom: "1rem",
+    padding: "0.75rem 1rem",
+    borderRadius: "8px",
+    border: "1px solid #334155",
+    backgroundColor: "#0b1736",
+    color: "#cbd5e1",
+    fontSize: "0.875rem",
   },
   tableWrapper: {
     overflowX: "auto" as const,

@@ -13,10 +13,12 @@ import {
   computeAccountHealth,
   computeAllAccountHealth,
   computeOverallHealth,
+  computeUserGraphHealth,
   healthLabel,
   STALE_THRESHOLD_MS,
   type SyncAccountStatus,
   type AccountHealth,
+  type UserGraphSyncHealth,
   type HealthState,
 } from "./sync-status";
 
@@ -296,5 +298,49 @@ describe("computeOverallHealth", () => {
 
   it("handles single account correctly", () => {
     expect(computeOverallHealth([makeAccountHealth("degraded")])).toBe("degraded");
+  });
+
+  it("uses user graph errors as overall error even when accounts are healthy", () => {
+    const graph: UserGraphSyncHealth = {
+      total_events: 10,
+      total_mirrors: 20,
+      active_mirrors: 18,
+      pending_mirrors: 0,
+      error_mirrors: 2,
+      last_activity_ts: new Date().toISOString(),
+    };
+    expect(computeOverallHealth([makeAccountHealth("healthy")], graph)).toBe("error");
+  });
+});
+
+describe("computeUserGraphHealth", () => {
+  it("returns healthy when user graph is missing", () => {
+    expect(computeUserGraphHealth(null)).toBe("healthy");
+  });
+
+  it("returns degraded when pending mirrors exist", () => {
+    expect(
+      computeUserGraphHealth({
+        total_events: 10,
+        total_mirrors: 20,
+        active_mirrors: 19,
+        pending_mirrors: 1,
+        error_mirrors: 0,
+        last_activity_ts: new Date().toISOString(),
+      }),
+    ).toBe("degraded");
+  });
+
+  it("returns error when error mirrors exist", () => {
+    expect(
+      computeUserGraphHealth({
+        total_events: 10,
+        total_mirrors: 20,
+        active_mirrors: 18,
+        pending_mirrors: 0,
+        error_mirrors: 2,
+        last_activity_ts: new Date().toISOString(),
+      }),
+    ).toBe("error");
   });
 });

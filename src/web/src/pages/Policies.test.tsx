@@ -360,6 +360,22 @@ describe("Policies Page", () => {
       expect(status.textContent).toContain("Policy updated");
     });
 
+    it("renders status as fixed overlay toast (no layout shift)", async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const updateFn = createMockUpdateEdge();
+      await renderAndWait(createMockFetchPolicies(), updateFn);
+
+      const btn = screen.getByTestId("cell-btn-acc-work-acc-personal");
+      await user.click(btn);
+      await flushAsync();
+
+      const status = screen.getByTestId("policy-status");
+      expect(status).toHaveStyle({
+        position: "fixed",
+        pointerEvents: "none",
+      });
+    });
+
     it("shows error message after failed save", async () => {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       const updateFn = createFailingUpdateEdge("Server error");

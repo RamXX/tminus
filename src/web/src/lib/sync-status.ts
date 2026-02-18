@@ -29,9 +29,20 @@ export interface SyncAccountStatus {
   error_count: number;
 }
 
+/** Aggregate mirror health from UserGraphDO. */
+export interface UserGraphSyncHealth {
+  total_events: number;
+  total_mirrors: number;
+  active_mirrors: number;
+  pending_mirrors: number;
+  error_mirrors: number;
+  last_activity_ts: string | null;
+}
+
 /** API response envelope for sync status. */
 export interface SyncStatusResponse {
   accounts: SyncAccountStatus[];
+  user_graph?: UserGraphSyncHealth | null;
 }
 
 /** Computed health for a single account. */
@@ -148,14 +159,33 @@ export function computeAllAccountHealth(
 }
 
 /**
+ * Compute health for UserGraph mirror layer.
+ *
+ * - error_mirrors > 0 -> error
+ * - pending_mirrors > 0 -> degraded
+ * - else healthy
+ */
+export function computeUserGraphHealth(
+  userGraph: UserGraphSyncHealth | null | undefined,
+): HealthState {
+  if (!userGraph) return "healthy";
+  if (userGraph.error_mirrors > 0) return "error";
+  if (userGraph.pending_mirrors > 0) return "degraded";
+  return "healthy";
+}
+
+/**
  * Compute overall system health from individual account healths.
  *
- * Returns the worst health state across all accounts.
+ * Returns the worst health state across all accounts plus UserGraph mirror health.
  * Priority: error > stale > degraded > healthy.
- * If no accounts, returns "healthy".
+ * If no accounts/userGraph, returns "healthy".
  */
-export function computeOverallHealth(accounts: AccountHealth[]): HealthState {
-  if (accounts.length === 0) return "healthy";
+export function computeOverallHealth(
+  accounts: AccountHealth[],
+  userGraph?: UserGraphSyncHealth | null,
+): HealthState {
+  if (accounts.length === 0 && !userGraph) return "healthy";
 
   const priority: Record<HealthState, number> = {
     healthy: 0,
@@ -169,6 +199,10 @@ export function computeOverallHealth(accounts: AccountHealth[]): HealthState {
     if (priority[account.health] > priority[worst]) {
       worst = account.health;
     }
+  }
+  const graphHealth = computeUserGraphHealth(userGraph);
+  if (priority[graphHealth] > priority[worst]) {
+    worst = graphHealth;
   }
   return worst;
 }

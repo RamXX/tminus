@@ -276,10 +276,15 @@ interface AccountDOState {
   syncSuccessCalls: Array<{ ts: string }>;
   syncFailureCalls: Array<{ error: string }>;
   setSyncTokenCalls: string[];
+  accessTokenError?: { status: number; body: string };
 }
 
 interface UserGraphDOState {
   applyDeltaCalls: Array<{ account_id: string; deltas: unknown[] }>;
+  canonicalOriginEvents: Array<{
+    origin_event_id: string;
+    start?: { dateTime?: string; date?: string } | string | null;
+  }>;
 }
 
 function createMockAccountDO(state: AccountDOState) {
@@ -289,6 +294,12 @@ function createMockAccountDO(state: AccountDOState) {
       const path = url.pathname;
 
       if (path === "/getAccessToken") {
+        if (state.accessTokenError) {
+          return new Response(state.accessTokenError.body, {
+            status: state.accessTokenError.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         return new Response(
           JSON.stringify({ access_token: state.accessToken }),
           { status: 200, headers: { "Content-Type": "application/json" } },
@@ -352,6 +363,16 @@ function createMockUserGraphDO(state: UserGraphDOState) {
             deleted: 0,
             mirrors_enqueued: 0,
             errors: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/listCanonicalEvents") {
+        return new Response(
+          JSON.stringify({
+            items: state.canonicalOriginEvents,
+            cursor: null,
+            has_more: false,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -451,6 +472,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
 
     userGraphDOState = {
       applyDeltaCalls: [],
+      canonicalOriginEvents: [],
     };
 
     env = createMockEnv({
@@ -547,6 +569,74 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     // Sync token from last page is saved
     expect(accountDOState.setSyncTokenCalls).toContain(NEW_SYNC_TOKEN);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("full sync prunes stale canonical origin events missing upstream", async () => {
+    userGraphDOState.canonicalOriginEvents = [
+      {
+        origin_event_id: "google_evt_keep",
+        start: { dateTime: "2026-02-20T09:00:00Z" },
+      },
+      {
+        origin_event_id: "google_evt_stale",
+        start: { dateTime: "2026-02-21T09:00:00Z" },
+      },
+    ];
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent({ id: "google_evt_keep", summary: "Keep" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: ACCOUNT_A.account_id,
+      reason: "onboarding",
+    };
+
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // First call: upsert current provider events
+    // Second call: synthetic delete for stale canonical origin IDs
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(2);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[1].deltas).toEqual([
+      {
+        type: "deleted",
+        origin_account_id: ACCOUNT_A.account_id,
+        origin_event_id: "google_evt_stale",
+      },
+    ]);
+  });
+
+  it("full sync does not prune historical events outside prune window", async () => {
+    userGraphDOState.canonicalOriginEvents = [
+      {
+        origin_event_id: "google_evt_keep",
+        start: { dateTime: "2026-02-20T09:00:00Z" },
+      },
+      {
+        origin_event_id: "google_evt_old",
+        start: { dateTime: "2020-02-20T09:00:00Z" },
+      },
+    ];
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent({ id: "google_evt_keep", summary: "Keep" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: ACCOUNT_A.account_id,
+      reason: "onboarding",
+    };
+
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // Only upsert call should run; historical missing event is skipped for prune.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
   });
 
   // -------------------------------------------------------------------------
@@ -922,6 +1012,30 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(eventPayload.start).toEqual({ date: "2026-02-20" });
     expect(eventPayload.end).toEqual({ date: "2026-02-21" });
   });
+
+  it("invalid_grant from AccountDO marks sync failure and does not throw", async () => {
+    accountDOState.accessTokenError = {
+      status: 500,
+      body: JSON.stringify({
+        error: "Token refresh failed (400): {\"error\":\"invalid_grant\"}",
+      }),
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-invalid-grant",
+      resource_id: "resource-invalid-grant",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+    expect(accountDOState.syncFailureCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls[0].error).toContain("invalid_grant");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1209,9 +1323,10 @@ const MS_ACCOUNT_B = {
   email: "alice@outlook.com",
 } as const;
 
+const MS_DEFAULT_CALENDAR_ID = "cal_ms_default";
 const MS_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJ-test-ms-token";
-const MS_DELTA_LINK = "https://graph.microsoft.com/v1.0/me/calendars/primary/events/delta?$deltatoken=abc123";
-const MS_NEW_DELTA_LINK = "https://graph.microsoft.com/v1.0/me/calendars/primary/events/delta?$deltatoken=def456";
+const MS_DELTA_LINK = `https://graph.microsoft.com/v1.0/me/calendars/${MS_DEFAULT_CALENDAR_ID}/events/delta?$deltatoken=abc123`;
+const MS_NEW_DELTA_LINK = `https://graph.microsoft.com/v1.0/me/calendars/${MS_DEFAULT_CALENDAR_ID}/events/delta?$deltatoken=def456`;
 
 // ---------------------------------------------------------------------------
 // Microsoft Graph API mock event helper
@@ -1283,6 +1398,26 @@ function createMicrosoftApiFetch(options: {
   return async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 
+    // Resolve provider-agnostic "primary" to Microsoft default calendar ID.
+    if (url.includes("graph.microsoft.com") && url.includes("/me/calendars?") && url.includes("isDefaultCalendar")) {
+      return new Response(
+        JSON.stringify({
+          value: [
+            {
+              id: MS_DEFAULT_CALENDAR_ID,
+              name: "Calendar",
+              isDefaultCalendar: true,
+              canEdit: true,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
     // Handle Microsoft Graph calendar events (including delta queries)
     if (url.includes("graph.microsoft.com") && (url.includes("/events") || url.includes("delta"))) {
       if (options.statusCode && options.statusCode !== 200) {
@@ -1320,6 +1455,26 @@ function createPaginatedMicrosoftApiFetch(pages: Array<{
   let callIndex = 0;
   return async (input: string | URL | Request): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    // Resolve provider-agnostic "primary" to Microsoft default calendar ID.
+    if (url.includes("graph.microsoft.com") && url.includes("/me/calendars?") && url.includes("isDefaultCalendar")) {
+      return new Response(
+        JSON.stringify({
+          value: [
+            {
+              id: MS_DEFAULT_CALENDAR_ID,
+              name: "Calendar",
+              isDefaultCalendar: true,
+              canEdit: true,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
 
     if (url.includes("graph.microsoft.com") && (url.includes("/events") || url.includes("delta"))) {
       const page = pages[callIndex] ?? pages[pages.length - 1];
@@ -1392,6 +1547,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     userGraphDOState = {
       applyDeltaCalls: [],
+      canonicalOriginEvents: [],
     };
 
     env = createMockEnv({

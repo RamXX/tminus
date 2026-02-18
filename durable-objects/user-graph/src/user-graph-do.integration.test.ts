@@ -188,6 +188,30 @@ function insertPolicyEdge(
   );
 }
 
+function insertCalendar(
+  db: DatabaseType,
+  opts: {
+    calendarId: string;
+    accountId: string;
+    providerCalendarId: string;
+    role?: string;
+    kind?: string;
+    displayName?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO calendars (calendar_id, account_id, provider_calendar_id, role, kind, display_name)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.calendarId,
+    opts.accountId,
+    opts.providerCalendarId,
+    opts.role ?? "primary",
+    opts.kind ?? "PRIMARY",
+    opts.displayName ?? null,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -485,6 +509,107 @@ describe("UserGraphDO integration", () => {
       expect(events).toHaveLength(1);
       expect(events[0].title).toBe("Team Standup (Moved)");
     });
+
+    it("rebinds orphaned legacy origin account on update (prevents stale twins)", async () => {
+      const sharedOriginId = "legacy_rebind_update_001";
+
+      // Ensure schema is created before direct table inserts.
+      ug.getSyncHealth();
+
+      // Rebind only activates for accounts with calendar metadata.
+      insertCalendar(db, {
+        calendarId: "cal_test_primary_for_rebind_update",
+        accountId: TEST_ACCOUNT_ID,
+        providerCalendarId: "primary",
+      });
+
+      // Seed a legacy event under a now-orphaned account ID.
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_account_id: OTHER_ACCOUNT_ID,
+            origin_event_id: sharedOriginId,
+            title: "Legacy Copy",
+          },
+        }),
+      ]);
+
+      // Update arrives from the current account for the same provider event.
+      const result = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeUpdatedDelta({
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+          event: {
+            ...makeUpdatedDelta().event!,
+            origin_account_id: TEST_ACCOUNT_ID,
+            origin_event_id: sharedOriginId,
+            title: "Current Truth",
+          },
+        }),
+      ]);
+
+      expect(result.updated).toBe(1);
+      expect(result.errors).toHaveLength(0);
+
+      const events = db
+        .prepare("SELECT origin_account_id, title FROM canonical_events WHERE origin_event_id = ?")
+        .all(sharedOriginId) as Array<{ origin_account_id: string; title: string }>;
+      expect(events).toHaveLength(1);
+      expect(events[0].origin_account_id).toBe(TEST_ACCOUNT_ID);
+      expect(events[0].title).toBe("Current Truth");
+
+      const journal = db
+        .prepare("SELECT patch_json FROM event_journal ORDER BY rowid DESC LIMIT 1")
+        .get() as { patch_json: string };
+      const patch = JSON.parse(journal.patch_json) as Record<string, unknown>;
+      expect(patch.legacy_rebind_from).toBe(OTHER_ACCOUNT_ID);
+    });
+
+    it("does not rebind when matching origin_event_id belongs to a non-orphan account", async () => {
+      const sharedOriginId = "shared_non_orphan_001";
+
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_account_id: OTHER_ACCOUNT_ID,
+            origin_event_id: sharedOriginId,
+          },
+        }),
+      ]);
+
+      // Mark OTHER_ACCOUNT_ID as active in graph metadata (calendar row present).
+      insertCalendar(db, {
+        calendarId: "cal_other_primary",
+        accountId: OTHER_ACCOUNT_ID,
+        providerCalendarId: "primary",
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeUpdatedDelta({
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+          event: {
+            ...makeUpdatedDelta().event!,
+            origin_account_id: TEST_ACCOUNT_ID,
+            origin_event_id: sharedOriginId,
+            title: "Second Account Copy",
+          },
+        }),
+      ]);
+
+      const events = db
+        .prepare("SELECT origin_account_id FROM canonical_events WHERE origin_event_id = ? ORDER BY origin_account_id")
+        .all(sharedOriginId) as Array<{ origin_account_id: string }>;
+      expect(events).toHaveLength(2);
+      const owners = events.map((e) => e.origin_account_id).sort();
+      expect(owners).toEqual([OTHER_ACCOUNT_ID, TEST_ACCOUNT_ID].sort());
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -525,6 +650,53 @@ describe("UserGraphDO integration", () => {
 
       expect(result.deleted).toBe(0);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it("deletes orphaned legacy copy when delete arrives from current account", async () => {
+      const sharedOriginId = "legacy_rebind_delete_001";
+
+      // Ensure schema is created before direct table inserts.
+      ug.getSyncHealth();
+
+      // Rebind only activates for accounts with calendar metadata.
+      insertCalendar(db, {
+        calendarId: "cal_test_primary_for_rebind_delete",
+        accountId: TEST_ACCOUNT_ID,
+        providerCalendarId: "primary",
+      });
+
+      await ug.applyProviderDelta(OTHER_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_account_id: OTHER_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+          event: {
+            ...makeCreatedDelta().event!,
+            origin_account_id: OTHER_ACCOUNT_ID,
+            origin_event_id: sharedOriginId,
+          },
+        }),
+      ]);
+
+      const result = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeDeletedDelta({
+          origin_account_id: TEST_ACCOUNT_ID,
+          origin_event_id: sharedOriginId,
+        }),
+      ]);
+
+      expect(result.deleted).toBe(1);
+      expect(result.errors).toHaveLength(0);
+
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events WHERE origin_event_id = ?")
+        .all(sharedOriginId);
+      expect(events).toHaveLength(0);
+
+      const journal = db
+        .prepare("SELECT patch_json FROM event_journal ORDER BY rowid DESC LIMIT 1")
+        .get() as { patch_json: string };
+      const patch = JSON.parse(journal.patch_json) as Record<string, unknown>;
+      expect(patch.legacy_rebind_from).toBe(OTHER_ACCOUNT_ID);
     });
   });
 
@@ -1119,6 +1291,45 @@ describe("UserGraphDO integration", () => {
       const enqueued = await ug.recomputeProjections();
       expect(enqueued).toBe(0);
       expect(queue.messages).toHaveLength(0);
+    });
+
+    it("force_requeue_non_active re-enqueues unchanged non-active mirrors", async () => {
+      ug.getSyncHealth();
+
+      insertPolicyEdge(db, {
+        policyId: "pol_01TEST000000000000000000001",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+      expect(queue.messages).toHaveLength(1); // initial enqueue
+      queue.clear();
+
+      // Mirror remains non-ACTIVE until write-consumer processes it.
+      const mirrors = db
+        .prepare(
+          `SELECT state FROM event_mirrors
+           WHERE target_account_id = ?`,
+        )
+        .all(OTHER_ACCOUNT_ID) as Array<{ state: string }>;
+      expect(mirrors).toHaveLength(1);
+      expect(mirrors[0].state).toBe("PENDING");
+
+      // Default recompute keeps write-skipping behavior for unchanged hashes.
+      const skipped = await ug.recomputeProjections();
+      expect(skipped).toBe(0);
+      expect(queue.messages).toHaveLength(0);
+
+      // Forced recompute re-enqueues unchanged non-ACTIVE mirrors.
+      const forced = await ug.recomputeProjections({
+        force_requeue_non_active: true,
+      });
+      expect(forced).toBe(1);
+      expect(queue.messages).toHaveLength(1);
+      const msg = queue.messages[0] as Record<string, unknown>;
+      expect(msg.type).toBe("UPSERT_MIRROR");
+      expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
     });
 
     it("recomputes for a single event", async () => {
@@ -1978,6 +2189,67 @@ describe("UserGraphDO integration", () => {
 
       // All edges should be BUSY / BUSY_OVERLAY
       for (const edge of policy!.edges) {
+        expect(edge.detail_level).toBe("BUSY");
+        expect(edge.calendar_kind).toBe("BUSY_OVERLAY");
+      }
+    });
+
+    it("preserves customized existing edges when extending defaults", async () => {
+      const THIRD_ACCOUNT_ID = "acc_01TESTACCOUNT0000000000003" as AccountId;
+
+      await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
+      const initialPolicy = (await ug.listPolicies())[0];
+
+      // Simulate user customization away from BUSY defaults.
+      await ug.setPolicyEdges(initialPolicy.policy_id, [
+        {
+          from_account_id: TEST_ACCOUNT_ID,
+          to_account_id: OTHER_ACCOUNT_ID,
+          detail_level: "TITLE",
+          calendar_kind: "BUSY_OVERLAY",
+        },
+        {
+          from_account_id: OTHER_ACCOUNT_ID,
+          to_account_id: TEST_ACCOUNT_ID,
+          detail_level: "FULL",
+          calendar_kind: "TRUE_MIRROR",
+        },
+      ]);
+
+      // Add a third account. Existing custom edges must not be reset.
+      await ug.ensureDefaultPolicy([
+        TEST_ACCOUNT_ID,
+        OTHER_ACCOUNT_ID,
+        THIRD_ACCOUNT_ID,
+      ]);
+
+      const policy = await ug.getPolicy(initialPolicy.policy_id);
+      expect(policy!.edges).toHaveLength(6);
+
+      const aToB = policy!.edges.find(
+        (e) =>
+          e.from_account_id === TEST_ACCOUNT_ID &&
+          e.to_account_id === OTHER_ACCOUNT_ID,
+      );
+      expect(aToB?.detail_level).toBe("TITLE");
+      expect(aToB?.calendar_kind).toBe("BUSY_OVERLAY");
+
+      const bToA = policy!.edges.find(
+        (e) =>
+          e.from_account_id === OTHER_ACCOUNT_ID &&
+          e.to_account_id === TEST_ACCOUNT_ID,
+      );
+      expect(bToA?.detail_level).toBe("FULL");
+      expect(bToA?.calendar_kind).toBe("TRUE_MIRROR");
+
+      // Newly added account links should get BUSY defaults.
+      const edgeWithThird = policy!.edges.filter(
+        (e) =>
+          e.from_account_id === THIRD_ACCOUNT_ID ||
+          e.to_account_id === THIRD_ACCOUNT_ID,
+      );
+      expect(edgeWithThird).toHaveLength(4);
+      for (const edge of edgeWithThird) {
         expect(edge.detail_level).toBe("BUSY");
         expect(edge.calendar_kind).toBe("BUSY_OVERLAY");
       }

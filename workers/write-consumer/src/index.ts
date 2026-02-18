@@ -37,6 +37,14 @@ import type {
   TokenProvider,
 } from "./write-consumer";
 
+/** Keep Google write throughput below per-user project quotas (600/min). */
+const GOOGLE_WRITE_THROTTLE_MS = 200;
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 // ---------------------------------------------------------------------------
 // DO-backed MirrorStore -- communicates with UserGraphDO via fetch()
 // ---------------------------------------------------------------------------
@@ -291,6 +299,13 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           const providerType: ProviderType = accountRow.provider === "microsoft" ? "microsoft" : "google";
 
+          // Global queue pressure can spike after recompute/full-sync bursts.
+          // A small per-message delay for Google keeps write QPS within
+          // provider quota and prevents retry storms.
+          if (providerType === "google") {
+            await sleep(GOOGLE_WRITE_THROTTLE_MS);
+          }
+
           // Resolve UserGraphDO stub
           const userGraphId = env.USER_GRAPH.idFromName(accountRow.user_id);
           const userGraphStub = env.USER_GRAPH.get(userGraphId);
@@ -323,8 +338,24 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           await cachedMirrorStore.flush();
 
           if (result.retry) {
+            console.error("write-consumer: retrying message", {
+              type: body.type,
+              target_account_id: body.target_account_id,
+              canonical_event_id: body.canonical_event_id,
+              action: result.action,
+              error: result.error ?? null,
+            });
             msg.retry();
           } else {
+            if (!result.success) {
+              console.error("write-consumer: permanent message failure", {
+                type: body.type,
+                target_account_id: body.target_account_id,
+                canonical_event_id: body.canonical_event_id,
+                action: result.action,
+                error: result.error ?? null,
+              });
+            }
             msg.ack();
           }
         } catch (err) {

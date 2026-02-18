@@ -199,6 +199,13 @@ export class GoogleCalendarClient implements CalendarProvider {
     do {
       const params = new URLSearchParams();
 
+      // Expand recurring series into concrete instances so future occurrences
+      // are visible in the canonical store, and include cancelled entries so
+      // delete deltas are observable during sync.
+      params.set("singleEvents", "true");
+      params.set("showDeleted", "true");
+      params.set("maxResults", "2500");
+
       if (syncToken) {
         // Incremental sync -- syncToken is included on every page request
         params.set("syncToken", syncToken);

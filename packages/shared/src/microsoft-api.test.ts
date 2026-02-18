@@ -303,6 +303,67 @@ describe("MicrosoftCalendarClient.listCalendars", () => {
 // ---------------------------------------------------------------------------
 
 describe("MicrosoftCalendarClient.listEvents", () => {
+  it("resolves 'primary' to default calendar ID before listing events", async () => {
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === `${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`) {
+        return new Response(
+          JSON.stringify({
+            value: [{ id: "ms_default_cal", isDefaultCalendar: true, name: "Calendar" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          value: [],
+          "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=abc",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as FetchFn;
+
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    await client.listEvents("primary");
+
+    const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0]).toBe(`${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`);
+    expect(calls[1][0]).toBe(
+      `${BASE_URL}/me/calendars/ms_default_cal/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')`,
+    );
+  });
+
+  it("caches resolved default calendar ID for repeated 'primary' calls", async () => {
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === `${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`) {
+        return new Response(
+          JSON.stringify({
+            value: [{ id: "ms_default_cal", isDefaultCalendar: true, name: "Calendar" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          value: [],
+          "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=abc",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as FetchFn;
+
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    await client.listEvents("primary");
+    await client.listEvents("primary");
+
+    const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
+    const lookupCalls = calls.filter(
+      ([url]) =>
+        url === `${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`,
+    );
+    expect(lookupCalls).toHaveLength(1);
+  });
+
   it("sends GET to /me/calendars/{id}/events with filtered $expand for full sync (no syncToken)", async () => {
     const fetchFn = mockFetch({
       value: [
@@ -324,6 +385,17 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     expect(url).toBe(
       `${BASE_URL}/me/calendars/cal_1/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')`,
     );
+  });
+
+  it("URL-encodes calendar IDs in listEvents path", async () => {
+    const fetchFn = mockFetch({ value: [] });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const calendarId = "AAMkAGI2TQABAAA=/AQMk-raw";
+
+    await client.listEvents(calendarId);
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain(`/me/calendars/${encodeURIComponent(calendarId)}/events`);
   });
 
   it("returns events mapped to GoogleCalendarEvent shape", async () => {
@@ -478,6 +550,29 @@ describe("MicrosoftCalendarClient.listEvents", () => {
 // ---------------------------------------------------------------------------
 
 describe("MicrosoftCalendarClient.insertEvent", () => {
+  it("resolves 'primary' to default calendar ID before insert", async () => {
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === `${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`) {
+        return new Response(
+          JSON.stringify({
+            value: [{ id: "ms_default_cal", isDefaultCalendar: true, name: "Calendar" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ id: "ms_new_evt_123" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as FetchFn;
+
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    await client.insertEvent("primary", sampleProjectedEvent());
+
+    const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[1][0]).toBe(`${BASE_URL}/me/calendars/ms_default_cal/events`);
+  });
+
   it("sends POST to /me/calendars/{id}/events with correct body", async () => {
     const fetchFn = mockFetch({ id: "ms_new_evt_123" });
     const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
@@ -497,6 +592,19 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
     expect(sentBody.subject).toBe("Busy");
     expect(sentBody.start).toBeDefined();
     expect(sentBody.end).toBeDefined();
+  });
+
+  it("URL-encodes calendar IDs in insertEvent path", async () => {
+    const fetchFn = mockFetch({ id: "ms_evt_encoded" });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const calendarId = "AAMkAGI2TQABAAA=/AQMk-raw";
+
+    await client.insertEvent(calendarId, sampleProjectedEvent());
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(
+      `${BASE_URL}/me/calendars/${encodeURIComponent(calendarId)}/events`,
+    );
   });
 
   it("maps ProjectedEvent to Microsoft Graph event format", async () => {
@@ -533,6 +641,30 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
     expect(sentBody.sensitivity).toBe("private");
   });
 
+  it("maps all-day dates to Microsoft isAllDay payload", async () => {
+    const fetchFn = mockFetch({ id: "ms_evt_all_day" });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const event: ProjectedEvent = {
+      summary: "All Day",
+      start: { date: "2026-02-20", timeZone: "UTC" },
+      end: { date: "2026-02-21", timeZone: "UTC" },
+    };
+
+    await client.insertEvent("cal_1", event);
+
+    const [, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.isAllDay).toBe(true);
+    expect(sentBody.start).toEqual({
+      dateTime: "2026-02-20T00:00:00",
+      timeZone: "UTC",
+    });
+    expect(sentBody.end).toEqual({
+      dateTime: "2026-02-21T00:00:00",
+      timeZone: "UTC",
+    });
+  });
+
   it("includes T-Minus open extension for managed markers", async () => {
     const fetchFn = mockFetch({ id: "ms_evt_ext" });
     const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
@@ -544,7 +676,7 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
     const sentBody = JSON.parse(init.body);
     expect(sentBody.extensions).toBeDefined();
     expect(sentBody.extensions).toHaveLength(1);
-    expect(sentBody.extensions[0]["@odata.type"]).toBe("microsoft.graph.openExtension");
+    expect(sentBody.extensions[0]["@odata.type"]).toBe("microsoft.graph.openTypeExtension");
     expect(sentBody.extensions[0].extensionName).toBe("com.tminus.metadata");
     expect(sentBody.extensions[0].tminus).toBe("true");
     expect(sentBody.extensions[0].managed).toBe("true");
@@ -595,6 +727,17 @@ describe("MicrosoftCalendarClient.patchEvent", () => {
 
     expect(result).toBeUndefined();
   });
+
+  it("URL-encodes event IDs in patchEvent path", async () => {
+    const fetchFn = mockFetch({ id: "ms_evt_encoded" });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const eventId = "AAMkAGI2TQABAAA=/AAABBB==";
+
+    await client.patchEvent("cal_1", eventId, { summary: "Encoded" });
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(`${BASE_URL}/me/events/${encodeURIComponent(eventId)}`);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -620,6 +763,17 @@ describe("MicrosoftCalendarClient.deleteEvent", () => {
     const result = await client.deleteEvent("cal_1", "ms_evt_123");
 
     expect(result).toBeUndefined();
+  });
+
+  it("URL-encodes event IDs in deleteEvent path", async () => {
+    const fetchFn = mockFetch204();
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const eventId = "AAMkAGI2TQABAAA=/AAABBB==";
+
+    await client.deleteEvent("cal_1", eventId);
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(`${BASE_URL}/me/events/${encodeURIComponent(eventId)}`);
   });
 });
 
@@ -651,6 +805,34 @@ describe("MicrosoftCalendarClient.insertCalendar", () => {
 // ---------------------------------------------------------------------------
 
 describe("MicrosoftCalendarClient.watchEvents", () => {
+  it("resolves 'primary' to default calendar ID before subscription", async () => {
+    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+      if (String(url) === `${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`) {
+        return new Response(
+          JSON.stringify({
+            value: [{ id: "ms_default_cal", isDefaultCalendar: true, name: "Calendar" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          id: "sub_abc123",
+          resource: "/me/calendars/ms_default_cal/events",
+          expirationDateTime: "2025-06-18T09:00:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as FetchFn;
+
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    await client.watchEvents("primary", "https://api.tminus.app/webhook/microsoft", "channel_unused", "client_state_secret");
+
+    const [, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[1];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.resource).toBe("/me/calendars/ms_default_cal/events");
+  });
+
   it("sends POST to /subscriptions with correct body", async () => {
     const fetchFn = mockFetch({
       id: "sub_abc123",
@@ -703,6 +885,24 @@ describe("MicrosoftCalendarClient.watchEvents", () => {
     expect(diffDays).toBeGreaterThan(2.9);
     expect(diffDays).toBeLessThan(3.1);
   });
+
+  it("URL-encodes calendar IDs in subscription resource", async () => {
+    const fetchFn = mockFetch({
+      id: "sub_encoded",
+      resource: "/me/calendars/encoded/events",
+      expirationDateTime: "2025-06-18T09:00:00Z",
+    });
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const calendarId = "AAMkAGI2TQABAAA=/AQMk-raw";
+
+    await client.watchEvents(calendarId, "https://hook.test", "ch", "secret");
+
+    const [, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.resource).toBe(
+      `/me/calendars/${encodeURIComponent(calendarId)}/events`,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -728,6 +928,17 @@ describe("MicrosoftCalendarClient.stopChannel", () => {
     const result = await client.stopChannel("sub_1", "res_unused");
 
     expect(result).toBeUndefined();
+  });
+
+  it("URL-encodes subscription IDs in stopChannel path", async () => {
+    const fetchFn = mockFetch204();
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+    const channelId = "sub/abc==";
+
+    await client.stopChannel(channelId, "res_unused");
+
+    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(`${BASE_URL}/subscriptions/${encodeURIComponent(channelId)}`);
   });
 });
 
@@ -772,6 +983,47 @@ describe("MicrosoftCalendarClient -- error handling", () => {
       expect(err).toBeInstanceOf(MicrosoftRateLimitError);
       expect((err as MicrosoftRateLimitError).retryAfterSeconds).toBe(30);
     }
+  });
+
+  it("retries mailbox concurrency throttling and succeeds", async () => {
+    let callCount = 0;
+    const fetchFn = vi.fn(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "ErrorExceededConnectionCount",
+              message: "Application is over its MailboxConcurrency limit.",
+            },
+          }),
+          {
+            status: 503,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": "0",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          value: [],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }) as FetchFn;
+
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn, {
+      enableRateLimiting: false,
+    });
+    const calendars = await client.listCalendars();
+
+    expect(calendars).toEqual([]);
+    expect(callCount).toBe(2);
   });
 
   it("throws MicrosoftApiError on 403 Forbidden", async () => {
@@ -823,6 +1075,7 @@ describe("MicrosoftCalendarClient -- error handling", () => {
     const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
 
     await expect(client.insertCalendar("Test")).rejects.toThrow(MicrosoftApiError);
+    expect((fetchFn as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
 
     try {
       await client.insertCalendar("Test");

@@ -335,6 +335,7 @@ export interface SyncHealth {
 /** Scope for recomputeProjections. */
 export interface RecomputeScope {
   readonly canonical_event_id?: string;
+  readonly force_requeue_non_active?: boolean;
 }
 
 /** Result of an account unlink cascade. */
@@ -651,6 +652,101 @@ export class UserGraphDO {
   // handleCreated / handleUpdated / handleDeleted
   // -------------------------------------------------------------------------
 
+  /**
+   * Returns true when an origin account appears detached from the active graph.
+   *
+   * This is used as a safety gate for legacy origin-account rebinds:
+   * we only auto-rebind events when the old account has no calendars and no
+   * policy edges, which indicates stale/orphaned ownership metadata.
+   */
+  private isLikelyOrphanOriginAccount(accountId: string): boolean {
+    if (!accountId || accountId === "internal") return false;
+
+    const calendarCount = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt FROM calendars WHERE account_id = ?`,
+        accountId,
+      )
+      .toArray()[0].cnt;
+
+    if (calendarCount > 0) return false;
+
+    const policyEdgeCount = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM policy_edges
+         WHERE from_account_id = ? OR to_account_id = ?`,
+        accountId,
+        accountId,
+      )
+      .toArray()[0].cnt;
+
+    return policyEdgeCount === 0;
+  }
+
+  /** True when the account has at least one known calendar in the graph. */
+  private hasCalendar(accountId: string): boolean {
+    const count = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt FROM calendars WHERE account_id = ?`,
+        accountId,
+      )
+      .toArray()[0].cnt;
+    return count > 0;
+  }
+
+  /**
+   * Find a single legacy canonical event for the same origin_event_id that can
+   * be safely rebound to the current account.
+   *
+   * Guardrails:
+   * - candidate must be source='provider'
+   * - candidate must belong to a different origin_account_id
+   * - there must be exactly ONE such candidate
+   * - candidate origin account must look orphaned in this graph
+   */
+  private findLegacyRebindCandidate(
+    accountId: string,
+    originEventId: string,
+  ): { canonical_event_id: string; origin_account_id: string; version: number } | null {
+    // Only attempt auto-rebind for accounts that are already fully represented
+    // in the graph (calendar metadata exists). This avoids rebinds during
+    // partial onboarding and preserves legitimate cross-account duplicates.
+    if (!this.hasCalendar(accountId)) return null;
+
+    const rows = this.sql
+      .exec<{
+        canonical_event_id: string;
+        origin_account_id: string;
+        source: string;
+        version: number;
+      }>(
+        `SELECT canonical_event_id, origin_account_id, source, version
+         FROM canonical_events
+         WHERE origin_event_id = ?`,
+        originEventId,
+      )
+      .toArray()
+      .filter(
+        (row) =>
+          row.origin_account_id !== accountId &&
+          row.source === "provider",
+      );
+
+    if (rows.length !== 1) return null;
+
+    const candidate = rows[0];
+    if (!this.isLikelyOrphanOriginAccount(candidate.origin_account_id)) {
+      return null;
+    }
+
+    return {
+      canonical_event_id: candidate.canonical_event_id,
+      origin_account_id: candidate.origin_account_id,
+      version: candidate.version,
+    };
+  }
+
   private async handleCreated(
     accountId: string,
     delta: ProviderDelta,
@@ -714,6 +810,52 @@ export class UserGraphDO {
       return canonicalId;
     }
 
+    // Legacy recovery path:
+    // if an event exists under a stale/orphaned origin account with the same
+    // origin_event_id, rebind ownership to the current account and update
+    // in-place instead of inserting a duplicate canonical event.
+    const legacy = this.findLegacyRebindCandidate(
+      accountId,
+      delta.origin_event_id,
+    );
+    if (legacy) {
+      const canonicalId = legacy.canonical_event_id;
+      const newVersion = legacy.version + 1;
+
+      this.sql.exec(
+        `UPDATE canonical_events SET
+          origin_account_id = ?,
+          title = ?, description = ?, location = ?,
+          start_ts = ?, end_ts = ?, timezone = ?,
+          all_day = ?, status = ?, visibility = ?,
+          transparency = ?, recurrence_rule = ?,
+          version = ?, updated_at = datetime('now')
+         WHERE canonical_event_id = ?`,
+        accountId,
+        evt.title ?? null,
+        evt.description ?? null,
+        evt.location ?? null,
+        startTs,
+        endTs,
+        evt.start.timeZone ?? null,
+        evt.all_day ? 1 : 0,
+        evt.status ?? "confirmed",
+        evt.visibility ?? "default",
+        evt.transparency ?? "opaque",
+        evt.recurrence_rule ?? null,
+        newVersion,
+        canonicalId,
+      );
+
+      this.writeJournal(canonicalId, "updated", `provider:${accountId}`, {
+        origin_event_id: delta.origin_event_id,
+        dedup: true,
+        legacy_rebind_from: legacy.origin_account_id,
+      });
+
+      return canonicalId;
+    }
+
     // New event -- insert with a fresh canonical_event_id
     const canonicalId = generateId("event");
 
@@ -765,45 +907,91 @@ export class UserGraphDO {
       )
       .toArray();
 
-    if (rows.length === 0) {
-      // Not found -- treat as create (could be a race or missed initial sync)
-      return this.handleCreated(accountId, delta);
+    let canonicalId: string;
+    let newVersion: number;
+    let legacyRebindFrom: string | null = null;
+
+    if (rows.length > 0) {
+      canonicalId = rows[0].canonical_event_id;
+      newVersion = rows[0].version + 1;
+    } else {
+      const legacy = this.findLegacyRebindCandidate(
+        accountId,
+        delta.origin_event_id,
+      );
+      if (!legacy) {
+        // Not found -- treat as create (could be a race or missed initial sync)
+        return this.handleCreated(accountId, delta);
+      }
+
+      canonicalId = legacy.canonical_event_id;
+      newVersion = legacy.version + 1;
+      legacyRebindFrom = legacy.origin_account_id;
     }
 
-    const canonicalId = rows[0].canonical_event_id;
-    const newVersion = rows[0].version + 1;
     const evt = delta.event;
 
     const startTs = evt.start.dateTime ?? evt.start.date ?? "";
     const endTs = evt.end.dateTime ?? evt.end.date ?? "";
 
-    this.sql.exec(
-      `UPDATE canonical_events SET
-        title = ?, description = ?, location = ?,
-        start_ts = ?, end_ts = ?, timezone = ?,
-        all_day = ?, status = ?, visibility = ?,
-        transparency = ?, recurrence_rule = ?,
-        version = ?, updated_at = datetime('now')
-       WHERE canonical_event_id = ?`,
-      evt.title ?? null,
-      evt.description ?? null,
-      evt.location ?? null,
-      startTs,
-      endTs,
-      evt.start.timeZone ?? null,
-      evt.all_day ? 1 : 0,
-      evt.status ?? "confirmed",
-      evt.visibility ?? "default",
-      evt.transparency ?? "opaque",
-      evt.recurrence_rule ?? null,
-      newVersion,
-      canonicalId,
-    );
+    if (legacyRebindFrom) {
+      this.sql.exec(
+        `UPDATE canonical_events SET
+          origin_account_id = ?,
+          title = ?, description = ?, location = ?,
+          start_ts = ?, end_ts = ?, timezone = ?,
+          all_day = ?, status = ?, visibility = ?,
+          transparency = ?, recurrence_rule = ?,
+          version = ?, updated_at = datetime('now')
+         WHERE canonical_event_id = ?`,
+        accountId,
+        evt.title ?? null,
+        evt.description ?? null,
+        evt.location ?? null,
+        startTs,
+        endTs,
+        evt.start.timeZone ?? null,
+        evt.all_day ? 1 : 0,
+        evt.status ?? "confirmed",
+        evt.visibility ?? "default",
+        evt.transparency ?? "opaque",
+        evt.recurrence_rule ?? null,
+        newVersion,
+        canonicalId,
+      );
+    } else {
+      this.sql.exec(
+        `UPDATE canonical_events SET
+          title = ?, description = ?, location = ?,
+          start_ts = ?, end_ts = ?, timezone = ?,
+          all_day = ?, status = ?, visibility = ?,
+          transparency = ?, recurrence_rule = ?,
+          version = ?, updated_at = datetime('now')
+         WHERE canonical_event_id = ?`,
+        evt.title ?? null,
+        evt.description ?? null,
+        evt.location ?? null,
+        startTs,
+        endTs,
+        evt.start.timeZone ?? null,
+        evt.all_day ? 1 : 0,
+        evt.status ?? "confirmed",
+        evt.visibility ?? "default",
+        evt.transparency ?? "opaque",
+        evt.recurrence_rule ?? null,
+        newVersion,
+        canonicalId,
+      );
+    }
 
-    this.writeJournal(canonicalId, "updated", `provider:${accountId}`, {
+    const patch: Record<string, unknown> = {
       origin_event_id: delta.origin_event_id,
       new_version: newVersion,
-    });
+    };
+    if (legacyRebindFrom) {
+      patch.legacy_rebind_from = legacyRebindFrom;
+    }
+    this.writeJournal(canonicalId, "updated", `provider:${accountId}`, patch);
 
     return canonicalId;
   }
@@ -822,11 +1010,21 @@ export class UserGraphDO {
       )
       .toArray();
 
-    if (rows.length === 0) {
-      return null; // Nothing to delete
+    let canonicalId: string;
+    let legacyRebindFrom: string | null = null;
+    if (rows.length > 0) {
+      canonicalId = rows[0].canonical_event_id;
+    } else {
+      const legacy = this.findLegacyRebindCandidate(
+        accountId,
+        delta.origin_event_id,
+      );
+      if (!legacy) {
+        return null; // Nothing to delete
+      }
+      canonicalId = legacy.canonical_event_id;
+      legacyRebindFrom = legacy.origin_account_id;
     }
-
-    const canonicalId = rows[0].canonical_event_id;
 
     // Enqueue DELETE_MIRROR for all existing mirrors BEFORE deleting the event
     const mirrors = this.sql
@@ -861,9 +1059,13 @@ export class UserGraphDO {
     );
 
     // Journal entry records the deletion
-    this.writeJournal(canonicalId, "deleted", `provider:${accountId}`, {
+    const patch: Record<string, unknown> = {
       origin_event_id: delta.origin_event_id,
-    });
+    };
+    if (legacyRebindFrom) {
+      patch.legacy_rebind_from = legacyRebindFrom;
+    }
+    this.writeJournal(canonicalId, "deleted", `provider:${accountId}`, patch);
 
     return { mirrorsDeleted };
   }
@@ -882,6 +1084,7 @@ export class UserGraphDO {
   private async projectAndEnqueue(
     canonicalEventId: string,
     originAccountId: string,
+    opts: { forceRequeueNonActive?: boolean } = {},
   ): Promise<number> {
     // Load the canonical event
     const eventRows = this.sql
@@ -934,8 +1137,13 @@ export class UserGraphDO {
 
       if (mirrorRows.length > 0) {
         const existing = mirrorRows[0];
-        // Write-skipping: if hash is identical, skip (Invariant C)
-        if (existing.last_projected_hash === projectedHash) {
+        // Write-skipping: if hash is identical and mirror is ACTIVE, skip.
+        // When explicitly forced, non-ACTIVE mirrors (e.g., stale PENDING)
+        // are re-enqueued even with identical projection hash.
+        if (
+          existing.last_projected_hash === projectedHash &&
+          (!opts.forceRequeueNonActive || existing.state === "ACTIVE")
+        ) {
           continue;
         }
         // Hash differs -- update mirror record and enqueue write
@@ -1315,6 +1523,7 @@ export class UserGraphDO {
       totalEnqueued += await this.projectAndEnqueue(
         evtRow.canonical_event_id,
         evtRow.origin_account_id,
+        { forceRequeueNonActive: scope.force_requeue_non_active },
       );
     }
 
@@ -1581,7 +1790,9 @@ export class UserGraphDO {
 
     // Recompute all projections: re-evaluate all canonical events against
     // the updated policy edges and enqueue UPSERT_MIRROR for changes.
-    await this.recomputeProjections();
+    // Force requeue for non-ACTIVE mirrors so policy saves can recover
+    // stale PENDING/ERROR rows that otherwise hash-skip forever.
+    await this.recomputeProjections({ force_requeue_non_active: true });
   }
 
   /**
@@ -1589,9 +1800,10 @@ export class UserGraphDO {
    * between all provided accounts.
    *
    * - Creates the default policy if it does not yet exist.
-   * - Replaces all edges with the full mesh of bidirectional BUSY edges
-   *   for the given accounts. This makes it idempotent and additive:
-   *   calling with [A, B] then [A, B, C] extends to include C.
+   * - Preserves any existing edge detail/calendar settings and only inserts
+   *   missing edges as BUSY/BUSY_OVERLAY defaults.
+   * - Calling with [A, B] then [A, B, C] extends to include C without
+   *   resetting previously customized edges back to BUSY.
    */
   async ensureDefaultPolicy(accounts: string[]): Promise<void> {
     this.ensureMigrated();
@@ -1615,13 +1827,9 @@ export class UserGraphDO {
       );
     }
 
-    // Build bidirectional edges between all distinct pairs
-    // Delete existing edges and replace with the full mesh
-    this.sql.exec(
-      `DELETE FROM policy_edges WHERE policy_id = ?`,
-      policyId,
-    );
-
+    // Build bidirectional edges between all distinct pairs.
+    // Do NOT wipe existing edges -- preserve any customized detail_level
+    // and calendar_kind choices that users previously set.
     for (let i = 0; i < accounts.length; i++) {
       for (let j = 0; j < accounts.length; j++) {
         if (i === j) continue;

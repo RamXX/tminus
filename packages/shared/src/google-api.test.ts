@@ -105,7 +105,11 @@ describe("GoogleCalendarClient.listEvents", () => {
 
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const [url, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe(`${BASE_URL}/calendars/primary/events?`);
+    const parsed = new URL(url);
+    expect(parsed.origin + parsed.pathname).toBe(`${BASE_URL}/calendars/primary/events`);
+    expect(parsed.searchParams.get("singleEvents")).toBe("true");
+    expect(parsed.searchParams.get("showDeleted")).toBe("true");
+    expect(parsed.searchParams.get("maxResults")).toBe("2500");
     expect(init.method).toBe("GET");
     expect(new Headers(init.headers).get("Authorization")).toBe(`Bearer ${TEST_TOKEN}`);
   });
@@ -240,6 +244,8 @@ describe("GoogleCalendarClient.listEvents", () => {
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toContain("syncToken=sync_old");
+    expect(url).toContain("singleEvents=true");
+    expect(url).toContain("showDeleted=true");
     expect(result.events).toHaveLength(1);
     expect(result.nextSyncToken).toBe("sync_new");
   });

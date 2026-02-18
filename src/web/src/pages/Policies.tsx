@@ -277,6 +277,8 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
         <div
           data-testid="policy-status"
           data-status-type={status.type}
+          role="status"
+          aria-live="polite"
           style={{
             ...styles.statusMessage,
             ...(status.type === "success"
@@ -449,11 +451,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontStyle: "italic",
   },
   statusMessage: {
+    position: "fixed",
+    top: "1rem",
+    right: "1rem",
+    left: "1rem",
+    maxWidth: "420px",
+    marginLeft: "auto",
+    zIndex: 40,
+    pointerEvents: "none",
     padding: "0.5rem 1rem",
     borderRadius: "6px",
     fontSize: "0.875rem",
     fontWeight: 500,
-    marginBottom: "1rem",
+    boxShadow: "0 8px 20px rgba(2, 6, 23, 0.45)",
   },
   statusSuccess: {
     backgroundColor: "#064e3b",

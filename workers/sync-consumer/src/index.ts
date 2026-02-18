@@ -135,7 +135,20 @@ export async function handleIncrementalSync(
   const provider = await lookupProvider(account_id, env);
 
   // Step 2: Get access token from AccountDO
-  const accessToken = await getAccessToken(account_id, env);
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken(account_id, env);
+  } catch (err) {
+    if (isPermanentAccessTokenFailure(err)) {
+      await markSyncFailure(
+        account_id,
+        env,
+        "Token refresh failed (invalid_grant). Re-link this account.",
+      );
+      return;
+    }
+    throw err;
+  }
 
   // Step 3: Get sync token (for Google: syncToken, for Microsoft: deltaLink URL)
   const syncToken = await getSyncToken(account_id, env);
@@ -238,7 +251,20 @@ export async function handleFullSync(
   const provider = await lookupProvider(account_id, env);
 
   // Get access token
-  const accessToken = await getAccessToken(account_id, env);
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken(account_id, env);
+  } catch (err) {
+    if (isPermanentAccessTokenFailure(err)) {
+      await markSyncFailure(
+        account_id,
+        env,
+        "Token refresh failed (invalid_grant). Re-link this account.",
+      );
+      return;
+    }
+    throw err;
+  }
   const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
   let pageToken: string | undefined;
@@ -295,6 +321,15 @@ export async function handleFullSync(
   // Process all events using provider-specific classification/normalization
   const deltasApplied = await processAndApplyDeltas(account_id, allEvents, env, provider);
 
+  // Full sync convergence: prune stale provider-origin canonicals that no longer
+  // exist upstream. Without this, explicit full resyncs can still leave deletes behind.
+  const prunedDeleted = await pruneMissingOriginEvents(
+    account_id,
+    allEvents,
+    env,
+    provider,
+  );
+
   // Update sync cursor (syncToken for Google, deltaLink for Microsoft)
   if (lastSyncToken) {
     await setSyncToken(account_id, env, lastSyncToken);
@@ -304,7 +339,7 @@ export async function handleFullSync(
   await markSyncSuccess(account_id, env);
 
   console.log(
-    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied`,
+    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${prunedDeleted} stale origin events pruned`,
   );
 }
 
@@ -380,6 +415,219 @@ async function processAndApplyDeltas(
   }
 
   return deltas.length;
+}
+
+/**
+ * During full sync, remove stale canonical origin events that no longer exist
+ * in the upstream provider.
+ */
+async function pruneMissingOriginEvents(
+  accountId: AccountId,
+  providerEvents: GoogleCalendarEvent[],
+  env: Env,
+  provider: ProviderType,
+): Promise<number> {
+  const providerOriginIds = collectOriginEventIds(providerEvents, provider);
+  const userId = await lookupUserId(accountId, env);
+  if (!userId) return 0;
+
+  const canonicalOrigins = await listCanonicalOriginEvents(accountId, userId, env);
+  if (canonicalOrigins.length === 0) return 0;
+
+  const missing = canonicalOrigins.filter((origin) => !providerOriginIds.has(origin.originEventId));
+  if (missing.length === 0) return 0;
+
+  // Google full list responses can omit some historical/special entries even
+  // though direct GET by event ID still succeeds. Restrict pruning to events
+  // that are recent or in the future to avoid deleting valid long-tail history.
+  const pruneBase = canonicalOrigins.filter((origin) => isPruneWindowEvent(origin.startTs));
+  const prunable = missing.filter((origin) => isPruneWindowEvent(origin.startTs));
+  if (prunable.length === 0) return 0;
+
+  // Guardrail: if a large fraction appears missing, skip pruning to avoid
+  // accidental mass-deletes on partial provider responses.
+  const denominator = pruneBase.length;
+  const missingRatio = denominator > 0 ? prunable.length / denominator : 0;
+  if (denominator >= 50 && missingRatio > 0.3) {
+    console.warn(
+      `sync-consumer: prune skipped for account ${accountId} -- suspiciously high missing ratio (${prunable.length}/${denominator})`,
+    );
+    return 0;
+  }
+
+  return applyDeletedOriginDeltas(
+    accountId,
+    userId,
+    prunable.map((origin) => origin.originEventId),
+    env,
+  );
+}
+
+/**
+ * Collect origin event IDs from provider payloads (managed mirrors excluded).
+ */
+function collectOriginEventIds(
+  providerEvents: readonly GoogleCalendarEvent[],
+  provider: ProviderType,
+): Set<string> {
+  const ids = new Set<string>();
+  const classificationStrategy = getClassificationStrategy(provider);
+
+  for (const event of providerEvents) {
+    const rawEvent = ((event as Record<string, unknown>)._msRaw ?? event) as Record<string, unknown>;
+    const classification = classificationStrategy.classify(rawEvent);
+    if (classification === "managed_mirror") continue;
+
+    const originEventId = rawEvent.id;
+    if (typeof originEventId === "string" && originEventId.length > 0) {
+      ids.add(originEventId);
+    }
+  }
+
+  return ids;
+}
+
+/**
+ * Detect non-retryable AccountDO token refresh failures.
+ *
+ * invalid_grant means the upstream refresh token is revoked/expired and no
+ * amount of queue retries will recover without user re-auth.
+ */
+function isPermanentAccessTokenFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message ?? "";
+  return msg.includes("AccountDO.getAccessToken failed") && msg.includes("invalid_grant");
+}
+
+const PRUNE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
+
+function isPruneWindowEvent(startTs: string | null): boolean {
+  if (!startTs) return false;
+  const startMs = Date.parse(startTs);
+  if (Number.isNaN(startMs)) return false;
+  return startMs >= Date.now() - PRUNE_LOOKBACK_MS;
+}
+
+function extractStartTimestamp(
+  start: { dateTime?: string; date?: string } | string | null | undefined,
+): string | null {
+  if (!start) return null;
+  if (typeof start === "string") return start;
+  if (typeof start.dateTime === "string") return start.dateTime;
+  if (typeof start.date === "string") return start.date;
+  return null;
+}
+
+interface CanonicalOriginEvent {
+  originEventId: string;
+  startTs: string | null;
+}
+
+/**
+ * List canonical provider-origin events for an account from UserGraphDO.
+ */
+async function listCanonicalOriginEvents(
+  accountId: AccountId,
+  userId: string,
+  env: Env,
+): Promise<CanonicalOriginEvent[]> {
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+
+  const events: CanonicalOriginEvent[] = [];
+  let cursor: string | null = null;
+
+  do {
+    const response = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/listCanonicalEvents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin_account_id: accountId,
+          source: "provider",
+          limit: 500,
+          ...(cursor ? { cursor } : {}),
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `UserGraphDO.listCanonicalEvents failed (${response.status}): ${body}`,
+      );
+    }
+
+    const data = (await response.json()) as {
+      items: Array<{
+        origin_event_id?: string;
+        start?: {
+          dateTime?: string;
+          date?: string;
+        } | string | null;
+      }>;
+      cursor: string | null;
+      has_more: boolean;
+    };
+
+    for (const item of data.items ?? []) {
+      if (typeof item.origin_event_id === "string" && item.origin_event_id.length > 0) {
+        events.push({
+          originEventId: item.origin_event_id,
+          startTs: extractStartTimestamp(item.start),
+        });
+      }
+    }
+
+    cursor = data.cursor ?? null;
+  } while (cursor);
+
+  return events;
+}
+
+/**
+ * Apply synthetic delete deltas for stale origin events, in chunks.
+ */
+async function applyDeletedOriginDeltas(
+  accountId: AccountId,
+  userId: string,
+  originEventIds: string[],
+  env: Env,
+): Promise<number> {
+  if (originEventIds.length === 0) return 0;
+
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const chunkSize = 200;
+  let deleted = 0;
+
+  for (let i = 0; i < originEventIds.length; i += chunkSize) {
+    const chunk = originEventIds.slice(i, i + chunkSize);
+    const deltas: ProviderDelta[] = chunk.map((originEventId) => ({
+      type: "deleted",
+      origin_account_id: accountId,
+      origin_event_id: originEventId,
+    }));
+
+    const response = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/applyProviderDelta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_id: accountId, deltas }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `UserGraphDO.applyProviderDelta (prune) failed (${response.status}): ${body}`,
+      );
+    }
+
+    deleted += chunk.length;
+  }
+
+  return deleted;
 }
 
 /**
