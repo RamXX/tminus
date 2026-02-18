@@ -233,6 +233,12 @@ export async function handleUpdateEvent(
       merged.end = { ...(existingEvent.end as Record<string, unknown>), ...(body.end as Record<string, unknown>) };
     }
 
+    // Note: origin_account_id is intentionally omitted from `merged`.
+    // PATCH targets an existing event (verified by the getCanonicalEvent call
+    // above), so upsertCanonicalEvent takes the UPDATE path where
+    // origin_account_id is never modified. If the event were somehow missing,
+    // the INSERT path defaults origin_account_id to 'api' (safe default
+    // established in TM-4u17).
     const result = await callDO<string>(
       env.USER_GRAPH,
       auth.userId,
