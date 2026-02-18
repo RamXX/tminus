@@ -86,6 +86,7 @@ import {
 
 function Router() {
   const { token, user } = useAuth();
+  const hasOAuthCompletionParams = new URL(window.location.href).searchParams.has("account_id");
   const [route, setRoute] = useState(window.location.hash || "#/");
   const [accountsCount, setAccountsCount] = useState(0);
   const [userTier, setUserTier] = useState<string>("free");
@@ -473,7 +474,9 @@ function Router() {
   }
 
   if (token && (route === "#/login" || route === "#/")) {
-    window.location.hash = "#/calendar";
+    window.location.hash = hasOAuthCompletionParams
+      ? "#/accounts?linked=true"
+      : "#/calendar";
     return null;
   }
 

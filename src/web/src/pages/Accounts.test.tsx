@@ -225,14 +225,14 @@ describe("Accounts Page", () => {
     it("builds correct Google OAuth start URL", () => {
       const url = buildOAuthStartUrl("google", "usr_test_123");
       expect(url).toBe(
-        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
 
     it("builds correct Microsoft OAuth start URL", () => {
       const url = buildOAuthStartUrl("microsoft", "usr_test_123");
       expect(url).toBe(
-        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
 
@@ -451,7 +451,7 @@ describe("Accounts Page", () => {
 
       expect(navigateToOAuth).toHaveBeenCalledTimes(1);
       expect(navigateToOAuth).toHaveBeenCalledWith(
-        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+        "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
 
@@ -463,7 +463,7 @@ describe("Accounts Page", () => {
 
       expect(navigateToOAuth).toHaveBeenCalledTimes(1);
       expect(navigateToOAuth).toHaveBeenCalledWith(
-        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts",
+        "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
 

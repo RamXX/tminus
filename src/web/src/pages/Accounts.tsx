@@ -108,17 +108,31 @@ export function Accounts({
     loadAccounts();
 
     // Check URL for OAuth callback indicators.
-    // The OAuth worker redirects back to app.tminus.ink/#/accounts?linked=true
-    // after successful account linking.
+    // OAuth callback may return params in URL search (?account_id=...)
+    // while route information lives in hash (#/accounts?linked=true).
+    const url = new URL(window.location.href);
+    const linkedAccountId = url.searchParams.get("account_id");
+    const linkedEmail = url.searchParams.get("email");
     const hash = window.location.hash;
-    if (hash.includes("linked=true")) {
-      showStatus("success", "Account linked successfully.");
-      // Clean the URL to remove query params from hash
-      window.location.hash = "#/accounts";
+    if (linkedAccountId) {
+      showStatus(
+        "success",
+        linkedEmail
+          ? `Account linked successfully: ${linkedEmail}`
+          : "Account linked successfully.",
+      );
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}#/accounts`,
+      );
     } else if (hash.includes("error=")) {
       const match = hash.match(/error=([^&]*)/);
       const errorMsg = match ? decodeURIComponent(match[1]) : "Unknown error";
       showStatus("error", `Failed to link account: ${errorMsg}`);
+      window.location.hash = "#/accounts";
+    } else if (hash.includes("linked=true")) {
+      showStatus("success", "Account linked successfully.");
       window.location.hash = "#/accounts";
     }
 

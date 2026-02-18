@@ -1,9 +1,9 @@
 /**
  * Authentication context for the T-Minus SPA.
  *
- * JWT is stored in React state/context ONLY (NOT localStorage) for security.
- * This means tokens are lost on page refresh, which is intentional for a
- * walking skeleton. A future story will add refresh token persistence.
+ * JWT is stored in React state/context and mirrored into sessionStorage.
+ * sessionStorage keeps auth across same-tab reloads (needed for OAuth redirect
+ * round-trips) while avoiding long-lived localStorage persistence.
  */
 
 import {
@@ -34,6 +34,52 @@ interface AuthContextValue extends AuthState {
   logout: () => void;
 }
 
+const AUTH_STORAGE_KEY = "tminus_auth_v1";
+const EMPTY_AUTH_STATE: AuthState = {
+  token: null,
+  refreshToken: null,
+  user: null,
+};
+
+function readAuthState(): AuthState {
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return EMPTY_AUTH_STATE;
+    const parsed = JSON.parse(raw) as Partial<AuthState>;
+    if (
+      typeof parsed.token === "string" &&
+      typeof parsed.refreshToken === "string" &&
+      parsed.user &&
+      typeof parsed.user.id === "string" &&
+      typeof parsed.user.email === "string"
+    ) {
+      return {
+        token: parsed.token,
+        refreshToken: parsed.refreshToken,
+        user: {
+          id: parsed.user.id,
+          email: parsed.user.email,
+        },
+      };
+    }
+  } catch {
+    // If storage is corrupted, ignore and treat as logged out.
+  }
+  return EMPTY_AUTH_STATE;
+}
+
+function writeAuthState(state: AuthState): void {
+  try {
+    if (!state.token || !state.refreshToken || !state.user) {
+      window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Best-effort persistence only.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -41,21 +87,20 @@ interface AuthContextValue extends AuthState {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    token: null,
-    refreshToken: null,
-    user: null,
-  });
+  const [state, setState] = useState<AuthState>(() => readAuthState());
 
   const login = useCallback(
     (token: string, refreshToken: string, user: { id: string; email: string }) => {
-      setState({ token, refreshToken, user });
+      const nextState: AuthState = { token, refreshToken, user };
+      setState(nextState);
+      writeAuthState(nextState);
     },
     [],
   );
 
   const logout = useCallback(() => {
-    setState({ token: null, refreshToken: null, user: null });
+    setState(EMPTY_AUTH_STATE);
+    writeAuthState(EMPTY_AUTH_STATE);
     window.location.hash = "#/login";
   }, []);
 

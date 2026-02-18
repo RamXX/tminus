@@ -16,7 +16,7 @@ import type { AccountProvider, AccountStatus } from "./api";
 export const OAUTH_BASE_URL = "https://oauth.tminus.ink";
 
 /** Callback URL after OAuth completes (app returns to accounts page). */
-export const OAUTH_CALLBACK_RETURN_URL = "https://app.tminus.ink/#/accounts";
+export const OAUTH_CALLBACK_RETURN_URL = "https://app.tminus.ink/#/accounts?linked=true";
 
 /**
  * Build the full OAuth start URL for a given provider.
