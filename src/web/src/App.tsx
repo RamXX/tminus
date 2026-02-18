@@ -94,6 +94,8 @@ function Router() {
   useEffect(() => {
     const handler = () => setRoute(window.location.hash || "#/");
     window.addEventListener("hashchange", handler);
+    // Catch hash mutations that may have happened before this effect mounted.
+    handler();
     return () => window.removeEventListener("hashchange", handler);
   }, []);
 
