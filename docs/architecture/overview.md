@@ -1,12 +1,12 @@
 # Architecture Overview
 
-**Status:** Phase 1 (Foundation) -- Active Development
-**Last Updated:** 2026-02-17
+**Status:** Active Development (Phases 1-5)
+**Last Updated:** 2026-02-18
 
-T-Minus is a Cloudflare-native platform that federates multiple Google Calendar
-accounts into a single canonical event store, projects events outward via
-configurable policies, and layers scheduling intelligence, relationship
-awareness, and time governance on top.
+T-Minus is a Cloudflare-native platform that federates multiple external
+calendar providers (Google, Microsoft, CalDAV) into a canonical coordination
+layer, projects policy-shaped updates outward, and layers scheduling
+intelligence, relationship awareness, and time governance on top.
 
 ---
 
@@ -14,11 +14,27 @@ awareness, and time governance on top.
 
 T-Minus is a stateful calendar graph per user:
 
-1. **Ingest** changes from external providers (Google Calendar first; Microsoft later).
+1. **Ingest** changes from connected external providers.
 2. **Maintain** a canonical "Unified Calendar" (source of truth).
 3. **Project** canonical state out to multiple provider calendars using a policy compiler (busy/title/full, per direction).
 4. **Support** planning features not native to Google Calendar: trips that block time across all accounts, override/exception events, constraint-based scheduling, multi-party coordination.
 5. **Provide** an MCP server so AI assistants can do all of the above programmatically.
+
+## Federated Coordination Model
+
+T-Minus is the **System of Coordination**:
+
+- Canonical event graph, policy graph, and journal live in T-Minus.
+- External providers remain systems of execution and user-facing surfaces.
+- Sync is peer-to-peer through canonical state, not "Google as primary."
+- Authority is policy-based (busy/title/full; directional edges), not implied by provider.
+
+Current implementation note:
+
+- The current onboarding/sync path is still effectively single-calendar per
+  account (`primary` calendar in provider APIs).
+- Target architecture is selected multi-calendar scopes per account with
+  per-calendar cursors and per-calendar webhook/subscription routing.
 
 ## Architectural Principle
 
@@ -151,8 +167,8 @@ Class               Storage    ID Derivation              Responsibilities
 UserGraphDO         SQLite     idFromName(user_id)        Canonical event store, policy graph,
                                                           projections, journal, availability
 
-AccountDO           SQLite     idFromName(account_id)     Token management, sync cursor, watch
-                                                          channel lifecycle, rate limiting
+AccountDO           SQLite     idFromName(account_id)     Token management, sync cursor(s), watch
+                                                          channel/subscription lifecycle, rate limiting
 
 GroupScheduleDO     SQLite     idFromName(session_id)     Multi-user scheduling sessions (Phase 3+)
 ```
@@ -163,11 +179,12 @@ GroupScheduleDO     SQLite     idFromName(session_id)     Multi-user scheduling 
 Workflow               Trigger                        Steps
 --------------------   ----------------------------   ----------------------------------
 OnboardingWorkflow     oauth-worker (account link)    1. Fetch calendar list
-                                                      2. Create busy overlay calendar
-                                                      3. Paginated full event sync
-                                                      4. Register watch channel
-                                                      5. Store initial syncToken
-                                                      6. Mark account active in D1
+                                                      2. Select sync scope (target: 1+ calendars)
+                                                      3. Create busy overlay calendar
+                                                      4. Paginated full event sync across scoped calendars
+                                                      5. Register watch channel/subscription per scoped calendar
+                                                      6. Store initial sync cursor(s)
+                                                      7. Mark account active in D1
 
 ReconcileWorkflow      reconcile-queue message        1. Full sync (no syncToken)
                                                       2. Cross-check mirrors vs provider
@@ -214,4 +231,4 @@ SchedulingWorkflow     api-worker / mcp-worker        1. Gather constraints
 - [Queue Contracts](queue-contracts.md) -- Queue message types
 - [Correctness Invariants](correctness-invariants.md) -- Non-negotiable invariants
 - [Platform Limits](platform-limits.md) -- Cloudflare resource limits
-- [Architecture Decision Records](../decisions/) -- ADR-001 through ADR-007
+- [Architecture Decision Records](../decisions/) -- ADR-001 through ADR-008

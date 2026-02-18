@@ -37,6 +37,7 @@ Understanding the system design and the decisions behind it.
 - [ADR-005: Event-sourcing via change journal](decisions/adr-005-event-sourcing-journal.md)
 - [ADR-006: Daily drift reconciliation](decisions/adr-006-daily-reconciliation.md)
 - [ADR-007: Secrets centralized in API worker](decisions/adr-007-secrets-centralization.md)
+- [ADR-008: Federated coordination SoR](decisions/adr-008-federated-coordination-sor.md)
 
 ## For API Consumers
 
