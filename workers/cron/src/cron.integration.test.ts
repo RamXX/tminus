@@ -41,29 +41,71 @@ import {
 // GoogleCalendarClient and calls stopChannel/watchEvents directly against
 // Google's API. In integration tests we mock these external API calls while
 // keeping all D1 queries real (via better-sqlite3).
+//
+// IMPORTANT: channel-renewal.ts (inside @tminus/shared) imports
+// GoogleCalendarClient from "./google-api" and generateId from "./id"
+// using RELATIVE paths. Mocking "@tminus/shared" only intercepts imports
+// that go through the package barrel (index.ts). To intercept the relative
+// imports used by channel-renewal.ts, we must also mock the individual
+// source modules that it imports from.
+//
+// vi.mock() calls are hoisted to the top of the file by vitest's transform,
+// so we use vi.hoisted() to declare shared state that the mock factories
+// can reference safely.
 // ---------------------------------------------------------------------------
 
-/** Tracks Google Calendar API calls for assertion. */
-const googleApiCalls: Array<{ method: string; args: unknown[] }> = [];
+const {
+  googleApiCalls,
+  mockGoogleCalendarClient,
+  mockGenerateId,
+} = vi.hoisted(() => {
+  const googleApiCalls: Array<{ method: string; args: unknown[] }> = [];
 
+  const mockGoogleCalendarClient = vi.fn().mockImplementation(() => ({
+    stopChannel: vi.fn(async (...args: unknown[]) => {
+      googleApiCalls.push({ method: "stopChannel", args });
+    }),
+    watchEvents: vi.fn(async (...args: unknown[]) => {
+      googleApiCalls.push({ method: "watchEvents", args });
+      return {
+        channelId: "new-channel-from-google",
+        resourceId: "new-resource-from-google",
+        expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      };
+    }),
+  }));
+
+  const mockGenerateId = vi.fn((prefix: string) => `${prefix}_mock_${Date.now()}`);
+
+  return { googleApiCalls, mockGoogleCalendarClient, mockGenerateId };
+});
+
+// Mock the barrel re-export (used by direct imports from @tminus/shared)
 vi.mock("@tminus/shared", async () => {
   const actual = await vi.importActual("@tminus/shared");
   return {
     ...actual,
-    GoogleCalendarClient: vi.fn().mockImplementation(() => ({
-      stopChannel: vi.fn(async (...args: unknown[]) => {
-        googleApiCalls.push({ method: "stopChannel", args });
-      }),
-      watchEvents: vi.fn(async (...args: unknown[]) => {
-        googleApiCalls.push({ method: "watchEvents", args });
-        return {
-          channelId: "new-channel-from-google",
-          resourceId: "new-resource-from-google",
-          expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        };
-      }),
-    })),
-    generateId: vi.fn((prefix: string) => `${prefix}_mock_${Date.now()}`),
+    GoogleCalendarClient: mockGoogleCalendarClient,
+    generateId: mockGenerateId,
+  };
+});
+
+// Mock the direct source modules (used by channel-renewal.ts -> ./google-api, ./id).
+// channel-renewal.ts uses relative imports that resolve to these files,
+// bypassing the @tminus/shared barrel mock.
+vi.mock("../../../packages/shared/src/google-api", async () => {
+  const actual = await vi.importActual("../../../packages/shared/src/google-api");
+  return {
+    ...actual,
+    GoogleCalendarClient: mockGoogleCalendarClient,
+  };
+});
+
+vi.mock("../../../packages/shared/src/id", async () => {
+  const actual = await vi.importActual("../../../packages/shared/src/id");
+  return {
+    ...actual,
+    generateId: mockGenerateId,
   };
 });
 
