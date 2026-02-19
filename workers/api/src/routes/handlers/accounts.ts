@@ -16,6 +16,27 @@ import {
   ErrorCode,
 } from "../shared";
 
+const ACCOUNT_DO_STEP_TIMEOUT_MS = 10_000;
+const USER_GRAPH_UNLINK_TIMEOUT_MS = 25_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, step: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${step} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 async function handleAccountLink(
   _request: Request,
   _auth: AuthContext,
@@ -153,32 +174,53 @@ async function handleDeleteAccount(
       );
     }
 
-    // Step 1: Revoke OAuth tokens (AccountDO)
-    // Errors are non-fatal -- tokens may already be revoked
-    try {
-      await callDO(env.ACCOUNT, accountId, "/revokeTokens", {});
-    } catch {
-      // Proceed anyway -- tokens may already be revoked
-    }
-
-    // Step 2: Stop watch channels (AccountDO)
-    try {
-      await callDO(env.ACCOUNT, accountId, "/stopWatchChannels", {});
-    } catch {
-      // Proceed anyway -- channels may already be expired
-    }
-
-    // Steps 3-8: Cascade cleanup in UserGraphDO
-    // (mirrors, events, policies, calendars, journal)
-    await callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
-      account_id: accountId,
-    });
-
-    // Step 9: Update D1 registry status
+    // Step 1: Mark revoked in D1 first so UI/API state converges immediately.
+    // Cleanup below is best-effort and can finish after this state transition.
     await env.DB
       .prepare("UPDATE accounts SET status = 'revoked' WHERE account_id = ?1")
       .bind(accountId)
       .run();
+
+    // Step 2: Revoke OAuth tokens (AccountDO)
+    // Errors/timeouts are non-fatal -- tokens may already be revoked.
+    try {
+      await withTimeout(
+        callDO(env.ACCOUNT, accountId, "/revokeTokens", {}),
+        ACCOUNT_DO_STEP_TIMEOUT_MS,
+        "AccountDO.revokeTokens",
+      );
+    } catch {
+      // Proceed anyway -- provider state cleanup is best-effort.
+    }
+
+    // Step 3: Stop watch channels (AccountDO)
+    try {
+      await withTimeout(
+        callDO(env.ACCOUNT, accountId, "/stopWatchChannels", {}),
+        ACCOUNT_DO_STEP_TIMEOUT_MS,
+        "AccountDO.stopWatchChannels",
+      );
+    } catch {
+      // Proceed anyway -- channels may already be expired.
+    }
+
+    // Steps 4-9: Cascade cleanup in UserGraphDO
+    // (mirrors, events, policies, calendars, journal)
+    try {
+      await withTimeout(
+        callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
+          account_id: accountId,
+        }),
+        USER_GRAPH_UNLINK_TIMEOUT_MS,
+        "UserGraphDO.unlinkAccount",
+      );
+    } catch (err) {
+      console.warn("Account unlink cleanup did not complete within timeout", {
+        account_id: accountId,
+        user_id: auth.userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     return jsonResponse(successEnvelope({ deleted: true }), 200);
   } catch (err) {

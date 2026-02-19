@@ -37,12 +37,31 @@ import type {
   TokenProvider,
 } from "./write-consumer";
 
-/** Keep Google write throughput below per-user project quotas (600/min). */
-const GOOGLE_WRITE_THROTTLE_MS = 200;
+/**
+ * Minimum spacing between Google Calendar writes for the same target account.
+ *
+ * This keeps per-account write rates below provider quota while allowing
+ * independent accounts to progress concurrently.
+ */
+const GOOGLE_ACCOUNT_WRITE_MIN_SPACING_MS = 120;
+
+/** Last Google write timestamp by target account (process-local best effort). */
+const googleLastWriteByAccount = new Map<string, number>();
 
 async function sleep(ms: number): Promise<void> {
   if (ms <= 0) return;
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function throttleGoogleAccountWrites(accountId: string): Promise<void> {
+  const now = Date.now();
+  const lastWrite = googleLastWriteByAccount.get(accountId) ?? 0;
+  const elapsed = now - lastWrite;
+  const waitMs = GOOGLE_ACCOUNT_WRITE_MIN_SPACING_MS - elapsed;
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  googleLastWriteByAccount.set(accountId, Date.now());
 }
 
 // ---------------------------------------------------------------------------
@@ -209,9 +228,11 @@ export class DOBackedMirrorStore implements MirrorStore {
  */
 export class DOBackedTokenProvider implements TokenProvider {
   private readonly accountNamespace: DurableObjectNamespace;
+  private readonly provider: ProviderType;
 
-  constructor(accountNamespace: DurableObjectNamespace) {
+  constructor(accountNamespace: DurableObjectNamespace, provider: ProviderType) {
     this.accountNamespace = accountNamespace;
+    this.provider = provider;
   }
 
   async getAccessToken(accountId: string): Promise<string> {
@@ -221,6 +242,8 @@ export class DOBackedTokenProvider implements TokenProvider {
     const response = await stub.fetch(
       new Request("https://account.internal/getAccessToken", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: this.provider }),
       }),
     );
 
@@ -299,11 +322,10 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           const providerType: ProviderType = accountRow.provider === "microsoft" ? "microsoft" : "google";
 
-          // Global queue pressure can spike after recompute/full-sync bursts.
-          // A small per-message delay for Google keeps write QPS within
-          // provider quota and prevents retry storms.
+          // Keep per-account Google write rate bounded while allowing
+          // different accounts to progress without unnecessary serialization.
           if (providerType === "google") {
-            await sleep(GOOGLE_WRITE_THROTTLE_MS);
+            await throttleGoogleAccountWrites(body.target_account_id as string);
           }
 
           // Resolve UserGraphDO stub
@@ -312,7 +334,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           // Create DO-backed dependencies
           const doMirrorStore = new DOBackedMirrorStore(userGraphStub);
-          const doTokenProvider = new DOBackedTokenProvider(env.ACCOUNT);
+          const doTokenProvider = new DOBackedTokenProvider(env.ACCOUNT, providerType);
 
           // Pre-fetch mirror state (since WriteConsumer expects sync getMirror)
           // We wrap the DO-backed store in a caching proxy that makes the

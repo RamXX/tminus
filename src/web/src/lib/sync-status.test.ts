@@ -335,13 +335,39 @@ describe("computeUserGraphHealth", () => {
     expect(computeUserGraphHealth(null)).toBe("healthy");
   });
 
-  it("returns degraded when pending mirrors exist", () => {
+  it("returns healthy for small residual pending mirrors", () => {
+    expect(
+      computeUserGraphHealth({
+        total_events: 100,
+        total_mirrors: 10000,
+        active_mirrors: 9950,
+        pending_mirrors: 50,
+        error_mirrors: 0,
+        last_activity_ts: new Date().toISOString(),
+      }),
+    ).toBe("healthy");
+  });
+
+  it("returns degraded when pending mirror count is materially high", () => {
+    expect(
+      computeUserGraphHealth({
+        total_events: 100,
+        total_mirrors: 10000,
+        active_mirrors: 9300,
+        pending_mirrors: 700,
+        error_mirrors: 0,
+        last_activity_ts: new Date().toISOString(),
+      }),
+    ).toBe("degraded");
+  });
+
+  it("returns degraded when pending mirror ratio is materially high", () => {
     expect(
       computeUserGraphHealth({
         total_events: 10,
-        total_mirrors: 20,
-        active_mirrors: 19,
-        pending_mirrors: 1,
+        total_mirrors: 80,
+        active_mirrors: 70,
+        pending_mirrors: 10,
         error_mirrors: 0,
         last_activity_ts: new Date().toISOString(),
       }),

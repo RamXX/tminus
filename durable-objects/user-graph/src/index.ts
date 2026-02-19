@@ -100,6 +100,9 @@ export interface QueueLike {
   sendBatch(messages: { body: unknown }[]): Promise<void>;
 }
 
+/** Maximum queue messages per sendBatch call. */
+const WRITE_QUEUE_BATCH_SIZE = 100;
+
 // ---------------------------------------------------------------------------
 // Internal DB row types
 // ---------------------------------------------------------------------------
@@ -1036,12 +1039,19 @@ export class UserGraphDO {
 
     let mirrorsDeleted = 0;
     for (const mirror of mirrors) {
+      const deleteIdempotencyKey = await computeIdempotencyKey(
+        canonicalId,
+        mirror.target_account_id,
+        `delete:${mirror.provider_event_id ?? ""}:${mirror.target_calendar_id}`,
+      );
+
       await this.writeQueue.send({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalId,
         target_account_id: mirror.target_account_id,
         target_calendar_id: mirror.target_calendar_id,
         provider_event_id: mirror.provider_event_id ?? "",
+        idempotency_key: deleteIdempotencyKey,
       });
       mirrorsDeleted++;
     }
@@ -1137,14 +1147,19 @@ export class UserGraphDO {
 
       if (mirrorRows.length > 0) {
         const existing = mirrorRows[0];
-        // Write-skipping: if hash is identical and mirror is ACTIVE, skip.
-        // When explicitly forced, non-ACTIVE mirrors (e.g., stale PENDING)
-        // are re-enqueued even with identical projection hash.
-        if (
-          existing.last_projected_hash === projectedHash &&
-          (!opts.forceRequeueNonActive || existing.state === "ACTIVE")
-        ) {
-          continue;
+        // Write-skipping:
+        // - ACTIVE + identical hash => skip (already converged)
+        // - PENDING + identical hash => replay automatically (self-heal for
+        //   dropped/DLQ'd writes that would otherwise remain stale forever)
+        // - other non-ACTIVE states (ERROR/DELETED/TOMBSTONED) replay only
+        //   when explicitly forced.
+        if (existing.last_projected_hash === projectedHash) {
+          if (existing.state === "ACTIVE") {
+            continue;
+          }
+          if (existing.state !== "PENDING" && !opts.forceRequeueNonActive) {
+            continue;
+          }
         }
         // Hash differs -- update mirror record and enqueue write
         this.sql.exec(
@@ -1167,6 +1182,7 @@ export class UserGraphDO {
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
           target_calendar_id: existing.target_calendar_id,
+          projected_hash: projectedHash,
           projected_payload: projection,
           idempotency_key: idempotencyKey,
         });
@@ -1199,6 +1215,7 @@ export class UserGraphDO {
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
           target_calendar_id: targetCalendarId,
+          projected_hash: projectedHash,
           projected_payload: projection,
           idempotency_key: idempotencyKey,
         });
@@ -1501,6 +1518,7 @@ export class UserGraphDO {
    */
   async recomputeProjections(scope: RecomputeScope = {}): Promise<number> {
     this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
 
     let events: CanonicalEventRow[];
 
@@ -1528,6 +1546,34 @@ export class UserGraphDO {
     }
 
     return totalEnqueued;
+  }
+
+  /**
+   * Remove mirror rows that can no longer be projected:
+   * - canonical event no longer exists, or
+   * - no active policy edge exists for (origin_account_id -> target_account_id).
+   *
+   * Without this cleanup, legacy ERROR/PENDING rows can linger indefinitely
+   * after account/policy changes and keep aggregate health degraded forever.
+   */
+  private pruneNonProjectableMirrors(): void {
+    this.sql.exec(
+      `DELETE FROM event_mirrors
+       WHERE
+         NOT EXISTS (
+           SELECT 1
+           FROM canonical_events c
+           WHERE c.canonical_event_id = event_mirrors.canonical_event_id
+         )
+         OR NOT EXISTS (
+           SELECT 1
+           FROM canonical_events c
+           JOIN policy_edges e
+             ON e.from_account_id = c.origin_account_id
+            AND e.to_account_id = event_mirrors.target_account_id
+           WHERE c.canonical_event_id = event_mirrors.canonical_event_id
+         )`,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1630,6 +1676,59 @@ export class UserGraphDO {
       error_mirrors: errorMirrors,
       last_journal_ts: lastJournalRows.length > 0 ? lastJournalRows[0].ts : null,
     };
+  }
+
+  /**
+   * List mirrors currently in ERROR state for operational debugging/recovery.
+   */
+  listErrorMirrors(limit = 100): Array<{
+    canonical_event_id: string;
+    target_account_id: string;
+    target_calendar_id: string;
+    provider_event_id: string | null;
+    last_projected_hash: string | null;
+    last_write_ts: string | null;
+    error_message: string | null;
+    title: string | null;
+    start_ts: string | null;
+    end_ts: string | null;
+  }> {
+    this.ensureMigrated();
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.trunc(limit))) : 100;
+
+    return this.sql
+      .exec<{
+        canonical_event_id: string;
+        target_account_id: string;
+        target_calendar_id: string;
+        provider_event_id: string | null;
+        last_projected_hash: string | null;
+        last_write_ts: string | null;
+        error_message: string | null;
+        title: string | null;
+        start_ts: string | null;
+        end_ts: string | null;
+      }>(
+        `SELECT
+           m.canonical_event_id,
+           m.target_account_id,
+           m.target_calendar_id,
+           m.provider_event_id,
+           m.last_projected_hash,
+           m.last_write_ts,
+           m.error_message,
+           c.title,
+           c.start_ts,
+           c.end_ts
+         FROM event_mirrors m
+         LEFT JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'ERROR'
+         ORDER BY COALESCE(m.last_write_ts, c.updated_at, c.created_at) DESC
+         LIMIT ?`,
+        safeLimit,
+      )
+      .toArray();
   }
 
   // -------------------------------------------------------------------------
@@ -2542,6 +2641,21 @@ export class UserGraphDO {
   // -------------------------------------------------------------------------
 
   /**
+   * Enqueue write-queue messages in bounded batches.
+   *
+   * Durable Object account unlink can emit many DELETE_MIRROR messages.
+   * Sending one-by-one can exceed request timeouts for large accounts.
+   */
+  private async enqueueWriteBatch(messages: unknown[]): Promise<void> {
+    if (messages.length === 0) return;
+
+    for (let i = 0; i < messages.length; i += WRITE_QUEUE_BATCH_SIZE) {
+      const chunk = messages.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
+      await this.writeQueue.sendBatch(chunk.map((body) => ({ body })));
+    }
+  }
+
+  /**
    * Remove all data associated with an account from the UserGraphDO.
    *
    * Cascade order:
@@ -2549,7 +2663,7 @@ export class UserGraphDO {
    * 2. Delete mirrors TO this account (remove mirror rows)
    * 3. Hard delete canonical events from this account (BR-7)
    * 4. Remove policy edges referencing this account
-   * 5. Trigger recomputeProjections for remaining events
+   * 5. Prune non-projectable mirrors for remaining events
    * 6. Remove calendar entries for this account
    * 7. Write journal entries recording the unlinking
    *
@@ -2568,44 +2682,39 @@ export class UserGraphDO {
     let policyEdgesRemoved = 0;
     let calendarsRemoved = 0;
 
-    // Step 1: Delete mirrors FROM this account
-    // For each canonical event owned by this account, enqueue DELETE_MIRROR
-    // for every mirror that was created from it.
-    const ownedEvents = this.sql
-      .exec<{ canonical_event_id: string }>(
-        `SELECT canonical_event_id FROM canonical_events WHERE origin_account_id = ?`,
+    // Step 1: Delete mirrors FROM this account (set-based for scale)
+    const outboundMirrors = this.sql
+      .exec<EventMirrorRow>(
+        `SELECT m.*
+         FROM event_mirrors m
+         JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE c.origin_account_id = ?`,
         accountId,
       )
       .toArray();
 
-    for (const evt of ownedEvents) {
-      const mirrors = this.sql
-        .exec<EventMirrorRow>(
-          `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
-          evt.canonical_event_id,
-        )
-        .toArray();
+    const outboundDeletes = outboundMirrors.map((mirror) => ({
+      type: "DELETE_MIRROR",
+      canonical_event_id: mirror.canonical_event_id,
+      target_account_id: mirror.target_account_id,
+      target_calendar_id: mirror.target_calendar_id,
+      provider_event_id: mirror.provider_event_id ?? "",
+    }));
+    await this.enqueueWriteBatch(outboundDeletes);
+    mirrorsDeleted += outboundDeletes.length;
 
-      for (const mirror of mirrors) {
-        await this.writeQueue.send({
-          type: "DELETE_MIRROR",
-          canonical_event_id: evt.canonical_event_id,
-          target_account_id: mirror.target_account_id,
-          target_calendar_id: mirror.target_calendar_id,
-          provider_event_id: mirror.provider_event_id ?? "",
-        });
-        mirrorsDeleted++;
-      }
-
-      // Remove mirror rows for this event
-      this.sql.exec(
-        `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
-        evt.canonical_event_id,
-      );
-    }
+    this.sql.exec(
+      `DELETE FROM event_mirrors
+       WHERE canonical_event_id IN (
+         SELECT canonical_event_id
+         FROM canonical_events
+         WHERE origin_account_id = ?
+       )`,
+      accountId,
+    );
 
     // Step 2: Delete mirrors TO this account
-    // These are mirror rows where this account is the target (receiving mirrors)
     const inboundMirrors = this.sql
       .exec<EventMirrorRow>(
         `SELECT * FROM event_mirrors WHERE target_account_id = ?`,
@@ -2613,17 +2722,10 @@ export class UserGraphDO {
       )
       .toArray();
 
-    for (const mirror of inboundMirrors) {
-      // Enqueue DELETE_MIRROR so the provider-side mirror event gets removed
-      await this.writeQueue.send({
-        type: "DELETE_MIRROR",
-        canonical_event_id: mirror.canonical_event_id,
-        target_account_id: mirror.target_account_id,
-        target_calendar_id: mirror.target_calendar_id,
-        provider_event_id: mirror.provider_event_id ?? "",
-      });
-      mirrorsDeleted++;
-    }
+    // Mirrors targeting the unlinked account do not need provider-side cleanup:
+    // the account is being removed, and these overlays are no longer user-visible.
+    // Removing them from UserGraphDO state is sufficient and avoids large delete storms.
+    mirrorsDeleted += inboundMirrors.length;
 
     this.sql.exec(
       `DELETE FROM event_mirrors WHERE target_account_id = ?`,
@@ -2631,17 +2733,39 @@ export class UserGraphDO {
     );
 
     // Step 3: Hard delete canonical events from this account (BR-7)
-    // Journal entries for each deletion
-    for (const evt of ownedEvents) {
-      this.writeJournal(
-        evt.canonical_event_id,
-        "deleted",
-        "system",
-        { reason: "account_unlinked", account_id: accountId },
-        "account_unlinked",
-      );
-      eventsDeleted++;
-    }
+    eventsDeleted = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt FROM canonical_events WHERE origin_account_id = ?`,
+        accountId,
+      )
+      .toArray()[0].cnt;
+
+    const deletePatchJson = JSON.stringify({
+      reason: "account_unlinked",
+      account_id: accountId,
+    });
+    this.sql.exec(
+      `INSERT INTO event_journal (
+         journal_id,
+         canonical_event_id,
+         actor,
+         change_type,
+         patch_json,
+         reason
+       )
+       SELECT
+         (? || ':' || canonical_event_id) as journal_id,
+         canonical_event_id,
+         'system',
+         'deleted',
+         ?,
+         'account_unlinked'
+       FROM canonical_events
+       WHERE origin_account_id = ?`,
+      `unlinkdel:${accountId}`,
+      deletePatchJson,
+      accountId,
+    );
 
     this.sql.exec(
       `DELETE FROM canonical_events WHERE origin_account_id = ?`,
@@ -2665,10 +2789,8 @@ export class UserGraphDO {
       accountId,
     );
 
-    // Step 5: Recompute projections for remaining events
-    // After edges are removed, some mirrors may be orphaned -- recompute
-    // will clean up by re-evaluating all remaining events against remaining edges.
-    await this.recomputeProjections();
+    // Step 5: Prune non-projectable mirrors for remaining events.
+    this.pruneNonProjectableMirrors();
 
     // Step 6: Remove calendar entries for this account
     const calCount = this.sql
@@ -2685,7 +2807,6 @@ export class UserGraphDO {
     );
 
     // Step 7: Write a summary journal entry for the unlinking
-    // Use a synthetic canonical_event_id since this is an account-level operation
     const syntheticId = `unlink:${accountId}`;
     this.writeJournal(
       syntheticId,
@@ -5332,6 +5453,12 @@ export class UserGraphDO {
         case "/getSyncHealth": {
           const result = this.getSyncHealth();
           return Response.json(result);
+        }
+
+        case "/listErrorMirrors": {
+          const body = (await request.json()) as { limit?: number };
+          const items = this.listErrorMirrors(body?.limit);
+          return Response.json({ items });
         }
 
         case "/createPolicy": {

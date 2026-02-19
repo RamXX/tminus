@@ -75,6 +75,12 @@ export const USER_GRAPH_ERROR_COUNT_THRESHOLD = 100;
 /** Mirror error ratio (error_mirrors / total_mirrors) at which health becomes hard error. */
 export const USER_GRAPH_ERROR_RATE_THRESHOLD = 0.01;
 
+/** Absolute pending mirror count at which UserGraph health becomes degraded. */
+export const USER_GRAPH_PENDING_COUNT_THRESHOLD = 500;
+
+/** Pending mirror ratio (pending_mirrors / total_mirrors) at which health becomes degraded. */
+export const USER_GRAPH_PENDING_RATE_THRESHOLD = 0.01;
+
 // ---------------------------------------------------------------------------
 // Pure functions
 // ---------------------------------------------------------------------------
@@ -169,7 +175,8 @@ export function computeAllAccountHealth(
  * Compute health for UserGraph mirror layer.
  *
  * - substantial error_mirrors -> error
- * - any pending_mirrors or residual error_mirrors -> degraded
+ * - residual error_mirrors -> degraded
+ * - materially high pending_mirrors -> degraded
  * - else healthy
  */
 export function computeUserGraphHealth(
@@ -178,13 +185,17 @@ export function computeUserGraphHealth(
   if (!userGraph) return "healthy";
   const totalMirrors = Math.max(userGraph.total_mirrors, 1);
   const errorRate = userGraph.error_mirrors / totalMirrors;
+  const pendingRate = userGraph.pending_mirrors / totalMirrors;
   const hasMaterialErrors =
     userGraph.error_mirrors >= USER_GRAPH_ERROR_COUNT_THRESHOLD ||
     errorRate >= USER_GRAPH_ERROR_RATE_THRESHOLD;
+  const hasMaterialPending =
+    userGraph.pending_mirrors >= USER_GRAPH_PENDING_COUNT_THRESHOLD ||
+    pendingRate >= USER_GRAPH_PENDING_RATE_THRESHOLD;
 
   if (hasMaterialErrors) return "error";
   if (userGraph.error_mirrors > 0) return "degraded";
-  if (userGraph.pending_mirrors > 0) return "degraded";
+  if (hasMaterialPending) return "degraded";
   return "healthy";
 }
 
