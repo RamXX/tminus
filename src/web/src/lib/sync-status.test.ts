@@ -131,12 +131,12 @@ describe("computeAccountHealth", () => {
       expect(computeAccountHealth(account, NOW)).toBe("degraded");
     });
 
-    it("returns degraded for active channels idle beyond threshold", () => {
+    it("returns healthy for active channels even when idle beyond threshold", () => {
       const account = makeAccount({
         channel_status: "active",
         last_sync_ts: new Date(NOW - STALE_THRESHOLD_MS - 1).toISOString(),
       });
-      expect(computeAccountHealth(account, NOW)).toBe("degraded");
+      expect(computeAccountHealth(account, NOW)).toBe("healthy");
     });
   });
 

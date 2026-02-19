@@ -16,8 +16,8 @@ import {
   ErrorCode,
 } from "../shared";
 
-const ACCOUNT_DO_STEP_TIMEOUT_MS = 10_000;
-const USER_GRAPH_UNLINK_TIMEOUT_MS = 25_000;
+const ACCOUNT_DO_STEP_TIMEOUT_MS = 3_000;
+const USER_GRAPH_UNLINK_TIMEOUT_MS = 12_000;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, step: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -181,46 +181,35 @@ async function handleDeleteAccount(
       .bind(accountId)
       .run();
 
-    // Step 2: Revoke OAuth tokens (AccountDO)
-    // Errors/timeouts are non-fatal -- tokens may already be revoked.
-    try {
-      await withTimeout(
+    // Step 2+: Best-effort cleanup (parallel, bounded latency).
+    // Each sub-step is independently timeboxed and non-fatal.
+    const cleanupTasks = [
+      withTimeout(
         callDO(env.ACCOUNT, accountId, "/revokeTokens", {}),
         ACCOUNT_DO_STEP_TIMEOUT_MS,
         "AccountDO.revokeTokens",
-      );
-    } catch {
-      // Proceed anyway -- provider state cleanup is best-effort.
-    }
-
-    // Step 3: Stop watch channels (AccountDO)
-    try {
-      await withTimeout(
+      ).catch(() => undefined),
+      withTimeout(
         callDO(env.ACCOUNT, accountId, "/stopWatchChannels", {}),
         ACCOUNT_DO_STEP_TIMEOUT_MS,
         "AccountDO.stopWatchChannels",
-      );
-    } catch {
-      // Proceed anyway -- channels may already be expired.
-    }
-
-    // Steps 4-9: Cascade cleanup in UserGraphDO
-    // (mirrors, events, policies, calendars, journal)
-    try {
-      await withTimeout(
+      ).catch(() => undefined),
+      withTimeout(
         callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
           account_id: accountId,
         }),
         USER_GRAPH_UNLINK_TIMEOUT_MS,
         "UserGraphDO.unlinkAccount",
-      );
-    } catch (err) {
-      console.warn("Account unlink cleanup did not complete within timeout", {
-        account_id: accountId,
-        user_id: auth.userId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+      ).catch((err) => {
+        console.warn("Account unlink cleanup did not complete within timeout", {
+          account_id: accountId,
+          user_id: auth.userId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }),
+    ];
+
+    await Promise.all(cleanupTasks);
 
     return jsonResponse(successEnvelope({ deleted: true }), 200);
   } catch (err) {

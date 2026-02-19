@@ -112,7 +112,7 @@ export function healthToColor(state: HealthState): HealthColor {
  *   1. error_count > 0 -> "error"
  *   2. status is "error"/"revoked" or channel_status is "error" -> "error"
  *   3. pending_writes > 10 or channel_status is "expired" -> "degraded"
- *   4. active channel with no errors -> "healthy" (or "degraded" if idle/invalid timestamp)
+ *   4. active channel with no errors -> "healthy"
  *   5. non-active channel without sync timestamp -> "stale"
  *   6. non-active channel older than STALE_THRESHOLD_MS -> "stale"
  *   7. Otherwise -> "degraded"
@@ -140,8 +140,7 @@ export function computeAccountHealth(
   if (channelStatus === "active") {
     if (!account.last_sync_ts) return "healthy";
     const lastSync = new Date(account.last_sync_ts).getTime();
-    if (Number.isNaN(lastSync)) return "degraded";
-    if (now - lastSync > STALE_THRESHOLD_MS) return "degraded";
+    if (Number.isNaN(lastSync)) return "healthy";
     return "healthy";
   }
 
