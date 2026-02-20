@@ -68,6 +68,68 @@ describe("api event contract adapters", () => {
     );
   });
 
+  it("normalizes UTC dateTimes without explicit offset to Z-form", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(
+          makeEnvelope([
+            {
+              canonical_event_id: "evt_ms_1",
+              title: "MS Event",
+              start: {
+                dateTime: "2026-02-19T00:00:00.0000000",
+                timeZone: "UTC",
+              },
+              end: {
+                dateTime: "2026-02-19T00:30:00.0000000",
+                timeZone: "UTC",
+              },
+            },
+          ]),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events = await fetchEvents("jwt-ms");
+
+    expect(events).toHaveLength(1);
+    expect(events[0].start).toBe("2026-02-19T00:00:00.0000000Z");
+    expect(events[0].end).toBe("2026-02-19T00:30:00.0000000Z");
+  });
+
+  it("normalizes Microsoft UTC aliases without explicit offset to Z-form", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(
+          makeEnvelope([
+            {
+              canonical_event_id: "evt_ms_utc_alias",
+              title: "MS UTC Alias Event",
+              start: {
+                dateTime: "2026-02-19T18:00:00.0000000",
+                timeZone: "Coordinated Universal Time",
+              },
+              end: {
+                dateTime: "2026-02-19T19:00:00.0000000",
+                timeZone: "UTC+00:00",
+              },
+            },
+          ]),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events = await fetchEvents("jwt-ms-utc-alias");
+
+    expect(events).toHaveLength(1);
+    expect(events[0].start).toBe("2026-02-19T18:00:00.0000000Z");
+    expect(events[0].end).toBe("2026-02-19T19:00:00.0000000Z");
+  });
+
   it("maps create payload to canonical API contract and resolves created event", async () => {
     const fetchMock = vi
       .fn()

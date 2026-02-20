@@ -311,6 +311,7 @@ async function handleCallback(
         expiry,
       },
       scopes: tokenData.scope || GOOGLE_SCOPES,
+      provider: "google",
     }),
   }));
 
@@ -548,6 +549,7 @@ async function handleMicrosoftCallback(
         expiry,
       },
       scopes: tokenData.scope || MS_SCOPES,
+      provider: "microsoft",
     }),
   }));
 

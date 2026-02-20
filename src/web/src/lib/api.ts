@@ -131,11 +131,36 @@ interface CanonicalApiEvent {
   mirrors?: EventMirror[];
 }
 
+function hasExplicitOffset(value: string): boolean {
+  return /(?:[zZ]|[+-]\d{2}:\d{2})$/.test(value);
+}
+
+function isUtcTimeZone(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toUpperCase();
+  return (
+    normalized === "UTC" ||
+    normalized === "ETC/UTC" ||
+    normalized === "GMT" ||
+    normalized === "COORDINATED UNIVERSAL TIME" ||
+    normalized === "UNIVERSAL COORDINATED TIME" ||
+    normalized === "UTC+00:00" ||
+    normalized === "UTC-00:00"
+  );
+}
+
 function normalizeDateTime(value: unknown): string | null {
   if (typeof value === "string") return value;
   if (typeof value === "object" && value !== null) {
     const v = value as CanonicalDateTime;
-    if (typeof v.dateTime === "string") return v.dateTime;
+    if (typeof v.dateTime === "string") {
+      // Microsoft Graph commonly emits UTC dateTimes without an explicit
+      // offset. Attach "Z" so Date parsing is timezone-correct in the UI.
+      if (!hasExplicitOffset(v.dateTime) && isUtcTimeZone(v.timeZone)) {
+        return `${v.dateTime}Z`;
+      }
+      return v.dateTime;
+    }
     if (typeof v.date === "string") return v.date;
   }
   return null;

@@ -276,15 +276,32 @@ interface AccountDOState {
   syncSuccessCalls: Array<{ ts: string }>;
   syncFailureCalls: Array<{ error: string }>;
   setSyncTokenCalls: string[];
+  scopedSyncTokens: Record<string, string | null>;
+  setScopedSyncTokenCalls: Array<{ provider_calendar_id: string; sync_token: string }>;
+  calendarScopes: Array<{
+    provider_calendar_id: string;
+    enabled: boolean;
+    sync_enabled: boolean;
+  }>;
   accessTokenError?: { status: number; body: string };
 }
 
 interface UserGraphDOState {
   applyDeltaCalls: Array<{ account_id: string; deltas: unknown[] }>;
+  deleteCanonicalCalls: Array<{ canonical_event_id: string; source: string }>;
+  findCanonicalByMirrorCalls: Array<{
+    target_account_id: string;
+    provider_event_id: string;
+  }>;
   canonicalOriginEvents: Array<{
     origin_event_id: string;
     start?: { dateTime?: string; date?: string } | string | null;
   }>;
+  activeMirrors: Array<{
+    provider_event_id: string | null;
+    target_calendar_id?: string | null;
+  }>;
+  mirrorLookupByProviderEventId: Record<string, string>;
 }
 
 function createMockAccountDO(state: AccountDOState) {
@@ -317,6 +334,56 @@ function createMockAccountDO(state: AccountDOState) {
         const body = (await request.json()) as { sync_token: string };
         state.setSyncTokenCalls.push(body.sync_token);
         state.syncToken = body.sync_token;
+        state.scopedSyncTokens.primary = body.sync_token;
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (path === "/listCalendarScopes") {
+        return new Response(
+          JSON.stringify({
+            scopes: state.calendarScopes.map((scope) => ({
+              providerCalendarId: scope.provider_calendar_id,
+              enabled: scope.enabled,
+              syncEnabled: scope.sync_enabled,
+            })),
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (path === "/getScopedSyncToken") {
+        const body = (await request.json()) as { provider_calendar_id: string };
+        const scopedToken = Object.prototype.hasOwnProperty.call(
+          state.scopedSyncTokens,
+          body.provider_calendar_id,
+        )
+          ? state.scopedSyncTokens[body.provider_calendar_id]
+          : null;
+        return new Response(
+          JSON.stringify({ sync_token: scopedToken ?? null }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (path === "/setScopedSyncToken") {
+        const body = (await request.json()) as {
+          provider_calendar_id: string;
+          sync_token: string;
+        };
+        state.setScopedSyncTokenCalls.push(body);
+        state.scopedSyncTokens[body.provider_calendar_id] = body.sync_token;
+        if (body.provider_calendar_id === "primary") {
+          state.syncToken = body.sync_token;
+        }
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -376,6 +443,39 @@ function createMockUserGraphDO(state: UserGraphDOState) {
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
+      }
+      if (url.pathname === "/getActiveMirrors") {
+        return new Response(
+          JSON.stringify({
+            mirrors: state.activeMirrors,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/findCanonicalByMirror") {
+        const body = (await request.json()) as {
+          target_account_id: string;
+          provider_event_id: string;
+        };
+        state.findCanonicalByMirrorCalls.push(body);
+        return new Response(
+          JSON.stringify({
+            canonical_event_id:
+              state.mirrorLookupByProviderEventId[body.provider_event_id] ?? null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/deleteCanonicalEvent") {
+        const body = (await request.json()) as {
+          canonical_event_id: string;
+          source: string;
+        };
+        state.deleteCanonicalCalls.push(body);
+        return new Response(JSON.stringify(true), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       return new Response("Not found", { status: 404 });
     },
@@ -468,11 +568,26 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       syncSuccessCalls: [],
       syncFailureCalls: [],
       setSyncTokenCalls: [],
+      scopedSyncTokens: {
+        primary: TEST_SYNC_TOKEN,
+      },
+      setScopedSyncTokenCalls: [],
+      calendarScopes: [
+        {
+          provider_calendar_id: "primary",
+          enabled: true,
+          sync_enabled: true,
+        },
+      ],
     };
 
     userGraphDOState = {
       applyDeltaCalls: [],
+      deleteCanonicalCalls: [],
+      findCanonicalByMirrorCalls: [],
       canonicalOriginEvents: [],
+      activeMirrors: [],
+      mirrorLookupByProviderEventId: {},
     };
 
     env = createMockEnv({
@@ -526,6 +641,32 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
 
     // Verify sync success marked
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("successful sync recovers account status from error to active in D1", async () => {
+    db.prepare("UPDATE accounts SET status = 'error' WHERE account_id = ?").run(
+      ACCOUNT_A.account_id,
+    );
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent()],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-recover-1",
+      resource_id: "resource-recover-1",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    const row = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_A.account_id) as { status: string };
+    expect(row.status).toBe("active");
   });
 
   // -------------------------------------------------------------------------
@@ -639,6 +780,88 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
   });
 
+  it("full sync deletes stale managed mirrors missing from provider snapshot", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: TEST_SYNC_TOKEN,
+      "overlay_busy_fullsync@group.calendar.google.com": "overlay-sync-old",
+    };
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "google_evt_missing_mirror_fullsync",
+        target_calendar_id: "overlay_busy_fullsync@group.calendar.google.com",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_missing_mirror_fullsync: "evt_01HXYZ00000000000000000008",
+    };
+
+    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+        ? input
+        : new URL(input.url);
+      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
+
+      if (calendarId === "primary") {
+        return new Response(
+          JSON.stringify({
+            items: [makeGoogleEvent({ id: "google_evt_origin_keep" })],
+            nextSyncToken: "primary-sync-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (calendarId === "overlay_busy_fullsync@group.calendar.google.com") {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            nextSyncToken: "overlay-sync-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Unexpected calendar", { status: 500 });
+    };
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: ACCOUNT_A.account_id,
+      reason: "token_410",
+    };
+
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000008",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
+      expect.arrayContaining([
+        {
+          provider_calendar_id: "primary",
+          sync_token: "primary-sync-new",
+        },
+        {
+          provider_calendar_id: "overlay_busy_fullsync@group.calendar.google.com",
+          sync_token: "overlay-sync-new",
+        },
+      ]),
+    );
+  });
+
   // -------------------------------------------------------------------------
   // 3. Event classification filters managed mirrors
   // -------------------------------------------------------------------------
@@ -674,6 +897,563 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(eventIds).toContain("google_evt_origin_2");
     // Mirror event NOT included
     expect(eventIds).not.toContain("google_evt_mirror_200");
+  });
+
+  it("google mirror without managed metadata is filtered when mirror index matches", async () => {
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "google_evt_mirror_missing_meta" },
+    ];
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: "google_evt_mirror_missing_meta",
+          summary: "Busy",
+          extendedProperties: undefined,
+        }),
+        makeGoogleEvent({
+          id: "google_evt_real_origin",
+          summary: "Real Origin Event",
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-google-missing-meta",
+      resource_id: "resource-google-missing-meta",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+    const eventIds = userGraphDOState.applyDeltaCalls[0].deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toEqual(["google_evt_real_origin"]);
+  });
+
+  it("managed mirror deletion triggers canonical delete", async () => {
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_200: "evt_01HXYZ00000000000000000001",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeManagedMirrorEvent({ status: "cancelled" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-1",
+      resource_id: "resource-managed-delete-1",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "google_evt_mirror_200",
+      },
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000001",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+  });
+
+  it("google deleted mirror without managed metadata still triggers canonical delete via mirror index", async () => {
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "google_evt_mirror_noext" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_noext: "evt_01HXYZ00000000000000000003",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: "google_evt_mirror_noext",
+          status: "cancelled",
+          extendedProperties: undefined,
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-2",
+      resource_id: "resource-managed-delete-2",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "google_evt_mirror_noext",
+      },
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000003",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+  });
+
+  it("google incremental sync reads overlay scopes and propagates overlay deletes", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+      {
+        provider_calendar_id: "overlay_busy_123@group.calendar.google.com",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: "sync-token-primary-old",
+      "overlay_busy_123@group.calendar.google.com": "sync-token-overlay-old",
+    };
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "google_evt_overlay_deleted" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_overlay_deleted: "evt_01HXYZ00000000000000000006",
+    };
+
+    const requestedCalendarIds: string[] = [];
+    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+        ? input
+        : new URL(input.url);
+
+      if (!url.pathname.includes("/calendars/") || !url.pathname.includes("/events")) {
+        return new Response("Not found", { status: 404 });
+      }
+
+      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
+      requestedCalendarIds.push(calendarId);
+
+      if (calendarId === "primary") {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            nextSyncToken: "sync-token-primary-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (calendarId === "overlay_busy_123@group.calendar.google.com") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              makeGoogleEvent({
+                id: "google_evt_overlay_deleted",
+                status: "cancelled",
+                extendedProperties: undefined,
+              }),
+            ],
+            nextSyncToken: "sync-token-overlay-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Unexpected calendar", { status: 500 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-overlay-delete",
+      resource_id: "resource-overlay-delete",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(requestedCalendarIds).toEqual([
+      "primary",
+      "overlay_busy_123@group.calendar.google.com",
+    ]);
+
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000006",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+
+    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
+      expect.arrayContaining([
+        {
+          provider_calendar_id: "primary",
+          sync_token: "sync-token-primary-new",
+        },
+        {
+          provider_calendar_id: "overlay_busy_123@group.calendar.google.com",
+          sync_token: "sync-token-overlay-new",
+        },
+      ]),
+    );
+    expect(accountDOState.setSyncTokenCalls).toContain("sync-token-primary-new");
+  });
+
+  it("google incremental sync falls back to mirror target calendars when scopes are missing overlays", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: "sync-token-primary-old",
+      "overlay_busy_legacy@group.calendar.google.com": "sync-token-overlay-old",
+    };
+
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "google_evt_overlay_legacy_deleted",
+        target_calendar_id: "overlay_busy_legacy@group.calendar.google.com",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_overlay_legacy_deleted: "evt_01HXYZ00000000000000000007",
+    };
+
+    const requestedCalendarIds: string[] = [];
+    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+        ? input
+        : new URL(input.url);
+
+      if (!url.pathname.includes("/calendars/") || !url.pathname.includes("/events")) {
+        return new Response("Not found", { status: 404 });
+      }
+
+      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
+      requestedCalendarIds.push(calendarId);
+
+      if (calendarId === "primary") {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            nextSyncToken: "sync-token-primary-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (calendarId === "overlay_busy_legacy@group.calendar.google.com") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              makeGoogleEvent({
+                id: "google_evt_overlay_legacy_deleted",
+                status: "cancelled",
+                extendedProperties: undefined,
+              }),
+            ],
+            nextSyncToken: "sync-token-overlay-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Unexpected calendar", { status: 500 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-overlay-fallback-delete",
+      resource_id: "resource-overlay-fallback-delete",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(requestedCalendarIds).toEqual([
+      "primary",
+      "overlay_busy_legacy@group.calendar.google.com",
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000007",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
+      expect.arrayContaining([
+        {
+          provider_calendar_id: "primary",
+          sync_token: "sync-token-primary-new",
+        },
+        {
+          provider_calendar_id: "overlay_busy_legacy@group.calendar.google.com",
+          sync_token: "sync-token-overlay-new",
+        },
+      ]),
+    );
+  });
+
+  it("google incremental enqueues full sync when overlay scope has no cursor", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: "sync-token-primary-old",
+    };
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "google_evt_overlay_bootstrap",
+        target_calendar_id: "overlay_bootstrap_missing_cursor@group.calendar.google.com",
+      },
+    ];
+
+    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+        ? input
+        : new URL(input.url);
+      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
+
+      if (calendarId === "primary") {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            nextSyncToken: "sync-token-primary-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (calendarId === "overlay_bootstrap_missing_cursor@group.calendar.google.com") {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            nextSyncToken: "sync-token-overlay-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Unexpected calendar", { status: 500 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-overlay-bootstrap",
+      resource_id: "resource-overlay-bootstrap",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(syncQueue.messages).toHaveLength(1);
+    const enqueued = syncQueue.messages[0] as Record<string, unknown>;
+    expect(enqueued.type).toBe("SYNC_FULL");
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(accountDOState.setSyncTokenCalls).toHaveLength(0);
+  });
+
+  it("google incremental skips unavailable overlay calendars (404) and continues syncing", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: "sync-token-primary-old",
+      "overlay_missing_scope@group.calendar.google.com": "sync-token-missing-old",
+    };
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: null,
+        target_calendar_id: "overlay_missing_scope@group.calendar.google.com",
+      },
+    ];
+
+    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+        ? input
+        : new URL(input.url);
+      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
+
+      if (calendarId === "primary") {
+        return new Response(
+          JSON.stringify({
+            items: [makeGoogleEvent({ id: "google_evt_primary_only_after_404" })],
+            nextSyncToken: "sync-token-primary-new",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (calendarId === "overlay_missing_scope@group.calendar.google.com") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 404,
+              message: "Not Found",
+              errors: [{ domain: "global", reason: "notFound", message: "Not Found" }],
+            },
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Unexpected calendar", { status: 500 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-overlay-404",
+      resource_id: "resource-overlay-404",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(syncQueue.messages).toHaveLength(0);
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+    expect(accountDOState.setSyncTokenCalls).toContain("sync-token-primary-new");
+  });
+
+  it("google deleted mirror resolves canonical via direct lookup when active mirror index is stale", async () => {
+    userGraphDOState.activeMirrors = [];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_stale_index: "evt_01HXYZ00000000000000000005",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: "google_evt_mirror_stale_index",
+          status: "cancelled",
+          extendedProperties: undefined,
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-stale-index",
+      resource_id: "resource-managed-delete-stale-index",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "google_evt_mirror_stale_index",
+      },
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "google_evt_mirror_stale_index",
+      },
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000005",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+  });
+
+  it("google deleted mirror resolves canonical even when event ID encoding differs", async () => {
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      "AAMkAGI2TQABAAA%2FAAABBB%3D%3D": "evt_01HXYZ00000000000000000004",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: "AAMkAGI2TQABAAA/AAABBB==",
+          status: "cancelled",
+          extendedProperties: undefined,
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-encoded",
+      resource_id: "resource-managed-delete-encoded",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "AAMkAGI2TQABAAA/AAABBB==",
+      },
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+      },
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000004",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
   });
 
   // -------------------------------------------------------------------------
@@ -1146,6 +1926,15 @@ describe("DLQ integration: messages retried and sent to DLQ after max_retries", 
         syncSuccessCalls: [],
         syncFailureCalls: [],
         setSyncTokenCalls: [],
+        scopedSyncTokens: { primary: TEST_SYNC_TOKEN },
+        setScopedSyncTokenCalls: [],
+        calendarScopes: [
+          {
+            provider_calendar_id: "primary",
+            enabled: true,
+            sync_enabled: true,
+          },
+        ],
       };
 
       env = createMockEnv({
@@ -1153,7 +1942,14 @@ describe("DLQ integration: messages retried and sent to DLQ after max_retries", 
         syncQueue,
         writeQueue,
         accountDOState,
-        userGraphDOState: { applyDeltaCalls: [] },
+        userGraphDOState: {
+          applyDeltaCalls: [],
+          deleteCanonicalCalls: [],
+          findCanonicalByMirrorCalls: [],
+          canonicalOriginEvents: [],
+          activeMirrors: [],
+          mirrorLookupByProviderEventId: {},
+        },
       });
 
       await handler.queue(mockBatch, env);
@@ -1543,11 +2339,26 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       syncSuccessCalls: [],
       syncFailureCalls: [],
       setSyncTokenCalls: [],
+      scopedSyncTokens: {
+        primary: MS_DELTA_LINK,
+      },
+      setScopedSyncTokenCalls: [],
+      calendarScopes: [
+        {
+          provider_calendar_id: "primary",
+          enabled: true,
+          sync_enabled: true,
+        },
+      ],
     };
 
     userGraphDOState = {
       applyDeltaCalls: [],
+      deleteCanonicalCalls: [],
+      findCanonicalByMirrorCalls: [],
       canonicalOriginEvents: [],
+      activeMirrors: [],
+      mirrorLookupByProviderEventId: {},
     };
 
     env = createMockEnv({
@@ -1688,6 +2499,153 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(eventIds).toContain("AAMkAG-origin-1");
     expect(eventIds).toContain("AAMkAG-origin-2");
     expect(eventIds).not.toContain("AAMkAG-ms-mirror-200");
+  });
+
+  it("filters managed mirrors via UserGraph mirror index when delta payload lacks extension", async () => {
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "AAMkAG-ms-mirror-noext" },
+    ];
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [
+        makeMicrosoftEvent({ id: "AAMkAG-origin-1" }),
+        makeMicrosoftEvent({
+          id: "AAMkAG-ms-mirror-noext",
+          subject: "Busy",
+          extensions: undefined,
+          categories: undefined,
+        }),
+        makeMicrosoftEvent({ id: "AAMkAG-origin-2", subject: "Real Event 2" }),
+      ],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-2b",
+      resource_id: "resource-ms-2b",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(2);
+    const eventIds = userGraphDOState.applyDeltaCalls[0].deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toContain("AAMkAG-origin-1");
+    expect(eventIds).toContain("AAMkAG-origin-2");
+    expect(eventIds).not.toContain("AAMkAG-ms-mirror-noext");
+  });
+
+  it("classifies MS event with category fallback as managed_mirror when extension is absent", async () => {
+    // AC #8: MS event with categories: ["T-Minus Managed"] but NO open extension
+    // should be classified as managed_mirror via the category fallback in
+    // classifyMicrosoftEvent(), and excluded from the origin delta batch.
+    const msFetch = createMicrosoftApiFetch({
+      events: [
+        makeMicrosoftEvent({ id: "AAMkAG-origin-cat-1", subject: "Real Origin" }),
+        makeMicrosoftEvent({
+          id: "AAMkAG-cat-mirror-300",
+          subject: "Busy",
+          extensions: undefined,
+          categories: ["T-Minus Managed"],
+        }),
+        makeMicrosoftEvent({ id: "AAMkAG-origin-cat-2", subject: "Another Origin" }),
+      ],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-cat-fallback",
+      resource_id: "resource-ms-cat-fallback",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // The category-flagged mirror should be excluded from the origin delta batch
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(2);
+
+    const eventIds = userGraphDOState.applyDeltaCalls[0].deltas.map(
+      (d: unknown) => (d as Record<string, unknown>).origin_event_id,
+    );
+    expect(eventIds).toContain("AAMkAG-origin-cat-1");
+    expect(eventIds).toContain("AAMkAG-origin-cat-2");
+    expect(eventIds).not.toContain("AAMkAG-cat-mirror-300");
+  });
+
+  it("managed Microsoft mirror deletion triggers canonical delete", async () => {
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      "AAMkAG-ms-mirror-200": "evt_01HXYZ00000000000000000002",
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftManagedMirrorEvent({ isCancelled: true })],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-managed-delete",
+      resource_id: "resource-ms-managed-delete",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: MS_ACCOUNT_B.account_id,
+        provider_event_id: "AAMkAG-ms-mirror-200",
+      },
+    ]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000002",
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+  });
+
+  it("invalid Microsoft delta cursor enqueues SYNC_FULL recovery instead of failing sync", async () => {
+    const invalidDeltaFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("graph.microsoft.com")) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "ErrorInvalidUrlQuery",
+              message: "Tracking changes to events is not supported for this request.",
+            },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-2c",
+      resource_id: "resource-ms-2c",
+      ping_ts: new Date().toISOString(),
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: invalidDeltaFetch, sleepFn: noopSleep });
+
+    expect(syncQueue.messages).toHaveLength(1);
+    expect((syncQueue.messages[0] as { type?: string }).type).toBe("SYNC_FULL");
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(accountDOState.syncFailureCalls).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

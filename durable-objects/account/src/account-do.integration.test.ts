@@ -315,6 +315,106 @@ describe("AccountDO integration", () => {
       expect(callCount).toBe(1); // No additional fetch
     });
 
+    it("serializes concurrent refresh requests with single-flight", async () => {
+      let callCount = 0;
+      const mockFetch: FetchFn = async () => {
+        callCount++;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return new Response(
+          JSON.stringify({
+            access_token: "ya29.concurrent-refresh",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES);
+
+      const [tokenA, tokenB] = await Promise.all([
+        acct.getAccessToken(),
+        acct.getAccessToken(),
+      ]);
+
+      expect(tokenA).toBe("ya29.concurrent-refresh");
+      expect(tokenB).toBe("ya29.concurrent-refresh");
+      expect(callCount).toBe(1);
+    });
+
+    it("persists and uses provider override during initialize", async () => {
+      let capturedUrl: string | undefined;
+      const spyFetch: FetchFn = async (input) => {
+        capturedUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        return new Response(
+          JSON.stringify({
+            access_token: "EwB0A8l6_provider_override",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES, "microsoft");
+      await acct.getAccessToken();
+
+      expect(capturedUrl).toContain("login.microsoftonline.com");
+      expect(capturedUrl).toContain("oauth2/v2.0/token");
+
+      const authRow = db
+        .prepare("SELECT provider FROM auth WHERE account_id = 'self'")
+        .get() as { provider: string };
+      expect(authRow.provider).toBe("microsoft");
+    });
+
+    it("self-heals legacy provider rows via Microsoft subscription presence", async () => {
+      let capturedUrl: string | undefined;
+      const spyFetch: FetchFn = async (input) => {
+        capturedUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        return new Response(
+          JSON.stringify({
+            access_token: "EwB0A8l6_legacy_healed",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, spyFetch);
+      await acct.initialize(EXPIRED_TOKENS, TEST_SCOPES); // legacy default provider='google'
+
+      db.prepare(
+        `INSERT INTO ms_subscriptions (subscription_id, resource, client_state, expiration)
+         VALUES (?, ?, ?, ?)`,
+      ).run(
+        "sub-legacy-heal",
+        "/me/calendars/primary/events",
+        "client-state",
+        new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      );
+
+      await acct.getAccessToken();
+
+      expect(capturedUrl).toContain("login.microsoftonline.com");
+      expect(capturedUrl).toContain("oauth2/v2.0/token");
+
+      const authRow = db
+        .prepare("SELECT provider FROM auth WHERE account_id = 'self'")
+        .get() as { provider: string };
+      expect(authRow.provider).toBe("microsoft");
+    });
+
     it("throws when Google API returns error on refresh", async () => {
       const mockFetch = createMockFetch({
         statusCode: 401,
@@ -1060,12 +1160,14 @@ describe("AccountDO integration", () => {
       const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
 
       await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct.markSyncFailure("initial failure");
       const ts = "2026-02-14T12:00:00Z";
       await acct.markSyncSuccess(ts);
 
       const health = await acct.getHealth();
       expect(health.lastSyncTs).toBe(ts);
       expect(health.lastSuccessTs).toBe(ts);
+      expect(health.fullSyncNeeded).toBe(false);
     });
 
     it("markSyncFailure updates lastSyncTs but not lastSuccessTs", async () => {
@@ -1354,6 +1456,49 @@ describe("AccountDO integration", () => {
       expect(reqBody.changeType).toBe("created,updated,deleted");
       expect(reqBody.notificationUrl).toBe("https://webhook.tminus.dev/webhook/microsoft");
       expect(reqBody.clientState).toBe("test-client-state-secret");
+    });
+
+    it("createMsSubscription URL-encodes calendar IDs with reserved characters", async () => {
+      let capturedBody = "";
+      const weirdCalendarId = "AAMk/cal+id=with==slashes";
+      const encodedCalendarId = encodeURIComponent(weirdCalendarId);
+      const mockFetch: FetchFn = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        capturedBody = (init?.body as string) ?? "";
+
+        if (url.includes("/subscriptions")) {
+          return new Response(
+            JSON.stringify({
+              id: "ms-sub-encoded-1",
+              resource: `/me/calendars/${encodedCalendarId}/events`,
+              expirationDateTime: "2026-02-17T12:00:00Z",
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ access_token: TEST_TOKENS.access_token, expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch, "microsoft");
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      await acct.createMsSubscription(
+        "https://webhook.tminus.dev/webhook/microsoft",
+        weirdCalendarId,
+        "test-client-state-secret",
+      );
+
+      const reqBody = JSON.parse(capturedBody);
+      expect(reqBody.resource).toBe(`/me/calendars/${encodedCalendarId}/events`);
+
+      const scoped = await acct.getScopedWatchLifecycle(weirdCalendarId);
+      expect(scoped).toHaveLength(1);
+      expect(scoped[0].providerCalendarId).toBe(weirdCalendarId);
+      expect(scoped[0].providerResourceId).toBe(`/me/calendars/${encodedCalendarId}/events`);
     });
 
     it("renewMsSubscription updates expiration (AC 5)", async () => {

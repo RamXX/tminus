@@ -310,6 +310,7 @@ export async function handleMarketplaceInstall(
         expiry,
       },
       scopes: tokenData.scope || GOOGLE_SCOPES,
+      provider: "google",
     }),
   }));
 

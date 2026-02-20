@@ -492,6 +492,7 @@ export async function handleOrgUserActivation(
         expiry,
       },
       scopes: tokenData.scope || GOOGLE_SCOPES,
+      provider: "google",
     }),
   }));
 

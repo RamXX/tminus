@@ -139,6 +139,7 @@ export {
   MicrosoftCalendarClient,
   MicrosoftApiError,
   MicrosoftTokenExpiredError,
+  MicrosoftDeltaTokenExpiredError,
   MicrosoftResourceNotFoundError,
   MicrosoftRateLimitError,
   MicrosoftSubscriptionValidationError,

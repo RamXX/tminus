@@ -133,13 +133,14 @@ export class AccountDO {
   private readonly fetchFn: FetchFn;
   private readonly oauthCredentials?: OAuthCredentials;
   private migrated = false;
+  private refreshInFlight: Promise<TokenPayload> | null = null;
 
   /**
    * The provider type for this account.
    * Defaults to 'google'. Stored in the auth table's provider column.
    * Used to route to the correct CalendarProvider, normalizer, and classifier.
    */
-  readonly provider: ProviderType;
+  private provider: ProviderType;
 
   /**
    * Construct an AccountDO.
@@ -162,6 +163,11 @@ export class AccountDO {
     this.fetchFn = fetchFn ?? globalThis.fetch.bind(globalThis);
     this.provider = provider ?? "google";
     this.oauthCredentials = oauthCredentials;
+  }
+
+  /** Narrow unknown values to supported OAuth calendar providers. */
+  private static isCalendarProvider(value: unknown): value is ProviderType {
+    return value === "google" || value === "microsoft";
   }
 
   // -------------------------------------------------------------------------
@@ -337,7 +343,79 @@ export class AccountDO {
 
   private parseMsCalendarIdFromResource(resource: string): string | null {
     const match = /^\/me\/calendars\/([^/]+)\/events$/.exec(resource);
-    return match?.[1] ?? null;
+    if (!match?.[1]) return null;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  }
+
+  /**
+   * Resolve the effective provider for this account from local persisted state.
+   *
+   * Production wrappers instantiate AccountDO without a fixed provider, so this
+   * method is the source of truth for runtime routing (Google vs Microsoft).
+   */
+  private resolveProvider(): ProviderType {
+    this.ensureMigrated();
+
+    const authRows = this.sql
+      .exec<{ provider: string | null }>(
+        "SELECT provider FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    let resolved: ProviderType = this.provider;
+    if (
+      authRows.length > 0 &&
+      AccountDO.isCalendarProvider(authRows[0].provider)
+    ) {
+      resolved = authRows[0].provider;
+    }
+
+    // Self-heal legacy rows where provider was persisted as "google" for
+    // Microsoft accounts before provider-aware initialization was enforced.
+    if (resolved === "google") {
+      const msSubs = this.sql
+        .exec<{ cnt: number }>(
+          "SELECT COUNT(*) as cnt FROM ms_subscriptions",
+        )
+        .toArray();
+      if ((msSubs[0]?.cnt ?? 0) > 0) {
+        resolved = "microsoft";
+      }
+    }
+
+    if (resolved !== this.provider) {
+      this.provider = resolved;
+    }
+
+    if (authRows.length > 0 && authRows[0].provider !== resolved) {
+      this.sql.exec(
+        `UPDATE auth
+         SET provider = ?, updated_at = datetime('now')
+         WHERE account_id = ?`,
+        resolved,
+        ACCOUNT_ROW_KEY,
+      );
+    }
+
+    return resolved;
+  }
+
+  /** Force provider for this account and persist it when auth row exists. */
+  private setProvider(provider: ProviderType): void {
+    this.ensureMigrated();
+    this.provider = provider;
+    this.sql.exec(
+      `UPDATE auth
+       SET provider = ?, updated_at = datetime('now')
+       WHERE account_id = ?`,
+      provider,
+      ACCOUNT_ROW_KEY,
+    );
   }
 
   private upsertCalendarScopeRow(scope: {
@@ -454,8 +532,11 @@ export class AccountDO {
   async initialize(
     tokens: { access_token: string; refresh_token: string; expiry: string },
     scopes: string,
+    provider?: ProviderType,
   ): Promise<void> {
     this.ensureMigrated();
+    const effectiveProvider = provider ?? this.resolveProvider();
+    this.provider = effectiveProvider;
 
     const masterKey = await importMasterKey(this.masterKeyHex);
     const envelope = await encryptTokens(masterKey, tokens);
@@ -467,7 +548,7 @@ export class AccountDO {
       ACCOUNT_ROW_KEY,
       JSON.stringify(envelope),
       scopes,
-      this.provider,
+      effectiveProvider,
     );
 
     // Initialize sync state
@@ -496,8 +577,13 @@ export class AccountDO {
    * BR-4: Access tokens minted JIT.
    * BR-8: Only the access_token is returned -- refresh_token stays inside.
    */
-  async getAccessToken(): Promise<string> {
+  async getAccessToken(providerOverride?: ProviderType): Promise<string> {
     this.ensureMigrated();
+    if (providerOverride) {
+      this.setProvider(providerOverride);
+    } else {
+      this.resolveProvider();
+    }
 
     const masterKey = await importMasterKey(this.masterKeyHex);
     const tokens = await this.loadTokens(masterKey);
@@ -511,13 +597,49 @@ export class AccountDO {
       return tokens.access_token;
     }
 
-    // Token expired or expiring soon -- refresh
-    const refreshed = await this.refreshAccessToken(
-      masterKey,
-      tokens.refresh_token,
-    );
+    // Token expired or expiring soon -- refresh. Use single-flight to avoid
+    // concurrent refresh races that can invalidate rotated refresh tokens.
+    const attemptedRefreshToken = tokens.refresh_token;
+    try {
+      const refreshed = await this.refreshAccessTokenSingleFlight(
+        masterKey,
+        attemptedRefreshToken,
+      );
+      return refreshed.access_token;
+    } catch (err) {
+      // Recovery path for refresh token rotation races:
+      // if another in-flight refresh already rotated tokens, reload and reuse.
+      if (err instanceof Error && err.message.includes("invalid_grant")) {
+        const latestTokens = await this.loadTokens(masterKey);
+        const latestExpiryMs = new Date(latestTokens.expiry).getTime();
+        if (
+          latestTokens.refresh_token !== attemptedRefreshToken &&
+          latestExpiryMs - Date.now() > REFRESH_BUFFER_MS
+        ) {
+          return latestTokens.access_token;
+        }
+      }
+      throw err;
+    }
+  }
 
-    return refreshed.access_token;
+  /**
+   * Serialize refresh-token usage within this DO instance.
+   */
+  private async refreshAccessTokenSingleFlight(
+    masterKey: CryptoKey,
+    refreshToken: string,
+  ): Promise<TokenPayload> {
+    if (!this.refreshInFlight) {
+      this.refreshInFlight = (async () => {
+        try {
+          return await this.refreshAccessToken(masterKey, refreshToken);
+        } finally {
+          this.refreshInFlight = null;
+        }
+      })();
+    }
+    return this.refreshInFlight;
   }
 
   /**
@@ -533,6 +655,7 @@ export class AccountDO {
    */
   async revokeTokens(): Promise<RevokeResult> {
     this.ensureMigrated();
+    const provider = this.resolveProvider();
 
     // Try to load tokens for server-side revocation
     let revoked = false;
@@ -544,7 +667,7 @@ export class AccountDO {
       .toArray();
 
     if (rows.length > 0) {
-      if (this.provider === "google") {
+      if (provider === "google") {
         // Google has a standard token revocation endpoint
         try {
           const masterKey = await importMasterKey(this.masterKeyHex);
@@ -830,7 +953,7 @@ export class AccountDO {
    * Google and Microsoft use different token endpoints.
    */
   private getTokenRefreshUrl(): string {
-    switch (this.provider) {
+    switch (this.resolveProvider()) {
       case "microsoft":
         return MS_TOKEN_URL;
       case "google":
@@ -848,6 +971,7 @@ export class AccountDO {
     masterKey: CryptoKey,
     refreshToken: string,
   ): Promise<TokenPayload> {
+    const provider = this.resolveProvider();
     const tokenUrl = this.getTokenRefreshUrl();
 
     // Build request body with client credentials per OAuth2 spec.
@@ -859,7 +983,7 @@ export class AccountDO {
     };
 
     if (this.oauthCredentials) {
-      if (this.provider === "microsoft") {
+      if (provider === "microsoft") {
         params.client_id = this.oauthCredentials.msClientId;
         params.client_secret = this.oauthCredentials.msClientSecret;
       } else {
@@ -1362,7 +1486,9 @@ export class AccountDO {
     const accessToken = await this.getAccessToken();
 
     // Build the subscription request to Microsoft Graph
-    const resource = `/me/calendars/${calendarId}/events`;
+    // Calendar IDs can contain reserved URL path characters. Keep the resource
+    // path URL-safe so Graph subscriptions always target the intended calendar.
+    const resource = `/me/calendars/${encodeURIComponent(calendarId)}/events`;
     const expirationDateTime = new Date(
       Date.now() + 3 * 24 * 60 * 60 * 1000, // max 3 days for calendar events
     ).toISOString();
@@ -1705,7 +1831,7 @@ export class AccountDO {
       // Update existing row, preserving sync_token and other fields
       this.sql.exec(
         `UPDATE sync_state
-         SET last_sync_ts = ?, last_success_ts = ?, updated_at = datetime('now')
+         SET last_sync_ts = ?, last_success_ts = ?, full_sync_needed = 0, updated_at = datetime('now')
          WHERE account_id = ?`,
         ts,
         ts,
@@ -1798,7 +1924,16 @@ export class AccountDO {
     try {
       switch (pathname) {
         case "/getAccessToken": {
-          const accessToken = await this.getAccessToken();
+          const body = request.method === "POST"
+            ? await request
+              .json()
+              .then((v) => v as { provider?: ProviderType })
+              .catch(() => ({} as { provider?: ProviderType }))
+            : ({} as { provider?: ProviderType });
+          const providerOverride = AccountDO.isCalendarProvider(body.provider)
+            ? body.provider
+            : undefined;
+          const accessToken = await this.getAccessToken(providerOverride);
           return Response.json({ access_token: accessToken });
         }
 
@@ -1871,8 +2006,12 @@ export class AccountDO {
               expiry: string;
             };
             scopes: string;
+            provider?: ProviderType;
           };
-          await this.initialize(body.tokens, body.scopes);
+          const providerOverride = AccountDO.isCalendarProvider(body.provider)
+            ? body.provider
+            : undefined;
+          await this.initialize(body.tokens, body.scopes, providerOverride);
           return Response.json({ ok: true });
         }
 
@@ -1922,7 +2061,7 @@ export class AccountDO {
         }
 
         case "/getProvider": {
-          return Response.json({ provider: this.provider });
+          return Response.json({ provider: this.resolveProvider() });
         }
 
         case "/createMsSubscription": {

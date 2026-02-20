@@ -1244,6 +1244,10 @@ function createOnboardingMicrosoftApiFetch(options: {
       (typeof input === "object" && "method" in input
         ? (input as Request).method
         : init?.method) ?? "GET";
+    const isMsEventsListRequest =
+      method === "GET" &&
+      url.includes("/me/calendars/") &&
+      (url.includes("/calendarView/delta") || url.includes("/events"));
 
     // GET /me/calendars (list calendars)
     if (url.endsWith("/me/calendars") && method === "GET") {
@@ -1286,8 +1290,8 @@ function createOnboardingMicrosoftApiFetch(options: {
       });
     }
 
-    // GET /me/calendars/{id}/events (list events) -- with optional $expand for extensions
-    if (url.includes("/me/calendars/") && url.includes("/events") && method === "GET") {
+    // GET /me/calendars/{id}/calendarView/delta (bootstrap) and legacy /events
+    if (isMsEventsListRequest) {
       const pages = options.eventPages ?? [
         {
           events: [makeMicrosoftEvent()],
@@ -1479,7 +1483,11 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
         return new Response("calendar-create-should-not-run", { status: 500 });
       }
 
-      if (url.includes("/me/calendars/") && url.includes("/events") && method === "GET") {
+      if (
+        method === "GET" &&
+        url.includes("/me/calendars/") &&
+        (url.includes("/calendarView/delta") || url.includes("/events"))
+      ) {
         return new Response(
           JSON.stringify({
             value: [makeMicrosoftEvent()],

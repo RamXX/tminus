@@ -69,6 +69,18 @@ export class MicrosoftRateLimitError extends MicrosoftApiError {
   }
 }
 
+/**
+ * Delta cursor is invalid/expired and caller should trigger a full sync reset.
+ *
+ * Graph can return this as 400 or 410 depending on token/query state.
+ */
+export class MicrosoftDeltaTokenExpiredError extends MicrosoftApiError {
+  constructor(message = "Microsoft delta token expired or invalid") {
+    super(message, 410);
+    this.name = "MicrosoftDeltaTokenExpiredError";
+  }
+}
+
 /** Subscription validation handshake failure. */
 export class MicrosoftSubscriptionValidationError extends MicrosoftApiError {
   constructor(message = "Subscription validation handshake failed") {
@@ -154,6 +166,12 @@ const MAILBOX_CONCURRENCY_BACKOFF_MS = 1000;
 
 /** T-Minus open extension name for managed markers. */
 const TMINUS_EXTENSION_NAME = "com.tminus.metadata";
+/** Fallback category marker for managed mirrors when delta payload omits extensions. */
+const TMINUS_MANAGED_CATEGORY = "T-Minus Managed";
+/** Full-sync bootstrap lookback window for calendarView/delta (days). */
+const FULL_SYNC_LOOKBACK_DAYS = 365;
+/** Full-sync bootstrap lookahead window for calendarView/delta (days). */
+const FULL_SYNC_LOOKAHEAD_DAYS = 730;
 
 // ---------------------------------------------------------------------------
 // Configuration options
@@ -211,7 +229,8 @@ export class MicrosoftCalendarClient implements CalendarProvider {
    *
    * When syncToken is provided, it's used as-is (it's a full URL with deltatoken).
    * When pageToken is provided, it's used as-is (it's a full URL with skiptoken).
-   * When neither is provided, fetches all events from the calendar.
+   * When neither is provided, starts a delta query (full snapshot + deltaLink)
+   * so future incremental syncs can detect deletions.
    */
   async listEvents(
     calendarId: string,
@@ -230,10 +249,24 @@ export class MicrosoftCalendarClient implements CalendarProvider {
     } else {
       const resolvedCalendarId = await this.resolveCalendarId(calendarId);
       const encodedCalendarId = encodeURIComponent(resolvedCalendarId);
-      url = `${MS_GRAPH_BASE}/me/calendars/${encodedCalendarId}/events?$expand=Extensions($filter=Id eq '${TMINUS_EXTENSION_NAME}')`;
+      // Use calendarView/delta bootstrap: Graph does not support $expand on
+      // events/delta, but calendarView/delta returns a durable delta cursor
+      // with richer event fields needed for normalization.
+      url = buildCalendarViewDeltaUrl(encodedCalendarId);
     }
 
-    const body = await this.request<MicrosoftEventsListRaw>(url, { method: "GET" });
+    let body: MicrosoftEventsListRaw;
+    try {
+      body = await this.request<MicrosoftEventsListRaw>(url, { method: "GET" });
+    } catch (err) {
+      // Self-heal old/invalid delta links so sync-consumer can enqueue SYNC_FULL.
+      if (isRecoverableDeltaCursorError(err)) {
+        throw new MicrosoftDeltaTokenExpiredError(
+          err instanceof Error ? err.message : "Microsoft delta cursor invalid",
+        );
+      }
+      throw err;
+    }
 
     // Map Microsoft Graph events to GoogleCalendarEvent shape for compatibility
     const events = (body.value ?? []).map((msEvt) => ({
@@ -591,9 +624,41 @@ function projectToMicrosoftEvent(event: ProjectedEvent): Record<string, unknown>
         originAccount: props.origin_account_id,
       },
     ];
+
+    // Delta payloads may omit open extensions; keep a category marker as a
+    // secondary loop-prevention signal.
+    if (props.tminus === "true" && props.managed === "true") {
+      msEvent.categories = [TMINUS_MANAGED_CATEGORY];
+    }
   }
 
   return msEvent;
+}
+
+function buildCalendarViewDeltaUrl(encodedCalendarId: string): string {
+  const now = Date.now();
+  const startMs = now - FULL_SYNC_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const endMs = now + FULL_SYNC_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000;
+  const searchParams = new URLSearchParams({
+    startDateTime: new Date(startMs).toISOString(),
+    endDateTime: new Date(endMs).toISOString(),
+  });
+  return `${MS_GRAPH_BASE}/me/calendars/${encodedCalendarId}/calendarView/delta?${searchParams.toString()}`;
+}
+
+function isRecoverableDeltaCursorError(err: unknown): boolean {
+  if (!(err instanceof MicrosoftApiError)) return false;
+  if (err.statusCode !== 400 && err.statusCode !== 410) return false;
+
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("syncstatenotfound") ||
+    msg.includes("delta token") ||
+    msg.includes("deltatoken") ||
+    msg.includes("tracking changes to events") ||
+    msg.includes("not supported for this request") ||
+    msg.includes("errorinvalidurlquery")
+  );
 }
 
 function toMicrosoftDateTime(

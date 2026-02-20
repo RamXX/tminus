@@ -22,6 +22,7 @@ import {
   MicrosoftCalendarClient,
   MicrosoftApiError,
   MicrosoftTokenExpiredError,
+  MicrosoftDeltaTokenExpiredError,
   MicrosoftResourceNotFoundError,
   MicrosoftRateLimitError,
   MicrosoftSubscriptionValidationError,
@@ -128,6 +129,14 @@ describe("Microsoft error classes", () => {
     const err = new MicrosoftRateLimitError("throttled", 30);
     expect(err.retryAfterSeconds).toBe(30);
     expect(err.message).toBe("throttled");
+  });
+
+  it("MicrosoftDeltaTokenExpiredError maps to retryable full-sync reset semantics", () => {
+    const err = new MicrosoftDeltaTokenExpiredError("stale cursor");
+    expect(err).toBeInstanceOf(MicrosoftApiError);
+    expect(err.name).toBe("MicrosoftDeltaTokenExpiredError");
+    expect(err.statusCode).toBe(410);
+    expect(err.message).toBe("stale cursor");
   });
 
   it("MicrosoftSubscriptionValidationError has correct name", () => {
@@ -328,9 +337,12 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls).toHaveLength(2);
     expect(calls[0][0]).toBe(`${BASE_URL}/me/calendars?$filter=isDefaultCalendar eq true`);
-    expect(calls[1][0]).toBe(
-      `${BASE_URL}/me/calendars/ms_default_cal/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')`,
+    const bootstrapUrl = String(calls[1][0]);
+    expect(bootstrapUrl).toContain(
+      `${BASE_URL}/me/calendars/ms_default_cal/calendarView/delta?`,
     );
+    expect(bootstrapUrl).toContain("startDateTime=");
+    expect(bootstrapUrl).toContain("endDateTime=");
   });
 
   it("caches resolved default calendar ID for repeated 'primary' calls", async () => {
@@ -364,7 +376,7 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     expect(lookupCalls).toHaveLength(1);
   });
 
-  it("sends GET to /me/calendars/{id}/events with filtered $expand for full sync (no syncToken)", async () => {
+  it("sends GET to /me/calendars/{id}/calendarView/delta with bounded window for full sync bootstrap", async () => {
     const fetchFn = mockFetch({
       value: [
         {
@@ -378,13 +390,12 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     });
     const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
 
-    const result = await client.listEvents("cal_1");
+    await client.listEvents("cal_1");
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    // Microsoft Graph requires filtered $expand to avoid 400 ErrorGraphExtensionExpandRequiresFilter
-    expect(url).toBe(
-      `${BASE_URL}/me/calendars/cal_1/events?$expand=Extensions($filter=Id eq 'com.tminus.metadata')`,
-    );
+    expect(String(url)).toContain(`${BASE_URL}/me/calendars/cal_1/calendarView/delta?`);
+    expect(String(url)).toContain("startDateTime=");
+    expect(String(url)).toContain("endDateTime=");
   });
 
   it("URL-encodes calendar IDs in listEvents path", async () => {
@@ -395,7 +406,7 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     await client.listEvents(calendarId);
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toContain(`/me/calendars/${encodeURIComponent(calendarId)}/events`);
+    expect(url).toContain(`/me/calendars/${encodeURIComponent(calendarId)}/calendarView/delta`);
   });
 
   it("returns events mapped to GoogleCalendarEvent shape", async () => {
@@ -452,19 +463,19 @@ describe("MicrosoftCalendarClient.listEvents", () => {
           end: { dateTime: "2025-06-15T10:00:00.0000000", timeZone: "UTC" },
         },
       ],
-      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events?$skiptoken=page2",
+      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events/delta?$skiptoken=page2",
     });
     const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
 
     const result = await client.listEvents("cal_1");
 
     expect(result.events).toHaveLength(1);
-    expect(result.nextPageToken).toBe("https://graph.microsoft.com/v1.0/me/calendars/cal_1/events?$skiptoken=page2");
+    expect(result.nextPageToken).toBe("https://graph.microsoft.com/v1.0/me/calendars/cal_1/events/delta?$skiptoken=page2");
     expect(result.nextSyncToken).toBeUndefined();
   });
 
   it("uses pageToken URL directly when pageToken is provided", async () => {
-    const pageUrl = "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events?$skiptoken=page2";
+    const pageUrl = "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events/delta?$skiptoken=page2";
     const fetchFn = mockFetch({
       value: [
         {
@@ -484,7 +495,7 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     expect(url).toBe(pageUrl);
   });
 
-  it("includes filtered $expand=Extensions in default URL to avoid Graph API 400 error", async () => {
+  it("default bootstrap URL does not use unsupported $expand on delta", async () => {
     const fetchFn = mockFetch({
       value: [],
       "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=test",
@@ -494,10 +505,26 @@ describe("MicrosoftCalendarClient.listEvents", () => {
     await client.listEvents("cal_special");
 
     const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    // Must use filtered expand to avoid ErrorGraphExtensionExpandRequiresFilter
-    expect(url).toContain("$expand=Extensions($filter=Id eq 'com.tminus.metadata')");
-    // Must NOT contain bare $expand=extensions (no filter)
+    expect(String(url)).toContain("/calendarView/delta?");
     expect(url).not.toMatch(/\$expand=extensions(?!\()/i);
+  });
+
+  it("maps invalid/expired delta cursor errors to MicrosoftDeltaTokenExpiredError", async () => {
+    const fetchFn = mockFetchError(
+      400,
+      JSON.stringify({
+        error: {
+          code: "ErrorInvalidUrlQuery",
+          message: "Tracking changes to events is not supported for this request.",
+        },
+      }),
+      { "Content-Type": "application/json" },
+    );
+    const client = new MicrosoftCalendarClient(TEST_TOKEN, fetchFn);
+
+    await expect(
+      client.listEvents("cal_1", "https://graph.microsoft.com/v1.0/me/calendars/cal_1/events/delta?$deltatoken=legacy"),
+    ).rejects.toBeInstanceOf(MicrosoftDeltaTokenExpiredError);
   });
 
   it("does NOT modify syncToken (deltaLink) URL -- API returns complete URLs", async () => {
@@ -682,6 +709,7 @@ describe("MicrosoftCalendarClient.insertEvent", () => {
     expect(sentBody.extensions[0].managed).toBe("true");
     expect(sentBody.extensions[0].canonicalId).toBe("evt_01HXYZ000012345678901234AB");
     expect(sentBody.extensions[0].originAccount).toBe("acc_01HXYZ000012345678901234AB");
+    expect(sentBody.categories).toEqual(["T-Minus Managed"]);
   });
 
   it("sends Authorization header", async () => {

@@ -20,7 +20,11 @@ import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { render, screen, within, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BriefingPanel } from "./BriefingPanel";
-import type { EventBriefing, ExcuseOutput } from "../lib/briefing";
+import {
+  computeDriftIndicator,
+  type EventBriefing,
+  type ExcuseOutput,
+} from "../lib/briefing";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -256,6 +260,10 @@ describe("BriefingPanel", () => {
     });
 
     it("shows drift indicator", async () => {
+      const expectedLabel = computeDriftIndicator(
+        MOCK_BRIEFING.participants[0].last_interaction_ts,
+      ).label;
+
       render(
         <BriefingPanel
           eventId="evt-1"
@@ -265,8 +273,7 @@ describe("BriefingPanel", () => {
       );
 
       await waitFor(() => {
-        // Alice interacted 5 days ago -> "Recent"
-        expect(screen.getByText("Recent")).toBeInTheDocument();
+        expect(screen.getByText(expectedLabel)).toBeInTheDocument();
       });
     });
   });

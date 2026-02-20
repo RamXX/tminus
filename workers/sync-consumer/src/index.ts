@@ -27,6 +27,7 @@ import {
   GoogleApiError,
   MicrosoftApiError,
   MicrosoftTokenExpiredError,
+  MicrosoftDeltaTokenExpiredError,
   MicrosoftRateLimitError,
   createCalendarProvider,
   getClassificationStrategy,
@@ -36,6 +37,7 @@ import type {
   SyncIncrementalMessage,
   SyncFullMessage,
   GoogleCalendarEvent,
+  EventClassification,
   ProviderDelta,
   AccountId,
   FetchFn,
@@ -137,9 +139,13 @@ export async function handleIncrementalSync(
   // Step 2: Get access token from AccountDO
   let accessToken: string;
   try {
-    accessToken = await getAccessToken(account_id, env);
+    accessToken = await getAccessToken(account_id, provider, env);
   } catch (err) {
     if (isPermanentAccessTokenFailure(err)) {
+      console.error(
+        `sync-consumer: permanent token failure for account ${account_id}`,
+        err instanceof Error ? err.message : err,
+      );
       await markSyncFailure(
         account_id,
         env,
@@ -150,26 +156,31 @@ export async function handleIncrementalSync(
     throw err;
   }
 
-  // Step 3: Get sync token (for Google: syncToken, for Microsoft: deltaLink URL)
-  const syncToken = await getSyncToken(account_id, env);
-
-  // Step 4: Fetch incremental changes via provider-specific client
+  // Step 3: Fetch incremental changes via provider-specific client.
+  // Google reads every enabled sync scope (primary + overlays) using
+  // per-calendar scoped cursors; Microsoft keeps single-cursor behavior.
   const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
   let events: GoogleCalendarEvent[];
-  let nextSyncToken: string | undefined;
+  let cursorUpdates: SyncCursorUpdate[] = [];
+  const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
 
   try {
-    const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
-    const response = await retryWithBackoff(
-      () => client.listEvents("primary", syncToken ?? undefined),
+    const result = await fetchIncrementalProviderEvents(
+      account_id,
+      provider,
+      client,
+      env,
       retryOpts,
     );
-    events = response.events;
-    nextSyncToken = response.nextSyncToken;
+    events = result.events;
+    cursorUpdates = result.cursorUpdates;
   } catch (err) {
-    // Step 5: Handle 410 Gone (Google sync token expired) -- enqueue SYNC_FULL
-    if (err instanceof SyncTokenExpiredError) {
+    // Step 4: Handle 410/delta token expiry -- enqueue SYNC_FULL.
+    if (
+      err instanceof SyncTokenExpiredError ||
+      err instanceof MicrosoftDeltaTokenExpiredError
+    ) {
       await env.SYNC_QUEUE.send({
         type: "SYNC_FULL",
         account_id,
@@ -180,17 +191,23 @@ export async function handleIncrementalSync(
 
     // Handle 401 -- refresh token and retry once (both Google and Microsoft)
     if (err instanceof TokenExpiredError || err instanceof MicrosoftTokenExpiredError) {
-      const freshToken = await refreshAndGetToken(account_id, env);
+      const freshToken = await refreshAndGetToken(account_id, provider, env);
       const freshClient = createCalendarProvider(provider, freshToken, deps.fetchFn);
       try {
-        const response = await freshClient.listEvents(
-          "primary",
-          syncToken ?? undefined,
+        const result = await fetchIncrementalProviderEvents(
+          account_id,
+          provider,
+          freshClient,
+          env,
+          retryOpts,
         );
-        events = response.events;
-        nextSyncToken = response.nextSyncToken;
+        events = result.events;
+        cursorUpdates = result.cursorUpdates;
       } catch (retryErr) {
-        if (retryErr instanceof SyncTokenExpiredError) {
+        if (
+          retryErr instanceof SyncTokenExpiredError ||
+          retryErr instanceof MicrosoftDeltaTokenExpiredError
+        ) {
           await env.SYNC_QUEUE.send({
             type: "SYNC_FULL",
             account_id,
@@ -205,6 +222,10 @@ export async function handleIncrementalSync(
       (err instanceof MicrosoftApiError && err.statusCode === 403)
     ) {
       // 403: insufficient scope/privileges -- mark failure, do not retry
+      console.error(
+        `sync-consumer: 403 scope failure for account ${account_id} (${provider})`,
+        err.message,
+      );
       await markSyncFailure(account_id, env, `Insufficient scope (403)`);
       return;
     } else {
@@ -212,19 +233,17 @@ export async function handleIncrementalSync(
     }
   }
 
-  // Steps 6-8: Process events and update state using provider-specific classification/normalization
+  // Step 5: Process events and apply deltas.
   const deltasApplied = await processAndApplyDeltas(account_id, events, env, provider);
 
-  // Update sync cursor (syncToken for Google, deltaLink URL for Microsoft)
-  if (nextSyncToken) {
-    await setSyncToken(account_id, env, nextSyncToken);
-  }
+  // Step 6: Persist sync cursors.
+  await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
-  // Mark sync success
+  // Step 7: Mark sync success.
   await markSyncSuccess(account_id, env);
 
   console.log(
-    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id} -- ${events.length} events fetched, ${deltasApplied} deltas applied`,
+    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated`,
   );
 }
 
@@ -253,9 +272,13 @@ export async function handleFullSync(
   // Get access token
   let accessToken: string;
   try {
-    accessToken = await getAccessToken(account_id, env);
+    accessToken = await getAccessToken(account_id, provider, env);
   } catch (err) {
     if (isPermanentAccessTokenFailure(err)) {
+      console.error(
+        `sync-consumer: permanent token failure for account ${account_id}`,
+        err instanceof Error ? err.message : err,
+      );
       await markSyncFailure(
         account_id,
         env,
@@ -267,50 +290,45 @@ export async function handleFullSync(
   }
   const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
-  let pageToken: string | undefined;
-  let lastSyncToken: string | undefined;
-  const allEvents: GoogleCalendarEvent[] = [];
-
-  // Paginate through all events
-  // For Google: nextPageToken for pagination, nextSyncToken on last page
-  // For Microsoft: @odata.nextLink for pagination, @odata.deltaLink on last page
+  let allEvents: GoogleCalendarEvent[] = [];
+  let cursorUpdates: SyncCursorUpdate[] = [];
+  let skippedCalendarIds: string[] = [];
   const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
+
   try {
-    do {
-      const response = await retryWithBackoff(
-        () => client.listEvents("primary", undefined, pageToken),
-        retryOpts,
-      );
-      allEvents.push(...response.events);
-      pageToken = response.nextPageToken;
-      // The sync/delta token is only on the last page
-      if (response.nextSyncToken) {
-        lastSyncToken = response.nextSyncToken;
-      }
-    } while (pageToken);
+    const result = await fetchFullProviderEvents(
+      account_id,
+      provider,
+      client,
+      env,
+      retryOpts,
+    );
+    allEvents = result.events;
+    cursorUpdates = result.cursorUpdates;
+    skippedCalendarIds = result.skippedCalendarIds;
   } catch (err) {
     // Handle 401 -- refresh token and retry (both Google and Microsoft)
     if (err instanceof TokenExpiredError || err instanceof MicrosoftTokenExpiredError) {
-      const freshToken = await refreshAndGetToken(account_id, env);
+      const freshToken = await refreshAndGetToken(account_id, provider, env);
       const freshClient = createCalendarProvider(provider, freshToken, deps.fetchFn);
-      // Restart pagination from scratch since the token changed
-      allEvents.length = 0;
-      pageToken = undefined;
-      do {
-        const response = await retryWithBackoff(
-          () => freshClient.listEvents("primary", undefined, pageToken),
-          retryOpts,
-        );
-        allEvents.push(...response.events);
-        pageToken = response.nextPageToken;
-        if (response.nextSyncToken) {
-          lastSyncToken = response.nextSyncToken;
-        }
-      } while (pageToken);
+      const result = await fetchFullProviderEvents(
+        account_id,
+        provider,
+        freshClient,
+        env,
+        retryOpts,
+      );
+      allEvents = result.events;
+      cursorUpdates = result.cursorUpdates;
+      skippedCalendarIds = result.skippedCalendarIds;
     } else if (
       (err instanceof GoogleApiError && err.statusCode === 403) ||
       (err instanceof MicrosoftApiError && err.statusCode === 403)
     ) {
+      console.error(
+        `sync-consumer: 403 scope failure during full sync for account ${account_id} (${provider})`,
+        err.message,
+      );
       await markSyncFailure(account_id, env, "Insufficient scope (403)");
       return;
     } else {
@@ -321,6 +339,29 @@ export async function handleFullSync(
   // Process all events using provider-specific classification/normalization
   const deltasApplied = await processAndApplyDeltas(account_id, allEvents, env, provider);
 
+  let staleManagedMirrorDeletes = 0;
+  if (provider === "google") {
+    const userId = await lookupUserId(account_id, env);
+    if (userId) {
+      const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
+        account_id,
+        userId,
+        allEvents,
+        env,
+        skippedCalendarIds,
+      );
+      if (missingMirrorProviderIds.length > 0) {
+        await applyManagedMirrorDeletes(
+          account_id,
+          userId,
+          missingMirrorProviderIds,
+          env,
+        );
+        staleManagedMirrorDeletes = missingMirrorProviderIds.length;
+      }
+    }
+  }
+
   // Full sync convergence: prune stale provider-origin canonicals that no longer
   // exist upstream. Without this, explicit full resyncs can still leave deletes behind.
   const prunedDeleted = await pruneMissingOriginEvents(
@@ -330,22 +371,312 @@ export async function handleFullSync(
     provider,
   );
 
-  // Update sync cursor (syncToken for Google, deltaLink for Microsoft)
-  if (lastSyncToken) {
-    await setSyncToken(account_id, env, lastSyncToken);
-  }
+  // Update sync cursor(s): scoped for Google, legacy-compatible for primary.
+  await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
   // Mark sync success
   await markSyncSuccess(account_id, env);
 
   console.log(
-    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${prunedDeleted} stale origin events pruned`,
+    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${staleManagedMirrorDeletes} stale managed mirrors deleted, ${prunedDeleted} stale origin events pruned, ${cursorUpdates.length} cursors updated`,
   );
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+interface SyncCursorUpdate {
+  providerCalendarId: string;
+  token: string;
+}
+
+interface CalendarScopeRecord {
+  providerCalendarId: string;
+  enabled: boolean;
+  syncEnabled: boolean;
+}
+
+interface ProviderFetchResult {
+  events: GoogleCalendarEvent[];
+  cursorUpdates: SyncCursorUpdate[];
+  skippedCalendarIds: string[];
+}
+
+async function fetchIncrementalProviderEvents(
+  accountId: AccountId,
+  provider: ProviderType,
+  client: ReturnType<typeof createCalendarProvider>,
+  env: Env,
+  retryOpts: RetryOptions,
+): Promise<ProviderFetchResult> {
+  if (provider !== "google") {
+    const syncToken = await getSyncToken(accountId, env);
+    const response = await retryWithBackoff(
+      () => client.listEvents("primary", syncToken ?? undefined),
+      retryOpts,
+    );
+    return {
+      events: response.events,
+      cursorUpdates: response.nextSyncToken
+        ? [{ providerCalendarId: "primary", token: response.nextSyncToken }]
+        : [],
+      skippedCalendarIds: [],
+    };
+  }
+
+  const calendarIds = await listGoogleSyncCalendarIds(accountId, env);
+  const events: GoogleCalendarEvent[] = [];
+  const cursorUpdates: SyncCursorUpdate[] = [];
+  const skippedCalendarIds: string[] = [];
+  let needsScopedBootstrapFullSync = false;
+
+  for (const calendarId of calendarIds) {
+    const syncToken = await getScopedSyncToken(accountId, env, calendarId);
+    let response: Awaited<ReturnType<ReturnType<typeof createCalendarProvider>["listEvents"]>>;
+    try {
+      response = await retryWithBackoff(
+        () => client.listEvents(calendarId, syncToken ?? undefined),
+        retryOpts,
+      );
+    } catch (err) {
+      if (err instanceof GoogleApiError && err.statusCode === 404) {
+        console.warn(
+          `sync-consumer: skipping unavailable google calendar scope ${calendarId} for account ${accountId}`,
+        );
+        skippedCalendarIds.push(calendarId);
+        continue;
+      }
+      throw err;
+    }
+
+    if (!syncToken && calendarId !== "primary") {
+      needsScopedBootstrapFullSync = true;
+    }
+
+    events.push(...response.events);
+    if (response.nextSyncToken) {
+      cursorUpdates.push({
+        providerCalendarId: calendarId,
+        token: response.nextSyncToken,
+      });
+    }
+  }
+
+  if (needsScopedBootstrapFullSync) {
+    throw new SyncTokenExpiredError(
+      "google scoped sync bootstrap required for non-primary calendars",
+    );
+  }
+
+  return { events, cursorUpdates, skippedCalendarIds };
+}
+
+async function fetchFullProviderEvents(
+  accountId: AccountId,
+  provider: ProviderType,
+  client: ReturnType<typeof createCalendarProvider>,
+  env: Env,
+  retryOpts: RetryOptions,
+): Promise<ProviderFetchResult> {
+  if (provider !== "google") {
+    let pageToken: string | undefined;
+    let lastSyncToken: string | undefined;
+    const events: GoogleCalendarEvent[] = [];
+
+    do {
+      const response = await retryWithBackoff(
+        () => client.listEvents("primary", undefined, pageToken),
+        retryOpts,
+      );
+      events.push(...response.events);
+      pageToken = response.nextPageToken;
+      if (response.nextSyncToken) {
+        lastSyncToken = response.nextSyncToken;
+      }
+    } while (pageToken);
+
+    return {
+      events,
+      cursorUpdates: lastSyncToken
+        ? [{ providerCalendarId: "primary", token: lastSyncToken }]
+        : [],
+      skippedCalendarIds: [],
+    };
+  }
+
+  const calendarIds = await listGoogleSyncCalendarIds(accountId, env);
+  const events: GoogleCalendarEvent[] = [];
+  const cursorUpdates: SyncCursorUpdate[] = [];
+  const skippedCalendarIds: string[] = [];
+
+  for (const calendarId of calendarIds) {
+    let pageToken: string | undefined;
+    let lastSyncToken: string | undefined;
+
+    do {
+      let response: Awaited<ReturnType<ReturnType<typeof createCalendarProvider>["listEvents"]>>;
+      try {
+        response = await retryWithBackoff(
+          () => client.listEvents(calendarId, undefined, pageToken),
+          retryOpts,
+        );
+      } catch (err) {
+        if (err instanceof GoogleApiError && err.statusCode === 404) {
+          console.warn(
+            `sync-consumer: skipping unavailable google calendar scope ${calendarId} for account ${accountId}`,
+          );
+          skippedCalendarIds.push(calendarId);
+          break;
+        }
+        throw err;
+      }
+      events.push(...response.events);
+      pageToken = response.nextPageToken;
+      if (response.nextSyncToken) {
+        lastSyncToken = response.nextSyncToken;
+      }
+    } while (pageToken);
+
+    if (lastSyncToken) {
+      cursorUpdates.push({
+        providerCalendarId: calendarId,
+        token: lastSyncToken,
+      });
+    }
+  }
+
+  return { events, cursorUpdates, skippedCalendarIds };
+}
+
+async function persistSyncCursorUpdates(
+  accountId: AccountId,
+  provider: ProviderType,
+  env: Env,
+  cursorUpdates: SyncCursorUpdate[],
+): Promise<void> {
+  if (cursorUpdates.length === 0) {
+    return;
+  }
+
+  if (provider === "google") {
+    for (const update of cursorUpdates) {
+      await setScopedSyncToken(
+        accountId,
+        env,
+        update.providerCalendarId,
+        update.token,
+      );
+    }
+
+    const primaryUpdate = cursorUpdates.find(
+      (update) => update.providerCalendarId === "primary",
+    );
+    if (primaryUpdate) {
+      await setSyncToken(accountId, env, primaryUpdate.token);
+    }
+    return;
+  }
+
+  const defaultUpdate = cursorUpdates.find(
+    (update) => update.providerCalendarId === "primary",
+  );
+  if (defaultUpdate) {
+    await setSyncToken(accountId, env, defaultUpdate.token);
+  }
+}
+
+async function listGoogleSyncCalendarIds(
+  accountId: AccountId,
+  env: Env,
+): Promise<string[]> {
+  const calendarIds = new Set(
+    (await listCalendarScopes(accountId, env))
+      .filter((scope) => scope.enabled && scope.syncEnabled)
+      .map((scope) => scope.providerCalendarId)
+      .filter((calendarId) => calendarId.length > 0),
+  );
+
+  // Fallback for legacy accounts that predate scoped calendar registration:
+  // derive active target calendars from mirror rows (overlay calendars).
+  const userId = await lookupUserId(accountId, env);
+  if (userId) {
+    const mirrorCalendarIds = await loadManagedMirrorCalendarIds(
+      accountId,
+      userId,
+      env,
+    );
+    for (const calendarId of mirrorCalendarIds) {
+      calendarIds.add(calendarId);
+    }
+  }
+
+  if (calendarIds.size === 0) {
+    return ["primary"];
+  }
+
+  return [...calendarIds];
+}
+
+async function listCalendarScopes(
+  accountId: AccountId,
+  env: Env,
+): Promise<CalendarScopeRecord[]> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+  const response = await stub.fetch(
+    new Request("https://account.internal/listCalendarScopes", {
+      method: "POST",
+    }),
+  );
+
+  if (!response.ok) {
+    // Compatibility fallback for older AccountDO deployments.
+    if (response.status === 404 || response.status === 405) {
+      return [
+        {
+          providerCalendarId: "primary",
+          enabled: true,
+          syncEnabled: true,
+        },
+      ];
+    }
+    const body = await response.text();
+    throw new Error(
+      `AccountDO.listCalendarScopes failed (${response.status}): ${body}`,
+    );
+  }
+
+  const payload = (await response.json()) as {
+    scopes?: Array<{
+      providerCalendarId?: string;
+      provider_calendar_id?: string;
+      enabled?: boolean;
+      syncEnabled?: boolean;
+      sync_enabled?: boolean;
+    }>;
+  };
+
+  const scopes = payload.scopes ?? [];
+  if (scopes.length === 0) {
+    return [
+      {
+        providerCalendarId: "primary",
+        enabled: true,
+        syncEnabled: true,
+      },
+    ];
+  }
+
+  return scopes
+    .map((scope) => ({
+      providerCalendarId:
+        scope.providerCalendarId ?? scope.provider_calendar_id ?? "primary",
+      enabled: scope.enabled ?? true,
+      syncEnabled: scope.syncEnabled ?? scope.sync_enabled ?? true,
+    }))
+    .filter((scope) => scope.providerCalendarId.length > 0);
+}
 
 /**
  * Classify, normalize, and apply provider deltas for a batch of events.
@@ -364,53 +695,133 @@ async function processAndApplyDeltas(
   provider: ProviderType = "google",
 ): Promise<number> {
   const deltas: ProviderDelta[] = [];
+  const managedMirrorDeletedEventIds = new Set<string>();
   const classificationStrategy = getClassificationStrategy(provider);
+  let userId: string | null = null;
+  let userGraphStub: DurableObjectStub | null = null;
+  let managedMirrorEventIds: Set<string> | null = null;
+
+  const ensureUserGraphStub = async (): Promise<DurableObjectStub> => {
+    if (userGraphStub) return userGraphStub;
+    if (!userId) {
+      userId = await lookupUserId(accountId, env);
+    }
+    if (!userId) {
+      throw new Error(
+        `sync-consumer: no user_id found for account ${accountId}`,
+      );
+    }
+    const userGraphId = env.USER_GRAPH.idFromName(userId);
+    userGraphStub = env.USER_GRAPH.get(userGraphId);
+    return userGraphStub;
+  };
+
+  const ensureManagedMirrorEventIds = async (): Promise<Set<string>> => {
+    if (managedMirrorEventIds) return managedMirrorEventIds;
+    if (!userId) {
+      userId = await lookupUserId(accountId, env);
+    }
+    if (!userId) {
+      throw new Error(
+        `sync-consumer: no user_id found for account ${accountId}`,
+      );
+    }
+    managedMirrorEventIds = await loadManagedMirrorEventIds(
+      accountId,
+      userId,
+      env,
+    );
+    return managedMirrorEventIds;
+  };
+
+  if (events.length > 0) {
+    managedMirrorEventIds = await ensureManagedMirrorEventIds();
+  }
 
   for (const event of events) {
     // For Microsoft events, the MicrosoftCalendarClient stores raw event data
     // under _msRaw. Use that for classification and normalization when available.
     const rawEvent = (event as Record<string, unknown>)._msRaw ?? event;
-    const classification = classificationStrategy.classify(rawEvent);
+    const classification = classifyProviderEvent(
+      provider,
+      rawEvent as Record<string, unknown>,
+      classificationStrategy,
+      managedMirrorEventIds,
+    );
+    const delta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
 
     if (classification === "managed_mirror") {
-      // Invariant E: managed mirrors are NOT treated as new origins.
-      // Skip entirely -- drift detection is handled by reconciliation.
+      // Managed mirrors are never treated as origins (Invariant E), but if a
+      // managed mirror was deleted at the provider, that is a user intent to
+      // remove the underlying canonical event globally.
+      if (
+        delta.type === "deleted" &&
+        typeof delta.origin_event_id === "string" &&
+        delta.origin_event_id.length > 0
+      ) {
+        managedMirrorDeletedEventIds.add(delta.origin_event_id);
+      }
       continue;
     }
 
-    // Origin or foreign_managed: normalize to ProviderDelta using provider-specific normalizer
-    const delta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
+    // Fallback for providers (notably Google cancelled payloads) that can omit
+    // managed markers on delete deltas. If the deleted provider_event_id is a
+    // known managed mirror, treat it as a managed delete intent.
+    if (
+      delta.type === "deleted" &&
+      typeof delta.origin_event_id === "string" &&
+      delta.origin_event_id.length > 0
+    ) {
+      const mirrorIds = await ensureManagedMirrorEventIds();
+      let managedDelete = providerEventIdVariants(delta.origin_event_id).some(
+        (candidateId) => mirrorIds.has(candidateId),
+      );
+
+      // Fallback: mirror state can drift out of ACTIVE while the provider
+      // event still exists. Resolve directly by mirror lookup before treating
+      // this as an origin delete.
+      if (!managedDelete) {
+        const stub = await ensureUserGraphStub();
+        const canonicalId = await findCanonicalIdByMirror(
+          stub,
+          accountId,
+          delta.origin_event_id,
+        );
+        managedDelete = canonicalId !== null;
+      }
+
+      if (managedDelete) {
+        managedMirrorDeletedEventIds.add(delta.origin_event_id);
+        continue;
+      }
+    }
+
+    // Origin or foreign_managed: include in ProviderDelta batch
     deltas.push(delta);
   }
 
-  if (deltas.length === 0) {
-    return 0;
+  if (deltas.length > 0 || managedMirrorDeletedEventIds.size > 0) {
+    // Look up user_id from D1 accounts table for the account_id
+    if (!userId) {
+      userId = await lookupUserId(accountId, env);
+    }
+    if (!userId) {
+      throw new Error(
+        `sync-consumer: no user_id found for account ${accountId}`,
+      );
+    }
   }
 
-  // Look up user_id from D1 accounts table for the account_id
-  const userId = await lookupUserId(accountId, env);
-  if (!userId) {
-    throw new Error(
-      `sync-consumer: no user_id found for account ${accountId}`,
-    );
+  if (deltas.length > 0) {
+    await applyProviderDeltas(accountId, userId!, deltas, env);
   }
 
-  // Call UserGraphDO.applyProviderDelta via DO stub
-  const userGraphId = env.USER_GRAPH.idFromName(userId);
-  const userGraphStub = env.USER_GRAPH.get(userGraphId);
-
-  const response = await userGraphStub.fetch(
-    new Request("https://user-graph.internal/applyProviderDelta", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account_id: accountId, deltas }),
-    }),
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `UserGraphDO.applyProviderDelta failed (${response.status}): ${body}`,
+  if (managedMirrorDeletedEventIds.size > 0) {
+    await applyManagedMirrorDeletes(
+      accountId,
+      userId!,
+      [...managedMirrorDeletedEventIds],
+      env,
     );
   }
 
@@ -427,9 +838,16 @@ async function pruneMissingOriginEvents(
   env: Env,
   provider: ProviderType,
 ): Promise<number> {
-  const providerOriginIds = collectOriginEventIds(providerEvents, provider);
   const userId = await lookupUserId(accountId, env);
   if (!userId) return 0;
+  const managedMirrorEventIds = provider === "microsoft"
+    ? await loadManagedMirrorEventIds(accountId, userId, env)
+    : null;
+  const providerOriginIds = collectOriginEventIds(
+    providerEvents,
+    provider,
+    managedMirrorEventIds,
+  );
 
   const canonicalOrigins = await listCanonicalOriginEvents(accountId, userId, env);
   if (canonicalOrigins.length === 0) return 0;
@@ -469,13 +887,19 @@ async function pruneMissingOriginEvents(
 function collectOriginEventIds(
   providerEvents: readonly GoogleCalendarEvent[],
   provider: ProviderType,
+  managedMirrorEventIds: Set<string> | null = null,
 ): Set<string> {
   const ids = new Set<string>();
   const classificationStrategy = getClassificationStrategy(provider);
 
   for (const event of providerEvents) {
     const rawEvent = ((event as Record<string, unknown>)._msRaw ?? event) as Record<string, unknown>;
-    const classification = classificationStrategy.classify(rawEvent);
+    const classification = classifyProviderEvent(
+      provider,
+      rawEvent,
+      classificationStrategy,
+      managedMirrorEventIds,
+    );
     if (classification === "managed_mirror") continue;
 
     const originEventId = rawEvent.id;
@@ -485,6 +909,178 @@ function collectOriginEventIds(
   }
 
   return ids;
+}
+
+function classifyProviderEvent(
+  _provider: ProviderType,
+  rawEvent: Record<string, unknown>,
+  classificationStrategy: ReturnType<typeof getClassificationStrategy>,
+  managedMirrorEventIds: Set<string> | null,
+): EventClassification {
+  const baseClassification = classificationStrategy.classify(rawEvent);
+  if (baseClassification === "managed_mirror") {
+    return baseClassification;
+  }
+
+  const eventId = rawEvent.id;
+  if (
+    typeof eventId === "string" &&
+    eventId.length > 0 &&
+    managedMirrorEventIds?.has(eventId)
+  ) {
+    return "managed_mirror";
+  }
+
+  return baseClassification;
+}
+
+async function loadManagedMirrorEventIds(
+  accountId: AccountId,
+  userId: string,
+  env: Env,
+): Promise<Set<string>> {
+  const mirrors = await loadActiveMirrors(accountId, userId, env);
+  const ids = new Set<string>();
+  for (const mirror of mirrors) {
+    if (typeof mirror.provider_event_id === "string" && mirror.provider_event_id.length > 0) {
+      for (const variant of providerEventIdVariants(mirror.provider_event_id)) {
+        ids.add(variant);
+      }
+    }
+  }
+  return ids;
+}
+
+async function loadManagedMirrorCalendarIds(
+  accountId: AccountId,
+  userId: string,
+  env: Env,
+): Promise<Set<string>> {
+  const mirrors = await loadActiveMirrors(accountId, userId, env);
+  const calendarIds = new Set<string>();
+  for (const mirror of mirrors) {
+    if (
+      typeof mirror.target_calendar_id === "string" &&
+      mirror.target_calendar_id.length > 0
+    ) {
+      calendarIds.add(mirror.target_calendar_id);
+    }
+  }
+
+  return calendarIds;
+}
+
+interface ActiveMirrorRow {
+  provider_event_id?: string | null;
+  target_calendar_id?: string | null;
+}
+
+async function loadActiveMirrors(
+  accountId: AccountId,
+  userId: string,
+  env: Env,
+): Promise<ActiveMirrorRow[]> {
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const response = await userGraphStub.fetch(
+    new Request("https://user-graph.internal/getActiveMirrors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_account_id: accountId }),
+    }),
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.getActiveMirrors failed (${response.status}): ${body}`,
+    );
+  }
+
+  const payload = (await response.json()) as {
+    mirrors?: ActiveMirrorRow[];
+  };
+  return payload.mirrors ?? [];
+}
+
+async function findMissingManagedMirrorProviderEventIds(
+  accountId: AccountId,
+  userId: string,
+  providerEvents: readonly GoogleCalendarEvent[],
+  env: Env,
+  skippedCalendarIds: readonly string[] = [],
+): Promise<string[]> {
+  const mirrors = await loadActiveMirrors(accountId, userId, env);
+  if (mirrors.length === 0) {
+    return [];
+  }
+  const skipped = new Set(skippedCalendarIds);
+
+  const providerIds = new Set<string>();
+  for (const event of providerEvents) {
+    const rawEvent = ((event as Record<string, unknown>)._msRaw ?? event) as Record<
+      string,
+      unknown
+    >;
+    const providerEventId = rawEvent.id;
+    if (typeof providerEventId !== "string" || providerEventId.length === 0) {
+      continue;
+    }
+    for (const variant of providerEventIdVariants(providerEventId)) {
+      providerIds.add(variant);
+    }
+  }
+
+  const missing = new Set<string>();
+  for (const mirror of mirrors) {
+    if (
+      typeof mirror.target_calendar_id === "string" &&
+      skipped.has(mirror.target_calendar_id)
+    ) {
+      continue;
+    }
+    if (
+      typeof mirror.provider_event_id !== "string" ||
+      mirror.provider_event_id.length === 0
+    ) {
+      continue;
+    }
+    const exists = providerEventIdVariants(mirror.provider_event_id).some(
+      (variant) => providerIds.has(variant),
+    );
+    if (!exists) {
+      missing.add(mirror.provider_event_id);
+    }
+  }
+
+  return [...missing];
+}
+
+function providerEventIdVariants(providerEventId: string): string[] {
+  const variants = [providerEventId];
+  const decoded = decodeProviderEventIdSafe(providerEventId);
+  if (decoded !== providerEventId) {
+    variants.push(decoded);
+  }
+  const encoded = providerEventId.includes("%")
+    ? providerEventId
+    : encodeURIComponent(providerEventId);
+  if (!variants.includes(encoded)) {
+    variants.push(encoded);
+  }
+  return variants;
+}
+
+function decodeProviderEventIdSafe(providerEventId: string): string {
+  if (!providerEventId.includes("%")) {
+    return providerEventId;
+  }
+  try {
+    const decoded = decodeURIComponent(providerEventId);
+    return decoded.length > 0 ? decoded : providerEventId;
+  } catch {
+    return providerEventId;
+  }
 }
 
 /**
@@ -630,6 +1226,133 @@ async function applyDeletedOriginDeltas(
   return deleted;
 }
 
+async function applyProviderDeltas(
+  accountId: AccountId,
+  userId: string,
+  deltas: ProviderDelta[],
+  env: Env,
+): Promise<void> {
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+
+  const response = await userGraphStub.fetch(
+    new Request("https://user-graph.internal/applyProviderDelta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountId, deltas }),
+    }),
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.applyProviderDelta failed (${response.status}): ${body}`,
+    );
+  }
+}
+
+async function applyManagedMirrorDeletes(
+  accountId: AccountId,
+  userId: string,
+  providerEventIds: string[],
+  env: Env,
+): Promise<void> {
+  if (providerEventIds.length === 0) return;
+
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const source = `provider:${accountId}`;
+  const canonicalIds = new Set<string>();
+
+  for (const providerEventId of providerEventIds) {
+    const canonicalEventId = await findCanonicalIdByMirror(
+      userGraphStub,
+      accountId,
+      providerEventId,
+    );
+    if (!canonicalEventId) {
+      console.warn(
+        `sync-consumer: managed mirror delete could not resolve canonical (account=${accountId}, provider_event_id=${providerEventId})`,
+      );
+      continue;
+    }
+    canonicalIds.add(canonicalEventId);
+  }
+
+  for (const canonicalEventId of canonicalIds) {
+    const deleted = await deleteCanonicalById(userGraphStub, canonicalEventId, source);
+    if (!deleted) {
+      console.warn(
+        `sync-consumer: managed mirror delete resolved canonical but delete returned false (canonical_event_id=${canonicalEventId})`,
+      );
+    }
+  }
+}
+
+async function findCanonicalIdByMirror(
+  userGraphStub: DurableObjectStub,
+  accountId: AccountId,
+  providerEventId: string,
+): Promise<string | null> {
+  for (const candidateId of providerEventIdVariants(providerEventId)) {
+    const response = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/findCanonicalByMirror", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_account_id: accountId,
+          provider_event_id: candidateId,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `UserGraphDO.findCanonicalByMirror failed (${response.status}): ${body}`,
+      );
+    }
+
+    const payload = (await response.json()) as {
+      canonical_event_id?: string | null;
+    };
+
+    if (
+      typeof payload.canonical_event_id === "string" &&
+      payload.canonical_event_id.length > 0
+    ) {
+      return payload.canonical_event_id;
+    }
+  }
+  return null;
+}
+
+async function deleteCanonicalById(
+  userGraphStub: DurableObjectStub,
+  canonicalEventId: string,
+  source: string,
+): Promise<boolean> {
+  const response = await userGraphStub.fetch(
+    new Request("https://user-graph.internal/deleteCanonicalEvent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        canonical_event_id: canonicalEventId,
+        source,
+      }),
+    }),
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.deleteCanonicalEvent failed (${response.status}): ${body}`,
+    );
+  }
+
+  return (await response.json()) as boolean;
+}
+
 /**
  * Look up user_id for an account_id in the D1 registry.
  */
@@ -677,6 +1400,7 @@ async function lookupProvider(
  */
 async function getAccessToken(
   accountId: AccountId,
+  provider: ProviderType,
   env: Env,
 ): Promise<string> {
   const doId = env.ACCOUNT.idFromName(accountId);
@@ -685,6 +1409,8 @@ async function getAccessToken(
   const response = await stub.fetch(
     new Request("https://account.internal/getAccessToken", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider }),
     }),
   );
 
@@ -705,9 +1431,10 @@ async function getAccessToken(
  */
 async function refreshAndGetToken(
   accountId: AccountId,
+  provider: ProviderType,
   env: Env,
 ): Promise<string> {
-  return getAccessToken(accountId, env);
+  return getAccessToken(accountId, provider, env);
 }
 
 /**
@@ -730,6 +1457,40 @@ async function getSyncToken(
     const body = await response.text();
     throw new Error(
       `AccountDO.getSyncToken failed (${response.status}): ${body}`,
+    );
+  }
+
+  const data = (await response.json()) as { sync_token: string | null };
+  return data.sync_token;
+}
+
+async function getScopedSyncToken(
+  accountId: AccountId,
+  env: Env,
+  providerCalendarId: string,
+): Promise<string | null> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  const response = await stub.fetch(
+    new Request("https://account.internal/getScopedSyncToken", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_calendar_id: providerCalendarId }),
+    }),
+  );
+
+  if (!response.ok) {
+    // Compatibility fallback for legacy AccountDOs.
+    if (
+      (response.status === 404 || response.status === 405) &&
+      providerCalendarId === "primary"
+    ) {
+      return getSyncToken(accountId, env);
+    }
+    const body = await response.text();
+    throw new Error(
+      `AccountDO.getScopedSyncToken failed (${response.status}): ${body}`,
     );
   }
 
@@ -764,6 +1525,42 @@ async function setSyncToken(
   }
 }
 
+async function setScopedSyncToken(
+  accountId: AccountId,
+  env: Env,
+  providerCalendarId: string,
+  token: string,
+): Promise<void> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  const response = await stub.fetch(
+    new Request("https://account.internal/setScopedSyncToken", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider_calendar_id: providerCalendarId,
+        sync_token: token,
+      }),
+    }),
+  );
+
+  if (!response.ok) {
+    // Compatibility fallback for legacy AccountDOs.
+    if (
+      (response.status === 404 || response.status === 405) &&
+      providerCalendarId === "primary"
+    ) {
+      await setSyncToken(accountId, env, token);
+      return;
+    }
+    const body = await response.text();
+    throw new Error(
+      `AccountDO.setScopedSyncToken failed (${response.status}): ${body}`,
+    );
+  }
+}
+
 /**
  * Mark sync as successful on AccountDO.
  */
@@ -788,6 +1585,13 @@ async function markSyncSuccess(
       `AccountDO.markSyncSuccess failed (${response.status}): ${body}`,
     );
   }
+
+  // Convergence signal: successful sync should recover account UI state from
+  // stale "error" flags set by prior transient incidents.
+  await env.DB
+    .prepare("UPDATE accounts SET status = ?1 WHERE account_id = ?2")
+    .bind("active", accountId)
+    .run();
 }
 
 /**
