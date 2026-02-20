@@ -11,7 +11,8 @@
  */
 import { describe, it, expect } from "vitest";
 import type { GoogleCalendarEvent } from "./types";
-import { classifyEvent } from "./classify";
+import type { MicrosoftGraphEvent } from "./normalize-microsoft";
+import { classifyEvent, classifyMicrosoftEvent } from "./classify";
 
 // ---------------------------------------------------------------------------
 // Helper: build a GoogleCalendarEvent with optional overrides
@@ -220,5 +221,55 @@ describe("classifyEvent -- return type", () => {
       const result = classifyEvent(event);
       expect(validValues.has(result)).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Microsoft classification
+// ---------------------------------------------------------------------------
+
+function makeMicrosoftEvent(
+  overrides: Partial<MicrosoftGraphEvent> = {},
+): MicrosoftGraphEvent {
+  return {
+    id: "AAMkAG-ms-event-1",
+    subject: "MS meeting",
+    start: { dateTime: "2026-02-15T09:00:00.0000000", timeZone: "UTC" },
+    end: { dateTime: "2026-02-15T09:30:00.0000000", timeZone: "UTC" },
+    ...overrides,
+  };
+}
+
+describe("classifyMicrosoftEvent", () => {
+  it("classifies managed extension marker as managed_mirror", () => {
+    const event = makeMicrosoftEvent({
+      extensions: [
+        {
+          extensionName: "com.tminus.metadata",
+          tminus: "true",
+          managed: "true",
+        },
+      ],
+    });
+    expect(classifyMicrosoftEvent(event)).toBe("managed_mirror");
+  });
+
+  it("classifies managed category marker as managed_mirror when extensions are absent", () => {
+    const event = makeMicrosoftEvent({
+      categories: ["T-Minus Managed"],
+    });
+    expect(classifyMicrosoftEvent(event)).toBe("managed_mirror");
+  });
+
+  it("classifies non-managed microsoft events as origin", () => {
+    const event = makeMicrosoftEvent({
+      categories: ["Blue Category"],
+      extensions: [
+        {
+          extensionName: "com.someone.else",
+        },
+      ],
+    });
+    expect(classifyMicrosoftEvent(event)).toBe("origin");
   });
 });

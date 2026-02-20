@@ -20,6 +20,8 @@ import {
 
 /** Open extension name used by T-Minus for Microsoft events. */
 const MS_EXTENSION_NAME = "com.tminus.metadata";
+/** Category fallback used when Graph delta payload omits open extensions. */
+const MS_MANAGED_CATEGORY = "T-Minus Managed";
 
 /**
  * Classify a Google Calendar provider event.
@@ -64,34 +66,32 @@ export function classifyEvent(
  *
  * Pure function -- no side effects, no mutations, deterministic.
  *
- * Uses open extensions (com.tminus.metadata) to detect managed mirrors.
+ * Uses open extensions (com.tminus.metadata) and a managed category fallback
+ * to detect managed mirrors.
  *
  * @param providerEvent - Raw event from the Microsoft Graph API
  * @returns Classification: 'origin' | 'managed_mirror' | 'foreign_managed'
  *
  * Decision logic:
- * 1. No extensions array => origin (user-created event)
- * 2. Has com.tminus.metadata with tminus='true' AND managed='true' => managed_mirror
- * 3. Has other extensions => origin (safe default)
+ * 1. Has com.tminus.metadata with tminus='true' AND managed='true' => managed_mirror
+ * 2. Has managed marker category => managed_mirror
+ * 3. Otherwise => origin (safe default)
  */
 export function classifyMicrosoftEvent(
   providerEvent: MicrosoftGraphEvent,
 ): EventClassification {
   const extensions = providerEvent.extensions;
-
-  if (!extensions || extensions.length === 0) {
-    return "origin";
+  if (extensions && extensions.length > 0) {
+    const tminusExt = extensions.find(
+      (ext) => ext.extensionName === MS_EXTENSION_NAME,
+    );
+    if (tminusExt?.tminus === "true" && tminusExt?.managed === "true") {
+      return "managed_mirror";
+    }
   }
 
-  const tminusExt = extensions.find(
-    (ext) => ext.extensionName === MS_EXTENSION_NAME,
-  );
-
-  if (!tminusExt) {
-    return "origin";
-  }
-
-  if (tminusExt.tminus === "true" && tminusExt.managed === "true") {
+  const categories = providerEvent.categories;
+  if (Array.isArray(categories) && categories.includes(MS_MANAGED_CATEGORY)) {
     return "managed_mirror";
   }
 

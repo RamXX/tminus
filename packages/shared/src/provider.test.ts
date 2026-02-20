@@ -118,6 +118,12 @@ describe("getClassificationStrategy", () => {
     const strategy = getClassificationStrategy("microsoft");
     expect(strategy).toBeDefined();
     expect(typeof strategy.classify).toBe("function");
+    expect(
+      strategy.classify({
+        id: "AAMkAG-ms-managed",
+        categories: ["T-Minus Managed"],
+      }),
+    ).toBe("managed_mirror");
   });
 
   it("returns caldavClassificationStrategy for 'caldav'", () => {

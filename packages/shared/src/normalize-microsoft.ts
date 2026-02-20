@@ -66,6 +66,8 @@ export interface MicrosoftGraphEvent {
   readonly onlineMeeting?: {
     readonly joinUrl?: string;
   };
+  /** Event categories (used for managed-marker fallback classification). */
+  readonly categories?: ReadonlyArray<string>;
   /** Open extensions attached to the event. */
   readonly extensions?: ReadonlyArray<{
     readonly "@odata.type"?: string;
