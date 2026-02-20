@@ -45,6 +45,10 @@ binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
 
 [[queues.producers]]
+binding = "WRITE_PRIORITY_QUEUE"
+queue = "tminus-write-priority-queue"
+
+[[queues.producers]]
 binding = "PUSH_QUEUE"
 queue = "tminus-push-queue"
 
@@ -129,6 +133,10 @@ binding = "WRITE_QUEUE"
 queue = "tminus-write-queue-staging"
 
 [[env.staging.queues.producers]]
+binding = "WRITE_PRIORITY_QUEUE"
+queue = "tminus-write-priority-queue-staging"
+
+[[env.staging.queues.producers]]
 binding = "PUSH_QUEUE"
 queue = "tminus-push-queue-staging"
 
@@ -187,6 +195,10 @@ queue = "tminus-sync-queue"
 [[env.production.queues.producers]]
 binding = "WRITE_QUEUE"
 queue = "tminus-write-queue"
+
+[[env.production.queues.producers]]
+binding = "WRITE_PRIORITY_QUEUE"
+queue = "tminus-write-priority-queue"
 
 [[env.production.queues.producers]]
 binding = "PUSH_QUEUE"

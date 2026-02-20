@@ -246,6 +246,277 @@ async function handleJournal(
   }
 }
 
+async function handleErrorMirrors(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const limitRaw = url.searchParams.get("limit");
+  const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 100;
+
+  try {
+    const result = await callDO<{ items: unknown[] }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/listErrorMirrors",
+      { limit: Number.isFinite(limit) ? limit : 100 },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to list error mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data.items ?? []), 200);
+  } catch (err) {
+    console.error("Failed to list error mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to list error mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleDiagnostics(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const sampleLimitRaw = url.searchParams.get("sample_limit");
+  const sampleLimit = sampleLimitRaw ? Number.parseInt(sampleLimitRaw, 10) : 25;
+
+  try {
+    const result = await callDO(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getMirrorDiagnostics",
+      {
+        sample_limit: Number.isFinite(sampleLimit) ? sampleLimit : 25,
+      },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to get sync diagnostics", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to get sync diagnostics", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get sync diagnostics", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleReplayPending(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    const result = await callDO<{ enqueued: number }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/recomputeProjections",
+      { force_requeue_pending: true },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to replay pending mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope({
+      enqueued: result.data.enqueued ?? 0,
+    }), 200);
+  } catch (err) {
+    console.error("Failed to replay pending mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to replay pending mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleRequeuePending(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const limitRaw = url.searchParams.get("limit");
+  const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 200;
+
+  try {
+    const result = await callDO<{
+      canonical_events: number;
+      enqueued: number;
+      limit: number;
+    }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/requeuePendingMirrors",
+      { limit: Number.isFinite(limit) ? limit : 200 },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to requeue pending mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to requeue pending mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to requeue pending mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleSettleHistorical(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const cutoffDaysRaw = url.searchParams.get("cutoff_days");
+  let cutoffDays = cutoffDaysRaw ? Number.parseInt(cutoffDaysRaw, 10) : 30;
+
+  if (!Number.isFinite(cutoffDays)) {
+    cutoffDays = 30;
+  }
+
+  try {
+    const result = await callDO<{ settled: number; cutoff_days: number }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/settleHistoricalPending",
+      { cutoff_days: cutoffDays },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to settle historical pending mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to settle historical pending mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to settle historical pending mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleSettleOutOfWindow(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const pastDaysRaw = url.searchParams.get("past_days");
+  const futureDaysRaw = url.searchParams.get("future_days");
+  let pastDays = pastDaysRaw ? Number.parseInt(pastDaysRaw, 10) : 30;
+  let futureDays = futureDaysRaw ? Number.parseInt(futureDaysRaw, 10) : 365;
+
+  if (!Number.isFinite(pastDays)) {
+    pastDays = 30;
+  }
+  if (!Number.isFinite(futureDays)) {
+    futureDays = 365;
+  }
+
+  try {
+    const result = await callDO<{
+      settled: number;
+      settled_past: number;
+      settled_far_future: number;
+      past_days: number;
+      future_days: number;
+    }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/settleOutOfWindowPending",
+      {
+        past_days: pastDays,
+        future_days: futureDays,
+      },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to settle out-of-window pending mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to settle out-of-window pending mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to settle out-of-window pending mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleSettleStuckPending(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const minAgeRaw = url.searchParams.get("min_age_minutes");
+  let minAgeMinutes = minAgeRaw ? Number.parseInt(minAgeRaw, 10) : 120;
+
+  if (!Number.isFinite(minAgeMinutes)) {
+    minAgeMinutes = 120;
+  }
+
+  try {
+    const result = await callDO<{
+      settled: number;
+      min_age_minutes: number;
+    }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/settleStuckPending",
+      { min_age_minutes: minAgeMinutes },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to settle stuck pending mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    return jsonResponse(successEnvelope(result.data), 200);
+  } catch (err) {
+    console.error("Failed to settle stuck pending mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to settle stuck pending mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 
 export const routeSyncRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {
   if (method === "GET" && pathname === "/v1/sync/status") {
@@ -259,6 +530,34 @@ export const routeSyncRoutes: RouteGroupHandler = async (request, method, pathna
 
   if (method === "GET" && pathname === "/v1/sync/journal") {
     return handleJournal(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/sync/errors") {
+    return handleErrorMirrors(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/sync/diagnostics") {
+    return handleDiagnostics(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/replay-pending") {
+    return handleReplayPending(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/requeue-pending") {
+    return handleRequeuePending(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/settle-historical") {
+    return handleSettleHistorical(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/settle-out-of-window") {
+    return handleSettleOutOfWindow(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/settle-stuck-pending") {
+    return handleSettleStuckPending(request, auth, env);
   }
 
   return null;

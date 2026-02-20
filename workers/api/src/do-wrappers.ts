@@ -25,7 +25,8 @@ import type { SqlStorageLike } from "@tminus/shared";
 /**
  * Production wrapper for UserGraphDO.
  *
- * Extracts ctx.storage.sql (SqlStorage) and env.WRITE_QUEUE (Queue)
+ * Extracts ctx.storage.sql (SqlStorage), env.WRITE_QUEUE (Queue),
+ * and optional env.WRITE_PRIORITY_QUEUE (Queue)
  * and passes them to the core UserGraphDO class.
  */
 export class UserGraphDO extends DurableObject<Env> {
@@ -36,7 +37,11 @@ export class UserGraphDO extends DurableObject<Env> {
     // Cast SqlStorage to SqlStorageLike: structurally compatible at runtime,
     // but TypeScript's generic variance makes them nominally incompatible.
     const sql = ctx.storage.sql as unknown as SqlStorageLike;
-    this.inner = new UserGraphDOCore(sql, env.WRITE_QUEUE);
+    this.inner = new UserGraphDOCore(
+      sql,
+      env.WRITE_QUEUE,
+      env.WRITE_PRIORITY_QUEUE,
+    );
   }
 
   async fetch(request: Request): Promise<Response> {

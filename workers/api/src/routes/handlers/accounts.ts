@@ -17,7 +17,7 @@ import {
 } from "../shared";
 
 const ACCOUNT_DO_STEP_TIMEOUT_MS = 3_000;
-const USER_GRAPH_UNLINK_TIMEOUT_MS = 12_000;
+const USER_GRAPH_UNLINK_TIMEOUT_MS = 120_000;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, step: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {

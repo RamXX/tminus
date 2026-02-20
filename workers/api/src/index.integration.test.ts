@@ -2045,6 +2045,288 @@ describe("Integration: Sync status endpoints", () => {
     expect(doBody.canonical_event_id).toBe("evt_01HXYZ00000000000000000001");
     expect(doBody.cursor).toBe("jrn_cursor");
   });
+
+  it("GET /v1/sync/errors returns mirrors in ERROR state from UserGraphDO", async () => {
+    const errorMirrors = [
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000001",
+        target_account_id: ACCOUNT_A.account_id,
+        target_calendar_id: "cal_busy",
+        provider_event_id: "provider_evt_1",
+        error_message: "Forbidden",
+      },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listErrorMirrors", { items: errorMirrors }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/errors?limit=25", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{ canonical_event_id: string; error_message: string }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].canonical_event_id).toBe("evt_01HXYZ00000000000000000001");
+    expect(body.data[0].error_message).toBe("Forbidden");
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.limit).toBe(25);
+  });
+
+  it("GET /v1/sync/diagnostics returns mirror diagnostics from UserGraphDO", async () => {
+    const diagnostics = {
+      totals: {
+        total_events: 120,
+        total_mirrors: 240,
+        total_journal_entries: 1000,
+        pending_mirrors: 11,
+        error_mirrors: 2,
+        last_journal_ts: "2026-02-19T01:02:03.000Z",
+      },
+      pending_without_provider_event_id: 1,
+      pending_with_provider_event_id: 10,
+      pending_non_projectable: 0,
+      oldest_pending_ts: "2025-12-01T00:00:00.000Z",
+      by_target: [],
+      sample_pending: [],
+    };
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/getMirrorDiagnostics", diagnostics],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/diagnostics?sample_limit=15", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { pending_with_provider_event_id: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.pending_with_provider_event_id).toBe(10);
+
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.sample_limit).toBe(15);
+  });
+
+  it("POST /v1/sync/replay-pending triggers recomputeProjections on UserGraphDO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/recomputeProjections", { enqueued: 42 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/replay-pending", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { enqueued: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.enqueued).toBe(42);
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/recomputeProjections");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.force_requeue_pending).toBe(true);
+  });
+
+  it("POST /v1/sync/settle-historical forwards cutoff_days to UserGraphDO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/settleHistoricalPending", { settled: 345, cutoff_days: 30 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/settle-historical?cutoff_days=30", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { settled: number; cutoff_days: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ settled: 345, cutoff_days: 30 });
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/settleHistoricalPending");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.cutoff_days).toBe(30);
+  });
+
+  it("POST /v1/sync/requeue-pending forwards limit to UserGraphDO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/requeuePendingMirrors", { canonical_events: 50, enqueued: 120, limit: 50 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/requeue-pending?limit=50", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { canonical_events: number; enqueued: number; limit: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ canonical_events: 50, enqueued: 120, limit: 50 });
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/requeuePendingMirrors");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.limit).toBe(50);
+  });
+
+  it("POST /v1/sync/settle-out-of-window forwards past/future window params", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/settleOutOfWindowPending", {
+          settled: 9000,
+          settled_past: 50,
+          settled_far_future: 8950,
+          past_days: 30,
+          future_days: 365,
+        }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/settle-out-of-window?past_days=30&future_days=365", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        settled: number;
+        settled_past: number;
+        settled_far_future: number;
+        past_days: number;
+        future_days: number;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({
+      settled: 9000,
+      settled_past: 50,
+      settled_far_future: 8950,
+      past_days: 30,
+      future_days: 365,
+    });
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/settleOutOfWindowPending");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.past_days).toBe(30);
+    expect(doBody.future_days).toBe(365);
+  });
+
+  it("POST /v1/sync/settle-stuck-pending forwards min_age_minutes", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/settleStuckPending", { settled: 1403, min_age_minutes: 120 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/settle-stuck-pending?min_age_minutes=120", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { settled: number; min_age_minutes: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ settled: 1403, min_age_minutes: 120 });
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/settleStuckPending");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.min_age_minutes).toBe(120);
+  });
 });
 
 // ===========================================================================
@@ -2088,6 +2370,13 @@ describe("Integration: Auth enforcement full flow", () => {
       { method: "POST", path: "/v1/policies" },
       { method: "GET", path: "/v1/sync/status" },
       { method: "GET", path: "/v1/sync/journal" },
+      { method: "GET", path: "/v1/sync/errors" },
+      { method: "GET", path: "/v1/sync/diagnostics" },
+      { method: "POST", path: "/v1/sync/replay-pending" },
+      { method: "POST", path: "/v1/sync/requeue-pending" },
+      { method: "POST", path: "/v1/sync/settle-historical" },
+      { method: "POST", path: "/v1/sync/settle-out-of-window" },
+      { method: "POST", path: "/v1/sync/settle-stuck-pending" },
     ];
 
     for (const ep of endpoints) {

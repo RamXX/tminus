@@ -36,6 +36,7 @@ interface Env {
   ACCOUNT: DurableObjectNamespace;
   SYNC_QUEUE: Queue;
   WRITE_QUEUE: Queue;
+  WRITE_PRIORITY_QUEUE?: Queue;
   MASTER_KEY: string;
 }
 
@@ -111,7 +112,10 @@ export class UserGraphDO extends DurableObject {
     super(ctx, env);
     const sql = wrapSqlStorage(ctx.storage);
     const queue = wrapQueue(env.WRITE_QUEUE);
-    this.logic = new UserGraphDOLogic(sql, queue);
+    const priorityQueue = env.WRITE_PRIORITY_QUEUE
+      ? wrapQueue(env.WRITE_PRIORITY_QUEUE)
+      : undefined;
+    this.logic = new UserGraphDOLogic(sql, queue, priorityQueue);
   }
 
   async fetch(request: Request): Promise<Response> {
