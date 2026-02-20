@@ -560,7 +560,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(1);
   });
 
-  it("Microsoft clientState mismatch: returns 403 (AC 3)", async () => {
+  it("Microsoft clientState mismatch: returns 202 and skips enqueue (AC 3)", async () => {
     db.prepare(
       `INSERT INTO accounts
        (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
@@ -594,8 +594,70 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(202);
     expect(queue.messages).toHaveLength(0);
+  });
+
+  it("Microsoft mixed clientState payload: valid notifications still enqueue", async () => {
+    db.prepare(
+      `INSERT INTO accounts
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+    ).run(
+      "acc_ms_valid_mix",
+      TEST_USER.user_id,
+      "microsoft",
+      "ms-sub-valid-mix",
+      "valid.mix@example.com",
+      "ms-sub-valid-mix",
+      "valid-secret",
+    );
+
+    db.prepare(
+      `INSERT INTO accounts
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+    ).run(
+      "acc_ms_bad_mix",
+      TEST_USER.user_id,
+      "microsoft",
+      "ms-sub-bad-mix",
+      "bad.mix@example.com",
+      "ms-sub-bad-mix",
+      "expected-bad-secret",
+    );
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [
+        {
+          subscriptionId: "ms-sub-bad-mix",
+          changeType: "updated",
+          clientState: "WRONG-secret",
+          resource: "users/x/events/y",
+        },
+        {
+          subscriptionId: "ms-sub-valid-mix",
+          changeType: "created",
+          clientState: "valid-secret",
+          resource: "users/x/events/z",
+        },
+      ],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages).toHaveLength(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.account_id).toBe("acc_ms_valid_mix");
   });
 
   it("Microsoft unknown subscriptionId: returns 202 but does not enqueue", async () => {

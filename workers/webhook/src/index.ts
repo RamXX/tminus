@@ -234,7 +234,9 @@ async function handleMicrosoftWebhook(
         subscriptionId: notification.subscriptionId,
         accountId: accountRow.account_id,
       });
-      return new Response("Forbidden", { status: 403 });
+      // Do not fail the whole batch for a single bad notification.
+      // Continue processing any other notifications in this payload.
+      continue;
     }
 
     // Enqueue SYNC_INCREMENTAL

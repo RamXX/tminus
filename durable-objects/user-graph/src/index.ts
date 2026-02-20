@@ -102,6 +102,14 @@ export interface QueueLike {
 
 /** Maximum queue messages per sendBatch call. */
 const WRITE_QUEUE_BATCH_SIZE = 100;
+/** Older than this many days is treated as low-priority historical churn. */
+const OUT_OF_WINDOW_PAST_DAYS = 30;
+/** Beyond this many days ahead is treated as low-priority far-future churn. */
+const OUT_OF_WINDOW_FUTURE_DAYS = 365;
+/** Near-term upserts within this horizon use the priority queue. */
+const UPSERT_PRIORITY_LOOKAHEAD_DAYS = 30;
+/** Recently-ended upserts within this lookback still use priority queue. */
+const UPSERT_PRIORITY_LOOKBACK_DAYS = 1;
 
 // ---------------------------------------------------------------------------
 // Internal DB row types
@@ -335,10 +343,72 @@ export interface SyncHealth {
   readonly last_journal_ts: string | null;
 }
 
+/** Aggregated mirror diagnostics grouped by state + target account. */
+export interface MirrorStateBreakdown {
+  readonly state: string;
+  readonly target_account_id: string;
+  readonly count: number;
+  readonly missing_provider_event_id: number;
+  readonly missing_canonical: number;
+  readonly missing_policy_edge: number;
+}
+
+/** Expanded mirror diagnostics for operational debugging. */
+export interface MirrorDiagnostics {
+  readonly totals: SyncHealth;
+  readonly pending_without_provider_event_id: number;
+  readonly pending_with_provider_event_id: number;
+  readonly pending_non_projectable: number;
+  readonly pending_past_window: number;
+  readonly pending_far_future_window: number;
+  readonly pending_in_window: number;
+  readonly oldest_pending_ts: string | null;
+  readonly by_target: MirrorStateBreakdown[];
+  readonly sample_pending: Array<{
+    canonical_event_id: string;
+    target_account_id: string;
+    target_calendar_id: string;
+    provider_event_id: string | null;
+    last_write_ts: string | null;
+    origin_account_id: string | null;
+    start_ts: string | null;
+    end_ts: string | null;
+  }>;
+}
+
+/** Result for settling historical pending mirrors without provider writes. */
+export interface SettleHistoricalPendingResult {
+  readonly settled: number;
+  readonly cutoff_days: number;
+}
+
+/** Result for settling out-of-window pending mirrors. */
+export interface SettleOutOfWindowPendingResult {
+  readonly settled: number;
+  readonly settled_past: number;
+  readonly settled_far_future: number;
+  readonly past_days: number;
+  readonly future_days: number;
+}
+
+/** Result for settling stuck pending mirrors by age. */
+export interface SettleStuckPendingResult {
+  readonly settled: number;
+  readonly min_age_minutes: number;
+}
+
 /** Scope for recomputeProjections. */
 export interface RecomputeScope {
   readonly canonical_event_id?: string;
   readonly force_requeue_non_active?: boolean;
+  readonly force_requeue_pending?: boolean;
+}
+
+/** Result for bounded pending replay operations. */
+export interface RequeuePendingResult {
+  readonly canonical_events: number;
+  readonly enqueued: number;
+  readonly limit: number;
 }
 
 /** Result of an account unlink cascade. */
@@ -536,12 +606,14 @@ export interface DeletionCounts {
 export class UserGraphDO {
   private readonly sql: SqlStorageLike;
   private readonly writeQueue: QueueLike;
+  private readonly deleteQueue: QueueLike;
   private migrated = false;
   private readonly onboarding: OnboardingSessionMixin;
 
-  constructor(sql: SqlStorageLike, writeQueue: QueueLike) {
+  constructor(sql: SqlStorageLike, writeQueue: QueueLike, deleteQueue?: QueueLike) {
     this.sql = sql;
     this.writeQueue = writeQueue;
+    this.deleteQueue = deleteQueue ?? writeQueue;
     this.onboarding = new OnboardingSessionMixin(sql, () => this.ensureMigrated());
   }
 
@@ -1045,7 +1117,7 @@ export class UserGraphDO {
         `delete:${mirror.provider_event_id ?? ""}:${mirror.target_calendar_id}`,
       );
 
-      await this.writeQueue.send({
+      await this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalId,
         target_account_id: mirror.target_account_id,
@@ -1094,7 +1166,7 @@ export class UserGraphDO {
   private async projectAndEnqueue(
     canonicalEventId: string,
     originAccountId: string,
-    opts: { forceRequeueNonActive?: boolean } = {},
+    opts: { forceRequeueNonActive?: boolean; forceRequeuePending?: boolean } = {},
   ): Promise<number> {
     // Load the canonical event
     const eventRows = this.sql
@@ -1107,6 +1179,7 @@ export class UserGraphDO {
     if (eventRows.length === 0) return 0;
     const evtRow = eventRows[0];
     const canonicalEvent = this.rowToCanonicalEvent(evtRow);
+    const canonicalEventEndMs = this.parseCanonicalEventEndMs(canonicalEvent);
 
     // Find all policy edges where this account is the source
     const edges = this.sql
@@ -1149,24 +1222,53 @@ export class UserGraphDO {
         const existing = mirrorRows[0];
         // Write-skipping:
         // - ACTIVE + identical hash => skip (already converged)
-        // - PENDING + identical hash => replay automatically (self-heal for
-        //   dropped/DLQ'd writes that would otherwise remain stale forever)
+        // - PENDING + identical hash => replay by default (self-heal for
+        //   dropped queue messages). Callers can explicitly disable replay
+        //   with forceRequeuePending=false.
         // - other non-ACTIVE states (ERROR/DELETED/TOMBSTONED) replay only
         //   when explicitly forced.
         if (existing.last_projected_hash === projectedHash) {
           if (existing.state === "ACTIVE") {
             continue;
           }
+          if (
+            existing.state === "PENDING" &&
+            opts.forceRequeuePending === false
+          ) {
+            continue;
+          }
           if (existing.state !== "PENDING" && !opts.forceRequeueNonActive) {
             continue;
           }
         }
+        const nowIso = new Date().toISOString();
+        // Hash differs for an already-created mirror.
+        // For out-of-window events with provider_event_id already present,
+        // converge hash/state locally to avoid flooding provider PATCH churn.
+        if (
+          existing.provider_event_id &&
+          this.isOutOfWindowProjection(canonicalEventEndMs)
+        ) {
+          this.sql.exec(
+            `UPDATE event_mirrors SET
+              last_projected_hash = ?, state = 'ACTIVE',
+              error_message = NULL, last_write_ts = ?
+             WHERE canonical_event_id = ? AND target_account_id = ?`,
+            projectedHash,
+            nowIso,
+            canonicalEventId,
+            edge.to_account_id,
+          );
+          continue;
+        }
+
         // Hash differs -- update mirror record and enqueue write
         this.sql.exec(
           `UPDATE event_mirrors SET
-            last_projected_hash = ?, state = 'PENDING'
+            last_projected_hash = ?, state = 'PENDING', last_write_ts = ?
            WHERE canonical_event_id = ? AND target_account_id = ?`,
           projectedHash,
+          nowIso,
           canonicalEventId,
           edge.to_account_id,
         );
@@ -1177,7 +1279,7 @@ export class UserGraphDO {
           projectedHash,
         );
 
-        await this.writeQueue.send({
+        await this.enqueueUpsertMirror({
           type: "UPSERT_MIRROR",
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
@@ -1185,7 +1287,7 @@ export class UserGraphDO {
           projected_hash: projectedHash,
           projected_payload: projection,
           idempotency_key: idempotencyKey,
-        });
+        }, canonicalEventEndMs);
 
         enqueued++;
       } else {
@@ -1193,15 +1295,17 @@ export class UserGraphDO {
         // Use to_account_id as default target_calendar_id (will be resolved by write-consumer)
         const targetCalendarId = edge.to_account_id;
 
+        const nowIso = new Date().toISOString();
         this.sql.exec(
           `INSERT INTO event_mirrors (
             canonical_event_id, target_account_id, target_calendar_id,
-            last_projected_hash, state
-          ) VALUES (?, ?, ?, ?, 'PENDING')`,
+            last_projected_hash, state, last_write_ts
+          ) VALUES (?, ?, ?, ?, 'PENDING', ?)`,
           canonicalEventId,
           edge.to_account_id,
           targetCalendarId,
           projectedHash,
+          nowIso,
         );
 
         const idempotencyKey = await computeIdempotencyKey(
@@ -1210,7 +1314,7 @@ export class UserGraphDO {
           projectedHash,
         );
 
-        await this.writeQueue.send({
+        await this.enqueueUpsertMirror({
           type: "UPSERT_MIRROR",
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
@@ -1218,7 +1322,7 @@ export class UserGraphDO {
           projected_hash: projectedHash,
           projected_payload: projection,
           idempotency_key: idempotencyKey,
-        });
+        }, canonicalEventEndMs);
 
         enqueued++;
       }
@@ -1346,7 +1450,7 @@ export class UserGraphDO {
 
   /**
    * Delete a canonical event by ID. Hard delete per BR-7.
-   * Enqueues DELETE_MIRROR for all existing mirrors.
+   * Enqueues DELETE_MIRROR for all existing mirrors and for the origin event.
    */
   async deleteCanonicalEvent(
     canonicalEventId: string,
@@ -1356,13 +1460,20 @@ export class UserGraphDO {
 
     // Check event exists
     const rows = this.sql
-      .exec<{ canonical_event_id: string }>(
-        `SELECT canonical_event_id FROM canonical_events WHERE canonical_event_id = ?`,
+      .exec<{
+        canonical_event_id: string;
+        origin_account_id: string;
+        origin_event_id: string;
+      }>(
+        `SELECT canonical_event_id, origin_account_id, origin_event_id
+         FROM canonical_events
+         WHERE canonical_event_id = ?`,
         canonicalEventId,
       )
       .toArray();
 
     if (rows.length === 0) return false;
+    const event = rows[0];
 
     // Enqueue DELETE_MIRROR for all existing mirrors
     const mirrors = this.sql
@@ -1373,14 +1484,54 @@ export class UserGraphDO {
       .toArray();
 
     for (const mirror of mirrors) {
-      await this.writeQueue.send({
+      const deleteIdempotencyKey = await computeIdempotencyKey(
+        canonicalEventId,
+        mirror.target_account_id,
+        `delete:${mirror.provider_event_id ?? ""}:${mirror.target_calendar_id}`,
+      );
+
+      await this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalEventId,
         target_account_id: mirror.target_account_id,
         target_calendar_id: mirror.target_calendar_id,
         provider_event_id: mirror.provider_event_id ?? "",
+        idempotency_key: deleteIdempotencyKey,
       });
     }
+
+    let originDeleteEnqueued = false;
+    // Also delete the origin provider event so user-initiated deletes from
+    // Tminus/API propagate back to the account that originated the canonical.
+    if (
+      event.origin_account_id.startsWith("acc_") &&
+      typeof event.origin_event_id === "string" &&
+      event.origin_event_id.length > 0
+    ) {
+      const originDeleteIdempotencyKey = await computeIdempotencyKey(
+        canonicalEventId,
+        event.origin_account_id,
+        `delete-origin:${event.origin_event_id}:primary`,
+      );
+      await this.enqueueDeleteMirror({
+        type: "DELETE_MIRROR",
+        canonical_event_id: canonicalEventId,
+        target_account_id: event.origin_account_id,
+        target_calendar_id: "primary",
+        provider_event_id: event.origin_event_id,
+        idempotency_key: originDeleteIdempotencyKey,
+      });
+      originDeleteEnqueued = true;
+    }
+
+    console.log("user-graph: deleteCanonicalEvent enqueue summary", {
+      canonical_event_id: canonicalEventId,
+      source,
+      mirrors_enqueued: mirrors.length,
+      origin_account_id: event.origin_account_id,
+      origin_event_id_present: typeof event.origin_event_id === "string" && event.origin_event_id.length > 0,
+      origin_delete_enqueued: originDeleteEnqueued,
+    });
 
     // Delete mirrors first (FK constraint)
     this.sql.exec(
@@ -1541,11 +1692,57 @@ export class UserGraphDO {
       totalEnqueued += await this.projectAndEnqueue(
         evtRow.canonical_event_id,
         evtRow.origin_account_id,
-        { forceRequeueNonActive: scope.force_requeue_non_active },
+        {
+          forceRequeueNonActive: scope.force_requeue_non_active,
+          forceRequeuePending: scope.force_requeue_pending,
+        },
       );
     }
 
     return totalEnqueued;
+  }
+
+  /**
+   * Re-enqueue projections for a bounded set of canonical events that currently
+   * have PENDING mirrors.
+   *
+   * This chunked variant avoids request timeouts caused by full-dataset replay.
+   */
+  async requeuePendingMirrors(limit = 200): Promise<RequeuePendingResult> {
+    this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
+
+    const safeLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(2000, Math.trunc(limit)))
+      : 200;
+
+    const candidates = this.sql
+      .exec<{ canonical_event_id: string; origin_account_id: string }>(
+        `SELECT DISTINCT c.canonical_event_id, c.origin_account_id
+         FROM event_mirrors m
+         JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'
+         ORDER BY COALESCE(m.last_write_ts, c.updated_at, c.created_at) ASC
+         LIMIT ?`,
+        safeLimit,
+      )
+      .toArray();
+
+    let totalEnqueued = 0;
+    for (const row of candidates) {
+      totalEnqueued += await this.projectAndEnqueue(
+        row.canonical_event_id,
+        row.origin_account_id,
+        { forceRequeuePending: true },
+      );
+    }
+
+    return {
+      canonical_events: candidates.length,
+      enqueued: totalEnqueued,
+      limit: safeLimit,
+    };
   }
 
   /**
@@ -1729,6 +1926,390 @@ export class UserGraphDO {
         safeLimit,
       )
       .toArray();
+  }
+
+  /**
+   * Return a detailed mirror-state breakdown for diagnosing sync degradation.
+   */
+  getMirrorDiagnostics(sampleLimit = 25): MirrorDiagnostics {
+    this.ensureMigrated();
+    const safeSampleLimit = Number.isFinite(sampleLimit)
+      ? Math.max(1, Math.min(200, Math.trunc(sampleLimit)))
+      : 25;
+
+    const totals = this.getSyncHealth();
+
+    const pendingWithoutProvider = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM event_mirrors
+         WHERE state = 'PENDING'
+           AND (provider_event_id IS NULL OR provider_event_id = '')`,
+      )
+      .toArray()[0].cnt;
+
+    const pendingWithProvider = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM event_mirrors
+         WHERE state = 'PENDING'
+           AND provider_event_id IS NOT NULL
+           AND provider_event_id != ''`,
+      )
+      .toArray()[0].cnt;
+
+    const pendingNonProjectable = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM event_mirrors m
+         LEFT JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         LEFT JOIN policy_edges e
+           ON e.from_account_id = c.origin_account_id
+          AND e.to_account_id = m.target_account_id
+         WHERE m.state = 'PENDING'
+           AND (
+             c.canonical_event_id IS NULL
+             OR e.policy_id IS NULL
+           )`,
+      )
+      .toArray()[0].cnt;
+
+    const pendingWindowRows = this.sql
+      .exec<{
+        past_window: number;
+        far_future_window: number;
+        in_window: number;
+      }>(
+        `SELECT
+           SUM(
+             CASE
+               WHEN c.end_ts IS NOT NULL
+                    AND c.end_ts != ''
+                    AND julianday(c.end_ts) <= julianday('now', '-30 days')
+               THEN 1 ELSE 0
+             END
+           ) as past_window,
+           SUM(
+             CASE
+               WHEN c.end_ts IS NOT NULL
+                    AND c.end_ts != ''
+                    AND julianday(c.end_ts) >= julianday('now', '+365 days')
+               THEN 1 ELSE 0
+             END
+           ) as far_future_window,
+           SUM(
+             CASE
+               WHEN c.end_ts IS NOT NULL
+                    AND c.end_ts != ''
+                    AND julianday(c.end_ts) > julianday('now', '-30 days')
+                    AND julianday(c.end_ts) < julianday('now', '+365 days')
+               THEN 1 ELSE 0
+             END
+           ) as in_window
+         FROM event_mirrors m
+         JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'`,
+      )
+      .toArray();
+    const pendingWindow = pendingWindowRows[0] ?? {
+      past_window: 0,
+      far_future_window: 0,
+      in_window: 0,
+    };
+
+    const oldestPendingRows = this.sql
+      .exec<{ oldest: string | null }>(
+        `SELECT MIN(COALESCE(m.last_write_ts, c.updated_at, c.created_at)) as oldest
+         FROM event_mirrors m
+         LEFT JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'`,
+      )
+      .toArray();
+    const oldestPendingTs =
+      oldestPendingRows.length > 0 ? oldestPendingRows[0].oldest : null;
+
+    const byTarget = this.sql
+      .exec<{
+        state: string;
+        target_account_id: string;
+        count: number;
+        missing_provider_event_id: number;
+        missing_canonical: number;
+        missing_policy_edge: number;
+      }>(
+        `SELECT
+           m.state as state,
+           m.target_account_id as target_account_id,
+           COUNT(*) as count,
+           SUM(CASE WHEN m.provider_event_id IS NULL OR m.provider_event_id = '' THEN 1 ELSE 0 END) as missing_provider_event_id,
+           SUM(CASE WHEN c.canonical_event_id IS NULL THEN 1 ELSE 0 END) as missing_canonical,
+           SUM(CASE WHEN c.canonical_event_id IS NOT NULL AND e.policy_id IS NULL THEN 1 ELSE 0 END) as missing_policy_edge
+         FROM event_mirrors m
+         LEFT JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         LEFT JOIN policy_edges e
+           ON e.from_account_id = c.origin_account_id
+          AND e.to_account_id = m.target_account_id
+         GROUP BY m.state, m.target_account_id
+         ORDER BY count DESC`,
+      )
+      .toArray()
+      .map((row) => ({
+        ...row,
+        count: Number(row.count) || 0,
+        missing_provider_event_id: Number(row.missing_provider_event_id) || 0,
+        missing_canonical: Number(row.missing_canonical) || 0,
+        missing_policy_edge: Number(row.missing_policy_edge) || 0,
+      }));
+
+    const samplePending = this.sql
+      .exec<{
+        canonical_event_id: string;
+        target_account_id: string;
+        target_calendar_id: string;
+        provider_event_id: string | null;
+        last_write_ts: string | null;
+        origin_account_id: string | null;
+        start_ts: string | null;
+        end_ts: string | null;
+      }>(
+        `SELECT
+           m.canonical_event_id,
+           m.target_account_id,
+           m.target_calendar_id,
+           m.provider_event_id,
+           m.last_write_ts,
+           c.origin_account_id,
+           c.start_ts,
+           c.end_ts
+         FROM event_mirrors m
+         LEFT JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'
+         ORDER BY COALESCE(m.last_write_ts, c.updated_at, c.created_at) ASC
+         LIMIT ?`,
+        safeSampleLimit,
+      )
+      .toArray();
+
+    return {
+      totals,
+      pending_without_provider_event_id: pendingWithoutProvider,
+      pending_with_provider_event_id: pendingWithProvider,
+      pending_non_projectable: pendingNonProjectable,
+      pending_past_window: Number(pendingWindow.past_window) || 0,
+      pending_far_future_window: Number(pendingWindow.far_future_window) || 0,
+      pending_in_window: Number(pendingWindow.in_window) || 0,
+      oldest_pending_ts: oldestPendingTs,
+      by_target: byTarget,
+      sample_pending: samplePending,
+    };
+  }
+
+  /**
+   * Mark old PENDING mirrors as ACTIVE when they already have provider IDs.
+   *
+   * This is used to converge historical backlog after policy changes where
+   * replaying years-old patches has low user value and high quota cost.
+   */
+  settleHistoricalPending(cutoffDays = 30): SettleHistoricalPendingResult {
+    this.ensureMigrated();
+    const safeDays = Number.isFinite(cutoffDays)
+      ? Math.max(1, Math.min(3650, Math.trunc(cutoffDays)))
+      : 30;
+    const cutoffExpr = `-${safeDays} days`;
+
+    const eligible = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM event_mirrors m
+         JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'
+           AND m.provider_event_id IS NOT NULL
+           AND m.provider_event_id != ''
+           AND c.end_ts IS NOT NULL
+           AND c.end_ts != ''
+           AND julianday(c.end_ts) <= julianday('now', ?)`,
+        cutoffExpr,
+      )
+      .toArray()[0].cnt;
+
+    if (eligible > 0) {
+      const nowIso = new Date().toISOString();
+      this.sql.exec(
+        `UPDATE event_mirrors
+         SET state = 'ACTIVE',
+             error_message = NULL,
+             last_write_ts = ?
+         WHERE state = 'PENDING'
+           AND provider_event_id IS NOT NULL
+           AND provider_event_id != ''
+           AND canonical_event_id IN (
+             SELECT canonical_event_id
+             FROM canonical_events
+             WHERE end_ts IS NOT NULL
+               AND end_ts != ''
+               AND julianday(end_ts) <= julianday('now', ?)
+           )`,
+        nowIso,
+        cutoffExpr,
+      );
+    }
+
+    return {
+      settled: eligible,
+      cutoff_days: safeDays,
+    };
+  }
+
+  /**
+   * Mark out-of-window PENDING mirrors as ACTIVE when they already have
+   * provider IDs.
+   *
+   * Window defaults:
+   * - past: older than 30 days
+   * - far future: more than 365 days ahead
+   */
+  settleOutOfWindowPending(
+    pastDays = 30,
+    futureDays = 365,
+  ): SettleOutOfWindowPendingResult {
+    this.ensureMigrated();
+
+    const safePastDays = Number.isFinite(pastDays)
+      ? Math.max(1, Math.min(3650, Math.trunc(pastDays)))
+      : 30;
+    const safeFutureDays = Number.isFinite(futureDays)
+      ? Math.max(1, Math.min(36500, Math.trunc(futureDays)))
+      : 365;
+    const pastExpr = `-${safePastDays} days`;
+    const futureExpr = `+${safeFutureDays} days`;
+
+    const counts = this.sql
+      .exec<{ past_cnt: number; future_cnt: number }>(
+        `SELECT
+           SUM(
+             CASE
+               WHEN julianday(c.end_ts) <= julianday('now', ?)
+               THEN 1 ELSE 0
+             END
+           ) as past_cnt,
+           SUM(
+             CASE
+               WHEN julianday(c.end_ts) >= julianday('now', ?)
+               THEN 1 ELSE 0
+             END
+           ) as future_cnt
+         FROM event_mirrors m
+         JOIN canonical_events c
+           ON c.canonical_event_id = m.canonical_event_id
+         WHERE m.state = 'PENDING'
+           AND m.provider_event_id IS NOT NULL
+           AND m.provider_event_id != ''
+           AND c.end_ts IS NOT NULL
+           AND c.end_ts != ''
+           AND (
+             julianday(c.end_ts) <= julianday('now', ?)
+             OR julianday(c.end_ts) >= julianday('now', ?)
+           )`,
+        pastExpr,
+        futureExpr,
+        pastExpr,
+        futureExpr,
+      )
+      .toArray()[0] ?? { past_cnt: 0, future_cnt: 0 };
+
+    const settledPast = Number(counts.past_cnt) || 0;
+    const settledFuture = Number(counts.future_cnt) || 0;
+    const totalSettled = settledPast + settledFuture;
+
+    if (totalSettled > 0) {
+      const nowIso = new Date().toISOString();
+      this.sql.exec(
+        `UPDATE event_mirrors
+         SET state = 'ACTIVE',
+             error_message = NULL,
+             last_write_ts = ?
+         WHERE state = 'PENDING'
+           AND provider_event_id IS NOT NULL
+           AND provider_event_id != ''
+           AND canonical_event_id IN (
+             SELECT canonical_event_id
+             FROM canonical_events
+             WHERE end_ts IS NOT NULL
+               AND end_ts != ''
+               AND (
+                 julianday(end_ts) <= julianday('now', ?)
+                 OR julianday(end_ts) >= julianday('now', ?)
+               )
+           )`,
+        nowIso,
+        pastExpr,
+        futureExpr,
+      );
+    }
+
+    return {
+      settled: totalSettled,
+      settled_past: settledPast,
+      settled_far_future: settledFuture,
+      past_days: safePastDays,
+      future_days: safeFutureDays,
+    };
+  }
+
+  /**
+   * Mark aged PENDING mirrors as ACTIVE when a provider_event_id already
+   * exists and no terminal error is recorded.
+   *
+   * This repairs mirrors that became permanently stuck in PENDING after
+   * dropped/out-of-order queue messages.
+   */
+  settleStuckPending(minAgeMinutes = 120): SettleStuckPendingResult {
+    this.ensureMigrated();
+    const safeMinutes = Number.isFinite(minAgeMinutes)
+      ? Math.max(1, Math.min(7 * 24 * 60, Math.trunc(minAgeMinutes)))
+      : 120;
+    const ageExpr = `-${safeMinutes} minutes`;
+
+    const eligible = this.sql
+      .exec<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt
+         FROM event_mirrors
+         WHERE state = 'PENDING'
+           AND provider_event_id IS NOT NULL
+           AND provider_event_id != ''
+           AND (error_message IS NULL OR error_message = '')
+           AND julianday(COALESCE(last_write_ts, '1970-01-01T00:00:00Z')) <= julianday('now', ?)`,
+        ageExpr,
+      )
+      .toArray()[0]?.cnt ?? 0;
+
+    if (eligible > 0) {
+      const nowIso = new Date().toISOString();
+      this.sql.exec(
+        `UPDATE event_mirrors
+         SET state = 'ACTIVE',
+             error_message = NULL,
+             last_write_ts = ?
+         WHERE state = 'PENDING'
+           AND provider_event_id IS NOT NULL
+           AND provider_event_id != ''
+           AND (error_message IS NULL OR error_message = '')
+           AND julianday(COALESCE(last_write_ts, '1970-01-01T00:00:00Z')) <= julianday('now', ?)`,
+        nowIso,
+        ageExpr,
+      );
+    }
+
+    return {
+      settled: Number(eligible) || 0,
+      min_age_minutes: safeMinutes,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -2328,7 +2909,7 @@ export class UserGraphDO {
         .toArray();
 
       for (const mirror of mirrors) {
-        await this.writeQueue.send({
+        await this.enqueueDeleteMirror({
           type: "DELETE_MIRROR",
           canonical_event_id: evt.canonical_event_id,
           target_account_id: mirror.target_account_id,
@@ -2468,7 +3049,7 @@ export class UserGraphDO {
           .toArray();
 
         for (const mirror of mirrors) {
-          await this.writeQueue.send({
+          await this.enqueueDeleteMirror({
             type: "DELETE_MIRROR",
             canonical_event_id: evt.canonical_event_id,
             target_account_id: mirror.target_account_id,
@@ -2655,6 +3236,64 @@ export class UserGraphDO {
     }
   }
 
+  /** Parse canonical event end timestamp for queue-priority/window decisions. */
+  private parseCanonicalEventEndMs(event: CanonicalEvent): number | null {
+    const end = event.end;
+    const raw = end.dateTime ?? end.date;
+    if (!raw) return null;
+    const normalized = end.date ? `${raw}T00:00:00Z` : raw;
+    const ms = Date.parse(normalized);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  /** True when event is outside the active sync optimization window. */
+  private isOutOfWindowProjection(eventEndMs: number | null): boolean {
+    if (eventEndMs === null) return false;
+    const now = Date.now();
+    const pastCutoff = now - OUT_OF_WINDOW_PAST_DAYS * 24 * 60 * 60 * 1000;
+    const futureCutoff = now + OUT_OF_WINDOW_FUTURE_DAYS * 24 * 60 * 60 * 1000;
+    return eventEndMs <= pastCutoff || eventEndMs >= futureCutoff;
+  }
+
+  /** Enqueue upsert writes, prioritizing near-term events. */
+  private async enqueueUpsertMirror(
+    message: unknown,
+    eventEndMs: number | null,
+  ): Promise<void> {
+    if (eventEndMs !== null) {
+      const now = Date.now();
+      const lookback = now - UPSERT_PRIORITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+      const lookahead = now + UPSERT_PRIORITY_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000;
+      if (eventEndMs >= lookback && eventEndMs <= lookahead) {
+        await this.deleteQueue.send(message);
+        return;
+      }
+    }
+    await this.writeQueue.send(message);
+  }
+
+  /**
+   * Enqueue a mirror deletion message.
+   * Uses a dedicated priority queue when configured; otherwise falls back
+   * to the standard write queue.
+   */
+  private async enqueueDeleteMirror(message: unknown): Promise<void> {
+    await this.deleteQueue.send(message);
+  }
+
+  /**
+   * Enqueue mirror deletion messages in bounded batches, targeting the
+   * delete-priority queue when available.
+   */
+  private async enqueueDeleteBatch(messages: unknown[]): Promise<void> {
+    if (messages.length === 0) return;
+
+    for (let i = 0; i < messages.length; i += WRITE_QUEUE_BATCH_SIZE) {
+      const chunk = messages.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
+      await this.deleteQueue.sendBatch(chunk.map((body) => ({ body })));
+    }
+  }
+
   /**
    * Remove all data associated with an account from the UserGraphDO.
    *
@@ -2701,7 +3340,7 @@ export class UserGraphDO {
       target_calendar_id: mirror.target_calendar_id,
       provider_event_id: mirror.provider_event_id ?? "",
     }));
-    await this.enqueueWriteBatch(outboundDeletes);
+    await this.enqueueDeleteBatch(outboundDeletes);
     mirrorsDeleted += outboundDeletes.length;
 
     this.sql.exec(
@@ -3211,6 +3850,61 @@ export class UserGraphDO {
 
     if (rows.length === 0) return null;
     return this.rowToCanonicalEvent(rows[0]);
+  }
+
+  /**
+   * Find canonical_event_id by mirror lookup keys.
+   * Used when a provider reports deletion for a managed mirror event.
+   */
+  findCanonicalByMirror(
+    targetAccountId: string,
+    providerEventId: string,
+  ): string | null {
+    this.ensureMigrated();
+
+    const candidates = [providerEventId];
+    if (providerEventId.includes("%")) {
+      try {
+        const decoded = decodeURIComponent(providerEventId);
+        if (decoded.length > 0 && !candidates.includes(decoded)) {
+          candidates.push(decoded);
+        }
+      } catch {
+        // Ignore malformed escape sequences and continue with raw key.
+      }
+    }
+    const encoded = providerEventId.includes("%")
+      ? providerEventId
+      : encodeURIComponent(providerEventId);
+    if (!candidates.includes(encoded)) {
+      candidates.push(encoded);
+    }
+
+    for (const candidate of candidates) {
+      const rows = this.sql
+        .exec<{ canonical_event_id: string }>(
+          `SELECT canonical_event_id
+           FROM event_mirrors
+           WHERE target_account_id = ? AND provider_event_id = ?
+           ORDER BY
+             CASE state
+               WHEN 'ACTIVE' THEN 0
+               WHEN 'PENDING' THEN 1
+               ELSE 2
+             END,
+             COALESCE(last_write_ts, '') DESC
+           LIMIT 1`,
+          targetAccountId,
+          candidate,
+        )
+        .toArray();
+
+      if (rows.length > 0) {
+        return rows[0].canonical_event_id;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -5461,6 +6155,36 @@ export class UserGraphDO {
           return Response.json({ items });
         }
 
+        case "/getMirrorDiagnostics": {
+          const body = (await request.json()) as { sample_limit?: number } | null;
+          const diagnostics = this.getMirrorDiagnostics(body?.sample_limit ?? 25);
+          return Response.json(diagnostics);
+        }
+
+        case "/settleHistoricalPending": {
+          const body = (await request.json()) as { cutoff_days?: number } | null;
+          const result = this.settleHistoricalPending(body?.cutoff_days ?? 30);
+          return Response.json(result);
+        }
+
+        case "/settleOutOfWindowPending": {
+          const body = (await request.json()) as {
+            past_days?: number;
+            future_days?: number;
+          } | null;
+          const result = this.settleOutOfWindowPending(
+            body?.past_days ?? 30,
+            body?.future_days ?? 365,
+          );
+          return Response.json(result);
+        }
+
+        case "/settleStuckPending": {
+          const body = (await request.json()) as { min_age_minutes?: number } | null;
+          const result = this.settleStuckPending(body?.min_age_minutes ?? 120);
+          return Response.json(result);
+        }
+
         case "/createPolicy": {
           const body = (await request.json()) as { name: string };
           const result = await this.createPolicy(body.name);
@@ -5509,6 +6233,18 @@ export class UserGraphDO {
           return Response.json({ event });
         }
 
+        case "/findCanonicalByMirror": {
+          const body = (await request.json()) as {
+            target_account_id: string;
+            provider_event_id: string;
+          };
+          const canonicalEventId = this.findCanonicalByMirror(
+            body.target_account_id,
+            body.provider_event_id,
+          );
+          return Response.json({ canonical_event_id: canonicalEventId });
+        }
+
         case "/getPolicyEdges": {
           const body = (await request.json()) as {
             from_account_id: string;
@@ -5543,6 +6279,12 @@ export class UserGraphDO {
           const body = (await request.json()) as RecomputeScope;
           const enqueued = await this.recomputeProjections(body);
           return Response.json({ enqueued });
+        }
+
+        case "/requeuePendingMirrors": {
+          const body = (await request.json()) as { limit?: number } | null;
+          const result = await this.requeuePendingMirrors(body?.limit ?? 200);
+          return Response.json(result);
         }
 
         case "/computeAvailability": {

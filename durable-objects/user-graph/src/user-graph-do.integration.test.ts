@@ -784,6 +784,12 @@ describe("UserGraphDO integration", () => {
 
       expect(queue.messages).toHaveLength(1);
 
+      // Simulate steady-state after write-consumer successfully applies mirror.
+      db.prepare(
+        `UPDATE event_mirrors SET state = 'ACTIVE'
+         WHERE target_account_id = ?`,
+      ).run(OTHER_ACCOUNT_ID);
+
       // Clear queue
       queue.clear();
 
@@ -873,6 +879,8 @@ describe("UserGraphDO integration", () => {
       const msg = queue.messages[0] as Record<string, unknown>;
       expect(msg.type).toBe("DELETE_MIRROR");
       expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
+      expect(msg.target_calendar_id).toBe(OTHER_ACCOUNT_ID);
+      expect(typeof msg.idempotency_key).toBe("string");
 
       // Mirror row should be cleaned up
       const mirrors = db.prepare("SELECT * FROM event_mirrors").all();
@@ -1285,6 +1293,13 @@ describe("UserGraphDO integration", () => {
       });
 
       await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+      // Simulate steady-state after write-consumer successfully applies mirror.
+      db.prepare(
+        `UPDATE event_mirrors SET state = 'ACTIVE'
+         WHERE target_account_id = ?`,
+      ).run(OTHER_ACCOUNT_ID);
+
       queue.clear();
 
       // Recompute without changing anything -- should skip
@@ -1293,7 +1308,7 @@ describe("UserGraphDO integration", () => {
       expect(queue.messages).toHaveLength(0);
     });
 
-    it("force_requeue_non_active re-enqueues unchanged non-active mirrors", async () => {
+    it("auto-replays unchanged PENDING mirrors; force_requeue_non_active is required for ERROR", async () => {
       ug.getSyncHealth();
 
       insertPolicyEdge(db, {
@@ -1316,12 +1331,26 @@ describe("UserGraphDO integration", () => {
       expect(mirrors).toHaveLength(1);
       expect(mirrors[0].state).toBe("PENDING");
 
-      // Default recompute keeps write-skipping behavior for unchanged hashes.
-      const skipped = await ug.recomputeProjections();
-      expect(skipped).toBe(0);
+      // Default recompute auto-replays unchanged PENDING mirrors.
+      const replayedPending = await ug.recomputeProjections();
+      expect(replayedPending).toBe(1);
+      expect(queue.messages).toHaveLength(1);
+
+      queue.clear();
+
+      // Move mirror to ERROR with unchanged hash.
+      db.prepare(
+        `UPDATE event_mirrors
+         SET state = 'ERROR'
+         WHERE target_account_id = ?`,
+      ).run(OTHER_ACCOUNT_ID);
+
+      // Default recompute should skip unchanged ERROR mirrors.
+      const skippedError = await ug.recomputeProjections();
+      expect(skippedError).toBe(0);
       expect(queue.messages).toHaveLength(0);
 
-      // Forced recompute re-enqueues unchanged non-ACTIVE mirrors.
+      // Forced recompute re-enqueues unchanged non-ACTIVE mirrors (including ERROR).
       const forced = await ug.recomputeProjections({
         force_requeue_non_active: true,
       });
@@ -1330,6 +1359,48 @@ describe("UserGraphDO integration", () => {
       const msg = queue.messages[0] as Record<string, unknown>;
       expect(msg.type).toBe("UPSERT_MIRROR");
       expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
+    });
+
+    it("prunes non-projectable mirrors when policy edge no longer exists", async () => {
+      ug.getSyncHealth();
+
+      insertPolicyEdge(db, {
+        policyId: "pol_01TEST000000000000000000001",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+
+      // Simulate a permanent write failure.
+      db.prepare(
+        `UPDATE event_mirrors
+         SET state = 'ERROR', error_message = 'Forbidden'
+         WHERE target_account_id = ?`,
+      ).run(OTHER_ACCOUNT_ID);
+
+      const before = ug.getSyncHealth();
+      expect(before.error_mirrors).toBe(1);
+
+      // Remove the policy edge so this mirror is no longer projectable.
+      db.prepare(
+        `DELETE FROM policy_edges
+         WHERE from_account_id = ? AND to_account_id = ?`,
+      ).run(TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID);
+
+      await ug.recomputeProjections();
+
+      const remaining = db
+        .prepare(
+          `SELECT COUNT(*) as cnt
+           FROM event_mirrors
+           WHERE target_account_id = ?`,
+        )
+        .get(OTHER_ACCOUNT_ID) as { cnt: number };
+      expect(remaining.cnt).toBe(0);
+
+      const after = ug.getSyncHealth();
+      expect(after.error_mirrors).toBe(0);
     });
 
     it("recomputes for a single event", async () => {
@@ -1742,7 +1813,7 @@ describe("UserGraphDO integration", () => {
   // -------------------------------------------------------------------------
 
   describe("deleteCanonicalEvent", () => {
-    it("deletes event and enqueues DELETE_MIRROR", async () => {
+    it("deletes event and enqueues DELETE_MIRROR for mirrors and origin", async () => {
       ug.getSyncHealth();
 
       insertPolicyEdge(db, {
@@ -1773,10 +1844,24 @@ describe("UserGraphDO integration", () => {
       const mirrors = db.prepare("SELECT * FROM event_mirrors").all();
       expect(mirrors).toHaveLength(0);
 
-      // DELETE_MIRROR should be enqueued
-      expect(queue.messages).toHaveLength(1);
-      const msg = queue.messages[0] as Record<string, unknown>;
-      expect(msg.type).toBe("DELETE_MIRROR");
+      // DELETE_MIRROR should be enqueued for both mirror target and origin account
+      expect(queue.messages).toHaveLength(2);
+      const deleteMessages = queue.messages as Array<Record<string, unknown>>;
+      const originDelete = deleteMessages.find(
+        (msg) => msg.target_account_id === TEST_ACCOUNT_ID,
+      );
+      const mirrorDelete = deleteMessages.find(
+        (msg) => msg.target_account_id === OTHER_ACCOUNT_ID,
+      );
+
+      expect(originDelete).toBeDefined();
+      expect(originDelete?.type).toBe("DELETE_MIRROR");
+      expect(originDelete?.provider_event_id).toBe("google_evt_001");
+      expect(originDelete?.target_calendar_id).toBe("primary");
+
+      expect(mirrorDelete).toBeDefined();
+      expect(mirrorDelete?.type).toBe("DELETE_MIRROR");
+      expect(mirrorDelete?.target_calendar_id).toBe(OTHER_ACCOUNT_ID);
 
       // Journal should have delete entry
       const journal = ug.queryJournal();
@@ -2676,6 +2761,73 @@ describe("UserGraphDO integration", () => {
         expect(resp.status).toBe(200);
         const data = (await resp.json()) as { event: null };
         expect(data.event).toBeNull();
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // /findCanonicalByMirror
+    // -----------------------------------------------------------------------
+
+    describe("/findCanonicalByMirror", () => {
+      it("returns canonical_event_id when mirror mapping exists", async () => {
+        ug.getSyncHealth();
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+        db.prepare(
+          "UPDATE event_mirrors SET state = 'ACTIVE', provider_event_id = ? WHERE target_account_id = ?",
+        ).run("google_mirror_123", OTHER_ACCOUNT_ID);
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          provider_event_id: "google_mirror_123",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBeDefined();
+        expect(data.canonical_event_id).not.toBeNull();
+      });
+
+      it("resolves canonical_event_id when provider_event_id encoding differs", async () => {
+        ug.getSyncHealth();
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+        db.prepare(
+          "UPDATE event_mirrors SET state = 'ACTIVE', provider_event_id = ? WHERE target_account_id = ?",
+        ).run("AAMkAGI2TQABAAA%2FAAABBB%3D%3D", OTHER_ACCOUNT_ID);
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          provider_event_id: "AAMkAGI2TQABAAA/AAABBB==",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBeDefined();
+        expect(data.canonical_event_id).not.toBeNull();
+      });
+
+      it("returns null when mirror mapping does not exist", async () => {
+        ug.getSyncHealth();
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          provider_event_id: "does-not-exist",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBeNull();
       });
     });
 

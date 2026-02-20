@@ -13,7 +13,7 @@
  * - Enqueued message has correct shape
  * - Microsoft validation handshake returns token as plain text
  * - Microsoft change notification enqueues SYNC_INCREMENTAL
- * - Microsoft clientState validation returns 403 on mismatch
+ * - Microsoft clientState mismatch is skipped without failing the whole batch
  * - Microsoft malformed body returns 400
  *
  * D1 and Queue are mocked with lightweight stubs.
@@ -468,7 +468,7 @@ describe("POST /webhook/microsoft", () => {
   });
 
   // AC 3: clientState validation
-  it("returns 403 when clientState does not match (AC 3)", async () => {
+  it("returns 202 and skips enqueue when clientState does not match (AC 3)", async () => {
     const { env, queue } = createMockEnv({
       accounts: [{
         account_id: TEST_ACCOUNT_ID,
@@ -491,8 +491,58 @@ describe("POST /webhook/microsoft", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(202);
     expect(queue.messages.length).toBe(0);
+  });
+
+  it("continues processing valid notifications when one clientState mismatches", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [
+        {
+          account_id: "acc_valid",
+          provider: "microsoft",
+          status: "active",
+          channel_id: "sub-valid",
+          channel_token: TEST_MS_CLIENT_STATE,
+        },
+        {
+          account_id: "acc_bad",
+          provider: "microsoft",
+          status: "active",
+          channel_id: "sub-bad",
+          channel_token: "expected-bad-secret",
+        },
+      ],
+    });
+    const handler = createHandler();
+
+    const body = {
+      value: [
+        {
+          subscriptionId: "sub-bad",
+          changeType: "updated",
+          clientState: "wrong-secret",
+          resource: "users/b/events/e2",
+        },
+        {
+          subscriptionId: "sub-valid",
+          changeType: "created",
+          clientState: TEST_MS_CLIENT_STATE,
+          resource: "users/a/events/e1",
+        },
+      ],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+    expect((queue.messages[0] as { account_id: string }).account_id).toBe("acc_valid");
   });
 
   // Malformed body handling
