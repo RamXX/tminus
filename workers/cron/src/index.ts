@@ -5,7 +5,8 @@
  * 1. Google channel renewal (every 6h): renew Google watch channels expiring within 24h
  * 2. Microsoft subscription renewal (every 6h): renew MS subscriptions at 75% lifetime
  * 3. Token health check (every 12h): verify account tokens, mark errors
- * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT messages
+ * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT +
+ *    SYNC_FULL recovery passes and force projection replay
  * 5. Social drift computation (daily 04:00 UTC): compute drift for all users, store alerts
  *
  * Design decisions:
@@ -16,7 +17,13 @@
  * - Per ADR-6: Daily reconciliation, not weekly
  */
 
-import type { ReconcileAccountMessage, AccountId, DeleteMirrorMessage, EventId } from "@tminus/shared";
+import type {
+  ReconcileAccountMessage,
+  SyncFullMessage,
+  AccountId,
+  DeleteMirrorMessage,
+  EventId,
+} from "@tminus/shared";
 import {
   GoogleCalendarClient,
   generateId,
@@ -83,6 +90,40 @@ interface AccountRow {
 
 interface MsAccountRow {
   readonly account_id: string;
+}
+
+async function enqueueFullSyncRecovery(
+  env: Env,
+  accountId: string,
+  reason: SyncFullMessage["reason"],
+): Promise<void> {
+  const msg: SyncFullMessage = {
+    type: "SYNC_FULL",
+    account_id: accountId as AccountId,
+    reason,
+  };
+  await env.SYNC_QUEUE.send(msg);
+}
+
+async function forceReplayNonActiveMirrors(
+  env: Env,
+  userId: string,
+): Promise<void> {
+  const doId = env.USER_GRAPH.idFromName(userId);
+  const stub = env.USER_GRAPH.get(doId);
+  const response = await stub.fetch(
+    new Request("https://user-graph.internal/recomputeProjections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force_requeue_non_active: true }),
+    }),
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.recomputeProjections failed (${response.status}): ${body}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +384,9 @@ async function handleMsSubscriptionRenewal(env: Env): Promise<void> {
  * AccountDO.getHealth() to check token status, and attempt refresh via
  * AccountDO.getAccessToken().
  * If refresh fails, mark account status='error' in D1.
- * If refresh succeeds for a previously errored account, recover it to active.
+ * If refresh succeeds for a previously errored account, recover it to active
+ * and trigger convergence recovery (SYNC_FULL + forced replay of non-active
+ * mirrors) so stale rows heal without manual intervention.
  */
 async function handleTokenHealth(env: Env): Promise<void> {
   const { results } = await env.DB
@@ -400,6 +443,30 @@ async function handleTokenHealth(env: Env): Promise<void> {
             .bind("active", row.account_id)
             .run();
           console.log(`Token recovered for account ${row.account_id}; marked active`);
+
+          try {
+            await enqueueFullSyncRecovery(env, row.account_id, "reconcile");
+            console.log(
+              `Token recovery: enqueued SYNC_FULL for account ${row.account_id}`,
+            );
+          } catch (err) {
+            console.error(
+              `Token recovery: failed to enqueue SYNC_FULL for account ${row.account_id}:`,
+              err,
+            );
+          }
+
+          try {
+            await forceReplayNonActiveMirrors(env, row.user_id);
+            console.log(
+              `Token recovery: forced non-active mirror replay for user ${row.user_id}`,
+            );
+          } catch (err) {
+            console.error(
+              `Token recovery: failed to force mirror replay for user ${row.user_id}:`,
+              err,
+            );
+          }
         }
         console.log(`Token healthy for account ${row.account_id}`);
       }
@@ -417,9 +484,15 @@ async function handleTokenHealth(env: Env): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Query D1 for all non-revoked accounts and enqueue RECONCILE_ACCOUNT messages
- * for each. Per ADR-6: daily, not weekly. Google push notifications are
- * best-effort and can silently stop.
+ * Query D1 for all non-revoked accounts and enqueue:
+ * 1. RECONCILE_ACCOUNT (legacy workflow path)
+ * 2. SYNC_FULL (guaranteed consumed by sync-consumer for convergence)
+ *
+ * Also force replay of non-active mirrors once per user to recover stale
+ * PENDING/ERROR/TOMBSTONED rows that may have been left behind by retries/DLQ.
+ *
+ * Per ADR-6: daily, not weekly. Provider webhooks are best-effort and can
+ * silently stop or miss deletes.
  *
  * This is a queue-only operation -- no AccountDO calls needed.
  */
@@ -435,7 +508,11 @@ async function handleReconciliation(env: Env): Promise<void> {
     `Drift reconciliation: enqueuing ${results.length} non-revoked accounts`,
   );
 
+  const replayUsers = new Set<string>();
+
   for (const row of results) {
+    replayUsers.add(row.user_id);
+
     try {
       const msg: ReconcileAccountMessage = {
         type: "RECONCILE_ACCOUNT",
@@ -448,6 +525,30 @@ async function handleReconciliation(env: Env): Promise<void> {
     } catch (err) {
       console.error(
         `Failed to enqueue reconciliation for account ${row.account_id}:`,
+        err,
+      );
+    }
+
+    try {
+      await enqueueFullSyncRecovery(env, row.account_id, "reconcile");
+      console.log(`Enqueued SYNC_FULL recovery for account ${row.account_id}`);
+    } catch (err) {
+      console.error(
+        `Failed to enqueue SYNC_FULL recovery for account ${row.account_id}:`,
+        err,
+      );
+    }
+  }
+
+  for (const userId of replayUsers) {
+    try {
+      await forceReplayNonActiveMirrors(env, userId);
+      console.log(
+        `Drift reconciliation: forced non-active mirror replay for user ${userId}`,
+      );
+    } catch (err) {
+      console.error(
+        `Drift reconciliation: failed forced mirror replay for user ${userId}:`,
         err,
       );
     }

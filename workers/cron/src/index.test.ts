@@ -887,6 +887,155 @@ describe("handleTokenHealth (via scheduled)", () => {
     );
     errorSpy.mockRestore();
   });
+
+  // -----------------------------------------------------------------------
+  // TM-bnfl: Token health convergence recovery tests
+  // -----------------------------------------------------------------------
+
+  it("enqueues SYNC_FULL and forces mirror replay when previously-errored account recovers", async () => {
+    const d1RunLog: Array<{ sql: string; params: unknown[] }> = [];
+    const userGraphCalls: Array<{ url: string; body: string }> = [];
+    const { env, syncQueue } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "error" },
+        ],
+      },
+      accountDOFetch: async (url) => {
+        if (url.includes("getHealth")) {
+          return new Response("OK", { status: 200 });
+        }
+        if (url.includes("getAccessToken")) {
+          // Token refresh now succeeds -- account has recovered
+          return new Response(JSON.stringify({ access_token: "fresh-token" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      },
+      userGraphDOFetch: async (url, init) => {
+        const body = init?.body ? String(init.body) : "";
+        userGraphCalls.push({ url, body });
+        return new Response("OK", { status: 200 });
+      },
+      d1RunLog,
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_TOKEN_HEALTH), env, mockCtx);
+
+    // Should mark account as active in D1
+    const activeUpdate = d1RunLog.find(
+      q => q.sql.includes("UPDATE accounts SET status") && q.params.includes("active"),
+    );
+    expect(activeUpdate).toBeDefined();
+    expect(activeUpdate!.params).toContain(TEST_ACCOUNT_ID_1);
+
+    // Should enqueue SYNC_FULL for the recovered account
+    expect(syncQueue.messages.length).toBe(1);
+    const syncMsg = syncQueue.messages[0] as { type: string; account_id: string; reason: string };
+    expect(syncMsg.type).toBe("SYNC_FULL");
+    expect(syncMsg.account_id).toBe(TEST_ACCOUNT_ID_1);
+    expect(syncMsg.reason).toBe("reconcile");
+
+    // Should call recomputeProjections with force_requeue_non_active
+    const recomputeCalls = userGraphCalls.filter(c => c.url.includes("recomputeProjections"));
+    expect(recomputeCalls.length).toBe(1);
+    const body = JSON.parse(recomputeCalls[0].body);
+    expect(body.force_requeue_non_active).toBe(true);
+
+    logSpy.mockRestore();
+  });
+
+  it("does NOT enqueue SYNC_FULL for healthy active accounts (no recovery needed)", async () => {
+    const { env, syncQueue } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "active" },
+        ],
+      },
+      accountDOFetch: async (url) => {
+        if (url.includes("getHealth")) {
+          return new Response("OK", { status: 200 });
+        }
+        if (url.includes("getAccessToken")) {
+          return new Response(JSON.stringify({ access_token: "good-token" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      },
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_TOKEN_HEALTH), env, mockCtx);
+
+    // No SYNC_FULL should be enqueued for already-active accounts
+    expect(syncQueue.messages.length).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it("token recovery SYNC_FULL failure does not prevent mirror replay", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const userGraphCalls: Array<{ url: string; body: string }> = [];
+    const d1RunLog: Array<{ sql: string; params: unknown[] }> = [];
+
+    // Make SYNC_QUEUE.send throw
+    const failingSyncQueue = {
+      messages: [] as unknown[],
+      async send() {
+        throw new Error("Queue send failure");
+      },
+    } as unknown as Queue & { messages: unknown[] };
+
+    const { env } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "error" },
+        ],
+      },
+      accountDOFetch: async (url) => {
+        if (url.includes("getHealth")) {
+          return new Response("OK", { status: 200 });
+        }
+        if (url.includes("getAccessToken")) {
+          return new Response(JSON.stringify({ access_token: "fresh-token" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("OK", { status: 200 });
+      },
+      userGraphDOFetch: async (url, init) => {
+        const body = init?.body ? String(init.body) : "";
+        userGraphCalls.push({ url, body });
+        return new Response("OK", { status: 200 });
+      },
+      d1RunLog,
+    });
+    (env as any).SYNC_QUEUE = failingSyncQueue;
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_TOKEN_HEALTH), env, mockCtx);
+
+    // SYNC_FULL enqueue failed
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("failed to enqueue SYNC_FULL"),
+      expect.any(Error),
+    );
+
+    // But mirror replay should still have been attempted (AC-6: isolation within recovery steps)
+    const recomputeCalls = userGraphCalls.filter(c => c.url.includes("recomputeProjections"));
+    expect(recomputeCalls.length).toBe(1);
+
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -966,6 +1115,117 @@ describe("handleReconciliation (via scheduled)", () => {
     await handler.scheduled(buildScheduledEvent(CRON_RECONCILIATION), env, mockCtx);
 
     expect(reconcileQueue.messages.length).toBe(0);
+  });
+
+  // -----------------------------------------------------------------------
+  // TM-bnfl: SYNC_FULL recovery and mirror replay tests
+  // -----------------------------------------------------------------------
+
+  it("enqueues SYNC_FULL for every non-revoked account alongside RECONCILE_ACCOUNT", async () => {
+    const { env, reconcileQueue, syncQueue } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "active" },
+          { account_id: TEST_ACCOUNT_ID_2, user_id: TEST_USER_ID_2, status: "error" },
+        ],
+      },
+    });
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_RECONCILIATION), env, mockCtx);
+
+    // RECONCILE_ACCOUNT messages still enqueued (AC-4: preserved, not replaced)
+    expect(reconcileQueue.messages.length).toBe(2);
+    expect((reconcileQueue.messages[0] as any).type).toBe("RECONCILE_ACCOUNT");
+    expect((reconcileQueue.messages[1] as any).type).toBe("RECONCILE_ACCOUNT");
+
+    // SYNC_FULL messages enqueued for both accounts (AC-1: errored + active)
+    expect(syncQueue.messages.length).toBe(2);
+    const sync1 = syncQueue.messages[0] as { type: string; account_id: string; reason: string };
+    const sync2 = syncQueue.messages[1] as { type: string; account_id: string; reason: string };
+    expect(sync1.type).toBe("SYNC_FULL");
+    expect(sync1.account_id).toBe(TEST_ACCOUNT_ID_1);
+    expect(sync1.reason).toBe("reconcile");
+    expect(sync2.type).toBe("SYNC_FULL");
+    expect(sync2.account_id).toBe(TEST_ACCOUNT_ID_2);
+    expect(sync2.reason).toBe("reconcile");
+  });
+
+  it("calls forceReplayNonActiveMirrors for each unique user during reconciliation", async () => {
+    const userGraphCalls: Array<{ url: string; body: string }> = [];
+    const { env } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "active" },
+          { account_id: TEST_ACCOUNT_ID_2, user_id: TEST_USER_ID_1, status: "error" }, // same user, different account
+        ],
+      },
+      userGraphDOFetch: async (url, init) => {
+        const body = init?.body ? String(init.body) : "";
+        userGraphCalls.push({ url, body });
+        return new Response("OK", { status: 200 });
+      },
+    });
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_RECONCILIATION), env, mockCtx);
+
+    // Should call recomputeProjections exactly once per unique user (deduped)
+    const recomputeCalls = userGraphCalls.filter(c => c.url.includes("recomputeProjections"));
+    expect(recomputeCalls.length).toBe(1);
+    const body = JSON.parse(recomputeCalls[0].body);
+    expect(body.force_requeue_non_active).toBe(true);
+  });
+
+  it("errored account SYNC_FULL enqueue does not block other accounts on queue failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let reconcileSendCount = 0;
+    let syncSendCount = 0;
+
+    const mockReconcileQueue = {
+      messages: [] as unknown[],
+      async send(msg: unknown) {
+        reconcileSendCount++;
+        mockReconcileQueue.messages.push(msg);
+      },
+    } as unknown as Queue & { messages: unknown[] };
+
+    const mockSyncQueue = {
+      messages: [] as unknown[],
+      async send(msg: unknown) {
+        syncSendCount++;
+        // First SYNC_FULL send fails
+        if (syncSendCount === 1) throw new Error("Sync queue full");
+        mockSyncQueue.messages.push(msg);
+      },
+    } as unknown as Queue & { messages: unknown[] };
+
+    const { env } = createMockEnv({
+      d1Results: {
+        "accounts WHERE status": [
+          { account_id: TEST_ACCOUNT_ID_1, user_id: TEST_USER_ID_1, status: "error" },
+          { account_id: TEST_ACCOUNT_ID_2, user_id: TEST_USER_ID_2, status: "active" },
+        ],
+      },
+    });
+    (env as any).RECONCILE_QUEUE = mockReconcileQueue;
+    (env as any).SYNC_QUEUE = mockSyncQueue;
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_RECONCILIATION), env, mockCtx);
+
+    // Both RECONCILE_ACCOUNT messages should succeed
+    expect(mockReconcileQueue.messages.length).toBe(2);
+
+    // First SYNC_FULL failed, second succeeded (AC-6: isolation)
+    expect(mockSyncQueue.messages.length).toBe(1);
+    expect((mockSyncQueue.messages[0] as any).account_id).toBe(TEST_ACCOUNT_ID_2);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to enqueue SYNC_FULL recovery"),
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
   });
 });
 
