@@ -39,6 +39,10 @@ import type {
   FetchFn,
 } from "@tminus/shared";
 
+/** Do not patch already-created historical mirrors older than this many days. */
+const HISTORICAL_PATCH_SKIP_DAYS = 30;
+const HISTORICAL_PATCH_SKIP_MS = HISTORICAL_PATCH_SKIP_DAYS * 24 * 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -188,6 +192,19 @@ function classifyError(err: unknown): RetryStrategy {
   return { shouldRetry: true, maxRetries: 1 };
 }
 
+function parseProjectedEventEndMs(message: UpsertMirrorMessage): number | null {
+  const end = message.projected_payload?.end;
+  if (!end) return null;
+
+  const raw = end.dateTime ?? end.date;
+  if (!raw) return null;
+
+  // For all-day dates, interpret as midnight UTC for cutoff comparisons.
+  const normalized = end.date ? `${raw}T00:00:00Z` : raw;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 // ---------------------------------------------------------------------------
 // WriteConsumer class
 // ---------------------------------------------------------------------------
@@ -217,6 +234,95 @@ export class WriteConsumer {
     this.calendarClientFactory =
       opts.calendarClientFactory ??
       ((token: string) => new GoogleCalendarClient(token));
+  }
+
+  // -------------------------------------------------------------------------
+  // Provider not-found helpers (self-healing upsert path)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Returns true when a provider error indicates a missing event/calendar.
+   *
+   * For UPSERT flows this should trigger self-healing:
+   * - Missing event on PATCH => recreate via INSERT.
+   * - Missing target calendar on INSERT => recreate busy overlay calendar + retry.
+   */
+  private isNotFoundError(err: unknown): boolean {
+    return (
+      err instanceof ResourceNotFoundError ||
+      err instanceof SyncTokenExpiredError ||
+      err instanceof MicrosoftResourceNotFoundError ||
+      (err instanceof GoogleApiError &&
+        (err.statusCode === 404 || err.statusCode === 410)) ||
+      (err instanceof MicrosoftApiError && err.statusCode === 404)
+    );
+  }
+
+  /**
+   * Decode a provider event ID once when it appears to be URL-encoded.
+   *
+   * Some historical rows can carry encoded IDs (e.g. `%2F`), which would be
+   * encoded again by provider clients and produce false 404s on delete.
+   */
+  private decodeProviderEventIdIfNeeded(providerEventId: string): string {
+    if (!providerEventId.includes("%")) {
+      return providerEventId;
+    }
+    try {
+      const decoded = decodeURIComponent(providerEventId);
+      return decoded.length > 0 ? decoded : providerEventId;
+    } catch {
+      return providerEventId;
+    }
+  }
+
+  /**
+   * Microsoft returns 400 "Id is malformed." when an event ID is double-encoded.
+   */
+  private isMalformedMicrosoftIdError(err: unknown): boolean {
+    return (
+      err instanceof MicrosoftApiError &&
+      err.statusCode === 400 &&
+      err.message.toLowerCase().includes("id is malformed")
+    );
+  }
+
+  /**
+   * Insert mirror event, recreating busy overlay calendar if needed.
+   *
+   * Calendar deletion/drift can happen outside T-Minus. A direct insert into a
+   * stale calendar ID should not permanently break mirror convergence.
+   */
+  private async insertWithCalendarRecovery(
+    client: CalendarProvider,
+    msg: UpsertMirrorMessage,
+    targetCalendarId: string,
+  ): Promise<{ providerEventId: string; targetCalendarId: string }> {
+    try {
+      const providerEventId = await client.insertEvent(
+        targetCalendarId,
+        msg.projected_payload,
+      );
+      return { providerEventId, targetCalendarId };
+    } catch (insertErr) {
+      if (!this.isNotFoundError(insertErr)) {
+        throw insertErr;
+      }
+
+      // Recover from missing/broken calendar by creating a fresh overlay and retrying once.
+      const recoveredCalendarId = await client.insertCalendar(
+        BUSY_OVERLAY_CALENDAR_NAME,
+      );
+      this.mirrorStore.storeBusyOverlayCalendar(
+        msg.target_account_id,
+        recoveredCalendarId,
+      );
+      const providerEventId = await client.insertEvent(
+        recoveredCalendarId,
+        msg.projected_payload,
+      );
+      return { providerEventId, targetCalendarId: recoveredCalendarId };
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -252,23 +358,80 @@ export class WriteConsumer {
   private async handleUpsert(
     msg: UpsertMirrorMessage,
   ): Promise<ProcessResult> {
-    // Step 1: Idempotency check (Invariant D)
-    // Check if the mirror's last_projected_hash already matches
+    // Step 1: Load the latest mirror row from UserGraphDO state.
     const mirror = this.mirrorStore.getMirror(
       msg.canonical_event_id,
       msg.target_account_id,
     );
 
-    if (mirror && mirror.state === "ACTIVE" && mirror.provider_event_id) {
-      // Idempotency: this mirror was already successfully written.
-      // The message was enqueued because the hash differed at enqueue time,
-      // but a previous delivery attempt already completed the write and set
-      // state=ACTIVE. On retry, we skip to avoid duplicate writes.
+    // Mirror row missing means this message is stale (event/policy edge removed)
+    // or superseded. Never create provider-side ghosts from orphaned queue work.
+    if (!mirror) {
       return {
         success: true,
         action: "skipped",
         retry: false,
       };
+    }
+
+    // Optional for backward compatibility with older queue messages.
+    const messageProjectedHash = msg.projected_hash ?? null;
+
+    // If a newer projection hash is already recorded, this queue item is stale.
+    // Skip to preserve "latest state wins" under out-of-order delivery.
+    if (
+      messageProjectedHash &&
+      mirror.last_projected_hash &&
+      mirror.last_projected_hash !== messageProjectedHash
+    ) {
+      return {
+        success: true,
+        action: "skipped",
+        retry: false,
+      };
+    }
+
+    // Idempotency: only skip when this message proves it already represents
+    // the ACTIVE hash. For legacy messages without projected_hash, we process
+    // them to avoid skipping needed writes.
+    if (
+      messageProjectedHash &&
+      mirror.state === "ACTIVE" &&
+      mirror.provider_event_id &&
+      mirror.last_projected_hash === messageProjectedHash
+    ) {
+      return {
+        success: true,
+        action: "skipped",
+        retry: false,
+      };
+    }
+
+    // Historical backfill acceleration:
+    // If the mirror already exists at the provider (provider_event_id present)
+    // and this update is only about old history, converge state to ACTIVE
+    // without issuing provider PATCH calls.
+    const projectedEndMs = parseProjectedEventEndMs(msg);
+    if (
+      mirror.provider_event_id &&
+      projectedEndMs !== null &&
+      projectedEndMs < Date.now() - HISTORICAL_PATCH_SKIP_MS
+    ) {
+      const now = new Date().toISOString();
+      this.mirrorStore.updateMirrorState(
+        msg.canonical_event_id,
+        msg.target_account_id,
+        {
+          last_write_ts: now,
+          state: "ACTIVE",
+          error_message: null,
+          ...(messageProjectedHash
+            ? { last_projected_hash: messageProjectedHash }
+            : {}),
+        },
+      );
+
+      return { success: true, action: "skipped", retry: false };
     }
 
     try {
@@ -307,12 +470,44 @@ export class WriteConsumer {
 
       // Step 4: Create or patch the event
       if (mirror?.provider_event_id) {
-        // PATCH existing event
-        await client.patchEvent(
-          targetCalendarId,
-          mirror.provider_event_id,
-          msg.projected_payload,
-        );
+        // PATCH existing event.
+        // If provider says the event no longer exists, recreate it via INSERT.
+        try {
+          await client.patchEvent(
+            targetCalendarId,
+            mirror.provider_event_id,
+            msg.projected_payload,
+          );
+        } catch (patchErr) {
+          if (!this.isNotFoundError(patchErr)) {
+            throw patchErr;
+          }
+
+          const recreated = await this.insertWithCalendarRecovery(
+            client,
+            msg,
+            targetCalendarId,
+          );
+          targetCalendarId = recreated.targetCalendarId;
+
+          const now = new Date().toISOString();
+          this.mirrorStore.updateMirrorState(
+            msg.canonical_event_id,
+            msg.target_account_id,
+            {
+              provider_event_id: recreated.providerEventId,
+              last_write_ts: now,
+              state: "ACTIVE",
+              error_message: null,
+              target_calendar_id: targetCalendarId,
+              ...(messageProjectedHash
+                ? { last_projected_hash: messageProjectedHash }
+                : {}),
+            },
+          );
+
+          return { success: true, action: "created", retry: false };
+        }
 
         const now = new Date().toISOString();
         this.mirrorStore.updateMirrorState(
@@ -323,27 +518,35 @@ export class WriteConsumer {
             state: "ACTIVE",
             error_message: null,
             target_calendar_id: targetCalendarId,
+            ...(messageProjectedHash
+              ? { last_projected_hash: messageProjectedHash }
+              : {}),
           },
         );
 
         return { success: true, action: "updated", retry: false };
       } else {
         // INSERT new event
-        const providerEventId = await client.insertEvent(
+        const inserted = await this.insertWithCalendarRecovery(
+          client,
+          msg,
           targetCalendarId,
-          msg.projected_payload,
         );
+        targetCalendarId = inserted.targetCalendarId;
 
         const now = new Date().toISOString();
         this.mirrorStore.updateMirrorState(
           msg.canonical_event_id,
           msg.target_account_id,
           {
-            provider_event_id: providerEventId,
+            provider_event_id: inserted.providerEventId,
             last_write_ts: now,
             state: "ACTIVE",
             error_message: null,
             target_calendar_id: targetCalendarId,
+            ...(messageProjectedHash
+              ? { last_projected_hash: messageProjectedHash }
+              : {}),
           },
         );
 
@@ -387,34 +590,80 @@ export class WriteConsumer {
         msg.canonical_event_id,
         msg.target_account_id,
       );
-      const calendarId = mirror?.target_calendar_id ?? "primary";
+      const calendarId =
+        msg.target_calendar_id ??
+        mirror?.target_calendar_id ??
+        "primary";
+      const fallbackEventId = this.decodeProviderEventIdIfNeeded(
+        msg.provider_event_id,
+      );
+      let deletedAtProvider = false;
 
       try {
         await client.deleteEvent(calendarId, msg.provider_event_id);
+        deletedAtProvider = true;
       } catch (err) {
-        // For DELETE operations, 404 and 410 mean the event is already gone.
-        // That's success -- the desired end state (event removed) is achieved.
-        //
-        // Google Calendar API returns:
-        //   404 -> ResourceNotFoundError (event never existed or long-deleted)
-        //   410 -> SyncTokenExpiredError (event recently deleted, "Gone")
-        //
-        // Microsoft Graph API returns:
-        //   404 -> MicrosoftResourceNotFoundError
-        //
-        // Defense in depth: also check generic GoogleApiError/MicrosoftApiError
-        // with statusCode 404 or 410, in case the error is not the specific subclass.
-        const isAlreadyGone =
-          err instanceof ResourceNotFoundError ||
-          err instanceof SyncTokenExpiredError ||
-          err instanceof MicrosoftResourceNotFoundError ||
-          (err instanceof GoogleApiError &&
-            (err.statusCode === 404 || err.statusCode === 410)) ||
-          (err instanceof MicrosoftApiError && err.statusCode === 404);
-        if (!isAlreadyGone) {
-          throw err;
+        // Retry once with a decoded ID to handle historical encoded IDs.
+        if (
+          fallbackEventId !== msg.provider_event_id &&
+          (this.isNotFoundError(err) || this.isMalformedMicrosoftIdError(err))
+        ) {
+          try {
+            await client.deleteEvent(calendarId, fallbackEventId);
+            deletedAtProvider = true;
+          } catch (retryErr) {
+            if (
+              !this.isNotFoundError(retryErr) &&
+              !this.isMalformedMicrosoftIdError(retryErr)
+            ) {
+              throw retryErr;
+            }
+            err = retryErr;
+          }
         }
-        // Event already deleted, proceed to update mirror state
+
+        if (!deletedAtProvider) {
+          // For DELETE operations, 404 and 410 mean the event is already gone.
+          // That's success -- the desired end state (event removed) is achieved.
+          //
+          // Google Calendar API returns:
+          //   404 -> ResourceNotFoundError (event never existed or long-deleted)
+          //   410 -> SyncTokenExpiredError (event recently deleted, "Gone")
+          //
+          // Microsoft Graph API returns:
+          //   404 -> MicrosoftResourceNotFoundError
+          //
+          // Defense in depth: also check generic GoogleApiError/MicrosoftApiError
+          // with statusCode 404 or 410, in case the error is not the specific subclass.
+          const isAlreadyGone =
+            err instanceof ResourceNotFoundError ||
+            err instanceof SyncTokenExpiredError ||
+            err instanceof MicrosoftResourceNotFoundError ||
+            (err instanceof GoogleApiError &&
+              (err.statusCode === 404 || err.statusCode === 410)) ||
+            (err instanceof MicrosoftApiError && err.statusCode === 404);
+          if (!isAlreadyGone) {
+            throw err;
+          }
+          // Origin-provider deletes do not always have a mirror row. Log this
+          // case to avoid silent false-success when provider IDs drift.
+          if (!mirror) {
+            console.warn(
+              "write-consumer: provider event not found during delete with no mirror row",
+              {
+                canonical_event_id: msg.canonical_event_id,
+                target_account_id: msg.target_account_id,
+                target_calendar_id: calendarId,
+                provider_event_id: msg.provider_event_id,
+                decoded_provider_event_id:
+                  fallbackEventId !== msg.provider_event_id
+                    ? fallbackEventId
+                    : undefined,
+              },
+            );
+          }
+          // Event already deleted, proceed to update mirror state
+        }
       }
 
       this.mirrorStore.updateMirrorState(

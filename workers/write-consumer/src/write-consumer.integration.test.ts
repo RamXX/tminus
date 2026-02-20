@@ -441,6 +441,94 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.state).toBe("ACTIVE");
       expect(mirror!.last_write_ts).toBeDefined();
     });
+
+    it("recreates mirror via INSERT when PATCH returns not found", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: "old_provider_event_id",
+        state: "PENDING",
+      });
+
+      calendarProvider.patchEventError = new ResourceNotFoundError();
+      calendarProvider.insertEventResult = "recreated_provider_event_id";
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload({ summary: "Recovered Busy" }),
+        idempotency_key: "idem_key_patch_not_found_recreate",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(result.retry).toBe(false);
+      expect(calendarProvider.patchedEvents).toHaveLength(0);
+      expect(calendarProvider.insertedEvents).toHaveLength(1);
+      expect(calendarProvider.insertedEvents[0].calendarId).toBe(TARGET_CALENDAR_ID);
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror).not.toBeNull();
+      expect(mirror!.state).toBe("ACTIVE");
+      expect(mirror!.provider_event_id).toBe("recreated_provider_event_id");
+      expect(mirror!.error_message).toBeNull();
+    });
+
+    it("recreates busy overlay calendar when insert target calendar is missing", async () => {
+      const staleCalendarId = "stale-missing-calendar-id" as CalendarId;
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: staleCalendarId,
+        state: "PENDING",
+      });
+
+      const insertSpy = vi.spyOn(calendarProvider, "insertEvent");
+      insertSpy.mockRejectedValueOnce(new ResourceNotFoundError());
+      insertSpy.mockResolvedValueOnce("provider_event_after_calendar_recovery");
+      calendarProvider.insertCalendarResult = "recovered-calendar-id";
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: staleCalendarId,
+        projected_payload: makeProjectedPayload({ summary: "Calendar Recovery Busy" }),
+        idempotency_key: "idem_key_calendar_recovery_insert",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(result.retry).toBe(false);
+      expect(calendarProvider.createdCalendars).toHaveLength(1);
+      expect(calendarProvider.createdCalendars[0].summary).toBe(
+        BUSY_OVERLAY_CALENDAR_NAME,
+      );
+      expect(insertSpy).toHaveBeenCalledTimes(2);
+      expect(insertSpy.mock.calls[0][0]).toBe(staleCalendarId);
+      expect(insertSpy.mock.calls[1][0]).toBe("recovered-calendar-id");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror).not.toBeNull();
+      expect(mirror!.state).toBe("ACTIVE");
+      expect(mirror!.provider_event_id).toBe(
+        "provider_event_after_calendar_recovery",
+      );
+      expect(mirror!.target_calendar_id).toBe("recovered-calendar-id");
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -515,6 +603,25 @@ describe("WriteConsumer integration", () => {
         TARGET_ACCOUNT_ID,
       );
       expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("uses target_calendar_id from delete message when mirror row is already gone", async () => {
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_key_del_missing_row",
+      };
+
+      const result = await consumer.processMessage(msg);
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      expect(calendarProvider.deletedEvents).toHaveLength(1);
+      expect(calendarProvider.deletedEvents[0].calendarId).toBe(TARGET_CALENDAR_ID);
+      expect(calendarProvider.deletedEvents[0].eventId).toBe(MOCK_PROVIDER_EVENT_ID);
     });
 
     it("handles 404 gracefully on delete (event already gone)", async () => {
@@ -689,6 +796,54 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.state).toBe("DELETED");
     });
 
+    it("retries delete with decoded ID when Microsoft returns malformed-id 400", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+        state: "ACTIVE",
+      });
+
+      let callCount = 0;
+      calendarProvider.deleteEvent = async (calendarId: string, eventId: string) => {
+        callCount += 1;
+        calendarProvider.deletedEvents.push({ calendarId, eventId });
+        if (callCount === 1) {
+          throw new MicrosoftApiError("Id is malformed.", 400);
+        }
+      };
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+        idempotency_key: "idem_key_del_ms_malformed_retry",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+      expect(calendarProvider.deletedEvents).toEqual([
+        {
+          calendarId: TARGET_CALENDAR_ID,
+          eventId: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+        },
+        {
+          calendarId: TARGET_CALENDAR_ID,
+          eventId: "AAMkAGI2TQABAAA/AAABBB==",
+        },
+      ]);
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
     it("still throws non-404/410 errors on delete (e.g. 403 Forbidden)", async () => {
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
@@ -731,7 +886,7 @@ describe("WriteConsumer integration", () => {
   // -------------------------------------------------------------------------
 
   describe("idempotency check skips duplicate writes", () => {
-    it("skips write when mirror is already ACTIVE with provider_event_id", async () => {
+    it("skips write when mirror is ACTIVE for the same projected_hash", async () => {
       // Setup: mirror already successfully written
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
@@ -748,6 +903,7 @@ describe("WriteConsumer integration", () => {
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         target_calendar_id: TARGET_CALENDAR_ID,
+        projected_hash: "hash_xyz",
         projected_payload: makeProjectedPayload(),
         idempotency_key: "idem_key_duplicate",
       };
@@ -758,6 +914,51 @@ describe("WriteConsumer integration", () => {
       expect(result.action).toBe("skipped");
 
       // No Google API calls should have been made
+      expect(calendarProvider.insertedEvents).toHaveLength(0);
+      expect(calendarProvider.patchedEvents).toHaveLength(0);
+    });
+
+    it("skips stale out-of-order upsert when projected_hash is older than mirror row", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "PENDING",
+        last_projected_hash: "hash_newer",
+      });
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_hash: "hash_older",
+        projected_payload: makeProjectedPayload({ summary: "Older payload" }),
+        idempotency_key: "idem_key_stale",
+      };
+
+      const result = await consumer.processMessage(msg);
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(calendarProvider.insertedEvents).toHaveLength(0);
+      expect(calendarProvider.patchedEvents).toHaveLength(0);
+    });
+
+    it("skips orphaned upsert when mirror row was removed before delivery", async () => {
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_hash: "hash_orphaned",
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_key_orphaned",
+      };
+
+      const result = await consumer.processMessage(msg);
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
       expect(calendarProvider.insertedEvents).toHaveLength(0);
       expect(calendarProvider.patchedEvents).toHaveLength(0);
     });

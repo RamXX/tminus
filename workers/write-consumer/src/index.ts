@@ -322,6 +322,18 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           const providerType: ProviderType = accountRow.provider === "microsoft" ? "microsoft" : "google";
 
+          if (body.type === "DELETE_MIRROR") {
+            console.log("write-consumer: processing DELETE_MIRROR", {
+              canonical_event_id: body.canonical_event_id,
+              target_account_id: body.target_account_id,
+              target_calendar_id: body.target_calendar_id ?? null,
+              provider_event_id_present:
+                typeof body.provider_event_id === "string" &&
+                body.provider_event_id.length > 0,
+              provider: providerType,
+            });
+          }
+
           // Keep per-account Google write rate bounded while allowing
           // different accounts to progress without unnecessary serialization.
           if (providerType === "google") {
@@ -336,12 +348,41 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           const doMirrorStore = new DOBackedMirrorStore(userGraphStub);
           const doTokenProvider = new DOBackedTokenProvider(env.ACCOUNT, providerType);
 
+          // Stale/out-of-order self-heal:
+          // If this queued upsert is older than the current mirror hash and the
+          // mirror is still PENDING, request a targeted recompute replay so the
+          // latest projection is guaranteed to be re-enqueued.
+          let prefetchedMirror: MirrorRow | null = null;
+          if (body.type === "UPSERT_MIRROR") {
+            prefetchedMirror = await doMirrorStore.getMirrorAsync(
+              body.canonical_event_id as string,
+              body.target_account_id as string,
+            );
+            const msgHash = body.projected_hash ?? null;
+            const mirrorHash = prefetchedMirror?.last_projected_hash ?? null;
+            const isStaleOutOfOrder = Boolean(
+              prefetchedMirror && msgHash && mirrorHash && mirrorHash !== msgHash,
+            );
+
+            if (isStaleOutOfOrder) {
+              if (prefetchedMirror?.state === "PENDING") {
+                await requestPendingReplay(
+                  userGraphStub,
+                  body.canonical_event_id as string,
+                );
+              }
+              msg.ack();
+              continue;
+            }
+          }
+
           // Pre-fetch mirror state (since WriteConsumer expects sync getMirror)
           // We wrap the DO-backed store in a caching proxy that makes the
           // first getMirror call async, then caches the result for sync access.
           const cachedMirrorStore = await createCachedMirrorStore(
             doMirrorStore,
             body,
+            prefetchedMirror,
           );
 
           // Create WriteConsumer with DO-backed dependencies.
@@ -406,6 +447,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 async function createCachedMirrorStore(
   doStore: DOBackedMirrorStore,
   msg: UpsertMirrorMessage | DeleteMirrorMessage,
+  prefetchedMirror?: MirrorRow | null,
 ): Promise<MirrorStore & { flush(): Promise<void> }> {
   // Pre-fetch the mirror for this message
   const targetAccountId =
@@ -414,7 +456,7 @@ async function createCachedMirrorStore(
       : "";
   const canonicalEventId = msg.canonical_event_id;
 
-  let cachedMirror = await doStore.getMirrorAsync(
+  let cachedMirror = prefetchedMirror ?? await doStore.getMirrorAsync(
     canonicalEventId as string,
     targetAccountId as string,
   );
@@ -533,6 +575,29 @@ async function createCachedMirrorStore(
       }
     },
   };
+}
+
+async function requestPendingReplay(
+  userGraphStub: DurableObjectStub,
+  canonicalEventId: string,
+): Promise<void> {
+  const response = await userGraphStub.fetch(
+    new Request("https://user-graph.internal/recomputeProjections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        canonical_event_id: canonicalEventId,
+        force_requeue_pending: true,
+      }),
+    }),
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `UserGraphDO.recomputeProjections failed (${response.status}): ${text}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

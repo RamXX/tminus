@@ -227,6 +227,11 @@ export interface UpsertMirrorMessage {
   readonly canonical_event_id: EventId;
   readonly target_account_id: AccountId;
   readonly target_calendar_id: CalendarId;
+  /**
+   * Projection hash used to detect stale/out-of-order queue messages.
+   * Optional for backward compatibility with older enqueued messages.
+   */
+  readonly projected_hash?: string;
   readonly projected_payload: ProjectedEvent;
   readonly idempotency_key: string;
 }
@@ -236,6 +241,11 @@ export interface DeleteMirrorMessage {
   readonly type: "DELETE_MIRROR";
   readonly canonical_event_id: EventId;
   readonly target_account_id: AccountId;
+  /**
+   * Target calendar the provider event lives in.
+   * Optional for backward compatibility with older enqueued messages.
+   */
+  readonly target_calendar_id?: CalendarId;
   readonly provider_event_id: string;
   readonly idempotency_key: string;
 }

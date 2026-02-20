@@ -37,11 +37,19 @@ database_id = "7a72bc74-0558-450f-b193-f7acd19c6c9c"
 
 [[queues.consumers]]
 queue = "tminus-write-queue"
-max_batch_size = 1
+max_batch_size = 25
 max_batch_timeout = 2
-max_concurrency = 6
+max_concurrency = 1
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-dlq"
+
+[[queues.consumers]]
+queue = "tminus-write-priority-queue"
+max_batch_size = 5
+max_batch_timeout = 1
+max_concurrency = 2
+max_retries = 5
+dead_letter_queue = "tminus-write-priority-queue-dlq"
 
 [vars]
 ENVIRONMENT = "development"
@@ -82,11 +90,19 @@ script_name = "tminus-api-staging"
 
 [[env.staging.queues.consumers]]
 queue = "tminus-write-queue-staging"
-max_batch_size = 1
+max_batch_size = 25
 max_batch_timeout = 2
-max_concurrency = 6
+max_concurrency = 4
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-staging-dlq"
+
+[[env.staging.queues.consumers]]
+queue = "tminus-write-priority-queue-staging"
+max_batch_size = 5
+max_batch_timeout = 1
+max_concurrency = 2
+max_retries = 5
+dead_letter_queue = "tminus-write-priority-queue-staging-dlq"
 
 # ===========================================================================
 # Production environment: tminus-write-consumer-production
@@ -119,8 +135,16 @@ script_name = "tminus-api-production"
 
 [[env.production.queues.consumers]]
 queue = "tminus-write-queue"
-max_batch_size = 1
+max_batch_size = 25
 max_batch_timeout = 2
-max_concurrency = 6
+max_concurrency = 4
 max_retries = 5
 dead_letter_queue = "tminus-write-queue-dlq"
+
+[[env.production.queues.consumers]]
+queue = "tminus-write-priority-queue"
+max_batch_size = 5
+max_batch_timeout = 1
+max_concurrency = 2
+max_retries = 5
+dead_letter_queue = "tminus-write-priority-queue-dlq"
