@@ -45,6 +45,14 @@ export function buildOAuthStartUrl(
   return url.toString();
 }
 
+/**
+ * Navigate the browser to an OAuth start URL.
+ * Extracted as a function for testability (can be mocked in tests).
+ */
+export function navigateToOAuth(url: string): void {
+  window.location.assign(url);
+}
+
 // ---------------------------------------------------------------------------
 // Status display helpers
 // ---------------------------------------------------------------------------

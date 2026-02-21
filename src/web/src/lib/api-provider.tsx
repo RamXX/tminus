@@ -74,6 +74,8 @@ import {
   getOnboardingStatus,
   addOnboardingAccount,
   completeOnboardingSession,
+  fetchAccountScopes,
+  updateAccountScopes,
 } from "./api";
 import { fetchPolicies, updatePolicyEdge } from "./policies";
 import {
@@ -101,7 +103,7 @@ import type {
 import type { OrgRole, CreatePolicyPayload, UpdatePolicyPayload } from "./admin";
 import type { DetailLevel } from "./policies";
 import type { ExcuseTone, TruthLevel } from "./briefing";
-import type { CreateEventPayload, UpdateEventPayload } from "./api";
+import type { CreateEventPayload, UpdateEventPayload, AccountScopesResponse, ScopeUpdateItem } from "./api";
 
 // ---------------------------------------------------------------------------
 // Context value type
@@ -121,6 +123,8 @@ export interface ApiContextValue {
   // Accounts
   fetchAccounts: () => Promise<import("./api").LinkedAccount[]>;
   unlinkAccount: (accountId: string) => Promise<void>;
+  fetchScopes: (accountId: string) => Promise<AccountScopesResponse>;
+  updateScopes: (accountId: string, scopes: ScopeUpdateItem[]) => Promise<AccountScopesResponse>;
 
   // Error recovery
   fetchErrors: () => Promise<import("./error-recovery").ErrorMirror[]>;
@@ -251,6 +255,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     // Accounts
     fetchAccounts: () => fetchAccounts(requireToken()),
     unlinkAccount: (accountId) => unlinkAccount(requireToken(), accountId),
+    fetchScopes: (accountId) => fetchAccountScopes(requireToken(), accountId),
+    updateScopes: (accountId, scopeItems) => updateAccountScopes(requireToken(), accountId, scopeItems),
 
     // Error recovery
     fetchErrors: () => fetchErrorMirrors(requireToken()),

@@ -68,6 +68,8 @@ vi.mock("./lib/api", () => ({
   getOnboardingStatus: vi.fn(),
   addOnboardingAccount: vi.fn(),
   completeOnboardingSession: vi.fn(),
+  fetchAccountScopes: vi.fn().mockResolvedValue({ scopes: [] }),
+  updateAccountScopes: vi.fn().mockResolvedValue({ scopes: [] }),
   ApiError: class ApiError extends Error {
     status: number;
     code: string;
@@ -194,18 +196,18 @@ describe("App routing integration", () => {
     it("renders Calendar page at #/calendar", async () => {
       window.location.hash = "#/calendar";
       render(<App />);
-      // Calendar page renders with useAuth internally, so we just check it doesn't crash
+      // Calendar page renders inside AppShell with useApi() internally
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByTestId("app-header")).toBeInTheDocument();
       });
     });
 
     it("renders Accounts page at #/accounts", async () => {
       window.location.hash = "#/accounts";
       render(<App />);
-      // Accounts page shows a heading or loading state
+      // Accounts page renders inside AppShell with useApi() internally
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByTestId("app-header")).toBeInTheDocument();
       });
     });
 
@@ -213,7 +215,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/sync-status";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByTestId("app-header")).toBeInTheDocument();
       });
     });
 

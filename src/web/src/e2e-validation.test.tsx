@@ -541,13 +541,11 @@ describe("Phase 2C E2E Validation", () => {
   // AC 2: Calendar shows real events from linked accounts
   // =========================================================================
   describe("AC 2: Calendar displays events from linked accounts", () => {
-    it("renders calendar header with user email", async () => {
+    it("renders calendar page with user email in AppShell header", async () => {
       await renderAndLogin();
 
-      expect(screen.getByText("T-Minus Calendar")).toBeInTheDocument();
-      // Email appears in both AppShell header and Calendar subtitle
-      const emailElements = screen.getAllByText("alice@example.com");
-      expect(emailElements.length).toBeGreaterThanOrEqual(1);
+      // AppShell provides the header with user email (Calendar no longer has its own header)
+      expect(screen.getByTestId("user-email")).toHaveTextContent("alice@example.com");
     });
 
     it("displays events from multiple accounts", async () => {
@@ -745,13 +743,13 @@ describe("Phase 2C E2E Validation", () => {
       expect(channelStatuses[0].textContent).toBe("active");
     });
 
-    it("has Back to Calendar navigation link", async () => {
+    it("has sidebar navigation for navigating back to Calendar", async () => {
       await renderAndLogin();
       await navigateTo("#/sync-status");
 
-      const backLink = screen.getByText("Back to Calendar");
-      expect(backLink).toBeInTheDocument();
-      expect(backLink).toHaveAttribute("href", "#/calendar");
+      // AppShell sidebar provides navigation; back-link removed from page
+      const sidebar = screen.getByTestId("desktop-sidebar");
+      expect(sidebar).toBeInTheDocument();
     });
   });
 
@@ -866,7 +864,8 @@ describe("Phase 2C E2E Validation", () => {
 
       // -- STEP 2: Calendar --
       expect(window.location.hash).toBe("#/calendar");
-      expect(screen.getByText("T-Minus Calendar")).toBeInTheDocument();
+      // Calendar renders inside AppShell (no separate "T-Minus Calendar" heading)
+      expect(screen.getByTestId("app-header")).toBeInTheDocument();
       expect(screen.getByText("Team Standup")).toBeInTheDocument();
       expect(screen.getByText("Lunch with Alex")).toBeInTheDocument();
 
@@ -1037,12 +1036,13 @@ describe("Phase 2C E2E Validation", () => {
   // Cross-cutting: Logout flow
   // =========================================================================
   describe("Logout flow", () => {
-    it("Sign Out button returns to login page", async () => {
+    it("Logout button returns to login page", async () => {
       await renderAndLogin();
 
-      expect(screen.getByText("T-Minus Calendar")).toBeInTheDocument();
+      // AppShell provides the Logout button instead of Calendar's "Sign Out"
+      expect(screen.getByTestId("app-header")).toBeInTheDocument();
 
-      fireEvent.click(screen.getByText("Sign Out"));
+      fireEvent.click(screen.getByTestId("logout-button"));
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);

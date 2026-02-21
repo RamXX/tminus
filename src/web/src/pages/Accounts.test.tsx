@@ -14,10 +14,13 @@
  * uses timers (status auto-clear via setTimeout) that interact poorly with
  * userEvent's internal delay mechanism under fake timers.
  * fireEvent dispatches events synchronously, avoiding the timer conflict.
+ *
+ * Since Accounts now uses useApi() + useAuth() internally, tests wrap the
+ * component in AuthProvider + ApiProvider and mock the underlying API module.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { Accounts, type AccountsProps } from "./Accounts";
+import { Accounts } from "./Accounts";
 import type { LinkedAccount, AccountScopesResponse, ScopeUpdateItem } from "../lib/api";
 import {
   buildOAuthStartUrl,
@@ -27,6 +30,53 @@ import {
   providerLabel,
   OAUTH_BASE_URL,
 } from "../lib/accounts";
+
+// ---------------------------------------------------------------------------
+// Mock the API module -- all API calls go through the provider
+// ---------------------------------------------------------------------------
+
+const mockFetchAccounts = vi.fn<() => Promise<LinkedAccount[]>>().mockResolvedValue([]);
+const mockUnlinkAccount = vi.fn<(accountId: string) => Promise<void>>().mockResolvedValue(undefined);
+const mockFetchScopes = vi.fn<(accountId: string) => Promise<AccountScopesResponse>>().mockResolvedValue({ account_id: "", provider: "google", scopes: [] });
+const mockUpdateScopes = vi.fn<(accountId: string, scopes: ScopeUpdateItem[]) => Promise<AccountScopesResponse>>().mockResolvedValue({ account_id: "", provider: "google", scopes: [] });
+const mockFetchSyncStatus = vi.fn().mockResolvedValue({ accounts: [] });
+
+// Mock useApi to return our test functions -- stable object reference to
+// avoid re-renders from dependency array changes
+const mockApiValue = {
+  fetchAccounts: mockFetchAccounts,
+  unlinkAccount: mockUnlinkAccount,
+  fetchScopes: mockFetchScopes,
+  updateScopes: mockUpdateScopes,
+  fetchSyncStatus: mockFetchSyncStatus,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// Mock useAuth to return a test user
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "usr_test_123", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// Mock navigateToOAuth from the accounts module to prevent actual navigation
+const mockNavigateToOAuth = vi.fn();
+vi.mock("../lib/accounts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/accounts")>();
+  return {
+    ...actual,
+    navigateToOAuth: (...args: unknown[]) => mockNavigateToOAuth(...args),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -57,58 +107,29 @@ const MOCK_ACCOUNTS: LinkedAccount[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetch(accounts: LinkedAccount[] = MOCK_ACCOUNTS) {
-  return vi.fn(async (): Promise<LinkedAccount[]> => accounts);
-}
-
-function createFailingFetch(message = "Network error") {
-  return vi.fn(async (): Promise<LinkedAccount[]> => {
-    throw new Error(message);
-  });
-}
-
-function createMockUnlink() {
-  return vi.fn(async (_accountId: string): Promise<void> => {});
-}
-
-function createFailingUnlink(message = "Unlink failed") {
-  return vi.fn(async (_accountId: string): Promise<void> => {
-    throw new Error(message);
-  });
-}
-
-function createMockNavigate() {
-  return vi.fn((_url: string) => {});
-}
-
 /**
  * Render the Accounts component and wait for the initial async fetch to resolve.
  */
-async function renderAndWait(overrides: Partial<AccountsProps> = {}) {
-  const fetchAccounts = overrides.fetchAccounts ?? createMockFetch();
-  const unlinkAccount = overrides.unlinkAccount ?? createMockUnlink();
-  const navigateToOAuth = overrides.navigateToOAuth ?? createMockNavigate();
-  const fetchScopes = overrides.fetchScopes;
-  const updateScopes = overrides.updateScopes;
-  const currentUserId = overrides.currentUserId ?? "usr_test_123";
+async function renderAndWait(
+  overrides: {
+    accounts?: LinkedAccount[];
+    fetchError?: string;
+  } = {},
+) {
+  if (overrides.fetchError) {
+    mockFetchAccounts.mockRejectedValueOnce(new Error(overrides.fetchError));
+  } else {
+    mockFetchAccounts.mockResolvedValueOnce(overrides.accounts ?? MOCK_ACCOUNTS);
+  }
 
-  const result = render(
-    <Accounts
-      currentUserId={currentUserId}
-      fetchAccounts={fetchAccounts}
-      unlinkAccount={unlinkAccount}
-      navigateToOAuth={navigateToOAuth}
-      fetchScopes={fetchScopes}
-      updateScopes={updateScopes}
-    />,
-  );
+  const result = render(<Accounts />);
 
   // Flush microtasks so async fetch resolves
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  return { ...result, fetchAccounts, unlinkAccount, navigateToOAuth, fetchScopes, updateScopes };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +141,11 @@ describe("Accounts Page", () => {
     vi.useFakeTimers({ now: new Date("2026-02-14T12:00:00Z").getTime() });
     // Reset hash to clean state
     window.location.hash = "#/accounts";
+    mockFetchAccounts.mockReset().mockResolvedValue([]);
+    mockUnlinkAccount.mockReset().mockResolvedValue(undefined);
+    mockFetchScopes.mockReset().mockResolvedValue({ account_id: "", provider: "google", scopes: [] });
+    mockUpdateScopes.mockReset().mockResolvedValue({ account_id: "", provider: "google", scopes: [] });
+    mockNavigateToOAuth.mockReset();
   });
 
   afterEach(() => {
@@ -366,15 +392,13 @@ describe("Accounts Page", () => {
 
   describe("integration: fetch accounts from API", () => {
     it("calls fetchAccounts on mount", async () => {
-      const fetchAccounts = createMockFetch();
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait();
 
-      expect(fetchAccounts).toHaveBeenCalledTimes(1);
+      expect(mockFetchAccounts).toHaveBeenCalledTimes(1);
     });
 
     it("renders fetched accounts in the table", async () => {
-      const fetchAccounts = createMockFetch();
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait();
 
       const table = screen.getByTestId("accounts-table");
       expect(within(table).getByText("work@gmail.com")).toBeInTheDocument();
@@ -385,40 +409,28 @@ describe("Accounts Page", () => {
     });
 
     it("shows empty state when API returns no accounts", async () => {
-      const fetchAccounts = createMockFetch([]);
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ accounts: [] });
 
       expect(screen.getByTestId("accounts-empty")).toBeInTheDocument();
       expect(screen.getByText(/no accounts linked/i)).toBeInTheDocument();
     });
 
     it("shows loading state before fetch completes", () => {
-      const fetchAccounts = vi.fn(
-        (): Promise<LinkedAccount[]> => new Promise(() => {}),
-      );
-      render(
-        <Accounts
-          currentUserId="usr_test_123"
-          fetchAccounts={fetchAccounts}
-          unlinkAccount={createMockUnlink()}
-          navigateToOAuth={createMockNavigate()}
-        />,
-      );
+      mockFetchAccounts.mockReturnValue(new Promise(() => {}));
+      render(<Accounts />);
 
       expect(screen.getByTestId("accounts-loading")).toBeInTheDocument();
     });
 
     it("shows error state when fetch fails", async () => {
-      const fetchAccounts = createFailingFetch("API unavailable");
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ fetchError: "API unavailable" });
 
       expect(screen.getByTestId("accounts-error")).toBeInTheDocument();
       expect(screen.getByText(/api unavailable/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      const fetchAccounts = createFailingFetch();
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ fetchError: "Network error" });
 
       expect(
         screen.getByRole("button", { name: /retry/i }),
@@ -426,11 +438,12 @@ describe("Accounts Page", () => {
     });
 
     it("retry button refetches accounts", async () => {
-      const fetchAccounts = createFailingFetch();
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ fetchError: "Network error" });
 
-      expect(fetchAccounts).toHaveBeenCalledTimes(1);
+      expect(mockFetchAccounts).toHaveBeenCalledTimes(1);
 
+      // Set up success response for retry
+      mockFetchAccounts.mockResolvedValueOnce(MOCK_ACCOUNTS);
       fireEvent.click(screen.getByRole("button", { name: /retry/i }));
 
       // Flush microtasks
@@ -438,7 +451,7 @@ describe("Accounts Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchAccounts).toHaveBeenCalledTimes(2);
+      expect(mockFetchAccounts).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -448,25 +461,23 @@ describe("Accounts Page", () => {
 
   describe("integration: link account OAuth flow", () => {
     it("Link Google Account redirects to Google OAuth URL", async () => {
-      const navigateToOAuth = createMockNavigate();
-      await renderAndWait({ navigateToOAuth });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("link-google"));
 
-      expect(navigateToOAuth).toHaveBeenCalledTimes(1);
-      expect(navigateToOAuth).toHaveBeenCalledWith(
+      expect(mockNavigateToOAuth).toHaveBeenCalledTimes(1);
+      expect(mockNavigateToOAuth).toHaveBeenCalledWith(
         "https://oauth.tminus.ink/oauth/google/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
 
     it("Link Microsoft Account redirects to Microsoft OAuth URL", async () => {
-      const navigateToOAuth = createMockNavigate();
-      await renderAndWait({ navigateToOAuth });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("link-microsoft"));
 
-      expect(navigateToOAuth).toHaveBeenCalledTimes(1);
-      expect(navigateToOAuth).toHaveBeenCalledWith(
+      expect(mockNavigateToOAuth).toHaveBeenCalledTimes(1);
+      expect(mockNavigateToOAuth).toHaveBeenCalledWith(
         "https://oauth.tminus.ink/oauth/microsoft/start?user_id=usr_test_123&redirect_uri=https%3A%2F%2Fapp.tminus.ink%2F%23%2Faccounts%3Flinked%3Dtrue",
       );
     });
@@ -484,8 +495,7 @@ describe("Accounts Page", () => {
     });
 
     it("link buttons are present even when no accounts exist", async () => {
-      const fetchAccounts = createMockFetch([]);
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ accounts: [] });
 
       expect(screen.getByTestId("link-google")).toBeInTheDocument();
       expect(screen.getByTestId("link-microsoft")).toBeInTheDocument();
@@ -498,8 +508,7 @@ describe("Accounts Page", () => {
 
   describe("integration: unlink account flow", () => {
     it("confirm unlink calls unlinkAccount with correct ID", async () => {
-      const unlinkAccount = createMockUnlink();
-      await renderAndWait({ unlinkAccount });
+      await renderAndWait();
 
       // Click unlink on first account
       fireEvent.click(screen.getByTestId("unlink-btn-acc-google-work"));
@@ -512,13 +521,12 @@ describe("Accounts Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(unlinkAccount).toHaveBeenCalledTimes(1);
-      expect(unlinkAccount).toHaveBeenCalledWith("acc-google-work");
+      expect(mockUnlinkAccount).toHaveBeenCalledTimes(1);
+      expect(mockUnlinkAccount).toHaveBeenCalledWith("acc-google-work");
     });
 
     it("account is removed from list after successful unlink", async () => {
-      const unlinkAccount = createMockUnlink();
-      await renderAndWait({ unlinkAccount });
+      await renderAndWait();
 
       // Verify account is in the list
       expect(screen.getByText("work@gmail.com")).toBeInTheDocument();
@@ -569,8 +577,8 @@ describe("Accounts Page", () => {
     });
 
     it("shows error message when unlink fails", async () => {
-      const unlinkAccount = createFailingUnlink("Server error");
-      await renderAndWait({ unlinkAccount });
+      mockUnlinkAccount.mockRejectedValueOnce(new Error("Server error"));
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("unlink-btn-acc-google-work"));
       fireEvent.click(screen.getByTestId("unlink-confirm"));
@@ -585,8 +593,8 @@ describe("Accounts Page", () => {
     });
 
     it("account remains in list when unlink fails", async () => {
-      const unlinkAccount = createFailingUnlink("Server error");
-      await renderAndWait({ unlinkAccount });
+      mockUnlinkAccount.mockRejectedValueOnce(new Error("Server error"));
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("unlink-btn-acc-google-work"));
       fireEvent.click(screen.getByTestId("unlink-confirm"));
@@ -595,19 +603,18 @@ describe("Accounts Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      // Account should still be in the table (email also appears in the dialog)
+      // Account should still be in the table
       const table = screen.getByTestId("accounts-table");
       expect(within(table).getByText("work@gmail.com")).toBeInTheDocument();
     });
 
     it("cancel does NOT call unlinkAccount", async () => {
-      const unlinkAccount = createMockUnlink();
-      await renderAndWait({ unlinkAccount });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("unlink-btn-acc-google-work"));
       fireEvent.click(screen.getByTestId("unlink-cancel"));
 
-      expect(unlinkAccount).not.toHaveBeenCalled();
+      expect(mockUnlinkAccount).not.toHaveBeenCalled();
     });
   });
 
@@ -665,8 +672,7 @@ describe("Accounts Page", () => {
         provider: "google",
         status: "pending",
       };
-      const fetchAccounts = createMockFetch([pendingAccount]);
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait({ accounts: [pendingAccount] });
 
       const row = screen.getByTestId("account-row-acc-pending");
       const indicator = within(row).getByTestId("account-status-indicator");
@@ -722,25 +728,8 @@ describe("Accounts Page", () => {
       ],
     };
 
-    function createMockFetchScopes() {
-      return vi.fn(
-        async (_accountId: string): Promise<AccountScopesResponse> =>
-          MOCK_SCOPES_RESPONSE,
-      );
-    }
-
-    function createMockUpdateScopes() {
-      return vi.fn(
-        async (
-          _accountId: string,
-          _scopes: ScopeUpdateItem[],
-        ): Promise<AccountScopesResponse> => MOCK_SCOPES_RESPONSE,
-      );
-    }
-
-    it("shows Scopes button when fetchScopes is provided", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+    it("shows Scopes button for each account", async () => {
+      await renderAndWait();
 
       // There should be a Scopes button for each account row
       const scopeBtn = screen.getByTestId("scopes-btn-acc-google-work");
@@ -748,16 +737,9 @@ describe("Accounts Page", () => {
       expect(scopeBtn.textContent).toBe("Scopes");
     });
 
-    it("does NOT show Scopes button when fetchScopes is not provided", async () => {
-      await renderAndWait(); // no fetchScopes
-
-      const scopeBtn = screen.queryByTestId("scopes-btn-acc-google-work");
-      expect(scopeBtn).not.toBeInTheDocument();
-    });
-
     it("opens scope dialog when Scopes button is clicked", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       const scopeBtn = screen.getByTestId("scopes-btn-acc-google-work");
 
@@ -768,12 +750,12 @@ describe("Accounts Page", () => {
 
       const dialog = screen.getByTestId("scopes-dialog");
       expect(dialog).toBeInTheDocument();
-      expect(fetchScopes).toHaveBeenCalledWith("acc-google-work");
+      expect(mockFetchScopes).toHaveBeenCalledWith("acc-google-work");
     });
 
     it("renders scope rows with capability metadata", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -799,8 +781,8 @@ describe("Accounts Page", () => {
     });
 
     it("disables sync checkbox for read-only calendars", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -821,9 +803,8 @@ describe("Accounts Page", () => {
     });
 
     it("shows Save button only when changes are pending", async () => {
-      const fetchScopes = createMockFetchScopes();
-      const updateScopes = createMockUpdateScopes();
-      await renderAndWait({ fetchScopes, updateScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -850,9 +831,9 @@ describe("Accounts Page", () => {
     });
 
     it("calls updateScopes and shows success message on save", async () => {
-      const fetchScopes = createMockFetchScopes();
-      const updateScopes = createMockUpdateScopes();
-      await renderAndWait({ fetchScopes, updateScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      mockUpdateScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -874,7 +855,7 @@ describe("Accounts Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(updateScopes).toHaveBeenCalledWith("acc-google-work", [
+      expect(mockUpdateScopes).toHaveBeenCalledWith("acc-google-work", [
         {
           provider_calendar_id: "shared-team@group.calendar.google.com",
           sync_enabled: true,
@@ -887,8 +868,8 @@ describe("Accounts Page", () => {
     });
 
     it("closes scope dialog on cancel", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -905,10 +886,8 @@ describe("Accounts Page", () => {
     });
 
     it("shows error message when scope fetch fails", async () => {
-      const fetchScopes = vi.fn(async () => {
-        throw new Error("Scope fetch failed");
-      });
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockRejectedValueOnce(new Error("Scope fetch failed"));
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
@@ -924,8 +903,8 @@ describe("Accounts Page", () => {
     });
 
     it("scope dialog contains optional/skippable messaging", async () => {
-      const fetchScopes = createMockFetchScopes();
-      await renderAndWait({ fetchScopes });
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
 
       await act(async () => {
         fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));

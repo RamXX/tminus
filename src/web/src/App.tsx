@@ -7,8 +7,9 @@
  * - ErrorBoundary at app root for crash recovery
  * - Token refresh via AuthProvider
  *
- * Both prop-passing (legacy) and useApi() (new) patterns coexist.
- * Pages will be migrated to useApi() in TM-02x1.
+ * Pages are being migrated from prop-passing to useApi() (TM-wqip, TM-02x1).
+ * Calendar, Accounts, and SyncStatus use useApi() directly.
+ * Remaining pages still use legacy prop-passing via route wrappers.
  */
 
 import { HashRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
@@ -73,23 +74,6 @@ function OnboardingRoute() {
       submitAppleCredentials={api.submitAppleCredentials}
     />
   );
-}
-
-function AccountsRoute() {
-  const { user } = useAuth();
-  const api = useApi();
-  return (
-    <Accounts
-      currentUserId={user?.id ?? ""}
-      fetchAccounts={api.fetchAccounts}
-      unlinkAccount={api.unlinkAccount}
-    />
-  );
-}
-
-function SyncStatusRoute() {
-  const api = useApi();
-  return <SyncStatus fetchSyncStatus={api.fetchSyncStatus} />;
 }
 
 function PoliciesRoute() {
@@ -238,8 +222,8 @@ function AuthenticatedRoutes() {
       <AppShell>
         <Routes>
           <Route path="/calendar" element={<Calendar />} />
-          <Route path="/accounts" element={<AccountsRoute />} />
-          <Route path="/sync-status" element={<SyncStatusRoute />} />
+          <Route path="/accounts" element={<Accounts />} />
+          <Route path="/sync-status" element={<SyncStatus />} />
           <Route path="/policies" element={<PoliciesRoute />} />
           <Route path="/errors" element={<ErrorRecoveryRoute />} />
           <Route path="/billing" element={<BillingRoute />} />

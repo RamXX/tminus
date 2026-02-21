@@ -10,6 +10,9 @@
  *
  * Uses React Testing Library with fake timers.
  *
+ * Since SyncStatus now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
+ *
  * NOTE: When using fake timers with async components, we must use
  * vi.advanceTimersByTimeAsync() to flush both timers AND microtasks
  * (promises). Plain vi.advanceTimersByTime() does not flush promises,
@@ -30,6 +33,33 @@ import { REFRESH_INTERVAL_MS } from "../lib/sync-status";
 // ---------------------------------------------------------------------------
 
 const NOW = new Date("2026-02-14T12:00:00Z").getTime();
+
+// ---------------------------------------------------------------------------
+// Mock the API provider
+// ---------------------------------------------------------------------------
+
+const mockFetchSyncStatus = vi.fn<() => Promise<SyncStatusResponse>>();
+
+// Stable object reference to avoid infinite re-render loops from useCallback deps
+const mockApiValue = {
+  fetchSyncStatus: mockFetchSyncStatus,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
 
 // ---------------------------------------------------------------------------
 // Test data factory
@@ -85,17 +115,15 @@ const MOCK_ACCOUNTS: SyncAccountStatus[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetchStatus(
+function setupMockResponse(
   accounts: SyncAccountStatus[] = MOCK_ACCOUNTS,
   userGraph: UserGraphSyncHealth | null = null,
 ) {
-  return vi.fn(async (): Promise<SyncStatusResponse> => ({ accounts, user_graph: userGraph }));
+  mockFetchSyncStatus.mockResolvedValue({ accounts, user_graph: userGraph });
 }
 
-function createFailingFetchStatus(message = "Network error") {
-  return vi.fn(async (): Promise<SyncStatusResponse> => {
-    throw new Error(message);
-  });
+function setupFailingResponse(message = "Network error") {
+  mockFetchSyncStatus.mockRejectedValue(new Error(message));
 }
 
 /**
@@ -103,10 +131,8 @@ function createFailingFetchStatus(message = "Network error") {
  * With fake timers we must flush microtasks so the component can
  * process the resolved promise and update state.
  */
-async function renderAndWaitForData(
-  fetchFn: ReturnType<typeof createMockFetchStatus>,
-) {
-  render(<SyncStatus fetchSyncStatus={fetchFn} />);
+async function renderAndWaitForData() {
+  render(<SyncStatus />);
   // Flush microtasks so the async fetch resolves and state updates
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -120,6 +146,7 @@ async function renderAndWaitForData(
 describe("SyncStatus Dashboard", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: NOW });
+    mockFetchSyncStatus.mockReset();
   });
 
   afterEach(() => {
@@ -128,8 +155,8 @@ describe("SyncStatus Dashboard", () => {
 
   describe("rendering accounts", () => {
     it("renders all account emails", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       expect(screen.getByText("work@example.com")).toBeInTheDocument();
       expect(screen.getByText("personal@example.com")).toBeInTheDocument();
@@ -137,32 +164,32 @@ describe("SyncStatus Dashboard", () => {
     });
 
     it("renders provider for each account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const providerLabels = screen.getAllByText("google");
       expect(providerLabels.length).toBe(3);
     });
 
     it("renders last sync time for each account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const timeElements = screen.getAllByTestId("last-sync-time");
       expect(timeElements.length).toBe(3);
     });
 
     it("renders channel status for each account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const channelElements = screen.getAllByTestId("channel-status");
       expect(channelElements.length).toBe(3);
     });
 
     it("renders error count for each account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const errorElements = screen.getAllByTestId("error-count");
       expect(errorElements.length).toBe(3);
@@ -173,8 +200,8 @@ describe("SyncStatus Dashboard", () => {
     });
 
     it("renders pending writes for each account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const workRow = screen.getByTestId("account-row-acc-work");
       const pendingEl = within(workRow).getByTestId("pending-writes");
@@ -184,8 +211,8 @@ describe("SyncStatus Dashboard", () => {
 
   describe("health color coding", () => {
     it("shows green indicator for healthy account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const workRow = screen.getByTestId("account-row-acc-work");
       const indicator = within(workRow).getByTestId("health-indicator");
@@ -194,8 +221,8 @@ describe("SyncStatus Dashboard", () => {
     });
 
     it("shows yellow indicator for degraded account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const personalRow = screen.getByTestId("account-row-acc-personal");
       const indicator = within(personalRow).getByTestId("health-indicator");
@@ -204,8 +231,8 @@ describe("SyncStatus Dashboard", () => {
     });
 
     it("shows red indicator for error account", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const brokenRow = screen.getByTestId("account-row-acc-broken");
       const indicator = within(brokenRow).getByTestId("health-indicator");
@@ -224,8 +251,8 @@ describe("SyncStatus Dashboard", () => {
         pending_writes: 0,
         error_count: 0,
       };
-      const fetchFn = createMockFetchStatus([staleAccount]);
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse([staleAccount]);
+      await renderAndWaitForData();
 
       const row = screen.getByTestId("account-row-acc-stale");
       const indicator = within(row).getByTestId("health-indicator");
@@ -240,16 +267,16 @@ describe("SyncStatus Dashboard", () => {
         makeHealthyAccount("acc-a", "a@test.com"),
         makeHealthyAccount("acc-b", "b@test.com"),
       ];
-      const fetchFn = createMockFetchStatus(healthyAccounts);
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse(healthyAccounts);
+      await renderAndWaitForData();
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner).toHaveAttribute("data-health", "healthy");
     });
 
     it("shows error banner when any account has errors", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner).toHaveAttribute("data-health", "error");
@@ -263,16 +290,16 @@ describe("SyncStatus Dashboard", () => {
           channel_status: "expired",
         },
       ];
-      const fetchFn = createMockFetchStatus(accounts);
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse(accounts);
+      await renderAndWaitForData();
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner).toHaveAttribute("data-health", "degraded");
     });
 
     it("banner contains health label text", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner.textContent).toContain("Error");
@@ -292,8 +319,8 @@ describe("SyncStatus Dashboard", () => {
         error_mirrors: 4,
         last_activity_ts: new Date(NOW).toISOString(),
       };
-      const fetchFn = createMockFetchStatus(healthyAccounts, userGraph);
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse(healthyAccounts, userGraph);
+      await renderAndWaitForData();
 
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner).toHaveAttribute("data-health", "error");
@@ -303,57 +330,57 @@ describe("SyncStatus Dashboard", () => {
 
   describe("auto-refresh", () => {
     it("fetches data on mount", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
     });
 
     it("auto-refreshes every 30 seconds", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
 
       // Advance 30 seconds and flush microtasks
       await act(async () => {
         await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL_MS);
       });
 
-      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(2);
 
       // Advance another 30 seconds
       await act(async () => {
         await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL_MS);
       });
 
-      expect(fetchFn).toHaveBeenCalledTimes(3);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(3);
     });
 
     it("does not refresh before 30 seconds", async () => {
-      const fetchFn = createMockFetchStatus();
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse();
+      await renderAndWaitForData();
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
 
       // Advance 29 seconds -- should NOT trigger a refresh
       await act(async () => {
         await vi.advanceTimersByTimeAsync(29_000);
       });
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
     });
 
     it("cleans up timer on unmount", async () => {
-      const fetchFn = createMockFetchStatus();
-      const { unmount } = render(<SyncStatus fetchSyncStatus={fetchFn} />);
+      setupMockResponse();
+      const { unmount } = render(<SyncStatus />);
 
       // Flush initial fetch
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
 
       unmount();
 
@@ -362,16 +389,14 @@ describe("SyncStatus Dashboard", () => {
         await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL_MS * 3);
       });
 
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(mockFetchSyncStatus).toHaveBeenCalledTimes(1);
     });
   });
 
   describe("loading state", () => {
     it("shows loading indicator while fetching", () => {
-      const fetchFn = vi.fn(
-        (): Promise<SyncStatusResponse> => new Promise(() => {}),
-      );
-      render(<SyncStatus fetchSyncStatus={fetchFn} />);
+      mockFetchSyncStatus.mockReturnValue(new Promise(() => {}));
+      render(<SyncStatus />);
 
       expect(screen.getByTestId("sync-status-loading")).toBeInTheDocument();
     });
@@ -379,16 +404,16 @@ describe("SyncStatus Dashboard", () => {
 
   describe("error state", () => {
     it("shows error message on fetch failure", async () => {
-      const fetchFn = createFailingFetchStatus("API unavailable");
-      await renderAndWaitForData(fetchFn as ReturnType<typeof createMockFetchStatus>);
+      setupFailingResponse("API unavailable");
+      await renderAndWaitForData();
 
       expect(screen.getByTestId("sync-status-error")).toBeInTheDocument();
       expect(screen.getByText(/failed to load/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      const fetchFn = createFailingFetchStatus();
-      await renderAndWaitForData(fetchFn as ReturnType<typeof createMockFetchStatus>);
+      setupFailingResponse();
+      await renderAndWaitForData();
 
       expect(
         screen.getByRole("button", { name: /retry/i }),
@@ -398,8 +423,8 @@ describe("SyncStatus Dashboard", () => {
 
   describe("empty state", () => {
     it("shows message when no accounts configured", async () => {
-      const fetchFn = createMockFetchStatus([]);
-      await renderAndWaitForData(fetchFn);
+      setupMockResponse([]);
+      await renderAndWaitForData();
 
       expect(screen.getByText(/no accounts/i)).toBeInTheDocument();
     });

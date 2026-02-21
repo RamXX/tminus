@@ -10,70 +10,43 @@
  * - Link new Google account (redirects to OAuth worker)
  * - Link new Microsoft account (redirects to OAuth worker)
  * - Unlink account with confirmation dialog
+ * - Calendar scope management per account
  * - Loading, error, and empty states
  * - OAuth callback handling (shows success message on return)
  *
- * The component accepts fetch/unlink functions as props for testability.
- * In production, these are wired to the API client with auth tokens.
+ * Uses useApi() for token-injected API calls and useAuth() for user context.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useAuth } from "../lib/auth";
+import { useApi } from "../lib/api-provider";
 import type {
   LinkedAccount,
   AccountProvider,
   CalendarScope,
-  AccountScopesResponse,
   ScopeUpdateItem,
 } from "../lib/api";
 import {
   buildOAuthStartUrl,
+  navigateToOAuth,
   statusColor,
   statusLabel,
   statusSymbol,
   providerLabel,
 } from "../lib/accounts";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface AccountsProps {
-  /** Authenticated user ID for OAuth start URLs. */
-  currentUserId: string;
-  /** Fetch linked accounts. Injected for testability. */
-  fetchAccounts: () => Promise<LinkedAccount[]>;
-  /** Unlink an account by ID. Injected for testability. */
-  unlinkAccount: (accountId: string) => Promise<void>;
-  /**
-   * Fetch calendar scopes for an account. Injected for testability.
-   * Returns null/undefined if scope management is not available.
-   */
-  fetchScopes?: (accountId: string) => Promise<AccountScopesResponse>;
-  /**
-   * Update calendar scopes for an account. Injected for testability.
-   */
-  updateScopes?: (accountId: string, scopes: ScopeUpdateItem[]) => Promise<AccountScopesResponse>;
-  /**
-   * Navigate to an OAuth URL. Defaults to window.location.assign.
-   * Injected for testability (prevents actual navigation in tests).
-   */
-  navigateToOAuth?: (url: string) => void;
-}
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function Accounts({
-  currentUserId,
-  fetchAccounts,
-  unlinkAccount,
-  fetchScopes,
-  updateScopes,
-  navigateToOAuth = (url) => {
-    window.location.assign(url);
-  },
-}: AccountsProps) {
+export function Accounts() {
+  const { user } = useAuth();
+  const api = useApi();
+
+  const currentUserId = user?.id ?? "";
+
   const [accounts, setAccounts] = useState<LinkedAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +89,7 @@ export function Accounts({
   // Load accounts from the API
   const loadAccounts = useCallback(async () => {
     try {
-      const data = await fetchAccounts();
+      const data = await api.fetchAccounts();
       if (!mountedRef.current) return;
       setAccounts(data);
       setError(null);
@@ -126,7 +99,7 @@ export function Accounts({
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
     }
-  }, [fetchAccounts]);
+  }, [api]);
 
   // Initial load + check for OAuth callback
   useEffect(() => {
@@ -180,7 +153,7 @@ export function Accounts({
       const url = buildOAuthStartUrl(provider, currentUserId);
       navigateToOAuth(url);
     },
-    [currentUserId, navigateToOAuth, showStatus],
+    [currentUserId, showStatus],
   );
 
   // Handle clicking "Unlink" on an account -- show confirmation dialog
@@ -199,7 +172,7 @@ export function Accounts({
 
     setUnlinking(true);
     try {
-      await unlinkAccount(unlinkTarget.account_id);
+      await api.unlinkAccount(unlinkTarget.account_id);
       if (!mountedRef.current) return;
 
       // Remove account from local state
@@ -219,18 +192,17 @@ export function Accounts({
         setUnlinking(false);
       }
     }
-  }, [unlinkTarget, unlinkAccount, showStatus]);
+  }, [unlinkTarget, api, showStatus]);
 
   // -- Scope management handlers --
 
   const handleManageScopes = useCallback(
     async (account: LinkedAccount) => {
-      if (!fetchScopes) return;
       setScopeTarget(account);
       setScopeLoading(true);
       setPendingScopeChanges(new Map());
       try {
-        const data = await fetchScopes(account.account_id);
+        const data = await api.fetchScopes(account.account_id);
         if (!mountedRef.current) return;
         setScopes(data.scopes);
       } catch (err) {
@@ -244,7 +216,7 @@ export function Accounts({
         if (mountedRef.current) setScopeLoading(false);
       }
     },
-    [fetchScopes, showStatus],
+    [api, showStatus],
   );
 
   const handleScopeToggle = useCallback(
@@ -268,11 +240,11 @@ export function Accounts({
   );
 
   const handleScopesSave = useCallback(async () => {
-    if (!updateScopes || !scopeTarget || pendingScopeChanges.size === 0) return;
+    if (!scopeTarget || pendingScopeChanges.size === 0) return;
     setScopeSaving(true);
     try {
       const changes = Array.from(pendingScopeChanges.values());
-      const data = await updateScopes(scopeTarget.account_id, changes);
+      const data = await api.updateScopes(scopeTarget.account_id, changes);
       if (!mountedRef.current) return;
       setScopes(data.scopes);
       setPendingScopeChanges(new Map());
@@ -286,7 +258,7 @@ export function Accounts({
     } finally {
       if (mountedRef.current) setScopeSaving(false);
     }
-  }, [updateScopes, scopeTarget, pendingScopeChanges, showStatus]);
+  }, [api, scopeTarget, pendingScopeChanges, showStatus]);
 
   const handleScopesClose = useCallback(() => {
     setScopeTarget(null);
@@ -297,9 +269,9 @@ export function Accounts({
   // -- Loading state --
   if (loading) {
     return (
-      <div data-testid="accounts-loading" style={styles.container}>
-        <h1 style={styles.title}>Accounts</h1>
-        <div style={styles.loading}>Loading accounts...</div>
+      <div data-testid="accounts-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground mb-4">Accounts</h1>
+        <p className="text-muted-foreground text-center py-8">Loading accounts...</p>
       </div>
     );
   }
@@ -307,17 +279,18 @@ export function Accounts({
   // -- Error state --
   if (error) {
     return (
-      <div data-testid="accounts-error" style={styles.container}>
-        <h1 style={styles.title}>Accounts</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="accounts-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground mb-4">Accounts</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load accounts: {error}</p>
-          <button
+          <Button
             onClick={loadAccounts}
-            style={styles.retryBtn}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
             aria-label="Retry"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -325,12 +298,9 @@ export function Accounts({
 
   // -- Normal state --
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Accounts</h1>
-        <a href="#/calendar" style={styles.backLink}>
-          Back to Calendar
-        </a>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-foreground">Accounts</h1>
       </div>
 
       {/* Status message */}
@@ -338,51 +308,54 @@ export function Accounts({
         <div
           data-testid="accounts-status"
           data-status-type={statusMsg.type}
-          style={{
-            ...styles.statusMessage,
-            ...(statusMsg.type === "success"
-              ? styles.statusSuccess
-              : styles.statusError),
-          }}
+          className={`px-4 py-2 rounded-md text-sm font-medium mb-4 ${
+            statusMsg.type === "success"
+              ? "bg-emerald-950 text-emerald-300 border border-emerald-600"
+              : "bg-red-950 text-red-300 border border-red-600"
+          }`}
         >
           {statusMsg.text}
         </div>
       )}
 
       {/* Link account buttons */}
-      <div style={styles.linkSection} data-testid="link-account-section">
-        <span style={styles.linkLabel}>Link new account:</span>
-        <button
+      <div className="flex items-center gap-3 mb-6 flex-wrap" data-testid="link-account-section">
+        <span className="text-muted-foreground text-sm">Link new account:</span>
+        <Button
           data-testid="link-google"
           onClick={() => handleLinkAccount("google")}
-          style={styles.linkBtn}
+          variant="outline"
+          size="sm"
+          className="border-blue-500 text-blue-500 hover:bg-blue-500/10"
         >
           Link Google Account
-        </button>
-        <button
+        </Button>
+        <Button
           data-testid="link-microsoft"
           onClick={() => handleLinkAccount("microsoft")}
-          style={styles.linkBtn}
+          variant="outline"
+          size="sm"
+          className="border-blue-500 text-blue-500 hover:bg-blue-500/10"
         >
           Link Microsoft Account
-        </button>
+        </Button>
       </div>
 
       {/* Account list */}
       {accounts.length === 0 ? (
-        <div style={styles.emptyState} data-testid="accounts-empty">
+        <div className="text-muted-foreground text-center py-8" data-testid="accounts-empty">
           No accounts linked yet. Link a Google or Microsoft account to get
           started.
         </div>
       ) : (
-        <div style={styles.tableWrapper}>
-          <table style={styles.table} data-testid="accounts-table">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse" data-testid="accounts-table">
             <thead>
               <tr>
-                <th style={styles.th}>Status</th>
-                <th style={styles.th}>Email</th>
-                <th style={styles.th}>Provider</th>
-                <th style={styles.th}>Actions</th>
+                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Status</th>
+                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Email</th>
+                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Provider</th>
+                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -390,54 +363,51 @@ export function Accounts({
                 <tr
                   key={account.account_id}
                   data-testid={`account-row-${account.account_id}`}
-                  style={styles.tr}
+                  className="border-b border-border/50"
                 >
-                  <td style={styles.td}>
+                  <td className="px-3 py-2 text-foreground whitespace-nowrap">
                     <span
                       data-testid="account-status-indicator"
                       data-status={account.status}
-                      style={{
-                        ...styles.statusDot,
-                        color: statusColor(account.status),
-                      }}
+                      style={{ color: statusColor(account.status) }}
                       title={statusLabel(account.status)}
+                      className="text-sm"
                     >
                       {statusSymbol(account.status)}
                     </span>
                     <span
                       data-testid="account-status-label"
-                      style={{
-                        marginLeft: "0.5rem",
-                        color: statusColor(account.status),
-                        fontSize: "0.8rem",
-                      }}
+                      style={{ color: statusColor(account.status) }}
+                      className="ml-2 text-xs"
                     >
                       {statusLabel(account.status)}
                     </span>
                   </td>
-                  <td style={styles.td} data-testid="account-email">
+                  <td className="px-3 py-2 text-foreground whitespace-nowrap" data-testid="account-email">
                     {account.email}
                   </td>
-                  <td style={styles.td} data-testid="account-provider">
+                  <td className="px-3 py-2 text-foreground whitespace-nowrap" data-testid="account-provider">
                     {providerLabel(account.provider)}
                   </td>
-                  <td style={styles.td}>
-                    {fetchScopes && (
-                      <button
-                        data-testid={`scopes-btn-${account.account_id}`}
-                        onClick={() => handleManageScopes(account)}
-                        style={styles.scopesBtn}
-                      >
-                        Scopes
-                      </button>
-                    )}
-                    <button
+                  <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                    <Button
+                      data-testid={`scopes-btn-${account.account_id}`}
+                      onClick={() => handleManageScopes(account)}
+                      variant="outline"
+                      size="sm"
+                      className="mr-2 border-blue-500 text-blue-500 hover:bg-blue-500/10 h-8 text-xs"
+                    >
+                      Scopes
+                    </Button>
+                    <Button
                       data-testid={`unlink-btn-${account.account_id}`}
                       onClick={() => handleUnlinkClick(account)}
-                      style={styles.unlinkBtn}
+                      variant="outline"
+                      size="sm"
+                      className="border-destructive text-destructive hover:bg-destructive/10 h-8 text-xs"
                     >
                       Unlink
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -450,41 +420,47 @@ export function Accounts({
       {unlinkTarget && (
         <div
           data-testid="unlink-dialog"
-          style={styles.dialogOverlay}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
           role="dialog"
           aria-modal="true"
           aria-label="Confirm unlink account"
         >
-          <div style={styles.dialog}>
-            <h2 style={styles.dialogTitle}>Unlink Account</h2>
-            <p style={styles.dialogText}>
-              Are you sure you want to unlink{" "}
-              <strong>{unlinkTarget.email}</strong> (
-              {providerLabel(unlinkTarget.provider)})?
-            </p>
-            <p style={styles.dialogWarning}>
-              This will stop syncing events for this account. Existing mirrored
-              events will remain but no longer update.
-            </p>
-            <div style={styles.dialogActions}>
-              <button
-                data-testid="unlink-cancel"
-                onClick={handleUnlinkCancel}
-                style={styles.cancelBtn}
-                disabled={unlinking}
-              >
-                Cancel
-              </button>
-              <button
-                data-testid="unlink-confirm"
-                onClick={handleUnlinkConfirm}
-                style={styles.confirmUnlinkBtn}
-                disabled={unlinking}
-              >
-                {unlinking ? "Unlinking..." : "Unlink"}
-              </button>
-            </div>
-          </div>
+          <Card className="w-[90%] max-w-[420px]">
+            <CardHeader>
+              <CardTitle className="text-lg">Unlink Account</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-foreground">
+                Are you sure you want to unlink{" "}
+                <strong>{unlinkTarget.email}</strong> (
+                {providerLabel(unlinkTarget.provider)})?
+              </p>
+              <p className="text-xs text-yellow-400">
+                This will stop syncing events for this account. Existing mirrored
+                events will remain but no longer update.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  data-testid="unlink-cancel"
+                  onClick={handleUnlinkCancel}
+                  variant="outline"
+                  size="sm"
+                  disabled={unlinking}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  data-testid="unlink-confirm"
+                  onClick={handleUnlinkConfirm}
+                  variant="destructive"
+                  size="sm"
+                  disabled={unlinking}
+                >
+                  {unlinking ? "Unlinking..." : "Unlink"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -492,358 +468,120 @@ export function Accounts({
       {scopeTarget && (
         <div
           data-testid="scopes-dialog"
-          style={styles.dialogOverlay}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
           role="dialog"
           aria-modal="true"
           aria-label="Manage calendar scopes"
         >
-          <div style={{ ...styles.dialog, maxWidth: "560px" }}>
-            <h2 style={styles.dialogTitle}>
-              Calendar Scopes -- {scopeTarget.email}
-            </h2>
-            <p style={styles.dialogText}>
-              Select which calendars to include in synchronization.
-              Recommended calendars are marked below. Scope tuning is optional
-              -- defaults work for most users.
-            </p>
+          <Card className="w-[90%] max-w-[560px]">
+            <CardHeader>
+              <CardTitle className="text-lg">
+                Calendar Scopes -- {scopeTarget.email}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-foreground">
+                Select which calendars to include in synchronization.
+                Recommended calendars are marked below. Scope tuning is optional
+                -- defaults work for most users.
+              </p>
 
-            {scopeLoading ? (
-              <div style={styles.loading} data-testid="scopes-loading">
-                Loading calendars...
-              </div>
-            ) : scopes.length === 0 ? (
-              <div style={styles.emptyState} data-testid="scopes-empty">
-                No calendars found for this account.
-              </div>
-            ) : (
-              <div data-testid="scopes-list" style={{ marginBottom: "1rem" }}>
-                {scopes.map((scope) => (
-                  <div
-                    key={scope.scope_id}
-                    data-testid={`scope-row-${scope.provider_calendar_id}`}
-                    style={styles.scopeRow}
-                  >
-                    <div style={styles.scopeInfo}>
-                      <span style={styles.scopeName}>
-                        {scope.display_name || scope.provider_calendar_id}
-                      </span>
-                      <span style={styles.scopeMeta}>
-                        {scope.access_level}
-                        {scope.recommended ? " (recommended)" : ""}
-                        {" -- "}
-                        {scope.capabilities.join(", ")}
-                      </span>
+              {scopeLoading ? (
+                <div className="text-muted-foreground text-center py-8" data-testid="scopes-loading">
+                  Loading calendars...
+                </div>
+              ) : scopes.length === 0 ? (
+                <div className="text-muted-foreground text-center py-8" data-testid="scopes-empty">
+                  No calendars found for this account.
+                </div>
+              ) : (
+                <div data-testid="scopes-list" className="mb-4">
+                  {scopes.map((scope) => (
+                    <div
+                      key={scope.scope_id}
+                      data-testid={`scope-row-${scope.provider_calendar_id}`}
+                      className="flex items-center justify-between px-3 py-2 border-b border-border/50"
+                    >
+                      <div className="flex flex-col gap-0.5 flex-1">
+                        <span className="text-sm font-medium text-foreground">
+                          {scope.display_name || scope.provider_calendar_id}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {scope.access_level}
+                          {scope.recommended ? " (recommended)" : ""}
+                          {" -- "}
+                          {scope.capabilities.join(", ")}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <label className="text-muted-foreground text-xs flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            data-testid={`scope-enabled-${scope.provider_calendar_id}`}
+                            checked={scope.enabled}
+                            onChange={(e) =>
+                              handleScopeToggle(
+                                scope.provider_calendar_id,
+                                "enabled",
+                                e.target.checked,
+                              )
+                            }
+                          />
+                          Enabled
+                        </label>
+                        <label className="text-muted-foreground text-xs flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            data-testid={`scope-sync-${scope.provider_calendar_id}`}
+                            checked={scope.sync_enabled}
+                            disabled={!scope.capabilities.includes("write")}
+                            title={
+                              scope.capabilities.includes("write")
+                                ? "Enable sync for this calendar"
+                                : "Sync requires write capability"
+                            }
+                            onChange={(e) =>
+                              handleScopeToggle(
+                                scope.provider_calendar_id,
+                                "sync_enabled",
+                                e.target.checked,
+                              )
+                            }
+                          />
+                          Sync
+                        </label>
+                      </div>
                     </div>
-                    <div style={styles.scopeToggles}>
-                      <label style={styles.scopeToggleLabel}>
-                        <input
-                          type="checkbox"
-                          data-testid={`scope-enabled-${scope.provider_calendar_id}`}
-                          checked={scope.enabled}
-                          onChange={(e) =>
-                            handleScopeToggle(
-                              scope.provider_calendar_id,
-                              "enabled",
-                              e.target.checked,
-                            )
-                          }
-                        />
-                        Enabled
-                      </label>
-                      <label style={styles.scopeToggleLabel}>
-                        <input
-                          type="checkbox"
-                          data-testid={`scope-sync-${scope.provider_calendar_id}`}
-                          checked={scope.sync_enabled}
-                          disabled={!scope.capabilities.includes("write")}
-                          title={
-                            scope.capabilities.includes("write")
-                              ? "Enable sync for this calendar"
-                              : "Sync requires write capability"
-                          }
-                          onChange={(e) =>
-                            handleScopeToggle(
-                              scope.provider_calendar_id,
-                              "sync_enabled",
-                              e.target.checked,
-                            )
-                          }
-                        />
-                        Sync
-                      </label>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
 
-            <div style={styles.dialogActions}>
-              <button
-                data-testid="scopes-cancel"
-                onClick={handleScopesClose}
-                style={styles.cancelBtn}
-                disabled={scopeSaving}
-              >
-                {pendingScopeChanges.size === 0 ? "Close" : "Cancel"}
-              </button>
-              {pendingScopeChanges.size > 0 && (
-                <button
-                  data-testid="scopes-save"
-                  onClick={handleScopesSave}
-                  style={styles.scopeSaveBtn}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  data-testid="scopes-cancel"
+                  onClick={handleScopesClose}
+                  variant="outline"
+                  size="sm"
                   disabled={scopeSaving}
                 >
-                  {scopeSaving ? "Saving..." : "Save Changes"}
-                </button>
-              )}
-            </div>
-          </div>
+                  {pendingScopeChanges.size === 0 ? "Close" : "Cancel"}
+                </Button>
+                {pendingScopeChanges.size > 0 && (
+                  <Button
+                    data-testid="scopes-save"
+                    onClick={handleScopesSave}
+                    variant="default"
+                    size="sm"
+                    disabled={scopeSaving}
+                  >
+                    {scopeSaving ? "Saving..." : "Save Changes"}
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with SyncStatus.tsx / Policies.tsx patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "1rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  statusMessage: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    marginBottom: "1rem",
-  },
-  statusSuccess: {
-    backgroundColor: "#064e3b",
-    color: "#6ee7b7",
-    border: "1px solid #059669",
-  },
-  statusError: {
-    backgroundColor: "#450a0a",
-    color: "#fca5a5",
-    border: "1px solid #dc2626",
-  },
-  linkSection: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    marginBottom: "1.5rem",
-    flexWrap: "wrap" as const,
-  },
-  linkLabel: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-  },
-  linkBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    background: "transparent",
-    color: "#3b82f6",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-  },
-  tableWrapper: {
-    overflowX: "auto" as const,
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse" as const,
-    fontSize: "0.875rem",
-  },
-  th: {
-    textAlign: "left" as const,
-    padding: "0.6rem 0.75rem",
-    borderBottom: "1px solid #334155",
-    color: "#94a3b8",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-  },
-  tr: {
-    borderBottom: "1px solid #1e293b",
-  },
-  td: {
-    padding: "0.6rem 0.75rem",
-    color: "#e2e8f0",
-    whiteSpace: "nowrap" as const,
-  },
-  statusDot: {
-    fontSize: "0.875rem",
-  },
-  unlinkBtn: {
-    padding: "0.35rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-  },
-  emptyState: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  // Dialog styles
-  dialogOverlay: {
-    position: "fixed" as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.6)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 1000,
-  },
-  dialog: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "1.5rem",
-    maxWidth: "420px",
-    width: "90%",
-    border: "1px solid #334155",
-  },
-  dialogTitle: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: "0 0 0.75rem 0",
-  },
-  dialogText: {
-    color: "#e2e8f0",
-    fontSize: "0.9rem",
-    margin: "0 0 0.5rem 0",
-  },
-  dialogWarning: {
-    color: "#fbbf24",
-    fontSize: "0.8rem",
-    margin: "0 0 1rem 0",
-  },
-  dialogActions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: "0.5rem",
-  },
-  cancelBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  confirmUnlinkBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    backgroundColor: "#7f1d1d",
-    color: "#fca5a5",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-  // Scope management styles
-  scopesBtn: {
-    padding: "0.35rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    background: "transparent",
-    color: "#3b82f6",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-    marginRight: "0.5rem",
-  },
-  scopeRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "0.5rem 0.75rem",
-    borderBottom: "1px solid #1e293b",
-  },
-  scopeInfo: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.15rem",
-    flex: 1,
-  },
-  scopeName: {
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-  },
-  scopeMeta: {
-    color: "#64748b",
-    fontSize: "0.75rem",
-  },
-  scopeToggles: {
-    display: "flex",
-    gap: "1rem",
-    alignItems: "center",
-  },
-  scopeToggleLabel: {
-    color: "#94a3b8",
-    fontSize: "0.8rem",
-    display: "flex",
-    alignItems: "center",
-    gap: "0.3rem",
-    cursor: "pointer",
-  },
-  scopeSaveBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    backgroundColor: "#1e3a5f",
-    color: "#93c5fd",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-};

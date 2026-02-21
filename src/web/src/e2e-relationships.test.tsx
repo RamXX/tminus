@@ -983,7 +983,8 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       // -- STEP 2: Calendar --
       expect(window.location.hash).toBe("#/calendar");
-      expect(screen.getByText("T-Minus Calendar")).toBeInTheDocument();
+      // Calendar renders inside AppShell (no separate "T-Minus Calendar" heading)
+      expect(screen.getByTestId("app-header")).toBeInTheDocument();
 
       // -- STEP 3: Navigate to Relationships --
       await navigateTo("#/relationships");
