@@ -40,10 +40,20 @@ export type DetailLevel = "BUSY" | "TITLE" | "FULL";
 /** The kind of calendar created for mirroring. */
 export type CalendarKind = "BUSY_OVERLAY" | "TRUE_MIRROR";
 
-/** State of a mirror entry in event_mirrors. */
+/**
+ * State of a mirror entry in event_mirrors.
+ *
+ * Lifecycle state machine:
+ *   PENDING -> ACTIVE      (write-consumer confirms provider-side creation)
+ *   ACTIVE  -> DELETING    (UserGraphDO marks mirror for deletion, enqueues DELETE_MIRROR)
+ *   DELETING -> DELETED    (write-consumer confirms provider-side deletion)
+ *   DELETED -> TOMBSTONED  (GC/cleanup process marks for eventual hard-delete)
+ *   *       -> ERROR       (any unrecoverable provider error)
+ */
 export type MirrorState =
   | "PENDING"
   | "ACTIVE"
+  | "DELETING"
   | "DELETED"
   | "TOMBSTONED"
   | "ERROR";

@@ -882,9 +882,10 @@ describe("UserGraphDO integration", () => {
       expect(msg.target_calendar_id).toBe(OTHER_ACCOUNT_ID);
       expect(typeof msg.idempotency_key).toBe("string");
 
-      // Mirror row should be cleaned up
-      const mirrors = db.prepare("SELECT * FROM event_mirrors").all();
-      expect(mirrors).toHaveLength(0);
+      // Mirror row should be soft-deleted (DELETING state, not removed)
+      const mirrors = db.prepare("SELECT * FROM event_mirrors").all() as Array<{ state: string }>;
+      expect(mirrors).toHaveLength(1);
+      expect(mirrors[0].state).toBe("DELETING");
     });
   });
 
@@ -1567,6 +1568,7 @@ describe("UserGraphDO integration", () => {
       expect(health.total_mirrors).toBe(3); // 1 mirror per event (1 policy edge)
       expect(health.total_journal_entries).toBe(3);
       expect(health.pending_mirrors).toBe(3);
+      expect(health.deleting_mirrors).toBe(0);
       expect(health.error_mirrors).toBe(0);
       expect(health.last_journal_ts).toBeDefined();
     });
@@ -1577,6 +1579,7 @@ describe("UserGraphDO integration", () => {
       expect(health.total_mirrors).toBe(0);
       expect(health.total_journal_entries).toBe(0);
       expect(health.pending_mirrors).toBe(0);
+      expect(health.deleting_mirrors).toBe(0);
       expect(health.error_mirrors).toBe(0);
       expect(health.last_journal_ts).toBeNull();
     });
@@ -1836,13 +1839,14 @@ describe("UserGraphDO integration", () => {
 
       expect(deleted).toBe(true);
 
-      // Event should be gone
+      // Canonical event is retained because DELETING mirrors still reference it (FK)
       const remaining = db.prepare("SELECT * FROM canonical_events").all();
-      expect(remaining).toHaveLength(0);
+      expect(remaining).toHaveLength(1);
 
-      // Mirror should be gone
-      const mirrors = db.prepare("SELECT * FROM event_mirrors").all();
-      expect(mirrors).toHaveLength(0);
+      // Mirror should be soft-deleted (DELETING state)
+      const mirrors = db.prepare("SELECT * FROM event_mirrors").all() as Array<{ state: string }>;
+      expect(mirrors).toHaveLength(1);
+      expect(mirrors[0].state).toBe("DELETING");
 
       // DELETE_MIRROR should be enqueued for both mirror target and origin account
       expect(queue.messages).toHaveLength(2);
@@ -2434,11 +2438,19 @@ describe("UserGraphDO integration", () => {
       expect(result.mirrors_deleted).toBeGreaterThan(0);
       expect(result.policy_edges_removed).toBeGreaterThan(0);
 
-      // Canonical events from TEST_ACCOUNT are gone (hard delete BR-7)
+      // Canonical events from TEST_ACCOUNT with DELETING mirrors are retained
+      // until write-consumer confirms provider-side deletion.
       const postEvents = db
         .prepare("SELECT * FROM canonical_events WHERE origin_account_id = ?")
-        .all(TEST_ACCOUNT_ID);
-      expect(postEvents).toHaveLength(0);
+        .all(TEST_ACCOUNT_ID) as Array<Record<string, unknown>>;
+      // Events with DELETING mirrors are retained; events without mirrors are deleted.
+      // The exact count depends on how many mirrors were created by projection.
+      for (const evt of postEvents) {
+        const mirrorCount = db
+          .prepare("SELECT COUNT(*) as cnt FROM event_mirrors WHERE canonical_event_id = ?")
+          .get(evt.canonical_event_id) as { cnt: number };
+        expect(mirrorCount.cnt).toBeGreaterThan(0); // retained because mirrors still exist
+      }
 
       // Other account's events remain
       const otherEvents = db
@@ -2446,21 +2458,23 @@ describe("UserGraphDO integration", () => {
         .all(OTHER_ACCOUNT_ID);
       expect(otherEvents).toHaveLength(1);
 
-      // All mirrors referencing TEST_ACCOUNT (as target) are gone
+      // All mirrors referencing TEST_ACCOUNT (as target) are gone (hard-deleted)
       const targetMirrors = db
         .prepare("SELECT * FROM event_mirrors WHERE target_account_id = ?")
         .all(TEST_ACCOUNT_ID);
       expect(targetMirrors).toHaveLength(0);
 
-      // All mirrors from events belonging to TEST_ACCOUNT are gone
-      // (because those canonical events were deleted)
+      // Outbound mirrors from TEST_ACCOUNT events are soft-deleted (DELETING)
       const sourceMirrors = db
         .prepare(
           `SELECT em.* FROM event_mirrors em
-           WHERE em.canonical_event_id NOT IN (SELECT canonical_event_id FROM canonical_events)`,
+           JOIN canonical_events ce ON ce.canonical_event_id = em.canonical_event_id
+           WHERE ce.origin_account_id = ?`,
         )
-        .all();
-      expect(sourceMirrors).toHaveLength(0);
+        .all(TEST_ACCOUNT_ID) as Array<{ state: string }>;
+      for (const mirror of sourceMirrors) {
+        expect(mirror.state).toBe("DELETING");
+      }
 
       // Policy edges referencing TEST_ACCOUNT are gone
       const edges = db

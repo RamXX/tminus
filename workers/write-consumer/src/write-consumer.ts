@@ -374,6 +374,20 @@ export class WriteConsumer {
       };
     }
 
+    // Mirror is in a terminal or deletion-in-progress state. Do not upsert --
+    // the delete lifecycle takes precedence over stale upsert queue messages.
+    if (
+      mirror.state === "DELETING" ||
+      mirror.state === "DELETED" ||
+      mirror.state === "TOMBSTONED"
+    ) {
+      return {
+        success: true,
+        action: "skipped",
+        retry: false,
+      };
+    }
+
     // Optional for backward compatibility with older queue messages.
     const messageProjectedHash = msg.projected_hash ?? null;
 
@@ -566,7 +580,8 @@ export class WriteConsumer {
   // -------------------------------------------------------------------------
 
   private async handleDelete(msg: DeleteMirrorMessage): Promise<ProcessResult> {
-    // If no provider_event_id, there is nothing to delete at the provider
+    // If no provider_event_id, there is nothing to delete at the provider.
+    // Transition directly to DELETED (no provider-side work needed).
     if (!msg.provider_event_id) {
       this.mirrorStore.updateMirrorState(
         msg.canonical_event_id,
@@ -578,6 +593,17 @@ export class WriteConsumer {
       );
       return { success: true, action: "deleted", retry: false };
     }
+
+    // State machine step 1: Mark as DELETING before attempting provider deletion.
+    // This ensures the mirror row survives until provider-side deletion is confirmed.
+    this.mirrorStore.updateMirrorState(
+      msg.canonical_event_id,
+      msg.target_account_id,
+      {
+        state: "DELETING",
+        error_message: null,
+      },
+    );
 
     try {
       const accessToken = await this.tokenProvider.getAccessToken(
@@ -666,6 +692,7 @@ export class WriteConsumer {
         }
       }
 
+      // State machine step 2: Provider-side deletion confirmed -> DELETED
       this.mirrorStore.updateMirrorState(
         msg.canonical_event_id,
         msg.target_account_id,

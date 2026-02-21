@@ -288,6 +288,7 @@ describe("SyncStatus Dashboard", () => {
         total_mirrors: 24,
         active_mirrors: 20,
         pending_mirrors: 0,
+        deleting_mirrors: 0,
         error_mirrors: 4,
         last_activity_ts: new Date(NOW).toISOString(),
       };

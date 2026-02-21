@@ -340,6 +340,7 @@ export interface SyncHealth {
   readonly total_mirrors: number;
   readonly total_journal_entries: number;
   readonly pending_mirrors: number;
+  readonly deleting_mirrors: number;
   readonly error_mirrors: number;
   readonly last_journal_ts: string | null;
 }
@@ -1129,15 +1130,32 @@ export class UserGraphDO {
       mirrorsDeleted++;
     }
 
-    // Delete mirrors first (FK constraint)
+    // Soft-delete mirrors: transition to DELETING so write-consumer
+    // can confirm provider-side deletion before marking DELETED.
     this.sql.exec(
-      `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+      `UPDATE event_mirrors SET state = 'DELETING'
+       WHERE canonical_event_id = ? AND state NOT IN ('DELETED', 'TOMBSTONED')`,
+      canonicalId,
+    );
+
+    // Drop the FK constraint reference so canonical_events can be hard-deleted.
+    // Mirrors in DELETING state are retained for write-consumer to process;
+    // mirrors already in DELETED/TOMBSTONED are safe to remove.
+    this.sql.exec(
+      `DELETE FROM event_mirrors
+       WHERE canonical_event_id = ? AND state IN ('DELETED', 'TOMBSTONED')`,
       canonicalId,
     );
 
     // Hard delete per BR-7
+    // Note: DELETING mirrors no longer reference this event via FK because
+    // we only keep rows that write-consumer still needs to process.
     this.sql.exec(
-      `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+      `DELETE FROM canonical_events WHERE canonical_event_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM event_mirrors
+         WHERE event_mirrors.canonical_event_id = canonical_events.canonical_event_id
+       )`,
       canonicalId,
     );
 
@@ -1221,12 +1239,24 @@ export class UserGraphDO {
 
       if (mirrorRows.length > 0) {
         const existing = mirrorRows[0];
+
+        // Mirrors in deletion lifecycle are off-limits for projection.
+        // DELETING means write-consumer is processing provider-side deletion;
+        // DELETED/TOMBSTONED are terminal. Never re-enqueue upserts for these.
+        if (
+          existing.state === "DELETING" ||
+          existing.state === "DELETED" ||
+          existing.state === "TOMBSTONED"
+        ) {
+          continue;
+        }
+
         // Write-skipping:
         // - ACTIVE + identical hash => skip (already converged)
         // - PENDING + identical hash => replay by default (self-heal for
         //   dropped queue messages). Callers can explicitly disable replay
         //   with forceRequeuePending=false.
-        // - other non-ACTIVE states (ERROR/DELETED/TOMBSTONED) replay only
+        // - other non-ACTIVE states (ERROR) replay only
         //   when explicitly forced.
         if (existing.last_projected_hash === projectedHash) {
           if (existing.state === "ACTIVE") {
@@ -1534,15 +1564,31 @@ export class UserGraphDO {
       origin_delete_enqueued: originDeleteEnqueued,
     });
 
-    // Delete mirrors first (FK constraint)
+    // Soft-delete mirrors: transition to DELETING so write-consumer
+    // can confirm provider-side deletion before marking DELETED.
     this.sql.exec(
-      `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+      `UPDATE event_mirrors SET state = 'DELETING'
+       WHERE canonical_event_id = ? AND state NOT IN ('DELETED', 'TOMBSTONED')`,
       canonicalEventId,
     );
 
-    // Hard delete
+    // Remove already-terminal mirrors so canonical event can be hard-deleted
+    // if no in-flight deletions remain.
     this.sql.exec(
-      `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+      `DELETE FROM event_mirrors
+       WHERE canonical_event_id = ? AND state IN ('DELETED', 'TOMBSTONED')`,
+      canonicalEventId,
+    );
+
+    // Hard delete canonical event only if no DELETING mirrors remain (FK safe).
+    // If DELETING mirrors exist, the canonical event is retained until
+    // write-consumer processes all pending deletions.
+    this.sql.exec(
+      `DELETE FROM canonical_events WHERE canonical_event_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM event_mirrors
+         WHERE event_mirrors.canonical_event_id = canonical_events.canonical_event_id
+       )`,
       canonicalEventId,
     );
 
@@ -1755,21 +1801,26 @@ export class UserGraphDO {
    * after account/policy changes and keep aggregate health degraded forever.
    */
   private pruneNonProjectableMirrors(): void {
+    // Only prune mirrors that are NOT in an active deletion lifecycle.
+    // DELETING mirrors must be retained until write-consumer confirms
+    // provider-side deletion (state machine: DELETING -> DELETED).
     this.sql.exec(
       `DELETE FROM event_mirrors
-       WHERE
-         NOT EXISTS (
-           SELECT 1
-           FROM canonical_events c
-           WHERE c.canonical_event_id = event_mirrors.canonical_event_id
-         )
-         OR NOT EXISTS (
-           SELECT 1
-           FROM canonical_events c
-           JOIN policy_edges e
-             ON e.from_account_id = c.origin_account_id
-            AND e.to_account_id = event_mirrors.target_account_id
-           WHERE c.canonical_event_id = event_mirrors.canonical_event_id
+       WHERE state NOT IN ('DELETING')
+         AND (
+           NOT EXISTS (
+             SELECT 1
+             FROM canonical_events c
+             WHERE c.canonical_event_id = event_mirrors.canonical_event_id
+           )
+           OR NOT EXISTS (
+             SELECT 1
+             FROM canonical_events c
+             JOIN policy_edges e
+               ON e.from_account_id = c.origin_account_id
+              AND e.to_account_id = event_mirrors.target_account_id
+             WHERE c.canonical_event_id = event_mirrors.canonical_event_id
+           )
          )`,
     );
   }
@@ -1854,6 +1905,12 @@ export class UserGraphDO {
       )
       .toArray()[0].cnt;
 
+    const deletingMirrors = this.sql
+      .exec<{ cnt: number }>(
+        "SELECT COUNT(*) as cnt FROM event_mirrors WHERE state = 'DELETING'",
+      )
+      .toArray()[0].cnt;
+
     const errorMirrors = this.sql
       .exec<{ cnt: number }>(
         "SELECT COUNT(*) as cnt FROM event_mirrors WHERE state = 'ERROR'",
@@ -1871,6 +1928,7 @@ export class UserGraphDO {
       total_mirrors: mirrorCount,
       total_journal_entries: journalCount,
       pending_mirrors: pendingMirrors,
+      deleting_mirrors: deletingMirrors,
       error_mirrors: errorMirrors,
       last_journal_ts: lastJournalRows.length > 0 ? lastJournalRows[0].ts : null,
     };
@@ -2919,15 +2977,25 @@ export class UserGraphDO {
         });
       }
 
-      // Delete mirrors from DB
+      // Soft-delete mirrors: transition to DELETING
       this.sql.exec(
-        `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+        `UPDATE event_mirrors SET state = 'DELETING'
+         WHERE canonical_event_id = ? AND state NOT IN ('DELETED', 'TOMBSTONED')`,
+        evt.canonical_event_id,
+      );
+      this.sql.exec(
+        `DELETE FROM event_mirrors
+         WHERE canonical_event_id = ? AND state IN ('DELETED', 'TOMBSTONED')`,
         evt.canonical_event_id,
       );
 
-      // Hard delete the derived event
+      // Hard delete derived event only if no DELETING mirrors remain
       this.sql.exec(
-        `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+        `DELETE FROM canonical_events WHERE canonical_event_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM event_mirrors
+           WHERE event_mirrors.canonical_event_id = canonical_events.canonical_event_id
+         )`,
         evt.canonical_event_id,
       );
 
@@ -2937,6 +3005,14 @@ export class UserGraphDO {
         constraint_id: constraintId,
       });
     }
+
+    // Detach any retained canonical events from the constraint before deleting it.
+    // Events with DELETING mirrors can't be hard-deleted yet, but the constraint
+    // reference must be cleared to satisfy the FK constraint.
+    this.sql.exec(
+      `UPDATE canonical_events SET constraint_id = NULL WHERE constraint_id = ?`,
+      constraintId,
+    );
 
     // Delete the constraint itself
     this.sql.exec(
@@ -3059,12 +3135,23 @@ export class UserGraphDO {
           });
         }
 
+        // Soft-delete mirrors: transition to DELETING
         this.sql.exec(
-          `DELETE FROM event_mirrors WHERE canonical_event_id = ?`,
+          `UPDATE event_mirrors SET state = 'DELETING'
+           WHERE canonical_event_id = ? AND state NOT IN ('DELETED', 'TOMBSTONED')`,
           evt.canonical_event_id,
         );
         this.sql.exec(
-          `DELETE FROM canonical_events WHERE canonical_event_id = ?`,
+          `DELETE FROM event_mirrors
+           WHERE canonical_event_id = ? AND state IN ('DELETED', 'TOMBSTONED')`,
+          evt.canonical_event_id,
+        );
+        this.sql.exec(
+          `DELETE FROM canonical_events WHERE canonical_event_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM event_mirrors
+             WHERE event_mirrors.canonical_event_id = canonical_events.canonical_event_id
+           )`,
           evt.canonical_event_id,
         );
 
@@ -3344,13 +3431,24 @@ export class UserGraphDO {
     await this.enqueueDeleteBatch(outboundDeletes);
     mirrorsDeleted += outboundDeletes.length;
 
+    // Soft-delete outbound mirrors: transition to DELETING for write-consumer
+    this.sql.exec(
+      `UPDATE event_mirrors SET state = 'DELETING'
+       WHERE canonical_event_id IN (
+         SELECT canonical_event_id
+         FROM canonical_events
+         WHERE origin_account_id = ?
+       ) AND state NOT IN ('DELETED', 'TOMBSTONED')`,
+      accountId,
+    );
+    // Remove terminal mirrors so canonical events can be hard-deleted
     this.sql.exec(
       `DELETE FROM event_mirrors
        WHERE canonical_event_id IN (
          SELECT canonical_event_id
          FROM canonical_events
          WHERE origin_account_id = ?
-       )`,
+       ) AND state IN ('DELETED', 'TOMBSTONED')`,
       accountId,
     );
 
@@ -3407,8 +3505,15 @@ export class UserGraphDO {
       accountId,
     );
 
+    // Hard delete canonical events that have no remaining DELETING mirrors.
+    // Events with DELETING mirrors are retained until write-consumer processes them.
     this.sql.exec(
-      `DELETE FROM canonical_events WHERE origin_account_id = ?`,
+      `DELETE FROM canonical_events
+       WHERE origin_account_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM event_mirrors
+         WHERE event_mirrors.canonical_event_id = canonical_events.canonical_event_id
+       )`,
       accountId,
     );
 

@@ -1693,4 +1693,274 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.provider_event_id).toBe(MOCK_PROVIDER_EVENT_ID);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Mirror lifecycle state machine (TM-8979)
+  // -------------------------------------------------------------------------
+
+  describe("mirror lifecycle state machine", () => {
+    it("DELETE_MIRROR transitions ACTIVE -> DELETING -> DELETED", async () => {
+      // Setup: ACTIVE mirror with provider_event_id
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_lifecycle_001",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      // Final state should be DELETED (DELETING is an intermediate step
+      // that occurs before the provider API call returns)
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror).not.toBeNull();
+      expect(mirror!.state).toBe("DELETED");
+      expect(mirror!.error_message).toBeNull();
+    });
+
+    it("DELETE_MIRROR with no provider_event_id skips DELETING, goes directly to DELETED", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        state: "PENDING",
+      });
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: "",
+        idempotency_key: "idem_lifecycle_002",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("UPSERT_MIRROR skips mirrors in DELETING state", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "DELETING",
+      });
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_lifecycle_003",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+
+      // Mirror state should NOT have changed
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETING");
+
+      // No provider API calls should have been made
+      expect(calendarProvider.insertedEvents).toHaveLength(0);
+      expect(calendarProvider.patchedEvents).toHaveLength(0);
+    });
+
+    it("UPSERT_MIRROR skips mirrors in DELETED state", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "DELETED",
+      });
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_lifecycle_004",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+
+      expect(calendarProvider.insertedEvents).toHaveLength(0);
+    });
+
+    it("UPSERT_MIRROR skips mirrors in TOMBSTONED state", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "TOMBSTONED",
+      });
+
+      const msg: UpsertMirrorMessage = {
+        type: "UPSERT_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        projected_payload: makeProjectedPayload(),
+        idempotency_key: "idem_lifecycle_005",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("TOMBSTONED");
+
+      expect(calendarProvider.insertedEvents).toHaveLength(0);
+    });
+
+    it("DELETE_MIRROR transitions DELETING mirror to DELETED on provider error (already gone)", async () => {
+      // Mirror already in DELETING state (set by UserGraphDO)
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "DELETING",
+      });
+
+      // Provider says event is already gone (404)
+      calendarProvider.deleteEventError = new ResourceNotFoundError();
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_lifecycle_006",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETED");
+    });
+
+    it("DELETE_MIRROR sets ERROR state on permanent provider failure", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      // Permanent failure: 403 Forbidden
+      calendarProvider.deleteEventError = new GoogleApiError("Forbidden", 403);
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_lifecycle_007",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(false);
+      expect(result.action).toBe("error");
+      expect(result.retry).toBe(false);
+
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      // State should be ERROR (permanent failure), not DELETING
+      expect(mirror!.state).toBe("ERROR");
+      expect(mirror!.error_message).toContain("Forbidden");
+    });
+
+    it("DELETE_MIRROR preserves DELETING state on transient failure (retry signaled)", async () => {
+      mirrorStore.insertMirror({
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        target_calendar_id: TARGET_CALENDAR_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        state: "ACTIVE",
+      });
+
+      // Transient failure: rate limit
+      calendarProvider.deleteEventError = new RateLimitError();
+
+      const msg: DeleteMirrorMessage = {
+        type: "DELETE_MIRROR",
+        canonical_event_id: CANONICAL_EVENT_ID,
+        target_account_id: TARGET_ACCOUNT_ID,
+        provider_event_id: MOCK_PROVIDER_EVENT_ID,
+        idempotency_key: "idem_lifecycle_008",
+      };
+
+      const result = await consumer.processMessage(msg);
+
+      expect(result.success).toBe(false);
+      expect(result.action).toBe("error");
+      expect(result.retry).toBe(true);
+
+      // On transient failure, state stays at DELETING (set before API call)
+      // so the next retry attempt can proceed
+      const mirror = mirrorStore.getMirror(
+        CANONICAL_EVENT_ID,
+        TARGET_ACCOUNT_ID,
+      );
+      expect(mirror!.state).toBe("DELETING");
+    });
+  });
 });

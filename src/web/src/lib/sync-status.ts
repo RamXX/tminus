@@ -35,6 +35,7 @@ export interface UserGraphSyncHealth {
   total_mirrors: number;
   active_mirrors: number;
   pending_mirrors: number;
+  deleting_mirrors: number;
   error_mirrors: number;
   last_activity_ts: string | null;
 }

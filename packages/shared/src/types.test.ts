@@ -90,17 +90,18 @@ describe("types.ts -- union types", () => {
     >();
   });
 
-  it("MirrorState accepts all five states", () => {
+  it("MirrorState accepts all six states", () => {
     const states: MirrorState[] = [
       "PENDING",
       "ACTIVE",
+      "DELETING",
       "DELETED",
       "TOMBSTONED",
       "ERROR",
     ];
-    expect(states).toHaveLength(5);
+    expect(states).toHaveLength(6);
     expectTypeOf<MirrorState>().toEqualTypeOf<
-      "PENDING" | "ACTIVE" | "DELETED" | "TOMBSTONED" | "ERROR"
+      "PENDING" | "ACTIVE" | "DELETING" | "DELETED" | "TOMBSTONED" | "ERROR"
     >();
   });
 });
