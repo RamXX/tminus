@@ -10,8 +10,7 @@
  * - Remove: disconnects account with confirmation dialog
  * - Expand: shows sync history, token info, and remediation guidance
  *
- * Props are injected for testability. In production, these are wired
- * to the API client with auth tokens in App.tsx.
+ * Uses useApi() for token-injected API calls.
  *
  * Design decisions:
  * - Provider-specific colors (Google=blue, Microsoft=purple, Apple=gray)
@@ -21,6 +20,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
 import type { AccountProvider } from "../lib/api";
 import { buildOAuthStartUrl } from "../lib/accounts";
 import {
@@ -37,37 +37,16 @@ import {
   type SyncHistoryResponse,
   type HealthBadge,
 } from "../lib/provider-health";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface ProviderHealthProps {
-  /** Fetch accounts with health data. */
-  fetchAccountsHealth: () => Promise<AccountsHealthResponse>;
-  /** Fetch sync history for a specific account. */
-  fetchSyncHistory: (accountId: string) => Promise<SyncHistoryResponse>;
-  /** Trigger re-auth for an account. */
-  reconnectAccount: (accountId: string) => Promise<void>;
-  /** Remove/disconnect an account. */
-  removeAccount: (accountId: string) => Promise<void>;
-  /** Navigate to OAuth URL (for reconnect). Defaults to window.location.assign. */
-  navigateToOAuth?: (url: string) => void;
-}
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function ProviderHealth({
-  fetchAccountsHealth,
-  fetchSyncHistory,
-  reconnectAccount,
-  removeAccount,
-  navigateToOAuth = (url) => {
-    window.location.assign(url);
-  },
-}: ProviderHealthProps) {
+export function ProviderHealth() {
+  const api = useApi();
+
   const [accounts, setAccounts] = useState<AccountHealthData[]>([]);
   const [accountCount, setAccountCount] = useState(0);
   const [tierLimit, setTierLimit] = useState(0);
@@ -111,7 +90,7 @@ export function ProviderHealth({
   // Load accounts
   const loadAccounts = useCallback(async () => {
     try {
-      const data = await fetchAccountsHealth();
+      const data = await api.fetchAccountsHealth();
       if (!mountedRef.current) return;
       setAccounts(data.accounts);
       setAccountCount(data.account_count);
@@ -123,7 +102,7 @@ export function ProviderHealth({
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
     }
-  }, [fetchAccountsHealth]);
+  }, [api]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -147,7 +126,7 @@ export function ProviderHealth({
       setExpandedId(accountId);
       setHistoryLoading(true);
       try {
-        const history = await fetchSyncHistory(accountId);
+        const history = await api.fetchSyncHistory(accountId);
         if (!mountedRef.current) return;
         setSyncHistory(history);
       } catch {
@@ -158,16 +137,16 @@ export function ProviderHealth({
         }
       }
     },
-    [expandedId, fetchSyncHistory],
+    [expandedId, api],
   );
 
   // Reconnect via OAuth
   const handleReconnect = useCallback(
     (provider: AccountProvider) => {
       const url = buildOAuthStartUrl(provider);
-      navigateToOAuth(url);
+      window.location.assign(url);
     },
-    [navigateToOAuth],
+    [],
   );
 
   // Remove flow
@@ -183,7 +162,7 @@ export function ProviderHealth({
     if (!removeTarget) return;
     setRemoving(true);
     try {
-      await removeAccount(removeTarget.account_id);
+      await api.removeAccount(removeTarget.account_id);
       if (!mountedRef.current) return;
       setAccounts((prev) =>
         prev.filter((a) => a.account_id !== removeTarget.account_id),
@@ -202,14 +181,14 @@ export function ProviderHealth({
         setRemoving(false);
       }
     }
-  }, [removeTarget, removeAccount, showStatus]);
+  }, [removeTarget, api, showStatus]);
 
   // --- Loading state ---
   if (loading) {
     return (
-      <div data-testid="health-loading" style={styles.container}>
-        <h1 style={styles.title}>Provider Health</h1>
-        <div style={styles.loading}>Loading account health...</div>
+      <div data-testid="health-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Provider Health</h1>
+        <p className="text-muted-foreground text-center py-8">Loading account health...</p>
       </div>
     );
   }
@@ -217,13 +196,18 @@ export function ProviderHealth({
   // --- Error state ---
   if (error) {
     return (
-      <div data-testid="health-error" style={styles.container}>
-        <h1 style={styles.title}>Provider Health</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="health-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Provider Health</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load accounts: {error}</p>
-          <button onClick={loadAccounts} style={styles.retryBtn} aria-label="Retry">
+          <Button
+            onClick={loadAccounts}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
+            aria-label="Retry"
+          >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -232,41 +216,41 @@ export function ProviderHealth({
   // --- Empty state ---
   if (accounts.length === 0) {
     return (
-      <div style={styles.container}>
-        <h1 style={styles.title}>Provider Health</h1>
-        <div data-testid="health-empty" style={styles.emptyState}>
+      <div className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Provider Health</h1>
+        <p data-testid="health-empty" className="text-muted-foreground text-center py-8">
           No accounts connected. Link a calendar account to get started.
-        </div>
+        </p>
       </div>
     );
   }
 
   // --- Normal state ---
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Provider Health</h1>
-        <a href="#/calendar" style={styles.backLink}>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold text-foreground">Provider Health</h1>
+        <a href="#/calendar" className="text-muted-foreground text-sm no-underline hover:text-foreground">
           Back to Calendar
         </a>
       </div>
 
       {/* Account counter (shows X of Y) */}
-      <div data-testid="account-counter" style={styles.counter}>
+      <p data-testid="account-counter" className="text-muted-foreground text-sm mb-4">
         {accountCount} of {tierLimit} accounts connected
-      </div>
+      </p>
 
       {/* Status message */}
       {statusMsg && (
         <div
           data-testid="health-status-msg"
           data-status-type={statusMsg.type}
-          style={{
-            ...styles.statusMessage,
-            ...(statusMsg.type === "success"
-              ? styles.statusSuccess
-              : styles.statusError),
-          }}
+          className="px-4 py-2 rounded-md text-sm font-medium mb-4"
+          style={
+            statusMsg.type === "success"
+              ? { backgroundColor: "#064e3b", color: "#6ee7b7", border: "1px solid #059669" }
+              : { backgroundColor: "#450a0a", color: "#fca5a5", border: "1px solid #dc2626" }
+          }
         >
           {statusMsg.text}
         </div>
@@ -281,146 +265,166 @@ export function ProviderHealth({
           : null;
 
         return (
-          <div
+          <Card
             key={account.account_id}
             data-testid={`health-row-${account.account_id}`}
-            style={styles.accountCard}
+            className="mb-3 p-3"
           >
-            {/* Account summary row */}
-            <div style={styles.summaryRow}>
-              {/* Provider indicator */}
-              <div
-                style={{
-                  ...styles.providerIndicator,
-                  backgroundColor: providerColor(account.provider),
-                }}
-                title={account.provider}
-              />
+            <CardContent className="p-0">
+              {/* Account summary row */}
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* Provider indicator -- dynamic color */}
+                <div
+                  className="w-2 h-8 rounded shrink-0"
+                  style={{ backgroundColor: providerColor(account.provider) }}
+                  title={account.provider}
+                />
 
-              {/* Badge */}
-              <span
-                data-testid="health-badge"
-                data-badge={badge}
-                style={{
-                  ...styles.badge,
-                  color: badgeColor(badge),
-                  borderColor: badgeColor(badge),
-                }}
-              >
-                {badgeSymbol(badge)} {badgeLabel(badge)}
-              </span>
-
-              {/* Email */}
-              <span style={styles.email}>{account.email}</span>
-
-              {/* Calendar count */}
-              <span data-testid="calendar-count" style={styles.calCount}>
-                {account.calendar_count}
-              </span>
-              <span style={styles.calLabel}>calendars</span>
-
-              {/* Calendar names */}
-              <span data-testid="calendar-names" style={styles.calNames}>
-                {account.calendar_names.join(", ")}
-              </span>
-
-              {/* Last sync */}
-              <span data-testid="last-sync" style={styles.lastSync}>
-                {formatRelativeTime(account.last_successful_sync)}
-              </span>
-
-              {/* Actions */}
-              <div style={styles.actions}>
-                <button
-                  data-testid="reconnect-btn"
-                  onClick={() => handleReconnect(account.provider)}
-                  style={styles.reconnectBtn}
+                {/* Badge -- dynamic color */}
+                <span
+                  data-testid="health-badge"
+                  data-badge={badge}
+                  className="px-2 py-0.5 rounded-full border text-xs font-semibold whitespace-nowrap"
+                  style={{
+                    color: badgeColor(badge),
+                    borderColor: badgeColor(badge),
+                  }}
                 >
-                  Reconnect
-                </button>
-                <button
-                  data-testid="remove-btn"
-                  onClick={() => handleRemoveClick(account)}
-                  style={styles.removeBtn}
-                >
-                  Remove
-                </button>
-                <button
-                  data-testid="expand-btn"
-                  onClick={() => handleExpand(account.account_id)}
-                  style={styles.expandBtn}
-                  aria-label={isExpanded ? "Collapse" : "Expand"}
-                >
-                  {isExpanded ? "\u25B2" : "\u25BC"}
-                </button>
-              </div>
-            </div>
+                  {badgeSymbol(badge)} {badgeLabel(badge)}
+                </span>
 
-            {/* Remediation guidance (shown inline for error accounts) */}
-            {guidance && (
-              <div data-testid="remediation-guidance" style={styles.guidance}>
-                {guidance}
-              </div>
-            )}
+                {/* Email */}
+                <span className="text-foreground font-medium text-sm min-w-[160px]">
+                  {account.email}
+                </span>
 
-            {/* Expanded detail view */}
-            {isExpanded && (
-              <div data-testid="account-detail" style={styles.detailPanel}>
-                {/* Token info */}
-                <div style={styles.detailSection}>
-                  <h3 style={styles.detailTitle}>Token Status</h3>
-                  <span data-testid="token-expiry" style={styles.detailValue}>
-                    {formatTokenExpiry(account.token_expires_at)}
-                  </span>
+                {/* Calendar count */}
+                <span data-testid="calendar-count" className="text-muted-foreground font-semibold text-sm">
+                  {account.calendar_count}
+                </span>
+                <span className="text-muted-foreground/60 text-xs">calendars</span>
+
+                {/* Calendar names */}
+                <span data-testid="calendar-names" className="text-muted-foreground/60 text-xs flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                  {account.calendar_names.join(", ")}
+                </span>
+
+                {/* Last sync */}
+                <span data-testid="last-sync" className="text-muted-foreground text-xs min-w-[70px] text-right">
+                  {formatRelativeTime(account.last_successful_sync)}
+                </span>
+
+                {/* Actions */}
+                <div className="flex gap-2 ml-auto">
+                  <Button
+                    data-testid="reconnect-btn"
+                    onClick={() => handleReconnect(account.provider)}
+                    variant="outline"
+                    size="sm"
+                    className="text-xs border-blue-500 text-blue-500 hover:bg-blue-500/10"
+                  >
+                    Reconnect
+                  </Button>
+                  <Button
+                    data-testid="remove-btn"
+                    onClick={() => handleRemoveClick(account)}
+                    variant="outline"
+                    size="sm"
+                    className="text-xs border-destructive text-destructive hover:bg-destructive/10"
+                  >
+                    Remove
+                  </Button>
+                  <Button
+                    data-testid="expand-btn"
+                    onClick={() => handleExpand(account.account_id)}
+                    variant="outline"
+                    size="sm"
+                    className="text-xs"
+                    aria-label={isExpanded ? "Collapse" : "Expand"}
+                  >
+                    {isExpanded ? "\u25B2" : "\u25BC"}
+                  </Button>
                 </div>
+              </div>
 
-                {/* Sync history */}
-                <div style={styles.detailSection}>
-                  <h3 style={styles.detailTitle}>Sync History</h3>
-                  {historyLoading ? (
-                    <div style={styles.loading}>Loading history...</div>
-                  ) : syncHistory ? (
-                    <div data-testid="sync-history">
-                      {syncHistory.events.map((event) => (
-                        <div
-                          key={event.id}
-                          data-testid="sync-history-entry"
-                          style={styles.historyEntry}
-                        >
-                          <span
-                            data-testid="sync-entry-status"
-                            data-status={event.status}
-                            style={{
-                              ...styles.historyStatus,
-                              color:
-                                event.status === "success"
-                                  ? "#16a34a"
-                                  : "#dc2626",
-                            }}
+              {/* Remediation guidance (shown inline for error accounts) */}
+              {guidance && (
+                <div
+                  data-testid="remediation-guidance"
+                  className="mt-2 px-3 py-2 rounded-md text-xs border-l-[3px]"
+                  style={{
+                    backgroundColor: "#450a0a",
+                    color: "#fca5a5",
+                    borderLeftColor: "#dc2626",
+                  }}
+                >
+                  {guidance}
+                </div>
+              )}
+
+              {/* Expanded detail view */}
+              {isExpanded && (
+                <div data-testid="account-detail" className="mt-3 pt-3 border-t border-border">
+                  {/* Token info */}
+                  <div className="mb-3">
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                      Token Status
+                    </h3>
+                    <span data-testid="token-expiry" className="text-foreground text-sm">
+                      {formatTokenExpiry(account.token_expires_at)}
+                    </span>
+                  </div>
+
+                  {/* Sync history */}
+                  <div className="mb-3">
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                      Sync History
+                    </h3>
+                    {historyLoading ? (
+                      <p className="text-muted-foreground text-center py-4">Loading history...</p>
+                    ) : syncHistory ? (
+                      <div data-testid="sync-history">
+                        {syncHistory.events.map((event) => (
+                          <div
+                            key={event.id}
+                            data-testid="sync-history-entry"
+                            className="flex items-center gap-2 py-1 text-xs"
                           >
-                            {event.status === "success" ? "\u25CF" : "\u2716"}
-                          </span>
-                          <span style={styles.historyTime}>
-                            {formatRelativeTime(event.timestamp)}
-                          </span>
-                          <span style={styles.historyCount}>
-                            {event.event_count} events
-                          </span>
-                          {event.error_message && (
-                            <span style={styles.historyError}>
-                              {event.error_message}
+                            <span
+                              data-testid="sync-entry-status"
+                              data-status={event.status}
+                              className="text-[0.7rem]"
+                              style={{
+                                color:
+                                  event.status === "success"
+                                    ? "#16a34a"
+                                    : "#dc2626",
+                              }}
+                            >
+                              {event.status === "success" ? "\u25CF" : "\u2716"}
                             </span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={styles.loading}>No history available</div>
-                  )}
+                            <span className="text-muted-foreground min-w-[60px]">
+                              {formatRelativeTime(event.timestamp)}
+                            </span>
+                            <span className="text-foreground">
+                              {event.event_count} events
+                            </span>
+                            {event.error_message && (
+                              <span className="text-destructive text-xs italic">
+                                {event.error_message}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground text-center py-4">No history available</p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </CardContent>
+          </Card>
         );
       })}
 
@@ -428,318 +432,42 @@ export function ProviderHealth({
       {removeTarget && (
         <div
           data-testid="remove-dialog"
-          style={styles.dialogOverlay}
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[1000]"
           role="dialog"
           aria-modal="true"
           aria-label="Confirm remove account"
         >
-          <div style={styles.dialog}>
-            <h2 style={styles.dialogTitle}>Remove Account</h2>
-            <p style={styles.dialogText}>
+          <Card className="max-w-[420px] w-[90%] p-6">
+            <h2 className="text-lg font-bold text-foreground mb-3">Remove Account</h2>
+            <p className="text-foreground text-sm mb-2">
               Are you sure you want to disconnect{" "}
               <strong>{removeTarget.email}</strong>?
             </p>
-            <p style={styles.dialogWarning}>
+            <p className="text-yellow-400 text-xs mb-4">
               This will stop syncing events, revoke tokens, and clean up all
               stored credentials for this account.
             </p>
-            <div style={styles.dialogActions}>
-              <button
+            <div className="flex justify-end gap-2">
+              <Button
                 data-testid="remove-cancel"
                 onClick={handleRemoveCancel}
-                style={styles.cancelBtn}
+                variant="outline"
                 disabled={removing}
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 data-testid="remove-confirm"
                 onClick={handleRemoveConfirm}
-                style={styles.confirmRemoveBtn}
+                variant="destructive"
                 disabled={removing}
               >
                 {removing ? "Removing..." : "Remove"}
-              </button>
+              </Button>
             </div>
-          </div>
+          </Card>
         </div>
       )}
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with existing page patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "0.5rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  counter: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    marginBottom: "1rem",
-  },
-  statusMessage: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    marginBottom: "1rem",
-  },
-  statusSuccess: {
-    backgroundColor: "#064e3b",
-    color: "#6ee7b7",
-    border: "1px solid #059669",
-  },
-  statusError: {
-    backgroundColor: "#450a0a",
-    color: "#fca5a5",
-    border: "1px solid #dc2626",
-  },
-  accountCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: "8px",
-    padding: "0.75rem 1rem",
-    marginBottom: "0.75rem",
-    border: "1px solid #334155",
-  },
-  summaryRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    flexWrap: "wrap" as const,
-  },
-  providerIndicator: {
-    width: "8px",
-    height: "32px",
-    borderRadius: "4px",
-    flexShrink: 0,
-  },
-  badge: {
-    padding: "0.2rem 0.5rem",
-    borderRadius: "12px",
-    border: "1px solid",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-  },
-  email: {
-    color: "#e2e8f0",
-    fontWeight: 500,
-    fontSize: "0.9rem",
-    minWidth: "160px",
-  },
-  calCount: {
-    color: "#94a3b8",
-    fontWeight: 600,
-    fontSize: "0.85rem",
-  },
-  calLabel: {
-    color: "#64748b",
-    fontSize: "0.75rem",
-  },
-  calNames: {
-    color: "#64748b",
-    fontSize: "0.75rem",
-    flex: 1,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap" as const,
-  },
-  lastSync: {
-    color: "#94a3b8",
-    fontSize: "0.8rem",
-    minWidth: "70px",
-    textAlign: "right" as const,
-  },
-  actions: {
-    display: "flex",
-    gap: "0.5rem",
-    marginLeft: "auto",
-  },
-  reconnectBtn: {
-    padding: "0.3rem 0.6rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    background: "transparent",
-    color: "#3b82f6",
-    cursor: "pointer",
-    fontSize: "0.75rem",
-    fontWeight: 500,
-  },
-  removeBtn: {
-    padding: "0.3rem 0.6rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.75rem",
-  },
-  expandBtn: {
-    padding: "0.3rem 0.5rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.75rem",
-  },
-  guidance: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 0.75rem",
-    backgroundColor: "#450a0a",
-    borderRadius: "6px",
-    color: "#fca5a5",
-    fontSize: "0.8rem",
-    borderLeft: "3px solid #dc2626",
-  },
-  detailPanel: {
-    marginTop: "0.75rem",
-    paddingTop: "0.75rem",
-    borderTop: "1px solid #334155",
-  },
-  detailSection: {
-    marginBottom: "0.75rem",
-  },
-  detailTitle: {
-    fontSize: "0.8rem",
-    fontWeight: 600,
-    color: "#94a3b8",
-    margin: "0 0 0.4rem 0",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  detailValue: {
-    color: "#e2e8f0",
-    fontSize: "0.85rem",
-  },
-  historyEntry: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    padding: "0.25rem 0",
-    fontSize: "0.8rem",
-  },
-  historyStatus: {
-    fontSize: "0.7rem",
-  },
-  historyTime: {
-    color: "#94a3b8",
-    minWidth: "60px",
-  },
-  historyCount: {
-    color: "#e2e8f0",
-  },
-  historyError: {
-    color: "#fca5a5",
-    fontSize: "0.75rem",
-    fontStyle: "italic",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  emptyState: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  // Dialog styles
-  dialogOverlay: {
-    position: "fixed" as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.6)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 1000,
-  },
-  dialog: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "1.5rem",
-    maxWidth: "420px",
-    width: "90%",
-    border: "1px solid #334155",
-  },
-  dialogTitle: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: "0 0 0.75rem 0",
-  },
-  dialogText: {
-    color: "#e2e8f0",
-    fontSize: "0.9rem",
-    margin: "0 0 0.5rem 0",
-  },
-  dialogWarning: {
-    color: "#fbbf24",
-    fontSize: "0.8rem",
-    margin: "0 0 1rem 0",
-  },
-  dialogActions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: "0.5rem",
-  },
-  cancelBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  confirmRemoveBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    backgroundColor: "#7f1d1d",
-    color: "#fca5a5",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-};

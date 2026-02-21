@@ -14,11 +14,11 @@
  * - Save success/failure feedback via status messages
  * - Loading, error, and empty states
  *
- * The component accepts fetch/update functions as props for testability.
- * In production, these are wired to the API client with auth tokens.
+ * Uses useApi() for token-injected API calls.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
 import {
   buildMatrixCells,
   nextDetailLevel,
@@ -30,24 +30,7 @@ import {
   type DetailLevel,
   type PolicyAccount,
 } from "../lib/policies";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface PoliciesProps {
-  /** Fetch all policy data (accounts + edges). Injected for testability. */
-  fetchPolicies: () => Promise<PolicyMatrixData>;
-  /** Update a policy edge. Injected for testability. */
-  updatePolicyEdge: (
-    policyId: string,
-    edge: {
-      from_account_id: string;
-      to_account_id: string;
-      detail_level: DetailLevel;
-    },
-  ) => Promise<PolicyEdgeData>;
-}
+import { Button } from "../components/ui/button";
 
 // ---------------------------------------------------------------------------
 // Status message type
@@ -59,10 +42,34 @@ interface StatusMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Level-specific colors (dynamic hex -- cannot be expressed as Tailwind classes)
+// ---------------------------------------------------------------------------
+
+const LEVEL_STYLES: Record<DetailLevel, React.CSSProperties> = {
+  BUSY: {
+    backgroundColor: "#1e3a5f",
+    color: "#60a5fa",
+    borderColor: "#2563eb",
+  },
+  TITLE: {
+    backgroundColor: "#3b2f1e",
+    color: "#fbbf24",
+    borderColor: "#d97706",
+  },
+  FULL: {
+    backgroundColor: "#1e3b2f",
+    color: "#34d399",
+    borderColor: "#059669",
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
+export function Policies() {
+  const api = useApi();
+
   const [accounts, setAccounts] = useState<PolicyAccount[]>([]);
   const [cells, setCells] = useState<MatrixCell[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,7 +94,7 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
 
   const loadData = useCallback(async () => {
     try {
-      const data = await fetchPolicies();
+      const data = await api.fetchPolicies();
       if (!mountedRef.current) return;
 
       setAccounts([...data.accounts]);
@@ -99,7 +106,7 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
     }
-  }, [fetchPolicies]);
+  }, [api]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -141,7 +148,7 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
       try {
         // Use existing policy_id or construct one for new edges
         const policyId = cell.policyId ?? "new";
-        const result = await updatePolicyEdge(policyId, {
+        const result = await api.updatePolicyEdge(policyId, {
           from_account_id: cell.fromAccountId,
           to_account_id: cell.toAccountId,
           detail_level: newLevel,
@@ -192,15 +199,15 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
         }
       }
     },
-    [updatePolicyEdge, showStatus],
+    [api, showStatus],
   );
 
   // Loading state
   if (loading) {
     return (
-      <div data-testid="policies-loading" style={styles.container}>
-        <h1 style={styles.title}>Policy Management</h1>
-        <div style={styles.loading}>Loading policies...</div>
+      <div data-testid="policies-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Policy Management</h1>
+        <p className="text-muted-foreground text-center py-8">Loading policies...</p>
       </div>
     );
   }
@@ -208,17 +215,18 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
   // Error state
   if (error) {
     return (
-      <div data-testid="policies-error" style={styles.container}>
-        <h1 style={styles.title}>Policy Management</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="policies-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Policy Management</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load policies: {error}</p>
-          <button
+          <Button
             onClick={loadData}
-            style={styles.retryBtn}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
             aria-label="Retry"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -227,46 +235,44 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
   // Empty state (fewer than 2 accounts -- no cross-edges possible)
   if (accounts.length < 2) {
     return (
-      <div data-testid="policies-empty" style={styles.container}>
-        <h1 style={styles.title}>Policy Management</h1>
-        <div style={styles.emptyState}>
+      <div data-testid="policies-empty" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Policy Management</h1>
+        <p className="text-muted-foreground text-center py-8">
           {accounts.length === 0
             ? "No accounts configured. Add at least two accounts to manage policies."
             : "Add another account to configure projection policies."}
-        </div>
+        </p>
       </div>
     );
   }
 
   // Normal state: matrix
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Policy Management</h1>
-        <a href="#/calendar" style={styles.backLink}>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold text-foreground">Policy Management</h1>
+        <a href="#/calendar" className="text-muted-foreground text-sm no-underline hover:text-foreground">
           Back to Calendar
         </a>
       </div>
 
-      <p style={styles.description}>
+      <p className="text-muted-foreground text-sm mb-4">
         Configure how events project between accounts. Click a cell to change
         the detail level.
       </p>
 
       {/* Legend */}
-      <div style={styles.legend} data-testid="policy-legend">
+      <div className="flex gap-4 mb-4 items-center" data-testid="policy-legend">
         {DETAIL_LEVELS.map((level) => (
-          <span key={level} style={styles.legendItem}>
+          <span key={level} className="flex items-center gap-1">
             <span
-              style={{
-                ...styles.levelBadge,
-                ...LEVEL_STYLES[level],
-              }}
+              className="inline-block px-2 py-0.5 rounded text-xs font-semibold border"
+              style={LEVEL_STYLES[level]}
             >
               {level}
             </span>
             {level === DEFAULT_DETAIL_LEVEL && (
-              <span style={styles.defaultTag}>(default)</span>
+              <span className="text-muted-foreground text-xs italic">(default)</span>
             )}
           </span>
         ))}
@@ -279,27 +285,27 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
           data-status-type={status.type}
           role="status"
           aria-live="polite"
-          style={{
-            ...styles.statusMessage,
-            ...(status.type === "success"
-              ? styles.statusSuccess
-              : styles.statusError),
-          }}
+          className="fixed top-4 right-4 left-4 max-w-[420px] ml-auto z-40 pointer-events-none px-4 py-2 rounded-md text-sm font-medium shadow-lg"
+          style={
+            status.type === "success"
+              ? { backgroundColor: "#064e3b", color: "#6ee7b7", border: "1px solid #059669" }
+              : { backgroundColor: "#450a0a", color: "#fca5a5", border: "1px solid #dc2626" }
+          }
         >
           {status.text}
         </div>
       )}
 
       {/* Matrix */}
-      <div style={styles.tableWrapper}>
-        <table style={styles.table} data-testid="policy-matrix">
+      <div className="overflow-x-auto">
+        <table className="text-sm border-collapse" data-testid="policy-matrix">
           <thead>
             <tr>
-              <th style={{ ...styles.th, ...styles.cornerCell }}>
+              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap italic">
                 From \ To
               </th>
               {accounts.map((acc) => (
-                <th key={acc.account_id} style={styles.th}>
+                <th key={acc.account_id} className="text-center px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap text-xs">
                   {acc.email}
                 </th>
               ))}
@@ -308,13 +314,15 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
           <tbody>
             {accounts.map((fromAcc) => (
               <tr key={fromAcc.account_id}>
-                <td style={styles.rowHeader}>{fromAcc.email}</td>
+                <td className="px-3 py-2 text-muted-foreground font-semibold whitespace-nowrap text-xs border-r border-border">
+                  {fromAcc.email}
+                </td>
                 {accounts.map((toAcc) => {
                   if (fromAcc.account_id === toAcc.account_id) {
                     return (
                       <td
                         key={toAcc.account_id}
-                        style={styles.selfCell}
+                        className="text-center px-3 py-2 text-border bg-background"
                         data-testid={`cell-${fromAcc.account_id}-${toAcc.account_id}`}
                       >
                         --
@@ -337,11 +345,7 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
                     <td
                       key={toAcc.account_id}
                       data-testid={`cell-${fromAcc.account_id}-${toAcc.account_id}`}
-                      style={{
-                        ...styles.matrixCell,
-                        ...(cell.isDefault ? styles.defaultCell : {}),
-                        ...(isSaving ? styles.savingCell : {}),
-                      }}
+                      className={`text-center p-1 ${cell.isDefault ? "bg-blue-950/15" : ""} ${isSaving ? "opacity-60" : ""}`}
                     >
                       <button
                         data-testid={`cell-btn-${fromAcc.account_id}-${toAcc.account_id}`}
@@ -349,16 +353,13 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
                         data-is-default={cell.isDefault}
                         onClick={() => handleCellClick(cell)}
                         disabled={isSaving}
-                        style={{
-                          ...styles.cellButton,
-                          ...LEVEL_STYLES[cell.detailLevel],
-                          ...(cell.isDefault ? styles.defaultBadge : {}),
-                        }}
+                        className={`inline-flex items-center gap-0.5 px-2.5 py-1 rounded-md border cursor-pointer font-semibold text-xs transition-opacity ${cell.isDefault ? "border-dashed" : "border-solid"}`}
+                        style={LEVEL_STYLES[cell.detailLevel]}
                         title={`${fromAcc.email} -> ${toAcc.email}: ${cell.detailLevel}${cell.isDefault ? " (default)" : ""}. Click to change.`}
                       >
                         {cell.detailLevel}
                         {cell.isDefault && (
-                          <span style={styles.defaultIndicator}>*</span>
+                          <span className="text-[0.6rem] align-super">*</span>
                         )}
                       </button>
                     </td>
@@ -372,198 +373,3 @@ export function Policies({ fetchPolicies, updatePolicyEdge }: PoliciesProps) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Level-specific styles
-// ---------------------------------------------------------------------------
-
-const LEVEL_STYLES: Record<DetailLevel, React.CSSProperties> = {
-  BUSY: {
-    backgroundColor: "#1e3a5f",
-    color: "#60a5fa",
-    borderColor: "#2563eb",
-  },
-  TITLE: {
-    backgroundColor: "#3b2f1e",
-    color: "#fbbf24",
-    borderColor: "#d97706",
-  },
-  FULL: {
-    backgroundColor: "#1e3b2f",
-    color: "#34d399",
-    borderColor: "#059669",
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with SyncStatus.tsx patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "0.5rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  description: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    marginBottom: "1rem",
-  },
-  legend: {
-    display: "flex",
-    gap: "1rem",
-    marginBottom: "1rem",
-    alignItems: "center",
-  },
-  legendItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.25rem",
-  },
-  levelBadge: {
-    display: "inline-block",
-    padding: "0.2rem 0.5rem",
-    borderRadius: "4px",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    border: "1px solid",
-  },
-  defaultTag: {
-    color: "#64748b",
-    fontSize: "0.75rem",
-    fontStyle: "italic",
-  },
-  statusMessage: {
-    position: "fixed",
-    top: "1rem",
-    right: "1rem",
-    left: "1rem",
-    maxWidth: "420px",
-    marginLeft: "auto",
-    zIndex: 40,
-    pointerEvents: "none",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    boxShadow: "0 8px 20px rgba(2, 6, 23, 0.45)",
-  },
-  statusSuccess: {
-    backgroundColor: "#064e3b",
-    color: "#6ee7b7",
-    border: "1px solid #059669",
-  },
-  statusError: {
-    backgroundColor: "#450a0a",
-    color: "#fca5a5",
-    border: "1px solid #dc2626",
-  },
-  tableWrapper: {
-    overflowX: "auto" as const,
-  },
-  table: {
-    borderCollapse: "collapse" as const,
-    fontSize: "0.875rem",
-  },
-  th: {
-    textAlign: "center" as const,
-    padding: "0.6rem 0.75rem",
-    borderBottom: "1px solid #334155",
-    color: "#94a3b8",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-    fontSize: "0.8rem",
-  },
-  cornerCell: {
-    textAlign: "left" as const,
-    color: "#64748b",
-    fontStyle: "italic",
-  },
-  rowHeader: {
-    padding: "0.6rem 0.75rem",
-    color: "#94a3b8",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-    fontSize: "0.8rem",
-    borderRight: "1px solid #334155",
-  },
-  selfCell: {
-    textAlign: "center" as const,
-    color: "#334155",
-    padding: "0.6rem 0.75rem",
-    backgroundColor: "#0f172a",
-  },
-  matrixCell: {
-    textAlign: "center" as const,
-    padding: "0.4rem",
-  },
-  defaultCell: {
-    backgroundColor: "rgba(30, 58, 95, 0.15)",
-  },
-  savingCell: {
-    opacity: 0.6,
-  },
-  cellButton: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "0.15rem",
-    padding: "0.35rem 0.65rem",
-    borderRadius: "6px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: "0.75rem",
-    transition: "opacity 0.15s",
-    background: "transparent",
-  },
-  defaultBadge: {
-    borderStyle: "dashed",
-  },
-  defaultIndicator: {
-    fontSize: "0.6rem",
-    verticalAlign: "super",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  emptyState: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-};

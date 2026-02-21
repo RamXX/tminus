@@ -223,7 +223,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/errors";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByTestId("app-header")).toBeInTheDocument();
       });
     });
 
@@ -279,7 +279,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/provider-health";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByTestId("app-header")).toBeInTheDocument();
       });
     });
   });

@@ -11,10 +11,13 @@
  *   success/failure feedback on retry
  *
  * Uses React Testing Library with fireEvent for click interactions.
+ *
+ * Since ErrorRecovery now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { ErrorRecovery, type ErrorRecoveryProps } from "./ErrorRecovery";
+import { ErrorRecovery } from "./ErrorRecovery";
 import type { ErrorMirror, RetryResult } from "../lib/error-recovery";
 
 // ---------------------------------------------------------------------------
@@ -56,21 +59,47 @@ const MOCK_ERRORS: ErrorMirror[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Mock the API provider and auth
+// ---------------------------------------------------------------------------
+
+const mockFetchErrors = vi.fn<() => Promise<ErrorMirror[]>>();
+const mockRetryMirror = vi.fn<(mirrorId: string) => Promise<RetryResult>>();
+
+const mockApiValue = {
+  fetchErrors: mockFetchErrors,
+  retryMirror: mockRetryMirror,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetchErrors(errors: ErrorMirror[] = MOCK_ERRORS) {
-  return vi.fn(async (): Promise<ErrorMirror[]> => errors);
+function setupMockResponse(errors: ErrorMirror[] = MOCK_ERRORS) {
+  mockFetchErrors.mockResolvedValue(errors);
 }
 
-function createFailingFetchErrors(message = "Network error") {
-  return vi.fn(async (): Promise<ErrorMirror[]> => {
-    throw new Error(message);
-  });
+function setupFailingResponse(message = "Network error") {
+  mockFetchErrors.mockRejectedValue(new Error(message));
 }
 
-function createMockRetryMirror(result: Partial<RetryResult> = {}) {
-  return vi.fn(
+function setupMockRetry(result: Partial<RetryResult> = {}) {
+  mockRetryMirror.mockImplementation(
     async (mirrorId: string): Promise<RetryResult> => ({
       mirror_id: mirrorId,
       success: true,
@@ -79,29 +108,20 @@ function createMockRetryMirror(result: Partial<RetryResult> = {}) {
   );
 }
 
-function createFailingRetryMirror(message = "Retry failed") {
-  return vi.fn(async (_mirrorId: string): Promise<RetryResult> => {
-    throw new Error(message);
-  });
+function setupFailingRetry(message = "Retry failed") {
+  mockRetryMirror.mockRejectedValue(new Error(message));
 }
 
 /**
  * Render the ErrorRecovery component and wait for async fetch to complete.
  */
-async function renderAndWait(overrides: Partial<ErrorRecoveryProps> = {}) {
-  const fetchErrors = overrides.fetchErrors ?? createMockFetchErrors();
-  const retryMirror = overrides.retryMirror ?? createMockRetryMirror();
-
-  const result = render(
-    <ErrorRecovery fetchErrors={fetchErrors} retryMirror={retryMirror} />,
-  );
+async function renderAndWait() {
+  render(<ErrorRecovery />);
 
   // Flush microtasks so the async fetch resolves
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
-
-  return { ...result, fetchErrors, retryMirror };
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +131,8 @@ async function renderAndWait(overrides: Partial<ErrorRecoveryProps> = {}) {
 describe("ErrorRecovery Page", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date("2026-02-14T12:00:00Z").getTime() });
+    mockFetchErrors.mockReset();
+    mockRetryMirror.mockReset();
   });
 
   afterEach(() => {
@@ -123,12 +145,14 @@ describe("ErrorRecovery Page", () => {
 
   describe("error list rendering", () => {
     it("renders page title", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.getByText("Error Recovery")).toBeInTheDocument();
     });
 
     it("renders all error mirrors in the list", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.getByTestId("error-row-m1")).toBeInTheDocument();
@@ -137,6 +161,7 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows target account email for each error", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row1 = screen.getByTestId("error-row-m1");
@@ -149,6 +174,7 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows error message for each mirror", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row1 = screen.getByTestId("error-row-m1");
@@ -163,6 +189,7 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows event summary for each mirror", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row1 = screen.getByTestId("error-row-m1");
@@ -170,6 +197,7 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("renders a retry button for each error mirror", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.getByTestId("retry-btn-m1")).toBeInTheDocument();
@@ -178,12 +206,14 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("renders batch retry all button", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.getByTestId("batch-retry-btn")).toBeInTheDocument();
     });
 
     it("batch retry button shows error count", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const btn = screen.getByTestId("batch-retry-btn");
@@ -191,6 +221,7 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("renders error count summary", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const summary = screen.getByTestId("error-count-summary");
@@ -204,15 +235,8 @@ describe("ErrorRecovery Page", () => {
 
   describe("loading state", () => {
     it("shows loading indicator while fetching", () => {
-      const fetchErrors = vi.fn(
-        (): Promise<ErrorMirror[]> => new Promise(() => {}),
-      );
-      render(
-        <ErrorRecovery
-          fetchErrors={fetchErrors}
-          retryMirror={createMockRetryMirror()}
-        />,
-      );
+      mockFetchErrors.mockReturnValue(new Promise(() => {}));
+      render(<ErrorRecovery />);
 
       expect(screen.getByTestId("error-recovery-loading")).toBeInTheDocument();
     });
@@ -220,14 +244,16 @@ describe("ErrorRecovery Page", () => {
 
   describe("empty state", () => {
     it("shows 'no errors' message when list is empty", async () => {
-      await renderAndWait({ fetchErrors: createMockFetchErrors([]) });
+      setupMockResponse([]);
+      await renderAndWait();
 
       expect(screen.getByTestId("error-recovery-empty")).toBeInTheDocument();
       expect(screen.getByText(/no errors/i)).toBeInTheDocument();
     });
 
     it("does not show batch retry button when empty", async () => {
-      await renderAndWait({ fetchErrors: createMockFetchErrors([]) });
+      setupMockResponse([]);
+      await renderAndWait();
 
       expect(screen.queryByTestId("batch-retry-btn")).not.toBeInTheDocument();
     });
@@ -235,9 +261,8 @@ describe("ErrorRecovery Page", () => {
 
   describe("fetch error state", () => {
     it("shows error message on fetch failure", async () => {
-      await renderAndWait({
-        fetchErrors: createFailingFetchErrors("API unavailable"),
-      });
+      setupFailingResponse("API unavailable");
+      await renderAndWait();
 
       expect(
         screen.getByTestId("error-recovery-fetch-error"),
@@ -246,7 +271,8 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows retry button on fetch failure", async () => {
-      await renderAndWait({ fetchErrors: createFailingFetchErrors() });
+      setupFailingResponse();
+      await renderAndWait();
 
       expect(
         screen.getByRole("button", { name: /retry/i }),
@@ -260,8 +286,9 @@ describe("ErrorRecovery Page", () => {
 
   describe("integration: single mirror retry", () => {
     it("calls retryMirror with correct mirror ID on click", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("retry-btn-m1"));
 
@@ -269,13 +296,14 @@ describe("ErrorRecovery Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(retryMirror).toHaveBeenCalledTimes(1);
-      expect(retryMirror).toHaveBeenCalledWith("m1");
+      expect(mockRetryMirror).toHaveBeenCalledTimes(1);
+      expect(mockRetryMirror).toHaveBeenCalledWith("m1");
     });
 
     it("removes mirror from list on successful retry", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       // m1 is in the list
       expect(screen.getByTestId("error-row-m1")).toBeInTheDocument();
@@ -295,8 +323,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows success feedback after successful retry", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("retry-btn-m1"));
 
@@ -310,8 +339,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows error feedback when retry fails (exception)", async () => {
-      const retryMirror = createFailingRetryMirror("Server error");
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupFailingRetry("Server error");
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("retry-btn-m1"));
 
@@ -325,8 +355,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("mirror stays in list when retry fails", async () => {
-      const retryMirror = createFailingRetryMirror("Server error");
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupFailingRetry("Server error");
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("retry-btn-m1"));
 
@@ -340,10 +371,9 @@ describe("ErrorRecovery Page", () => {
 
     it("disables retry button while retrying", async () => {
       // Use a retry that never resolves
-      const retryMirror = vi.fn(
-        (_mirrorId: string): Promise<RetryResult> => new Promise(() => {}),
-      );
-      await renderAndWait({ retryMirror });
+      mockRetryMirror.mockReturnValue(new Promise(() => {}));
+      setupMockResponse();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("retry-btn-m1"));
 
@@ -352,8 +382,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("updates error count after successful retry", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       // Initially 3 errors
       expect(screen.getByTestId("error-count-summary").textContent).toContain("3");
@@ -375,8 +406,9 @@ describe("ErrorRecovery Page", () => {
 
   describe("integration: batch retry all", () => {
     it("calls retryMirror for each error mirror", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -384,15 +416,16 @@ describe("ErrorRecovery Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(retryMirror).toHaveBeenCalledTimes(3);
-      expect(retryMirror).toHaveBeenCalledWith("m1");
-      expect(retryMirror).toHaveBeenCalledWith("m2");
-      expect(retryMirror).toHaveBeenCalledWith("m3");
+      expect(mockRetryMirror).toHaveBeenCalledTimes(3);
+      expect(mockRetryMirror).toHaveBeenCalledWith("m1");
+      expect(mockRetryMirror).toHaveBeenCalledWith("m2");
+      expect(mockRetryMirror).toHaveBeenCalledWith("m3");
     });
 
     it("removes all mirrors on full batch success", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -406,8 +439,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows success feedback for batch retry", async () => {
-      const retryMirror = createMockRetryMirror();
-      await renderAndWait({ retryMirror });
+      setupMockResponse();
+      setupMockRetry();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -421,14 +455,15 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("keeps failed mirrors in list on partial batch failure", async () => {
+      setupMockResponse();
       // m1 succeeds, m2 fails, m3 succeeds
-      const retryMirror = vi.fn(async (mirrorId: string): Promise<RetryResult> => {
+      mockRetryMirror.mockImplementation(async (mirrorId: string): Promise<RetryResult> => {
         if (mirrorId === "m2") {
           throw new Error("Calendar not found");
         }
         return { mirror_id: mirrorId, success: true };
       });
-      await renderAndWait({ retryMirror });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -443,13 +478,14 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("shows partial failure feedback", async () => {
-      const retryMirror = vi.fn(async (mirrorId: string): Promise<RetryResult> => {
+      setupMockResponse();
+      mockRetryMirror.mockImplementation(async (mirrorId: string): Promise<RetryResult> => {
         if (mirrorId === "m2") {
           throw new Error("Calendar not found");
         }
         return { mirror_id: mirrorId, success: true };
       });
-      await renderAndWait({ retryMirror });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -465,10 +501,9 @@ describe("ErrorRecovery Page", () => {
     });
 
     it("disables batch retry button while retrying", async () => {
-      const retryMirror = vi.fn(
-        (_mirrorId: string): Promise<RetryResult> => new Promise(() => {}),
-      );
-      await renderAndWait({ retryMirror });
+      mockRetryMirror.mockReturnValue(new Promise(() => {}));
+      setupMockResponse();
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
@@ -483,6 +518,7 @@ describe("ErrorRecovery Page", () => {
 
   describe("navigation", () => {
     it("has a link back to sync status", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const link = screen.getByText(/back to sync status/i);

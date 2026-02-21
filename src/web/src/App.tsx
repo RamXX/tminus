@@ -7,8 +7,9 @@
  * - ErrorBoundary at app root for crash recovery
  * - Token refresh via AuthProvider
  *
- * Pages are being migrated from prop-passing to useApi() (TM-wqip, TM-02x1).
- * Calendar, Accounts, and SyncStatus use useApi() directly.
+ * Pages migrated to useApi():
+ * - Calendar, Accounts, SyncStatus (TM-wqip)
+ * - Policies, ProviderHealth, ErrorRecovery (TM-b5g4)
  * Remaining pages still use legacy prop-passing via route wrappers.
  */
 
@@ -76,25 +77,6 @@ function OnboardingRoute() {
   );
 }
 
-function PoliciesRoute() {
-  const api = useApi();
-  return (
-    <Policies
-      fetchPolicies={api.fetchPolicies}
-      updatePolicyEdge={api.updatePolicyEdge}
-    />
-  );
-}
-
-function ErrorRecoveryRoute() {
-  const api = useApi();
-  return (
-    <ErrorRecovery
-      fetchErrors={api.fetchErrors}
-      retryMirror={api.retryMirror}
-    />
-  );
-}
 
 function BillingRoute() {
   const api = useApi();
@@ -163,18 +145,6 @@ function ReconnectionsRoute() {
   );
 }
 
-function ProviderHealthRoute() {
-  const api = useApi();
-  return (
-    <ProviderHealth
-      fetchAccountsHealth={api.fetchAccountsHealth}
-      fetchSyncHistory={api.fetchSyncHistory}
-      reconnectAccount={api.reconnectAccount}
-      removeAccount={api.removeAccount}
-    />
-  );
-}
-
 function AdminRoute() {
   const { orgId } = useParams<{ orgId: string }>();
   const { user } = useAuth();
@@ -224,14 +194,14 @@ function AuthenticatedRoutes() {
           <Route path="/calendar" element={<Calendar />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/sync-status" element={<SyncStatus />} />
-          <Route path="/policies" element={<PoliciesRoute />} />
-          <Route path="/errors" element={<ErrorRecoveryRoute />} />
+          <Route path="/policies" element={<Policies />} />
+          <Route path="/errors" element={<ErrorRecovery />} />
           <Route path="/billing" element={<BillingRoute />} />
           <Route path="/scheduling" element={<SchedulingRoute />} />
           <Route path="/governance" element={<GovernanceRoute />} />
           <Route path="/relationships" element={<RelationshipsRoute />} />
           <Route path="/reconnections" element={<ReconnectionsRoute />} />
-          <Route path="/provider-health" element={<ProviderHealthRoute />} />
+          <Route path="/provider-health" element={<ProviderHealth />} />
           <Route path="/admin/:orgId" element={<AdminRoute />} />
           <Route path="*" element={<Navigate to="/calendar" replace />} />
         </Routes>

@@ -10,13 +10,16 @@
  *
  * Uses React Testing Library with fireEvent for click interactions.
  *
+ * Since ProviderHealth now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
+ *
  * NOTE: We use fireEvent.click instead of userEvent.click because this component
  * uses timers (auto-refresh) that interact poorly with userEvent's internal
  * delay mechanism under fake timers.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { ProviderHealth, type ProviderHealthProps } from "./ProviderHealth";
+import { ProviderHealth } from "./ProviderHealth";
 import type { AccountHealthData, SyncHistoryEvent, AccountsHealthResponse, SyncHistoryResponse } from "../lib/provider-health";
 
 // ---------------------------------------------------------------------------
@@ -87,68 +90,70 @@ const MOCK_SYNC_HISTORY: SyncHistoryEvent[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Mock the API provider and auth
+// ---------------------------------------------------------------------------
+
+const mockFetchAccountsHealth = vi.fn<() => Promise<AccountsHealthResponse>>();
+const mockFetchSyncHistory = vi.fn<(accountId: string) => Promise<SyncHistoryResponse>>();
+const mockReconnectAccount = vi.fn<(accountId: string) => Promise<void>>();
+const mockRemoveAccount = vi.fn<(accountId: string) => Promise<void>>();
+
+const mockApiValue = {
+  fetchAccountsHealth: mockFetchAccountsHealth,
+  fetchSyncHistory: mockFetchSyncHistory,
+  reconnectAccount: mockReconnectAccount,
+  removeAccount: mockRemoveAccount,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// Mock window.location.assign for reconnect flow
+const mockLocationAssign = vi.fn();
+Object.defineProperty(window, "location", {
+  writable: true,
+  value: { ...window.location, assign: mockLocationAssign },
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetchHealth(response: AccountsHealthResponse = MOCK_RESPONSE) {
-  return vi.fn(async (): Promise<AccountsHealthResponse> => response);
+function setupMockResponse(response: AccountsHealthResponse = MOCK_RESPONSE) {
+  mockFetchAccountsHealth.mockResolvedValue(response);
 }
 
-function createFailingFetchHealth(message = "Network error") {
-  return vi.fn(async (): Promise<AccountsHealthResponse> => {
-    throw new Error(message);
-  });
+function setupFailingResponse(message = "Network error") {
+  mockFetchAccountsHealth.mockRejectedValue(new Error(message));
 }
 
-function createMockFetchSyncHistory(events: SyncHistoryEvent[] = MOCK_SYNC_HISTORY) {
-  return vi.fn(async (_accountId: string): Promise<SyncHistoryResponse> => ({
-    account_id: _accountId,
-    events,
-  }));
-}
-
-function createMockReconnect() {
-  return vi.fn(async (_accountId: string): Promise<void> => {});
-}
-
-function createMockRemoveAccount() {
-  return vi.fn(async (_accountId: string): Promise<void> => {});
-}
-
-function createFailingReconnect(message = "Reconnect failed") {
-  return vi.fn(async (_accountId: string): Promise<void> => {
-    throw new Error(message);
-  });
-}
-
-function createFailingRemoveAccount(message = "Remove failed") {
-  return vi.fn(async (_accountId: string): Promise<void> => {
-    throw new Error(message);
-  });
-}
-
-async function renderAndWait(overrides: Partial<ProviderHealthProps> = {}) {
-  const fetchAccountsHealth = overrides.fetchAccountsHealth ?? createMockFetchHealth();
-  const fetchSyncHistory = overrides.fetchSyncHistory ?? createMockFetchSyncHistory();
-  const reconnectAccount = overrides.reconnectAccount ?? createMockReconnect();
-  const removeAccount = overrides.removeAccount ?? createMockRemoveAccount();
-  const navigateToOAuth = overrides.navigateToOAuth ?? vi.fn();
-
-  const result = render(
-    <ProviderHealth
-      fetchAccountsHealth={fetchAccountsHealth}
-      fetchSyncHistory={fetchSyncHistory}
-      reconnectAccount={reconnectAccount}
-      removeAccount={removeAccount}
-      navigateToOAuth={navigateToOAuth}
-    />,
+function setupMockSyncHistory(events: SyncHistoryEvent[] = MOCK_SYNC_HISTORY) {
+  mockFetchSyncHistory.mockImplementation(
+    async (accountId: string): Promise<SyncHistoryResponse> => ({
+      account_id: accountId,
+      events,
+    }),
   );
+}
 
+async function renderAndWait() {
+  render(<ProviderHealth />);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
-
-  return { ...result, fetchAccountsHealth, fetchSyncHistory, reconnectAccount, removeAccount, navigateToOAuth };
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +163,15 @@ async function renderAndWait(overrides: Partial<ProviderHealthProps> = {}) {
 describe("ProviderHealth Dashboard", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: NOW });
+    mockFetchAccountsHealth.mockReset();
+    mockFetchSyncHistory.mockReset();
+    mockReconnectAccount.mockReset();
+    mockRemoveAccount.mockReset();
+    mockLocationAssign.mockReset();
+    // Set up default mocks
+    setupMockSyncHistory();
+    mockReconnectAccount.mockResolvedValue(undefined);
+    mockRemoveAccount.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -170,6 +184,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("account list rendering", () => {
     it("renders all account emails", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.getByText("work@gmail.com")).toBeInTheDocument();
@@ -178,6 +193,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows calendar count for each account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -185,6 +201,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows calendar names for each account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -192,6 +209,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows last sync time for each account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -199,6 +217,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows 'Never' for accounts that have never synced", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-ms-outlook");
@@ -206,6 +225,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows account count and tier limit", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const counter = screen.getByTestId("account-counter");
@@ -219,6 +239,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("status badges", () => {
     it("shows 'Synced' badge (green) for healthy account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -228,6 +249,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows 'Syncing' badge (blue pulse) for actively syncing account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-personal");
@@ -237,6 +259,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows 'Error' badge (red) for error account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-ms-outlook");
@@ -255,7 +278,8 @@ describe("ProviderHealth Dashboard", () => {
         account_count: 1,
         tier_limit: 5,
       };
-      await renderAndWait({ fetchAccountsHealth: createMockFetchHealth(staleResponse) });
+      setupMockResponse(staleResponse);
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-stale");
       const badge = within(row).getByTestId("health-badge");
@@ -270,6 +294,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("error remediation guidance", () => {
     it("shows human-readable remediation for token errors", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-ms-outlook");
@@ -280,6 +305,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("does not show remediation for healthy accounts", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -293,6 +319,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("reconnect flow", () => {
     it("shows reconnect button for error accounts", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-ms-outlook");
@@ -300,19 +327,20 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("reconnect triggers provider-specific re-auth flow", async () => {
-      const navigateToOAuth = vi.fn();
-      await renderAndWait({ navigateToOAuth });
+      setupMockResponse();
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-ms-outlook");
       fireEvent.click(within(row).getByTestId("reconnect-btn"));
 
-      expect(navigateToOAuth).toHaveBeenCalledTimes(1);
-      expect(navigateToOAuth).toHaveBeenCalledWith(
+      expect(mockLocationAssign).toHaveBeenCalledTimes(1);
+      expect(mockLocationAssign).toHaveBeenCalledWith(
         expect.stringContaining("microsoft"),
       );
     });
 
     it("reconnect button is also available on non-error accounts", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -326,6 +354,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("remove account flow", () => {
     it("shows remove button for each account", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -333,6 +362,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows confirmation dialog when remove is clicked", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       expect(screen.queryByTestId("remove-dialog")).not.toBeInTheDocument();
@@ -344,6 +374,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("confirmation dialog shows account email", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -354,8 +385,8 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("confirm remove calls removeAccount with correct ID", async () => {
-      const removeAccount = createMockRemoveAccount();
-      await renderAndWait({ removeAccount });
+      setupMockResponse();
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
       fireEvent.click(within(row).getByTestId("remove-btn"));
@@ -365,13 +396,13 @@ describe("ProviderHealth Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(removeAccount).toHaveBeenCalledTimes(1);
-      expect(removeAccount).toHaveBeenCalledWith("acc-google-work");
+      expect(mockRemoveAccount).toHaveBeenCalledTimes(1);
+      expect(mockRemoveAccount).toHaveBeenCalledWith("acc-google-work");
     });
 
     it("account is removed from list after successful removal", async () => {
-      const removeAccount = createMockRemoveAccount();
-      await renderAndWait({ removeAccount });
+      setupMockResponse();
+      await renderAndWait();
 
       expect(screen.getByText("work@gmail.com")).toBeInTheDocument();
 
@@ -387,20 +418,21 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("cancel does not remove the account", async () => {
-      const removeAccount = createMockRemoveAccount();
-      await renderAndWait({ removeAccount });
+      setupMockResponse();
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
       fireEvent.click(within(row).getByTestId("remove-btn"));
       fireEvent.click(screen.getByTestId("remove-cancel"));
 
-      expect(removeAccount).not.toHaveBeenCalled();
+      expect(mockRemoveAccount).not.toHaveBeenCalled();
       expect(screen.getByText("work@gmail.com")).toBeInTheDocument();
     });
 
     it("shows error message when remove fails", async () => {
-      const removeAccount = createFailingRemoveAccount("Server error");
-      await renderAndWait({ removeAccount });
+      mockRemoveAccount.mockRejectedValue(new Error("Server error"));
+      setupMockResponse();
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
       fireEvent.click(within(row).getByTestId("remove-btn"));
@@ -422,8 +454,8 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("sync history", () => {
     it("shows sync history when account is expanded", async () => {
-      const fetchSyncHistory = createMockFetchSyncHistory();
-      await renderAndWait({ fetchSyncHistory });
+      setupMockResponse();
+      await renderAndWait();
 
       // Expand the first account
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -433,11 +465,12 @@ describe("ProviderHealth Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchSyncHistory).toHaveBeenCalledWith("acc-google-work");
+      expect(mockFetchSyncHistory).toHaveBeenCalledWith("acc-google-work");
       expect(screen.getByTestId("sync-history")).toBeInTheDocument();
     });
 
     it("displays last 10 sync events with timestamps and event counts", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       // Expand the first account
@@ -454,6 +487,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows event count for each sync history entry", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -469,6 +503,7 @@ describe("ProviderHealth Dashboard", () => {
     });
 
     it("shows error indicator for failed sync entries", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -492,6 +527,7 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("token info in detail view", () => {
     it("shows token expiry info when account is expanded", async () => {
+      setupMockResponse();
       await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-google-work");
@@ -515,7 +551,8 @@ describe("ProviderHealth Dashboard", () => {
         account_count: 1,
         tier_limit: 5,
       };
-      await renderAndWait({ fetchAccountsHealth: createMockFetchHealth(expiredResponse) });
+      setupMockResponse(expiredResponse);
+      await renderAndWait();
 
       const row = screen.getByTestId("health-row-acc-expired");
       fireEvent.click(within(row).getByTestId("expand-btn"));
@@ -535,17 +572,8 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("loading state", () => {
     it("shows loading indicator while fetching", () => {
-      const fetchAccountsHealth = vi.fn(
-        (): Promise<AccountsHealthResponse> => new Promise(() => {}),
-      );
-      render(
-        <ProviderHealth
-          fetchAccountsHealth={fetchAccountsHealth}
-          fetchSyncHistory={createMockFetchSyncHistory()}
-          reconnectAccount={createMockReconnect()}
-          removeAccount={createMockRemoveAccount()}
-        />,
-      );
+      mockFetchAccountsHealth.mockReturnValue(new Promise(() => {}));
+      render(<ProviderHealth />);
 
       expect(screen.getByTestId("health-loading")).toBeInTheDocument();
     });
@@ -553,14 +581,16 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("error state", () => {
     it("shows error message on fetch failure", async () => {
-      await renderAndWait({ fetchAccountsHealth: createFailingFetchHealth("API unavailable") });
+      setupFailingResponse("API unavailable");
+      await renderAndWait();
 
       expect(screen.getByTestId("health-error")).toBeInTheDocument();
       expect(screen.getByText(/api unavailable/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      await renderAndWait({ fetchAccountsHealth: createFailingFetchHealth() });
+      setupFailingResponse();
+      await renderAndWait();
 
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
@@ -573,7 +603,8 @@ describe("ProviderHealth Dashboard", () => {
         account_count: 0,
         tier_limit: 5,
       };
-      await renderAndWait({ fetchAccountsHealth: createMockFetchHealth(emptyResponse) });
+      setupMockResponse(emptyResponse);
+      await renderAndWait();
 
       expect(screen.getByTestId("health-empty")).toBeInTheDocument();
     });
@@ -585,10 +616,10 @@ describe("ProviderHealth Dashboard", () => {
 
   describe("auto-refresh", () => {
     it("fetches data on mount", async () => {
-      const fetchAccountsHealth = createMockFetchHealth();
-      await renderAndWait({ fetchAccountsHealth });
+      setupMockResponse();
+      await renderAndWait();
 
-      expect(fetchAccountsHealth).toHaveBeenCalledTimes(1);
+      expect(mockFetchAccountsHealth).toHaveBeenCalledTimes(1);
     });
   });
 });

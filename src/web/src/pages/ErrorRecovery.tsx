@@ -9,23 +9,13 @@
  *   GET  /api/v1/sync/journal?change_type=error  -- fetch error mirrors
  *   POST /api/v1/sync/retry/:mirror_id           -- retry individual mirror
  *
- * The component accepts injected fetch/retry functions for testability.
- * In production, these are wired to the API client in App.tsx.
+ * Uses useApi() for token-injected API calls.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
 import type { ErrorMirror, RetryResult } from "../lib/error-recovery";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface ErrorRecoveryProps {
-  /** Fetch function that returns error mirrors. Injected for testability. */
-  fetchErrors: () => Promise<ErrorMirror[]>;
-  /** Retry a single mirror by ID. Injected for testability. */
-  retryMirror: (mirrorId: string) => Promise<RetryResult>;
-}
+import { Button } from "../components/ui/button";
 
 // ---------------------------------------------------------------------------
 // Status feedback type
@@ -40,7 +30,9 @@ interface StatusMessage {
 // Component
 // ---------------------------------------------------------------------------
 
-export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) {
+export function ErrorRecovery() {
+  const api = useApi();
+
   const [errors, setErrors] = useState<ErrorMirror[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -57,7 +49,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
 
   const loadErrors = useCallback(async () => {
     try {
-      const result = await fetchErrors();
+      const result = await api.fetchErrors();
       if (!mountedRef.current) return;
       setErrors(result);
       setFetchError(null);
@@ -67,7 +59,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
       setFetchError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
     }
-  }, [fetchErrors]);
+  }, [api]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -87,7 +79,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
       setStatus(null);
 
       try {
-        await retryMirror(mirrorId);
+        await api.retryMirror(mirrorId);
 
         if (!mountedRef.current) return;
 
@@ -109,7 +101,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
         }
       }
     },
-    [retryMirror],
+    [api],
   );
 
   // -------------------------------------------------------------------------
@@ -126,7 +118,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
 
     for (const mirror of currentErrors) {
       try {
-        await retryMirror(mirror.mirror_id);
+        await api.retryMirror(mirror.mirror_id);
         succeededIds.push(mirror.mirror_id);
       } catch {
         failedIds.push(mirror.mirror_id);
@@ -153,7 +145,7 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
     }
 
     setBatchRetrying(false);
-  }, [errors, retryMirror]);
+  }, [errors, api]);
 
   // -------------------------------------------------------------------------
   // Render: Loading
@@ -161,9 +153,9 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
 
   if (loading) {
     return (
-      <div data-testid="error-recovery-loading" style={styles.container}>
-        <h1 style={styles.title}>Error Recovery</h1>
-        <div style={styles.loading}>Loading error mirrors...</div>
+      <div data-testid="error-recovery-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Error Recovery</h1>
+        <p className="text-muted-foreground text-center py-8">Loading error mirrors...</p>
       </div>
     );
   }
@@ -174,17 +166,18 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
 
   if (fetchError) {
     return (
-      <div data-testid="error-recovery-fetch-error" style={styles.container}>
-        <h1 style={styles.title}>Error Recovery</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="error-recovery-fetch-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Error Recovery</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load errors: {fetchError}</p>
-          <button
+          <Button
             onClick={loadErrors}
-            style={styles.retryBtn}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
             aria-label="Retry"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -196,14 +189,14 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
 
   if (errors.length === 0 && !status) {
     return (
-      <div data-testid="error-recovery-empty" style={styles.container}>
-        <div style={styles.headerRow}>
-          <h1 style={styles.title}>Error Recovery</h1>
-          <a href="#/sync-status" style={styles.backLink}>
+      <div data-testid="error-recovery-empty" className="mx-auto max-w-[1200px]">
+        <div className="flex items-center justify-between mb-4">
+          <h1 className="text-2xl font-bold text-foreground">Error Recovery</h1>
+          <a href="#/sync-status" className="text-muted-foreground text-sm no-underline hover:text-foreground">
             Back to Sync Status
           </a>
         </div>
-        <div style={styles.emptyState}>No errors found. All mirrors are healthy.</div>
+        <p className="text-muted-foreground text-center py-8">No errors found. All mirrors are healthy.</p>
       </div>
     );
   }
@@ -213,30 +206,31 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
   // -------------------------------------------------------------------------
 
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Error Recovery</h1>
-        <a href="#/sync-status" style={styles.backLink}>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-foreground">Error Recovery</h1>
+        <a href="#/sync-status" className="text-muted-foreground text-sm no-underline hover:text-foreground">
           Back to Sync Status
         </a>
       </div>
 
       {/* Summary + batch retry */}
-      <div style={styles.summaryRow}>
-        <span data-testid="error-count-summary" style={styles.countText}>
+      <div className="flex items-center justify-between mb-4">
+        <span data-testid="error-count-summary" className="text-destructive font-semibold text-sm">
           {errors.length} error{errors.length !== 1 ? "s" : ""}
         </span>
         {errors.length > 0 && (
-          <button
+          <Button
             data-testid="batch-retry-btn"
             onClick={handleBatchRetry}
             disabled={batchRetrying}
-            style={styles.batchRetryBtn}
+            variant="outline"
+            className="border-orange-500 text-orange-500 hover:bg-orange-500/10 font-semibold"
           >
             {batchRetrying
               ? "Retrying..."
               : `Retry All (${errors.length})`}
-          </button>
+          </Button>
         )}
       </div>
 
@@ -245,8 +239,8 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
         <div
           data-testid="retry-status"
           data-status-type={status.type}
+          className="px-4 py-3 rounded-lg border text-foreground text-sm mb-4"
           style={{
-            ...styles.statusBox,
             backgroundColor:
               status.type === "success" ? "#052e16" : "#450a0a",
             borderColor:
@@ -258,14 +252,14 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
       )}
 
       {/* Error table */}
-      <div style={styles.tableWrapper}>
-        <table style={styles.table}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
           <thead>
             <tr>
-              <th style={styles.th}>Event</th>
-              <th style={styles.th}>Account</th>
-              <th style={styles.th}>Error</th>
-              <th style={styles.th}>Actions</th>
+              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Event</th>
+              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Account</th>
+              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Error</th>
+              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -273,26 +267,28 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
               <tr
                 key={mirror.mirror_id}
                 data-testid={`error-row-${mirror.mirror_id}`}
-                style={styles.tr}
+                className="border-b border-border/50"
               >
-                <td style={styles.td}>
+                <td className="px-3 py-2 text-foreground">
                   {mirror.event_summary ?? mirror.canonical_event_id}
                 </td>
-                <td style={styles.td}>{mirror.target_account_email}</td>
-                <td style={styles.td}>
-                  <span data-testid="error-message" style={styles.errorText}>
+                <td className="px-3 py-2 text-foreground">{mirror.target_account_email}</td>
+                <td className="px-3 py-2">
+                  <span data-testid="error-message" className="text-destructive text-xs">
                     {mirror.error_message}
                   </span>
                 </td>
-                <td style={styles.td}>
-                  <button
+                <td className="px-3 py-2">
+                  <Button
                     data-testid={`retry-btn-${mirror.mirror_id}`}
                     onClick={() => handleRetry(mirror.mirror_id)}
                     disabled={retryingIds.has(mirror.mirror_id) || batchRetrying}
-                    style={styles.retryBtn}
+                    variant="outline"
+                    size="sm"
+                    className="text-xs border-destructive text-destructive hover:bg-destructive/10"
                   >
                     {retryingIds.has(mirror.mirror_id) ? "Retrying..." : "Retry"}
-                  </button>
+                  </Button>
                 </td>
               </tr>
             ))}
@@ -302,111 +298,3 @@ export function ErrorRecovery({ fetchErrors, retryMirror }: ErrorRecoveryProps) 
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with SyncStatus.tsx patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "1rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  summaryRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "1rem",
-  },
-  countText: {
-    color: "#fca5a5",
-    fontWeight: 600,
-    fontSize: "0.95rem",
-  },
-  batchRetryBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #f97316",
-    background: "transparent",
-    color: "#f97316",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-  statusBox: {
-    padding: "0.75rem 1rem",
-    borderRadius: "8px",
-    border: "1px solid",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    marginBottom: "1rem",
-  },
-  tableWrapper: {
-    overflowX: "auto" as const,
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse" as const,
-    fontSize: "0.875rem",
-  },
-  th: {
-    textAlign: "left" as const,
-    padding: "0.6rem 0.75rem",
-    borderBottom: "1px solid #334155",
-    color: "#94a3b8",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-  },
-  tr: {
-    borderBottom: "1px solid #1e293b",
-  },
-  td: {
-    padding: "0.6rem 0.75rem",
-    color: "#e2e8f0",
-  },
-  errorText: {
-    color: "#fca5a5",
-    fontSize: "0.8rem",
-  },
-  retryBtn: {
-    padding: "0.35rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  emptyState: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-};
