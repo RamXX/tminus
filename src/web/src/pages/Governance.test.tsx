@@ -6,10 +6,12 @@
  *   aggregation per week/month
  * - Integration: component renders with mock commitment data, chart shows
  *   actual vs target. VIP list add/remove calls API. Export proof button
- *   calls POST /v1/commitments/:id/export and shows download link.
+ *   calls API and shows download link.
  *
  * Uses React Testing Library with fireEvent for click interactions.
- * Same pattern as Scheduling.test.tsx.
+ *
+ * Since Governance now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
  *
  * NOTE: We use fireEvent.click instead of userEvent.click because components
  * with timers interact poorly with userEvent's internal delay mechanism
@@ -17,7 +19,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { Governance, type GovernanceProps } from "./Governance";
+import { Governance } from "./Governance";
 import type {
   Commitment,
   VipContact,
@@ -88,68 +90,103 @@ const MOCK_EXPORT_RESPONSE: ExportProofResponse = {
 };
 
 // ---------------------------------------------------------------------------
+// Mock the API provider and auth
+// ---------------------------------------------------------------------------
+
+const mockFetchCommitments = vi.fn<() => Promise<Commitment[]>>();
+const mockFetchVips = vi.fn<() => Promise<VipContact[]>>();
+const mockAddVip = vi.fn<(payload: AddVipPayload) => Promise<VipContact>>();
+const mockRemoveVip = vi.fn<(vipId: string) => Promise<void>>();
+const mockExportProof = vi.fn<(commitmentId: string) => Promise<ExportProofResponse>>();
+
+const mockApiValue = {
+  fetchCommitments: mockFetchCommitments,
+  fetchVips: mockFetchVips,
+  addVip: mockAddVip,
+  removeVip: mockRemoveVip,
+  exportProof: mockExportProof,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetchCommitments(commitments: Commitment[] = MOCK_COMMITMENTS) {
-  return vi.fn(async (): Promise<Commitment[]> => commitments);
-}
+function setupMocks(overrides: {
+  commitments?: Commitment[];
+  commitmentsError?: string;
+  vips?: VipContact[];
+  addVipResult?: VipContact;
+  addVipError?: string;
+  removeVipError?: string;
+  exportResult?: ExportProofResponse;
+  exportError?: string;
+} = {}) {
+  if (overrides.commitmentsError) {
+    mockFetchCommitments.mockRejectedValue(new Error(overrides.commitmentsError));
+  } else {
+    mockFetchCommitments.mockResolvedValue(overrides.commitments ?? MOCK_COMMITMENTS);
+  }
 
-function createFailingFetchCommitments(message = "Network error") {
-  return vi.fn(async (): Promise<Commitment[]> => {
-    throw new Error(message);
-  });
-}
+  mockFetchVips.mockResolvedValue(overrides.vips ?? MOCK_VIPS);
 
-function createMockFetchVips(vips: VipContact[] = MOCK_VIPS) {
-  return vi.fn(async (): Promise<VipContact[]> => vips);
-}
+  if (overrides.addVipError) {
+    mockAddVip.mockRejectedValue(new Error(overrides.addVipError));
+  } else {
+    mockAddVip.mockResolvedValue(overrides.addVipResult ?? MOCK_NEW_VIP);
+  }
 
-function createMockAddVip(result: VipContact = MOCK_NEW_VIP) {
-  return vi.fn(async (_payload: AddVipPayload): Promise<VipContact> => result);
-}
+  if (overrides.removeVipError) {
+    mockRemoveVip.mockRejectedValue(new Error(overrides.removeVipError));
+  } else {
+    mockRemoveVip.mockResolvedValue(undefined);
+  }
 
-function createMockRemoveVip() {
-  return vi.fn(async (_vipId: string): Promise<void> => {});
-}
-
-function createMockExportProof(response: ExportProofResponse = MOCK_EXPORT_RESPONSE) {
-  return vi.fn(async (_id: string): Promise<ExportProofResponse> => response);
+  if (overrides.exportError) {
+    mockExportProof.mockRejectedValue(new Error(overrides.exportError));
+  } else {
+    mockExportProof.mockResolvedValue(overrides.exportResult ?? MOCK_EXPORT_RESPONSE);
+  }
 }
 
 /**
  * Render the Governance component and wait for the initial async fetch to resolve.
  */
-async function renderAndWait(overrides: Partial<GovernanceProps> = {}) {
-  const fetchCommitments = overrides.fetchCommitments ?? createMockFetchCommitments();
-  const fetchVips = overrides.fetchVips ?? createMockFetchVips();
-  const addVip = overrides.addVip ?? createMockAddVip();
-  const removeVip = overrides.removeVip ?? createMockRemoveVip();
-  const exportProof = overrides.exportProof ?? createMockExportProof();
+async function renderAndWait(overrides: {
+  commitments?: Commitment[];
+  commitmentsError?: string;
+  vips?: VipContact[];
+  addVipResult?: VipContact;
+  addVipError?: string;
+  removeVipError?: string;
+  exportResult?: ExportProofResponse;
+  exportError?: string;
+} = {}) {
+  setupMocks(overrides);
 
-  const result = render(
-    <Governance
-      fetchCommitments={fetchCommitments}
-      fetchVips={fetchVips}
-      addVip={addVip}
-      removeVip={removeVip}
-      exportProof={exportProof}
-    />,
-  );
+  const result = render(<Governance />);
 
   // Flush microtasks so async fetch resolves
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  return {
-    ...result,
-    fetchCommitments,
-    fetchVips,
-    addVip,
-    removeVip,
-    exportProof,
-  };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +196,11 @@ async function renderAndWait(overrides: Partial<GovernanceProps> = {}) {
 describe("Governance Dashboard", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date("2026-02-15T12:00:00Z").getTime() });
+    mockFetchCommitments.mockReset();
+    mockFetchVips.mockReset();
+    mockAddVip.mockReset();
+    mockRemoveVip.mockReset();
+    mockExportProof.mockReset();
   });
 
   afterEach(() => {
@@ -194,9 +236,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows empty state when no commitments exist", async () => {
-      await renderAndWait({
-        fetchCommitments: createMockFetchCommitments([]),
-      });
+      await renderAndWait({ commitments: [] });
 
       expect(screen.getByTestId("chart-empty")).toBeInTheDocument();
     });
@@ -270,9 +310,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows empty state when no VIPs exist", async () => {
-      await renderAndWait({
-        fetchVips: createMockFetchVips([]),
-      });
+      await renderAndWait({ vips: [] });
 
       expect(screen.getByTestId("vip-empty")).toBeInTheDocument();
     });
@@ -314,8 +352,6 @@ describe("Governance Dashboard", () => {
     it("shows per-client hours in allocation", async () => {
       await renderAndWait();
 
-      // Client names appear in chart, export, AND allocation sections.
-      // Verify allocation section specifically contains them.
       const allocationSection = screen.getByTestId("time-allocation-section");
       expect(within(allocationSection).getByText("Acme Corp")).toBeInTheDocument();
       expect(within(allocationSection).getByText("Globex Inc")).toBeInTheDocument();
@@ -336,9 +372,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows empty state when no allocations exist", async () => {
-      await renderAndWait({
-        fetchCommitments: createMockFetchCommitments([]),
-      });
+      await renderAndWait({ commitments: [] });
 
       expect(screen.getByTestId("allocation-empty")).toBeInTheDocument();
     });
@@ -350,54 +384,35 @@ describe("Governance Dashboard", () => {
 
   describe("integration: component loads data on mount", () => {
     it("calls fetchCommitments on mount", async () => {
-      const fetchCommitments = createMockFetchCommitments();
-      await renderAndWait({ fetchCommitments });
+      await renderAndWait();
 
-      expect(fetchCommitments).toHaveBeenCalledTimes(1);
+      expect(mockFetchCommitments).toHaveBeenCalledTimes(1);
     });
 
     it("calls fetchVips on mount", async () => {
-      const fetchVips = createMockFetchVips();
-      await renderAndWait({ fetchVips });
+      await renderAndWait();
 
-      expect(fetchVips).toHaveBeenCalledTimes(1);
+      expect(mockFetchVips).toHaveBeenCalledTimes(1);
     });
 
     it("shows loading state before fetch completes", () => {
-      const fetchCommitments = vi.fn(
-        (): Promise<Commitment[]> => new Promise(() => {}),
-      );
-      // Also use a never-resolving promise for VIPs to prevent its state
-      // update from firing outside act() while we assert loading.
-      const fetchVips = vi.fn(
-        (): Promise<VipContact[]> => new Promise(() => {}),
-      );
-      render(
-        <Governance
-          fetchCommitments={fetchCommitments}
-          fetchVips={fetchVips}
-          addVip={createMockAddVip()}
-          removeVip={createMockRemoveVip()}
-          exportProof={createMockExportProof()}
-        />,
-      );
+      mockFetchCommitments.mockReturnValue(new Promise(() => {}));
+      mockFetchVips.mockReturnValue(new Promise(() => {}));
+
+      render(<Governance />);
 
       expect(screen.getByTestId("governance-loading")).toBeInTheDocument();
     });
 
     it("shows error state when fetchCommitments fails", async () => {
-      await renderAndWait({
-        fetchCommitments: createFailingFetchCommitments("API unavailable"),
-      });
+      await renderAndWait({ commitmentsError: "API unavailable" });
 
       expect(screen.getByTestId("governance-error")).toBeInTheDocument();
       expect(screen.getByText(/api unavailable/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      await renderAndWait({
-        fetchCommitments: createFailingFetchCommitments(),
-      });
+      await renderAndWait({ commitmentsError: "Network error" });
 
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
@@ -431,8 +446,7 @@ describe("Governance Dashboard", () => {
 
   describe("integration: VIP add/remove calls API", () => {
     it("clicking add VIP calls addVip with form data", async () => {
-      const addVip = createMockAddVip();
-      await renderAndWait({ addVip });
+      await renderAndWait();
 
       // Fill form
       fireEvent.change(screen.getByTestId("vip-name-input"), {
@@ -452,8 +466,8 @@ describe("Governance Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(addVip).toHaveBeenCalledTimes(1);
-      expect(addVip).toHaveBeenCalledWith({
+      expect(mockAddVip).toHaveBeenCalledTimes(1);
+      expect(mockAddVip).toHaveBeenCalledWith({
         name: "Alice PM",
         email: "alice@initech.com",
         notes: "Project lead",
@@ -481,10 +495,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows error message when addVip fails", async () => {
-      const addVip = vi.fn(async () => {
-        throw new Error("Duplicate email");
-      });
-      await renderAndWait({ addVip });
+      await renderAndWait({ addVipError: "Duplicate email" });
 
       fireEvent.change(screen.getByTestId("vip-name-input"), {
         target: { value: "Test" },
@@ -528,10 +539,9 @@ describe("Governance Dashboard", () => {
     });
 
     it("refreshes VIP list after adding", async () => {
-      const fetchVips = createMockFetchVips();
-      await renderAndWait({ fetchVips });
+      await renderAndWait();
 
-      expect(fetchVips).toHaveBeenCalledTimes(1);
+      expect(mockFetchVips).toHaveBeenCalledTimes(1);
 
       fireEvent.change(screen.getByTestId("vip-name-input"), {
         target: { value: "Test" },
@@ -546,12 +556,11 @@ describe("Governance Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchVips).toHaveBeenCalledTimes(2);
+      expect(mockFetchVips).toHaveBeenCalledTimes(2);
     });
 
     it("clicking remove VIP calls removeVip with VIP ID", async () => {
-      const removeVip = createMockRemoveVip();
-      await renderAndWait({ removeVip });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("remove-vip-btn-vip_1"));
 
@@ -559,8 +568,8 @@ describe("Governance Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(removeVip).toHaveBeenCalledTimes(1);
-      expect(removeVip).toHaveBeenCalledWith("vip_1");
+      expect(mockRemoveVip).toHaveBeenCalledTimes(1);
+      expect(mockRemoveVip).toHaveBeenCalledWith("vip_1");
     });
 
     it("shows success message after removing VIP", async () => {
@@ -576,10 +585,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows error message when removeVip fails", async () => {
-      const removeVip = vi.fn(async () => {
-        throw new Error("Permission denied");
-      });
-      await renderAndWait({ removeVip });
+      await renderAndWait({ removeVipError: "Permission denied" });
 
       fireEvent.click(screen.getByTestId("remove-vip-btn-vip_1"));
 
@@ -592,10 +598,9 @@ describe("Governance Dashboard", () => {
     });
 
     it("refreshes VIP list after removing", async () => {
-      const fetchVips = createMockFetchVips();
-      await renderAndWait({ fetchVips });
+      await renderAndWait();
 
-      expect(fetchVips).toHaveBeenCalledTimes(1);
+      expect(mockFetchVips).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByTestId("remove-vip-btn-vip_1"));
 
@@ -603,7 +608,7 @@ describe("Governance Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchVips).toHaveBeenCalledTimes(2);
+      expect(mockFetchVips).toHaveBeenCalledTimes(2);
     });
 
     it("disables add button when name is empty", async () => {
@@ -643,8 +648,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("clicking export calls exportProof with commitment ID", async () => {
-      const exportProof = createMockExportProof();
-      await renderAndWait({ exportProof });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("export-btn-cmt_1"));
 
@@ -652,8 +656,8 @@ describe("Governance Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(exportProof).toHaveBeenCalledTimes(1);
-      expect(exportProof).toHaveBeenCalledWith("cmt_1");
+      expect(mockExportProof).toHaveBeenCalledTimes(1);
+      expect(mockExportProof).toHaveBeenCalledWith("cmt_1");
     });
 
     it("shows download link after successful export", async () => {
@@ -684,10 +688,7 @@ describe("Governance Dashboard", () => {
     });
 
     it("shows error message when export fails", async () => {
-      const exportProof = vi.fn(async () => {
-        throw new Error("Export service unavailable");
-      });
-      await renderAndWait({ exportProof });
+      await renderAndWait({ exportError: "Export service unavailable" });
 
       fireEvent.click(screen.getByTestId("export-btn-cmt_1"));
 
@@ -702,14 +703,19 @@ describe("Governance Dashboard", () => {
     it("shows Exporting... while export is in progress", async () => {
       // Create a slow export that we can control
       let resolveExport: (value: ExportProofResponse) => void;
-      const exportProof = vi.fn(
+      setupMocks();
+      mockExportProof.mockImplementation(
         () =>
           new Promise<ExportProofResponse>((resolve) => {
             resolveExport = resolve;
           }),
       );
 
-      await renderAndWait({ exportProof });
+      render(<Governance />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
 
       fireEvent.click(screen.getByTestId("export-btn-cmt_1"));
 

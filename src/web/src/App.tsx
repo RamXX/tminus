@@ -10,6 +10,7 @@
  * Pages migrated to useApi():
  * - Calendar, Accounts, SyncStatus (TM-wqip)
  * - Policies, ProviderHealth, ErrorRecovery (TM-b5g4)
+ * - Billing, Scheduling, Governance (TM-6dgl)
  * Remaining pages still use legacy prop-passing via route wrappers.
  */
 
@@ -32,7 +33,7 @@ import { Reconnections } from "./pages/Reconnections";
 import { Admin } from "./pages/Admin";
 import { Onboarding } from "./pages/Onboarding";
 import { ProviderHealth } from "./pages/ProviderHealth";
-import { useOnboardingCallbackId, useBillingAccountsCount, useAdminTierGate } from "./lib/route-helpers";
+import { useOnboardingCallbackId, useAdminTierGate } from "./lib/route-helpers";
 
 // ---------------------------------------------------------------------------
 // Auth-aware route wrapper
@@ -77,46 +78,6 @@ function OnboardingRoute() {
   );
 }
 
-
-function BillingRoute() {
-  const api = useApi();
-  const accountsCount = useBillingAccountsCount(api.fetchAccounts);
-  return (
-    <Billing
-      fetchBillingStatus={api.fetchBillingStatus}
-      createCheckoutSession={api.createCheckoutSession}
-      createPortalSession={api.createPortalSession}
-      fetchBillingHistory={api.fetchBillingHistory}
-      accountsUsed={accountsCount}
-    />
-  );
-}
-
-function SchedulingRoute() {
-  const api = useApi();
-  return (
-    <Scheduling
-      listSessions={api.listSessions}
-      fetchAccounts={api.fetchAccounts}
-      createSession={api.createSchedulingSession}
-      commitCandidate={api.commitCandidate}
-      cancelSession={api.cancelSession}
-    />
-  );
-}
-
-function GovernanceRoute() {
-  const api = useApi();
-  return (
-    <Governance
-      fetchCommitments={api.fetchCommitments}
-      fetchVips={api.fetchVips}
-      addVip={api.addVip}
-      removeVip={api.removeVip}
-      exportProof={api.exportProof}
-    />
-  );
-}
 
 function RelationshipsRoute() {
   const api = useApi();
@@ -196,9 +157,9 @@ function AuthenticatedRoutes() {
           <Route path="/sync-status" element={<SyncStatus />} />
           <Route path="/policies" element={<Policies />} />
           <Route path="/errors" element={<ErrorRecovery />} />
-          <Route path="/billing" element={<BillingRoute />} />
-          <Route path="/scheduling" element={<SchedulingRoute />} />
-          <Route path="/governance" element={<GovernanceRoute />} />
+          <Route path="/billing" element={<Billing />} />
+          <Route path="/scheduling" element={<Scheduling />} />
+          <Route path="/governance" element={<Governance />} />
           <Route path="/relationships" element={<RelationshipsRoute />} />
           <Route path="/reconnections" element={<ReconnectionsRoute />} />
           <Route path="/provider-health" element={<ProviderHealth />} />

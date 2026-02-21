@@ -239,7 +239,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/billing";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Billing" })).toBeInTheDocument();
       });
     });
 
@@ -247,7 +247,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/scheduling";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Scheduling" })).toBeInTheDocument();
       });
     });
 
@@ -255,7 +255,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/governance";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Governance Dashboard" })).toBeInTheDocument();
       });
     });
 

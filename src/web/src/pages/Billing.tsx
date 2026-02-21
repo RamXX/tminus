@@ -15,17 +15,13 @@
  * - Grace period warning for past_due subscriptions
  * - Loading, error, and retry states
  *
- * The component accepts fetch/action functions as props for testability.
- * In production, these are wired to the API client with auth tokens.
+ * Uses useApi() for token-injected API calls (migrated from prop-passing).
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
 import type {
   BillingStatusResponse,
-  BillingTier,
-  BillingStatus,
-  CheckoutResponse,
-  PortalResponse,
   BillingEvent,
 } from "../lib/billing";
 import {
@@ -41,45 +37,26 @@ import {
   PLANS,
   STRIPE_PRICE_IDS,
 } from "../lib/billing";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface BillingProps {
-  /** Fetch current billing status. Injected for testability. */
-  fetchBillingStatus: () => Promise<BillingStatusResponse>;
-  /** Create a Stripe Checkout session. Returns checkout URL. */
-  createCheckoutSession: (priceId: string) => Promise<CheckoutResponse>;
-  /** Create a Stripe Customer Portal session. Returns portal URL. */
-  createPortalSession: () => Promise<PortalResponse>;
-  /** Fetch billing event history. */
-  fetchBillingHistory: () => Promise<BillingEvent[]>;
-  /** Number of accounts currently linked by the user. */
-  accountsUsed: number;
-  /**
-   * Navigate to an external URL. Defaults to window.location.assign.
-   * Injected for testability (prevents actual navigation in tests).
-   */
-  navigateToUrl?: (url: string) => void;
-}
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Badge } from "../components/ui/badge";
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function Billing({
-  fetchBillingStatus,
-  createCheckoutSession,
-  createPortalSession,
-  fetchBillingHistory,
-  accountsUsed,
-  navigateToUrl = (url) => {
+  navigateToUrl = (url: string) => {
     window.location.assign(url);
   },
-}: BillingProps) {
+}: {
+  navigateToUrl?: (url: string) => void;
+} = {}) {
+  const api = useApi();
+
   const [billingStatus, setBillingStatus] = useState<BillingStatusResponse | null>(null);
   const [billingEvents, setBillingEvents] = useState<BillingEvent[]>([]);
+  const [accountsUsed, setAccountsUsed] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [upgrading, setUpgrading] = useState(false);
@@ -112,7 +89,7 @@ export function Billing({
   const loadBillingStatus = useCallback(async () => {
     try {
       setLoading(true);
-      const status = await fetchBillingStatus();
+      const status = await api.fetchBillingStatus();
       if (!mountedRef.current) return;
       setBillingStatus(status);
       setError(null);
@@ -122,24 +99,36 @@ export function Billing({
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
     }
-  }, [fetchBillingStatus]);
+  }, [api]);
 
   // Load billing history
   const loadBillingHistory = useCallback(async () => {
     try {
-      const events = await fetchBillingHistory();
+      const events = await api.fetchBillingHistory();
       if (!mountedRef.current) return;
       setBillingEvents(events);
     } catch {
       // Billing history is non-critical; silently ignore errors
     }
-  }, [fetchBillingHistory]);
+  }, [api]);
+
+  // Load accounts count for usage display
+  const loadAccountsCount = useCallback(async () => {
+    try {
+      const accounts = await api.fetchAccounts();
+      if (!mountedRef.current) return;
+      setAccountsUsed(accounts.length);
+    } catch {
+      // Non-critical -- defaults to 0
+    }
+  }, [api]);
 
   // Initial load
   useEffect(() => {
     mountedRef.current = true;
     loadBillingStatus();
     loadBillingHistory();
+    loadAccountsCount();
 
     return () => {
       mountedRef.current = false;
@@ -147,7 +136,7 @@ export function Billing({
         clearTimeout(statusTimerRef.current);
       }
     };
-  }, [loadBillingStatus, loadBillingHistory]);
+  }, [loadBillingStatus, loadBillingHistory, loadAccountsCount]);
 
   // Handle upgrade button click
   const handleUpgrade = useCallback(async () => {
@@ -160,7 +149,7 @@ export function Billing({
     setUpgrading(true);
 
     try {
-      const response = await createCheckoutSession(priceId);
+      const response = await api.createCheckoutSession(priceId);
       if (!mountedRef.current) return;
       navigateToUrl(response.checkout_url);
     } catch (err) {
@@ -174,12 +163,12 @@ export function Billing({
         setUpgrading(false);
       }
     }
-  }, [billingStatus, createCheckoutSession, navigateToUrl, showStatus]);
+  }, [billingStatus, api, navigateToUrl, showStatus]);
 
   // Handle manage subscription button click
   const handleManageSubscription = useCallback(async () => {
     try {
-      const response = await createPortalSession();
+      const response = await api.createPortalSession();
       if (!mountedRef.current) return;
       navigateToUrl(response.portal_url);
     } catch (err) {
@@ -189,14 +178,14 @@ export function Billing({
         `Failed to open billing portal: ${err instanceof Error ? err.message : "Unknown error"}`,
       );
     }
-  }, [createPortalSession, navigateToUrl, showStatus]);
+  }, [api, navigateToUrl, showStatus]);
 
   // -- Loading state --
   if (loading) {
     return (
-      <div data-testid="billing-loading" style={styles.container}>
-        <h1 style={styles.title}>Billing</h1>
-        <div style={styles.loading}>Loading billing information...</div>
+      <div data-testid="billing-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Billing</h1>
+        <p className="text-muted-foreground text-center py-8">Loading billing information...</p>
       </div>
     );
   }
@@ -204,17 +193,18 @@ export function Billing({
   // -- Error state --
   if (error) {
     return (
-      <div data-testid="billing-error" style={styles.container}>
-        <h1 style={styles.title}>Billing</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="billing-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground">Billing</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load billing information: {error}</p>
-          <button
+          <Button
             onClick={loadBillingStatus}
-            style={styles.retryBtn}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
             aria-label="Retry"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -231,10 +221,10 @@ export function Billing({
   const hasPaidSubscription = tier !== "free" && status !== "none";
 
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Billing</h1>
-        <a href="#/calendar" style={styles.backLink}>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-foreground">Billing</h1>
+        <a href="#/calendar" className="text-muted-foreground text-sm no-underline hover:text-foreground">
           Back to Calendar
         </a>
       </div>
@@ -243,12 +233,11 @@ export function Billing({
       {statusMsg && (
         <div
           data-testid="billing-status-msg"
-          style={{
-            ...styles.statusMessage,
-            ...(statusMsg.type === "success"
-              ? styles.statusSuccess
-              : styles.statusError),
-          }}
+          className={`px-4 py-2 rounded-md text-sm font-medium mb-4 border ${
+            statusMsg.type === "success"
+              ? "bg-emerald-950 text-emerald-300 border-emerald-600"
+              : "bg-red-950 text-red-300 border-red-700"
+          }`}
         >
           {statusMsg.text}
         </div>
@@ -256,7 +245,10 @@ export function Billing({
 
       {/* Grace period warning */}
       {status === "past_due" && billingStatus.subscription?.grace_period_end && (
-        <div data-testid="grace-period-warning" style={styles.gracePeriodWarning}>
+        <div
+          data-testid="grace-period-warning"
+          className="px-4 py-3 rounded-md text-sm font-medium mb-4 bg-amber-950 text-amber-300 border border-amber-600"
+        >
           Your payment is past due. You have a grace period until{" "}
           {formatBillingDate(billingStatus.subscription.grace_period_end)}.
           Please update your payment method to avoid losing access.
@@ -264,136 +256,135 @@ export function Billing({
       )}
 
       {/* Current Plan Card */}
-      <div style={styles.planCard}>
-        <div style={styles.planCardHeader}>
-          <div>
-            <div style={styles.planCardLabel}>Current Plan</div>
-            <div data-testid="current-plan-name" style={styles.planCardTier}>
-              {tierLabel(tier)}
+      <Card className="mb-6">
+        <CardContent className="p-6">
+          <div className="flex justify-between items-start mb-6">
+            <div>
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Current Plan</div>
+              <div data-testid="current-plan-name" className="text-2xl font-bold text-foreground">
+                {tierLabel(tier)}
+              </div>
+            </div>
+            <div className="text-right">
+              <div
+                data-testid="subscription-status"
+                className="text-sm font-semibold"
+                style={{ color: statusColor(status) }}
+              >
+                {statusLabel(status)}
+              </div>
+              {billingStatus.subscription?.current_period_end && (
+                <div data-testid="period-end" className="text-xs text-muted-foreground mt-1">
+                  Renews {formatBillingDate(billingStatus.subscription.current_period_end)}
+                </div>
+              )}
             </div>
           </div>
-          <div style={styles.planCardStatusBlock}>
-            <div
-              data-testid="subscription-status"
-              style={{
-                ...styles.planCardStatus,
-                color: statusColor(status),
-              }}
-            >
-              {statusLabel(status)}
+
+          {/* Usage bar */}
+          <div className="mb-6">
+            <div className="flex justify-between mb-2">
+              <span className="text-xs text-muted-foreground">Accounts</span>
+              <span data-testid="usage-display" className="text-xs text-foreground font-semibold">
+                {accountsUsed} / {limit}
+              </span>
             </div>
-            {billingStatus.subscription?.current_period_end && (
-              <div data-testid="period-end" style={styles.periodEnd}>
-                Renews {formatBillingDate(billingStatus.subscription.current_period_end)}
-              </div>
+            <div className="w-full h-2 bg-muted rounded overflow-hidden">
+              <div
+                data-testid="usage-bar-fill"
+                className="h-full rounded transition-all duration-300"
+                style={{
+                  width: `${usage}%`,
+                  backgroundColor: usage >= 100 ? "#dc2626" : usage >= 80 ? "#ca8a04" : "#3b82f6",
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex gap-3 flex-wrap">
+            {btnState !== "at_max" && (
+              <Button
+                data-testid="upgrade-btn"
+                onClick={handleUpgrade}
+                disabled={btnState === "disabled" || upgrading}
+              >
+                {upgrading
+                  ? "Processing..."
+                  : `Upgrade to ${tierLabel(nextTier(tier) ?? tier)}`}
+              </Button>
+            )}
+            {hasPaidSubscription && (
+              <Button
+                data-testid="manage-subscription-btn"
+                onClick={handleManageSubscription}
+                variant="outline"
+              >
+                Manage Subscription
+              </Button>
             )}
           </div>
-        </div>
-
-        {/* Usage bar */}
-        <div style={styles.usageSection}>
-          <div style={styles.usageHeader}>
-            <span style={styles.usageLabel}>Accounts</span>
-            <span data-testid="usage-display" style={styles.usageCount}>
-              {accountsUsed} / {limit}
-            </span>
-          </div>
-          <div style={styles.usageBarBg}>
-            <div
-              data-testid="usage-bar-fill"
-              style={{
-                ...styles.usageBarFill,
-                width: `${usage}%`,
-                backgroundColor: usage >= 100 ? "#dc2626" : usage >= 80 ? "#ca8a04" : "#3b82f6",
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Action buttons */}
-        <div style={styles.actionRow}>
-          {btnState !== "at_max" && (
-            <button
-              data-testid="upgrade-btn"
-              onClick={handleUpgrade}
-              disabled={btnState === "disabled" || upgrading}
-              style={{
-                ...styles.upgradeBtn,
-                opacity: btnState === "disabled" || upgrading ? 0.5 : 1,
-                cursor: btnState === "disabled" || upgrading ? "not-allowed" : "pointer",
-              }}
-            >
-              {upgrading
-                ? "Processing..."
-                : `Upgrade to ${tierLabel(nextTier(tier) ?? tier)}`}
-            </button>
-          )}
-          {hasPaidSubscription && (
-            <button
-              data-testid="manage-subscription-btn"
-              onClick={handleManageSubscription}
-              style={styles.manageBtn}
-            >
-              Manage Subscription
-            </button>
-          )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       {/* Plan Comparison */}
-      <div data-testid="plan-comparison" style={styles.comparisonSection}>
-        <h2 style={styles.sectionTitle}>Compare Plans</h2>
-        <div style={styles.planGrid}>
+      <div data-testid="plan-comparison" className="mb-6">
+        <h2 className="text-lg font-bold text-foreground mb-4">Compare Plans</h2>
+        <div className="grid grid-cols-3 gap-4">
           {PLANS.map((plan) => (
-            <div
+            <Card
               key={plan.tier}
               data-testid={`plan-card-${plan.tier}`}
               data-current={plan.tier === tier ? "true" : "false"}
-              style={{
-                ...styles.comparisonCard,
-                ...(plan.tier === tier ? styles.comparisonCardCurrent : {}),
-              }}
+              className={`relative ${
+                plan.tier === tier ? "border-primary ring-1 ring-primary" : ""
+              }`}
             >
-              <div style={styles.comparisonCardName}>{plan.name}</div>
-              <div style={styles.comparisonCardPrice}>{plan.price}</div>
-              <ul style={styles.featureList}>
-                {plan.features.map((feature, i) => (
-                  <li key={i} style={styles.featureItem}>
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-              {plan.tier === tier && (
-                <div style={styles.currentBadge}>Current Plan</div>
-              )}
-            </div>
+              <CardContent className="p-5">
+                <div className="text-base font-bold text-foreground mb-1">{plan.name}</div>
+                <div className="text-xl font-bold text-primary mb-4">{plan.price}</div>
+                <ul className="list-none p-0 m-0">
+                  {plan.features.map((feature, i) => (
+                    <li key={i} className="text-xs text-muted-foreground py-1 border-b border-border last:border-0">
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+                {plan.tier === tier && (
+                  <Badge className="mt-3" variant="secondary">
+                    Current Plan
+                  </Badge>
+                )}
+              </CardContent>
+            </Card>
           ))}
         </div>
       </div>
 
       {/* Billing History */}
       {billingEvents.length > 0 && (
-        <div data-testid="billing-history" style={styles.historySection}>
-          <h2 style={styles.sectionTitle}>Billing History</h2>
-          <div style={styles.historyList}>
+        <div data-testid="billing-history" className="mb-6">
+          <h2 className="text-lg font-bold text-foreground mb-4">Billing History</h2>
+          <div className="flex flex-col gap-2">
             {billingEvents.map((event) => (
-              <div
+              <Card
                 key={event.event_id}
                 data-testid={`billing-event-${event.event_id}`}
-                style={styles.historyItem}
               >
-                <div style={styles.historyEventType}>
-                  {formatEventType(event.event_type)}
-                </div>
-                <div style={styles.historyEventDate}>
-                  {formatBillingDate(event.created_at)}
-                </div>
-                {event.old_tier && event.new_tier && event.old_tier !== event.new_tier && (
-                  <div style={styles.historyTierChange}>
-                    {tierLabel(event.old_tier)} &rarr; {tierLabel(event.new_tier)}
+                <CardContent className="p-4 flex items-center gap-4">
+                  <div className="text-sm text-foreground font-medium flex-1">
+                    {formatEventType(event.event_type)}
                   </div>
-                )}
-              </div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatBillingDate(event.created_at)}
+                  </div>
+                  {event.old_tier && event.new_tier && event.old_tier !== event.new_tier && (
+                    <div className="text-xs text-primary font-medium">
+                      {tierLabel(event.old_tier)} &rarr; {tierLabel(event.new_tier)}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             ))}
           </div>
         </div>
@@ -401,263 +392,3 @@ export function Billing({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with Accounts.tsx / SyncStatus.tsx patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "1rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  statusMessage: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    marginBottom: "1rem",
-  },
-  statusSuccess: {
-    backgroundColor: "#064e3b",
-    color: "#6ee7b7",
-    border: "1px solid #059669",
-  },
-  statusError: {
-    backgroundColor: "#450a0a",
-    color: "#fca5a5",
-    border: "1px solid #dc2626",
-  },
-  gracePeriodWarning: {
-    padding: "0.75rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    marginBottom: "1rem",
-    backgroundColor: "#451a03",
-    color: "#fbbf24",
-    border: "1px solid #ca8a04",
-  },
-  // Current plan card
-  planCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "1.5rem",
-    border: "1px solid #334155",
-    marginBottom: "2rem",
-  },
-  planCardHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: "1.5rem",
-  },
-  planCardLabel: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    marginBottom: "0.25rem",
-  },
-  planCardTier: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-  },
-  planCardStatusBlock: {
-    textAlign: "right" as const,
-  },
-  planCardStatus: {
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-  periodEnd: {
-    fontSize: "0.75rem",
-    color: "#94a3b8",
-    marginTop: "0.25rem",
-  },
-  // Usage bar
-  usageSection: {
-    marginBottom: "1.5rem",
-  },
-  usageHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    marginBottom: "0.5rem",
-  },
-  usageLabel: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-  },
-  usageCount: {
-    fontSize: "0.8rem",
-    color: "#e2e8f0",
-    fontWeight: 600,
-  },
-  usageBarBg: {
-    width: "100%",
-    height: "8px",
-    backgroundColor: "#334155",
-    borderRadius: "4px",
-    overflow: "hidden" as const,
-  },
-  usageBarFill: {
-    height: "100%",
-    borderRadius: "4px",
-    transition: "width 0.3s ease",
-  },
-  // Action buttons
-  actionRow: {
-    display: "flex",
-    gap: "0.75rem",
-    flexWrap: "wrap" as const,
-  },
-  upgradeBtn: {
-    padding: "0.5rem 1.25rem",
-    borderRadius: "6px",
-    border: "none",
-    backgroundColor: "#3b82f6",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-  manageBtn: {
-    padding: "0.5rem 1.25rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  // Plan comparison
-  comparisonSection: {
-    marginBottom: "2rem",
-  },
-  sectionTitle: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    marginBottom: "1rem",
-  },
-  planGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(3, 1fr)",
-    gap: "1rem",
-  },
-  comparisonCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "1.25rem",
-    border: "1px solid #334155",
-    position: "relative" as const,
-  },
-  comparisonCardCurrent: {
-    borderColor: "#3b82f6",
-    boxShadow: "0 0 0 1px #3b82f6",
-  },
-  comparisonCardName: {
-    fontSize: "1rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    marginBottom: "0.25rem",
-  },
-  comparisonCardPrice: {
-    fontSize: "1.25rem",
-    fontWeight: 700,
-    color: "#3b82f6",
-    marginBottom: "1rem",
-  },
-  featureList: {
-    listStyle: "none",
-    padding: 0,
-    margin: 0,
-  },
-  featureItem: {
-    fontSize: "0.8rem",
-    color: "#cbd5e1",
-    padding: "0.3rem 0",
-    borderBottom: "1px solid #1e293b",
-  },
-  currentBadge: {
-    marginTop: "0.75rem",
-    padding: "0.25rem 0.5rem",
-    backgroundColor: "#1e3a5f",
-    color: "#93c5fd",
-    borderRadius: "4px",
-    fontSize: "0.7rem",
-    fontWeight: 600,
-    textAlign: "center" as const,
-  },
-  // Billing history
-  historySection: {
-    marginBottom: "2rem",
-  },
-  historyList: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.5rem",
-  },
-  historyItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: "1rem",
-    padding: "0.75rem 1rem",
-    backgroundColor: "#1e293b",
-    borderRadius: "8px",
-    border: "1px solid #334155",
-  },
-  historyEventType: {
-    fontSize: "0.875rem",
-    color: "#e2e8f0",
-    fontWeight: 500,
-    flex: 1,
-  },
-  historyEventDate: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-  },
-  historyTierChange: {
-    fontSize: "0.75rem",
-    color: "#93c5fd",
-    fontWeight: 500,
-  },
-};

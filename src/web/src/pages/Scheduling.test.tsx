@@ -8,7 +8,9 @@
  *   calls commit API, cancel button calls cancel API, sessions load on mount
  *
  * Uses React Testing Library with fireEvent for click interactions.
- * Same pattern as Billing.test.tsx, ErrorRecovery.test.tsx.
+ *
+ * Since Scheduling now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
  *
  * NOTE: We use fireEvent.click instead of userEvent.click because components
  * with timers interact poorly with userEvent's internal delay mechanism
@@ -16,13 +18,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { Scheduling, type SchedulingProps } from "./Scheduling";
+import { Scheduling } from "./Scheduling";
 import type {
   SchedulingSession,
   SchedulingCandidate,
   CommitResponse,
   CancelResponse,
-  SessionParticipant,
+  CreateSessionPayload,
 } from "../lib/scheduling";
 import type { LinkedAccount } from "../lib/api";
 
@@ -153,68 +155,105 @@ const MOCK_CANCEL_RESPONSE: CancelResponse = {
 };
 
 // ---------------------------------------------------------------------------
+// Mock the API provider and auth
+// ---------------------------------------------------------------------------
+
+const mockListSessions = vi.fn<() => Promise<SchedulingSession[]>>();
+const mockFetchAccounts = vi.fn<() => Promise<LinkedAccount[]>>();
+const mockCreateSchedulingSession = vi.fn<(payload: CreateSessionPayload) => Promise<SchedulingSession>>();
+const mockCommitCandidate = vi.fn<(sessionId: string, candidateId: string) => Promise<CommitResponse>>();
+const mockCancelSession = vi.fn<(sessionId: string) => Promise<CancelResponse>>();
+
+const mockApiValue = {
+  listSessions: mockListSessions,
+  fetchAccounts: mockFetchAccounts,
+  createSchedulingSession: mockCreateSchedulingSession,
+  commitCandidate: mockCommitCandidate,
+  cancelSession: mockCancelSession,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockListSessions(sessions: SchedulingSession[] = ALL_MOCK_SESSIONS) {
-  return vi.fn(async (): Promise<SchedulingSession[]> => sessions);
-}
+function setupMocks(overrides: {
+  sessions?: SchedulingSession[];
+  sessionsError?: string;
+  accounts?: LinkedAccount[];
+  createSessionResult?: SchedulingSession;
+  createSessionError?: string;
+  commitResult?: CommitResponse;
+  commitError?: string;
+  cancelResult?: CancelResponse;
+  cancelError?: string;
+} = {}) {
+  if (overrides.sessionsError) {
+    mockListSessions.mockRejectedValue(new Error(overrides.sessionsError));
+  } else {
+    mockListSessions.mockResolvedValue(overrides.sessions ?? ALL_MOCK_SESSIONS);
+  }
 
-function createFailingListSessions(message = "Network error") {
-  return vi.fn(async (): Promise<SchedulingSession[]> => {
-    throw new Error(message);
-  });
-}
+  mockFetchAccounts.mockResolvedValue(overrides.accounts ?? MOCK_ACCOUNTS);
 
-function createMockFetchAccounts(accounts: LinkedAccount[] = MOCK_ACCOUNTS) {
-  return vi.fn(async (): Promise<LinkedAccount[]> => accounts);
-}
+  if (overrides.createSessionError) {
+    mockCreateSchedulingSession.mockRejectedValue(new Error(overrides.createSessionError));
+  } else {
+    mockCreateSchedulingSession.mockResolvedValue(overrides.createSessionResult ?? MOCK_SESSION_PENDING);
+  }
 
-function createMockCreateSession(session: SchedulingSession = MOCK_SESSION_PENDING) {
-  return vi.fn(async (): Promise<SchedulingSession> => session);
-}
+  if (overrides.commitError) {
+    mockCommitCandidate.mockRejectedValue(new Error(overrides.commitError));
+  } else {
+    mockCommitCandidate.mockResolvedValue(overrides.commitResult ?? MOCK_COMMIT_RESPONSE);
+  }
 
-function createMockCommitCandidate(response: CommitResponse = MOCK_COMMIT_RESPONSE) {
-  return vi.fn(async (): Promise<CommitResponse> => response);
-}
-
-function createMockCancelSession(response: CancelResponse = MOCK_CANCEL_RESPONSE) {
-  return vi.fn(async (): Promise<CancelResponse> => response);
+  if (overrides.cancelError) {
+    mockCancelSession.mockRejectedValue(new Error(overrides.cancelError));
+  } else {
+    mockCancelSession.mockResolvedValue(overrides.cancelResult ?? MOCK_CANCEL_RESPONSE);
+  }
 }
 
 /**
  * Render the Scheduling component and wait for the initial async fetch to resolve.
  */
-async function renderAndWait(overrides: Partial<SchedulingProps> = {}) {
-  const listSessions = overrides.listSessions ?? createMockListSessions();
-  const fetchAccounts = overrides.fetchAccounts ?? createMockFetchAccounts();
-  const createSession = overrides.createSession ?? createMockCreateSession();
-  const commitCandidate = overrides.commitCandidate ?? createMockCommitCandidate();
-  const cancelSession = overrides.cancelSession ?? createMockCancelSession();
+async function renderAndWait(overrides: {
+  sessions?: SchedulingSession[];
+  sessionsError?: string;
+  accounts?: LinkedAccount[];
+  createSessionResult?: SchedulingSession;
+  createSessionError?: string;
+  commitResult?: CommitResponse;
+  commitError?: string;
+  cancelResult?: CancelResponse;
+  cancelError?: string;
+} = {}) {
+  setupMocks(overrides);
 
-  const result = render(
-    <Scheduling
-      listSessions={listSessions}
-      fetchAccounts={fetchAccounts}
-      createSession={createSession}
-      commitCandidate={commitCandidate}
-      cancelSession={cancelSession}
-    />,
-  );
+  const result = render(<Scheduling />);
 
   // Flush microtasks so async fetch resolves
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  return {
-    ...result,
-    listSessions,
-    fetchAccounts,
-    createSession,
-    commitCandidate,
-    cancelSession,
-  };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +263,11 @@ async function renderAndWait(overrides: Partial<SchedulingProps> = {}) {
 describe("Scheduling Page", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date("2026-02-15T12:00:00Z").getTime() });
+    mockListSessions.mockReset();
+    mockFetchAccounts.mockReset();
+    mockCreateSchedulingSession.mockReset();
+    mockCommitCandidate.mockReset();
+    mockCancelSession.mockReset();
   });
 
   afterEach(() => {
@@ -251,11 +295,8 @@ describe("Scheduling Page", () => {
     });
 
     it("renders participant selector with accounts from API", async () => {
-      await renderAndWait({
-        fetchAccounts: createMockFetchAccounts(MOCK_ACCOUNTS),
-      });
+      await renderAndWait();
 
-      // Should show checkboxes for each account
       expect(screen.getByTestId("participant-acc_1")).toBeInTheDocument();
       expect(screen.getByTestId("participant-acc_2")).toBeInTheDocument();
       expect(screen.getByTestId("participant-acc_3")).toBeInTheDocument();
@@ -296,9 +337,7 @@ describe("Scheduling Page", () => {
 
   describe("candidate list", () => {
     it("renders candidates with scores and explanations", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       // Click the ready session to view details
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
@@ -316,9 +355,7 @@ describe("Scheduling Page", () => {
     });
 
     it("highlights best candidate", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
 
@@ -331,9 +368,7 @@ describe("Scheduling Page", () => {
     });
 
     it("shows explanations for each candidate", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
 
@@ -346,9 +381,7 @@ describe("Scheduling Page", () => {
     });
 
     it("shows commit button for each candidate in ready session", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
 
@@ -411,63 +444,43 @@ describe("Scheduling Page", () => {
 
   describe("integration: load sessions on mount", () => {
     it("calls listSessions on mount", async () => {
-      const listSessions = createMockListSessions();
-      await renderAndWait({ listSessions });
+      await renderAndWait();
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(mockListSessions).toHaveBeenCalledTimes(1);
     });
 
     it("calls fetchAccounts on mount for participant selector", async () => {
-      const fetchAccounts = createMockFetchAccounts();
-      await renderAndWait({ fetchAccounts });
+      await renderAndWait();
 
-      expect(fetchAccounts).toHaveBeenCalledTimes(1);
+      expect(mockFetchAccounts).toHaveBeenCalledTimes(1);
     });
 
     it("shows loading state before fetch completes", () => {
-      const listSessions = vi.fn(
-        (): Promise<SchedulingSession[]> => new Promise(() => {}),
-      );
-      // Also use a never-resolving promise for accounts to prevent its state
-      // update from firing outside act() while we assert loading.
-      const fetchAccounts = vi.fn(
-        (): Promise<LinkedAccount[]> => new Promise(() => {}),
-      );
-      render(
-        <Scheduling
-          listSessions={listSessions}
-          fetchAccounts={fetchAccounts}
-          createSession={createMockCreateSession()}
-          commitCandidate={createMockCommitCandidate()}
-          cancelSession={createMockCancelSession()}
-        />,
-      );
+      mockListSessions.mockReturnValue(new Promise(() => {}));
+      mockFetchAccounts.mockReturnValue(new Promise(() => {}));
+
+      render(<Scheduling />);
 
       expect(screen.getByTestId("scheduling-loading")).toBeInTheDocument();
     });
 
     it("shows error state when fetch fails", async () => {
-      await renderAndWait({
-        listSessions: createFailingListSessions("API unavailable"),
-      });
+      await renderAndWait({ sessionsError: "API unavailable" });
 
       expect(screen.getByTestId("scheduling-error")).toBeInTheDocument();
       expect(screen.getByText(/api unavailable/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      await renderAndWait({
-        listSessions: createFailingListSessions(),
-      });
+      await renderAndWait({ sessionsError: "Network error" });
 
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
 
     it("retry button refetches sessions", async () => {
-      const listSessions = createFailingListSessions();
-      await renderAndWait({ listSessions });
+      await renderAndWait({ sessionsError: "Network error" });
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(mockListSessions).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByRole("button", { name: /retry/i }));
 
@@ -475,13 +488,11 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(listSessions).toHaveBeenCalledTimes(2);
+      expect(mockListSessions).toHaveBeenCalledTimes(2);
     });
 
     it("shows empty state when no sessions exist", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([]),
-      });
+      await renderAndWait({ sessions: [] });
 
       expect(screen.getByTestId("sessions-empty")).toBeInTheDocument();
     });
@@ -492,9 +503,8 @@ describe("Scheduling Page", () => {
   // =========================================================================
 
   describe("integration: form submission creates session", () => {
-    it("submitting form calls createSession with correct payload", async () => {
-      const createSession = createMockCreateSession();
-      await renderAndWait({ createSession });
+    it("submitting form calls createSchedulingSession with correct payload", async () => {
+      await renderAndWait();
 
       // Fill form: select duration
       fireEvent.change(screen.getByTestId("duration-select"), {
@@ -523,8 +533,8 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(createSession).toHaveBeenCalledTimes(1);
-      expect(createSession).toHaveBeenCalledWith({
+      expect(mockCreateSchedulingSession).toHaveBeenCalledTimes(1);
+      expect(mockCreateSchedulingSession).toHaveBeenCalledWith({
         duration_minutes: 30,
         window_start: "2026-02-20",
         window_end: "2026-02-22",
@@ -561,10 +571,7 @@ describe("Scheduling Page", () => {
     });
 
     it("shows error message when session creation fails", async () => {
-      const createSession = vi.fn(async () => {
-        throw new Error("Scheduling conflict");
-      });
-      await renderAndWait({ createSession });
+      await renderAndWait({ createSessionError: "Scheduling conflict" });
 
       // Select a participant
       fireEvent.click(screen.getByTestId("participant-acc_1"));
@@ -588,10 +595,9 @@ describe("Scheduling Page", () => {
     });
 
     it("refreshes sessions list after successful creation", async () => {
-      const listSessions = createMockListSessions();
-      await renderAndWait({ listSessions });
+      await renderAndWait();
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(mockListSessions).toHaveBeenCalledTimes(1);
 
       // Select a participant
       fireEvent.click(screen.getByTestId("participant-acc_1"));
@@ -611,7 +617,7 @@ describe("Scheduling Page", () => {
       });
 
       // Should have been called again to refresh
-      expect(listSessions).toHaveBeenCalledTimes(2);
+      expect(mockListSessions).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -621,11 +627,7 @@ describe("Scheduling Page", () => {
 
   describe("integration: commit candidate creates event", () => {
     it("clicking commit calls commitCandidate with session and candidate IDs", async () => {
-      const commitCandidate = createMockCommitCandidate();
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-        commitCandidate,
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       // Click session to expand
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
@@ -641,14 +643,12 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(commitCandidate).toHaveBeenCalledTimes(1);
-      expect(commitCandidate).toHaveBeenCalledWith("sess_002", "cand_1");
+      expect(mockCommitCandidate).toHaveBeenCalledTimes(1);
+      expect(mockCommitCandidate).toHaveBeenCalledWith("sess_002", "cand_1");
     });
 
     it("shows success message after committing", async () => {
-      await renderAndWait({
-        listSessions: createMockListSessions([MOCK_SESSION_READY]),
-      });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
 
@@ -667,10 +667,9 @@ describe("Scheduling Page", () => {
     });
 
     it("refreshes sessions after committing", async () => {
-      const listSessions = createMockListSessions([MOCK_SESSION_READY]);
-      await renderAndWait({ listSessions });
+      await renderAndWait({ sessions: [MOCK_SESSION_READY] });
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(mockListSessions).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByTestId("session-row-sess_002"));
 
@@ -684,7 +683,7 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(listSessions).toHaveBeenCalledTimes(2);
+      expect(mockListSessions).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -694,8 +693,7 @@ describe("Scheduling Page", () => {
 
   describe("integration: cancel session", () => {
     it("clicking cancel calls cancelSession with session ID", async () => {
-      const cancelSession = createMockCancelSession();
-      await renderAndWait({ cancelSession });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("cancel-btn-sess_001"));
 
@@ -703,8 +701,8 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(cancelSession).toHaveBeenCalledTimes(1);
-      expect(cancelSession).toHaveBeenCalledWith("sess_001");
+      expect(mockCancelSession).toHaveBeenCalledTimes(1);
+      expect(mockCancelSession).toHaveBeenCalledWith("sess_001");
     });
 
     it("shows success message after cancelling", async () => {
@@ -721,10 +719,9 @@ describe("Scheduling Page", () => {
     });
 
     it("refreshes sessions after cancelling", async () => {
-      const listSessions = createMockListSessions();
-      await renderAndWait({ listSessions });
+      await renderAndWait();
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(mockListSessions).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByTestId("cancel-btn-sess_001"));
 
@@ -732,14 +729,11 @@ describe("Scheduling Page", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(listSessions).toHaveBeenCalledTimes(2);
+      expect(mockListSessions).toHaveBeenCalledTimes(2);
     });
 
     it("shows error message when cancel fails", async () => {
-      const cancelSession = vi.fn(async () => {
-        throw new Error("Cannot cancel committed session");
-      });
-      await renderAndWait({ cancelSession });
+      await renderAndWait({ cancelError: "Cannot cancel committed session" });
 
       fireEvent.click(screen.getByTestId("cancel-btn-sess_001"));
 
