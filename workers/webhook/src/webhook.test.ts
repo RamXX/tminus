@@ -3,6 +3,8 @@
  *
  * Covers:
  * - Valid Google webhook with known channel_token enqueues SYNC_INCREMENTAL
+ * - Google webhook resolves to account + scoped calendar_id (per-scope routing)
+ * - Google webhook with null calendar_id (legacy) still enqueues with telemetry
  * - Unknown channel_token returns 200 but does NOT enqueue
  * - Missing Google headers returns 200 (always 200 to Google)
  * - 'sync' resource_state returns 200 WITHOUT enqueueing
@@ -10,11 +12,12 @@
  * - 'not_exists' resource_state enqueues correctly
  * - Health endpoint returns 200
  * - Unknown routes return 404
- * - Enqueued message has correct shape
+ * - Enqueued message has correct shape including calendar_id
  * - Microsoft validation handshake returns token as plain text
- * - Microsoft change notification enqueues SYNC_INCREMENTAL
+ * - Microsoft change notification enqueues SYNC_INCREMENTAL with calendar_id
  * - Microsoft clientState mismatch is skipped without failing the whole batch
  * - Microsoft malformed body returns 400
+ * - Microsoft legacy subscription fallback resolves calendar_id
  *
  * D1 and Queue are mocked with lightweight stubs.
  */
@@ -30,8 +33,10 @@ const TEST_ACCOUNT_ID = "acc_01HXY0000000000000000000AA";
 const TEST_CHANNEL_TOKEN = "secret-token-abc123";
 const TEST_CHANNEL_ID = "channel-uuid-12345";
 const TEST_RESOURCE_ID = "resource-id-67890";
+const TEST_CALENDAR_ID = "user@example.com";
 const TEST_MS_CLIENT_STATE = "ms-webhook-secret-xyz";
 const TEST_MS_SUBSCRIPTION_ID = "ms-sub-aaa-111-bbb";
+const TEST_MS_CALENDAR_ID = "AAMkAGU0OGRh";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -43,10 +48,15 @@ function createMockD1(
     account_id: string;
     channel_token: string | null;
     channel_id?: string;
+    channel_calendar_id?: string | null;
     provider?: string;
     status?: string;
   }> = [],
-  msSubscriptions: Array<{ subscription_id: string; account_id: string }> = [],
+  msSubscriptions: Array<{
+    subscription_id: string;
+    account_id: string;
+    calendar_id?: string | null;
+  }> = [],
 ) {
   return {
     prepare(sql: string) {
@@ -69,6 +79,7 @@ function createMockD1(
                 return ({
                   account_id: match.account_id,
                   channel_token: match.channel_token,
+                  channel_calendar_id: match.channel_calendar_id ?? null,
                 } as T);
               }
 
@@ -81,6 +92,7 @@ function createMockD1(
                 return ({
                   account_id: account.account_id,
                   channel_token: account.channel_token,
+                  calendar_id: sub.calendar_id ?? null,
                 } as T);
               }
 
@@ -92,10 +104,14 @@ function createMockD1(
                 return (match as T) ?? null;
               }
 
-              // Look up by channel_token
+              // Look up by channel_token -- now returns channel_calendar_id too
               const token = args[0] as string;
               const match = accounts.find((a) => a.channel_token === token);
-              return (match as T) ?? null;
+              if (!match) return null;
+              return ({
+                account_id: match.account_id,
+                channel_calendar_id: match.channel_calendar_id ?? null,
+              } as T);
             },
           };
         },
@@ -121,10 +137,15 @@ function createMockEnv(opts?: {
     account_id: string;
     channel_token: string | null;
     channel_id?: string;
+    channel_calendar_id?: string | null;
     provider?: string;
     status?: string;
   }>;
-  msSubscriptions?: Array<{ subscription_id: string; account_id: string }>;
+  msSubscriptions?: Array<{
+    subscription_id: string;
+    account_id: string;
+    calendar_id?: string | null;
+  }>;
   msClientState?: string;
 }) {
   const queue = createMockQueue();
@@ -216,7 +237,11 @@ function buildMsNotificationBody(overrides?: {
 describe("POST /webhook/google", () => {
   it("valid webhook with known channel_token enqueues SYNC_INCREMENTAL and returns 200", async () => {
     const { env, queue } = createMockEnv({
-      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        channel_calendar_id: TEST_CALENDAR_ID,
+      }],
     });
     const handler = createHandler();
 
@@ -232,12 +257,51 @@ describe("POST /webhook/google", () => {
       channel_id: string;
       resource_id: string;
       ping_ts: string;
+      calendar_id: string | null;
     };
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe(TEST_ACCOUNT_ID);
     expect(msg.channel_id).toBe(TEST_CHANNEL_ID);
     expect(msg.resource_id).toBe(TEST_RESOURCE_ID);
     expect(msg.ping_ts).toBeTruthy();
+    expect(msg.calendar_id).toBe(TEST_CALENDAR_ID);
+  });
+
+  it("resolves to scoped calendar_id when channel_calendar_id is set (AC 1)", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        channel_calendar_id: "work-calendar-123",
+      }],
+    });
+    const handler = createHandler();
+
+    const request = buildWebhookRequest();
+    await handler.fetch(request, env, mockCtx);
+
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as { calendar_id: string | null };
+    expect(msg.calendar_id).toBe("work-calendar-123");
+  });
+
+  it("enqueues with calendar_id: null for legacy channel (no channel_calendar_id)", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        // No channel_calendar_id -- legacy channel
+      }],
+    });
+    const handler = createHandler();
+
+    const request = buildWebhookRequest();
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as { calendar_id: string | null };
+    expect(msg.calendar_id).toBeNull();
   });
 
   it("unknown channel_token returns 200 but does NOT enqueue", async () => {
@@ -282,7 +346,11 @@ describe("POST /webhook/google", () => {
 
   it("'exists' resource_state enqueues correctly", async () => {
     const { env, queue } = createMockEnv({
-      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        channel_calendar_id: "primary",
+      }],
     });
     const handler = createHandler();
 
@@ -296,7 +364,11 @@ describe("POST /webhook/google", () => {
 
   it("'not_exists' resource_state enqueues correctly", async () => {
     const { env, queue } = createMockEnv({
-      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        channel_calendar_id: "primary",
+      }],
     });
     const handler = createHandler();
 
@@ -308,9 +380,13 @@ describe("POST /webhook/google", () => {
     expect((queue.messages[0] as { type: string }).type).toBe("SYNC_INCREMENTAL");
   });
 
-  it("enqueued message has correct shape", async () => {
+  it("enqueued message has correct shape including calendar_id", async () => {
     const { env, queue } = createMockEnv({
-      accounts: [{ account_id: TEST_ACCOUNT_ID, channel_token: TEST_CHANNEL_TOKEN }],
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        channel_token: TEST_CHANNEL_TOKEN,
+        channel_calendar_id: "work@example.com",
+      }],
     });
     const handler = createHandler();
 
@@ -322,9 +398,9 @@ describe("POST /webhook/google", () => {
     expect(queue.messages.length).toBe(1);
     const msg = queue.messages[0] as Record<string, unknown>;
 
-    // Verify exact shape: only expected keys
+    // Verify exact shape: only expected keys (now includes calendar_id)
     const keys = Object.keys(msg).sort();
-    expect(keys).toEqual(["account_id", "channel_id", "ping_ts", "resource_id", "type"]);
+    expect(keys).toEqual(["account_id", "calendar_id", "channel_id", "ping_ts", "resource_id", "type"]);
 
     // Verify types
     expect(typeof msg.type).toBe("string");
@@ -332,12 +408,14 @@ describe("POST /webhook/google", () => {
     expect(typeof msg.channel_id).toBe("string");
     expect(typeof msg.resource_id).toBe("string");
     expect(typeof msg.ping_ts).toBe("string");
+    expect(typeof msg.calendar_id).toBe("string");
 
     // Verify values
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe(TEST_ACCOUNT_ID);
     expect(msg.channel_id).toBe(TEST_CHANNEL_ID);
     expect(msg.resource_id).toBe(TEST_RESOURCE_ID);
+    expect(msg.calendar_id).toBe("work@example.com");
 
     // Verify ping_ts is a valid ISO timestamp within test window
     const pingTs = msg.ping_ts as string;
@@ -384,8 +462,8 @@ describe("POST /webhook/microsoft", () => {
     expect(body).toBe(token);
   });
 
-  // AC 2: Change notification enqueues SYNC_INCREMENTAL
-  it("change notification enqueues SYNC_INCREMENTAL (AC 2)", async () => {
+  // AC 2: Change notification enqueues SYNC_INCREMENTAL with calendar_id
+  it("change notification enqueues SYNC_INCREMENTAL with scoped calendar_id (AC 2)", async () => {
     const { env, queue } = createMockEnv({
       accounts: [{
         account_id: TEST_ACCOUNT_ID,
@@ -393,6 +471,7 @@ describe("POST /webhook/microsoft", () => {
         status: "active",
         channel_id: TEST_MS_SUBSCRIPTION_ID,
         channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: TEST_MS_CALENDAR_ID,
       }],
     });
     const handler = createHandler();
@@ -415,6 +494,67 @@ describe("POST /webhook/microsoft", () => {
     expect(msg.channel_id).toBe(TEST_MS_SUBSCRIPTION_ID);
     expect(msg.resource_id).toBe("users/abc123/events/evt-1");
     expect(typeof msg.ping_ts).toBe("string");
+    expect(msg.calendar_id).toBe(TEST_MS_CALENDAR_ID);
+  });
+
+  it("enqueues with calendar_id: null for legacy Microsoft subscription (no calendar_id)", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+        // No channel_calendar_id -- legacy subscription
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as { calendar_id: string | null };
+    expect(msg.calendar_id).toBeNull();
+  });
+
+  it("legacy ms_subscriptions fallback resolves calendar_id", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_token: TEST_MS_CLIENT_STATE,
+        // No channel_id -- won't match direct lookup
+      }],
+      msSubscriptions: [{
+        subscription_id: TEST_MS_SUBSCRIPTION_ID,
+        account_id: TEST_ACCOUNT_ID,
+        calendar_id: "legacy-cal-789",
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as { calendar_id: string | null };
+    expect(msg.calendar_id).toBe("legacy-cal-789");
   });
 
   it("accepts microsoft accounts in status='error' (only revoked is excluded)", async () => {
@@ -425,6 +565,7 @@ describe("POST /webhook/microsoft", () => {
         status: "error",
         channel_id: TEST_MS_SUBSCRIPTION_ID,
         channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: TEST_MS_CALENDAR_ID,
       }],
     });
     const handler = createHandler();
@@ -467,8 +608,8 @@ describe("POST /webhook/microsoft", () => {
     expect(queue.messages.length).toBe(0);
   });
 
-  // AC 3: clientState validation
-  it("returns 202 and skips enqueue when clientState does not match (AC 3)", async () => {
+  // AC 5: clientState validation (security check)
+  it("returns 202 and skips enqueue when clientState does not match (AC 5)", async () => {
     const { env, queue } = createMockEnv({
       accounts: [{
         account_id: TEST_ACCOUNT_ID,
@@ -504,6 +645,7 @@ describe("POST /webhook/microsoft", () => {
           status: "active",
           channel_id: "sub-valid",
           channel_token: TEST_MS_CLIENT_STATE,
+          channel_calendar_id: "cal-valid",
         },
         {
           account_id: "acc_bad",
@@ -596,7 +738,7 @@ describe("POST /webhook/microsoft", () => {
   });
 
   // Unknown subscription
-  it("returns 202 but does not enqueue for unknown subscriptionId", async () => {
+  it("returns 202 but does not enqueue for unknown subscriptionId (AC 4)", async () => {
     const { env, queue } = createMockEnv({
       msSubscriptions: [], // no subscriptions registered
     });
@@ -615,8 +757,8 @@ describe("POST /webhook/microsoft", () => {
     expect(queue.messages.length).toBe(0);
   });
 
-  // Multiple notifications
-  it("processes multiple notifications in a single payload", async () => {
+  // Multiple notifications with per-scope routing
+  it("processes multiple notifications with per-scope calendar_ids", async () => {
     const { env, queue } = createMockEnv({
       accounts: [
         {
@@ -625,6 +767,7 @@ describe("POST /webhook/microsoft", () => {
           status: "active",
           channel_id: "sub-1",
           channel_token: TEST_MS_CLIENT_STATE,
+          channel_calendar_id: "cal-work",
         },
         {
           account_id: "acc_02",
@@ -632,6 +775,7 @@ describe("POST /webhook/microsoft", () => {
           status: "active",
           channel_id: "sub-2",
           channel_token: TEST_MS_CLIENT_STATE,
+          channel_calendar_id: "cal-personal",
         },
       ],
     });
@@ -666,7 +810,9 @@ describe("POST /webhook/microsoft", () => {
 
     const msgs = queue.messages as Array<Record<string, unknown>>;
     expect(msgs[0].account_id).toBe("acc_01");
+    expect(msgs[0].calendar_id).toBe("cal-work");
     expect(msgs[1].account_id).toBe("acc_02");
+    expect(msgs[1].calendar_id).toBe("cal-personal");
   });
 
   // GET /webhook/microsoft still returns 404

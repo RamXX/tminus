@@ -620,6 +620,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -659,6 +660,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-recover-1",
       resource_id: "resource-recover-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -882,6 +884,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -925,6 +928,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-google-missing-meta",
       resource_id: "resource-google-missing-meta",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -953,6 +957,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-managed-delete-1",
       resource_id: "resource-managed-delete-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -997,6 +1002,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-managed-delete-2",
       resource_id: "resource-managed-delete-2",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1092,6 +1098,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-overlay-delete",
       resource_id: "resource-overlay-delete",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1197,6 +1204,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-overlay-fallback-delete",
       resource_id: "resource-overlay-fallback-delete",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1281,6 +1289,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-overlay-bootstrap",
       resource_id: "resource-overlay-bootstrap",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1352,6 +1361,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-overlay-404",
       resource_id: "resource-overlay-404",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1385,6 +1395,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-managed-delete-stale-index",
       resource_id: "resource-managed-delete-stale-index",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1433,6 +1444,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-managed-delete-encoded",
       resource_id: "resource-managed-delete-encoded",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1472,6 +1484,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1519,6 +1532,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1561,6 +1575,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1586,6 +1601,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1617,6 +1633,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1648,6 +1665,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1673,6 +1691,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1715,6 +1734,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
             channel_id: "channel-1",
             resource_id: "resource-1",
             ping_ts: new Date().toISOString(),
+            calendar_id: null,
           } as SyncIncrementalMessage,
           ack() {
             ackedIds.push("msg-1");
@@ -1779,6 +1799,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-1",
       resource_id: "resource-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
@@ -1807,6 +1828,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       channel_id: "channel-invalid-grant",
       resource_id: "resource-invalid-grant",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { sleepFn: noopSleep });
@@ -1964,17 +1986,15 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       sleepFn: noopSleep,
     });
 
-    // All three events produce deltas, each canonicalized to the same origin_event_id.
-    // UserGraphDO receives one applyProviderDelta call with 3 deltas.
+    // All three events canonicalize to the same origin_event_id.
+    // Cross-scope dedup (TM-8gfd.5) collapses duplicates, so only 1 delta
+    // reaches UserGraphDO -- this is the correct behavior.
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
     const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
       origin_event_id: string;
     }>;
-    expect(deltas).toHaveLength(3);
-    // Every delta's origin_event_id must be the canonical (fully decoded) form.
-    for (const delta of deltas) {
-      expect(delta.origin_event_id).toBe(canonicalId);
-    }
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].origin_event_id).toBe(canonicalId);
   });
 
   it("TM-08pp: full sync normalizes provider_event_id values", async () => {
@@ -2080,6 +2100,7 @@ describe("DLQ integration: messages retried and sent to DLQ after max_retries", 
       channel_id: "channel-dlq-test",
       resource_id: "resource-dlq-test",
       ping_ts: "2026-02-15T00:00:00Z",
+    calendar_id: null,
     };
 
     let retryCount = 0;
@@ -2584,6 +2605,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-1",
       resource_id: "resource-ms-1",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2678,6 +2700,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-2",
       resource_id: "resource-ms-2",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2719,6 +2742,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-2b",
       resource_id: "resource-ms-2b",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2757,6 +2781,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-cat-fallback",
       resource_id: "resource-ms-cat-fallback",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2789,6 +2814,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-managed-delete",
       resource_id: "resource-ms-managed-delete",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2831,6 +2857,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-2c",
       resource_id: "resource-ms-2c",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: invalidDeltaFetch, sleepFn: noopSleep });
@@ -2857,6 +2884,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-3",
       resource_id: "resource-ms-3",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2884,6 +2912,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-4",
       resource_id: "resource-ms-4",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
@@ -2911,6 +2940,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       channel_id: "channel-ms-5",
       resource_id: "resource-ms-5",
       ping_ts: new Date().toISOString(),
+      calendar_id: null,
     };
 
     // No special Microsoft-specific fields in the message

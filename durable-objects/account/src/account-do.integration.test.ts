@@ -2172,4 +2172,219 @@ describe("AccountDO integration", () => {
       expect(body.lastSuccessTs).toBeDefined();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Calendar scope persistence round-trip (TM-8gfd.2 Gap 2 fix)
+  //
+  // These tests prove that upsertCalendarScope writes to real SQLite and
+  // listCalendarScopes reads back the persisted values. Unlike the API-layer
+  // test (accounts.integration.test.ts) which uses a shared in-memory mock,
+  // this exercises the actual DO storage layer via better-sqlite3.
+  // -------------------------------------------------------------------------
+
+  describe("calendar scope storage persistence", () => {
+    it("upsert then list round-trips syncEnabled=true through SQLite", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      // Initialize creates a default "primary" scope with syncEnabled=true
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Upsert a new scope with syncEnabled=true
+      await acct.upsertCalendarScope({
+        providerCalendarId: "work-calendar@example.com",
+        displayName: "Work Calendar",
+        calendarRole: "editor",
+        enabled: true,
+        syncEnabled: true,
+      });
+
+      // Read back from real SQLite storage
+      const scopes = await acct.listCalendarScopes();
+
+      const workScope = scopes.find(
+        (s) => s.providerCalendarId === "work-calendar@example.com",
+      );
+      expect(workScope).toBeDefined();
+      expect(workScope!.syncEnabled).toBe(true);
+      expect(workScope!.enabled).toBe(true);
+      expect(workScope!.displayName).toBe("Work Calendar");
+      expect(workScope!.calendarRole).toBe("editor");
+
+      // Also verify at the raw SQLite row level to prove real storage
+      const rawRow = db
+        .prepare(
+          "SELECT sync_enabled, enabled, display_name, calendar_role FROM calendar_scopes WHERE provider_calendar_id = ?",
+        )
+        .get("work-calendar@example.com") as {
+          sync_enabled: number;
+          enabled: number;
+          display_name: string | null;
+          calendar_role: string;
+        };
+      expect(rawRow).toBeDefined();
+      expect(rawRow.sync_enabled).toBe(1);
+      expect(rawRow.enabled).toBe(1);
+      expect(rawRow.display_name).toBe("Work Calendar");
+      expect(rawRow.calendar_role).toBe("editor");
+    });
+
+    it("upsert then list round-trips syncEnabled=false through SQLite", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // Upsert a scope with syncEnabled=false
+      await acct.upsertCalendarScope({
+        providerCalendarId: "personal-calendar@example.com",
+        displayName: "Personal Calendar",
+        calendarRole: "owner",
+        enabled: true,
+        syncEnabled: false,
+      });
+
+      // Read back via the DO method
+      const scopes = await acct.listCalendarScopes();
+      const personalScope = scopes.find(
+        (s) => s.providerCalendarId === "personal-calendar@example.com",
+      );
+      expect(personalScope).toBeDefined();
+      expect(personalScope!.syncEnabled).toBe(false);
+      expect(personalScope!.enabled).toBe(true);
+
+      // Verify raw SQLite row stores 0 for sync_enabled
+      const rawRow = db
+        .prepare(
+          "SELECT sync_enabled FROM calendar_scopes WHERE provider_calendar_id = ?",
+        )
+        .get("personal-calendar@example.com") as { sync_enabled: number };
+      expect(rawRow.sync_enabled).toBe(0);
+    });
+
+    it("update toggles syncEnabled from true to false through storage", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // First upsert: syncEnabled=true
+      await acct.upsertCalendarScope({
+        providerCalendarId: "toggle-calendar@example.com",
+        syncEnabled: true,
+      });
+
+      const beforeScopes = await acct.listCalendarScopes();
+      const beforeScope = beforeScopes.find(
+        (s) => s.providerCalendarId === "toggle-calendar@example.com",
+      );
+      expect(beforeScope!.syncEnabled).toBe(true);
+
+      // Second upsert: toggle syncEnabled to false
+      await acct.upsertCalendarScope({
+        providerCalendarId: "toggle-calendar@example.com",
+        syncEnabled: false,
+      });
+
+      // Read back -- must reflect the updated value from SQLite
+      const afterScopes = await acct.listCalendarScopes();
+      const afterScope = afterScopes.find(
+        (s) => s.providerCalendarId === "toggle-calendar@example.com",
+      );
+      expect(afterScope!.syncEnabled).toBe(false);
+
+      // Verify at the raw row level: same scope_id, updated sync_enabled
+      const rawRow = db
+        .prepare(
+          "SELECT sync_enabled FROM calendar_scopes WHERE provider_calendar_id = ?",
+        )
+        .get("toggle-calendar@example.com") as { sync_enabled: number };
+      expect(rawRow.sync_enabled).toBe(0);
+    });
+
+    it("persisted scope survives a fresh AccountDO instance over same SQLite", async () => {
+      const mockFetch = createMockFetch();
+
+      // Instance 1: write the scope
+      const acct1 = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+      await acct1.initialize(TEST_TOKENS, TEST_SCOPES);
+      await acct1.upsertCalendarScope({
+        providerCalendarId: "survive-test@example.com",
+        displayName: "Survival Test",
+        calendarRole: "editor",
+        enabled: true,
+        syncEnabled: true,
+      });
+
+      // Instance 2: brand new AccountDO, same underlying SQLite storage
+      // This simulates what happens after a DO restart or eviction
+      const acct2 = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      const scopes = await acct2.listCalendarScopes();
+      const survivedScope = scopes.find(
+        (s) => s.providerCalendarId === "survive-test@example.com",
+      );
+      expect(survivedScope).toBeDefined();
+      expect(survivedScope!.syncEnabled).toBe(true);
+      expect(survivedScope!.displayName).toBe("Survival Test");
+      expect(survivedScope!.calendarRole).toBe("editor");
+      expect(survivedScope!.enabled).toBe(true);
+    });
+
+    it("scope persistence via handleFetch RPC round-trip", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      // PUT via handleFetch /upsertCalendarScope
+      const putResp = await acct.handleFetch(
+        new Request("https://do/upsertCalendarScope", {
+          method: "POST",
+          body: JSON.stringify({
+            provider_calendar_id: "rpc-test@example.com",
+            display_name: "RPC Test",
+            calendar_role: "owner",
+            enabled: true,
+            sync_enabled: true,
+          }),
+        }),
+      );
+      expect(putResp.status).toBe(200);
+
+      // GET via handleFetch /listCalendarScopes
+      const getResp = await acct.handleFetch(
+        new Request("https://do/listCalendarScopes", {
+          method: "POST",
+        }),
+      );
+      expect(getResp.status).toBe(200);
+
+      const body = await getResp.json() as {
+        scopes: Array<{
+          providerCalendarId: string;
+          syncEnabled: boolean;
+          displayName: string | null;
+        }>;
+      };
+      const rpcScope = body.scopes.find(
+        (s) => s.providerCalendarId === "rpc-test@example.com",
+      );
+      expect(rpcScope).toBeDefined();
+      expect(rpcScope!.syncEnabled).toBe(true);
+      expect(rpcScope!.displayName).toBe("RPC Test");
+
+      // Double-check raw SQLite to prove storage is real
+      const rawRow = db
+        .prepare(
+          "SELECT sync_enabled, display_name FROM calendar_scopes WHERE provider_calendar_id = ?",
+        )
+        .get("rpc-test@example.com") as {
+          sync_enabled: number;
+          display_name: string | null;
+        };
+      expect(rawRow.sync_enabled).toBe(1);
+      expect(rawRow.display_name).toBe("RPC Test");
+    });
+  });
 });

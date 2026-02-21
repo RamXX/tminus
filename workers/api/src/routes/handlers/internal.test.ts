@@ -156,7 +156,10 @@ vi.mock("@tminus/shared", async () => {
       accountDOStub: { fetch(input: Request): Promise<Response> };
       db: D1Database;
       webhookUrl: string;
+      calendarId?: string;
     }) => {
+      const calendarId = params.calendarId ?? "primary";
+
       // Step 1: Get access token from AccountDO
       const tokenResponse = await params.accountDOStub.fetch(
         new Request("https://account-do.internal/getAccessToken", { method: "POST" }),
@@ -179,7 +182,7 @@ vi.mock("@tminus/shared", async () => {
             channel_id: watchEventsResult.channelId,
             resource_id: watchEventsResult.resourceId,
             expiration: watchEventsResult.expiration,
-            calendar_id: "primary",
+            calendar_id: calendarId,
           }),
         }),
       );
@@ -187,15 +190,16 @@ vi.mock("@tminus/shared", async () => {
         throw new Error(`Failed to store new channel in AccountDO for account ${params.accountId}: ${storeResponse.status}`);
       }
 
-      // Step 5: Update D1
+      // Step 5: Update D1 with channel_calendar_id for per-scope routing
       const expiryTs = new Date(parseInt(watchEventsResult.expiration, 10)).toISOString();
       await params.db
         .prepare(
           `UPDATE accounts
-           SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
-           WHERE account_id = ?5`,
+           SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3,
+               resource_id = ?4, channel_calendar_id = ?5
+           WHERE account_id = ?6`,
         )
-        .bind(watchEventsResult.channelId, "token_mock", expiryTs, watchEventsResult.resourceId, params.accountId)
+        .bind(watchEventsResult.channelId, "token_mock", expiryTs, watchEventsResult.resourceId, calendarId, params.accountId)
         .run();
 
       return {
@@ -204,6 +208,7 @@ vi.mock("@tminus/shared", async () => {
         resource_id: watchEventsResult.resourceId,
         expiry: expiryTs,
         previous_channel_id: params.oldChannelId,
+        calendar_id: calendarId,
       };
     }),
   };
@@ -247,12 +252,20 @@ function makeRequest(
   pathname: string,
   method = "POST",
   adminKey?: string,
+  body?: Record<string, unknown>,
 ): Request {
   const headers: Record<string, string> = {};
   if (adminKey !== undefined) {
     headers["X-Admin-Key"] = adminKey;
   }
-  return new Request(`https://api.tminus.ink${pathname}`, { method, headers });
+  if (body) {
+    headers["Content-Type"] = "application/json";
+  }
+  return new Request(`https://api.tminus.ink${pathname}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
 }
 
 // ===========================================================================
@@ -399,6 +412,7 @@ describe("POST /internal/accounts/:id/renew-channel", () => {
         resource_id: string;
         expiry: string;
         previous_channel_id: string | null;
+        calendar_id: string;
       };
     };
     expect(body.ok).toBe(true);
@@ -407,6 +421,33 @@ describe("POST /internal/accounts/:id/renew-channel", () => {
     expect(body.data.resource_id).toBe("new-resource-from-google");
     expect(body.data.expiry).toBeTruthy();
     expect(body.data.previous_channel_id).toBe("old-channel-123");
+    // Default calendar_id should be "primary" when no body is provided
+    expect(body.data.calendar_id).toBe("primary");
+  });
+
+  it("returns calendar_id from body when per-scope renewal is requested", async () => {
+    const accountDO = createMockAccountDO();
+    const env = buildEnv({ accountDO });
+    const req = makeRequest(
+      `/internal/accounts/${TEST_ACCOUNT_GOOGLE.account_id}/renew-channel`,
+      "POST",
+      ADMIN_KEY,
+      { calendar_id: "user-cal-abc123" },
+    );
+    const result = await routeInternalRequest(
+      req,
+      "POST",
+      `/internal/accounts/${TEST_ACCOUNT_GOOGLE.account_id}/renew-channel`,
+      env,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(200);
+    const body = await result!.json() as {
+      ok: boolean;
+      data: { calendar_id: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.calendar_id).toBe("user-cal-abc123");
   });
 
   it("calls AccountDO to get access token and store new channel", async () => {

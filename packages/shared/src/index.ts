@@ -32,6 +32,7 @@ export type {
   UpsertMirrorMessage,
   DeleteMirrorMessage,
   ReconcileAccountMessage,
+  ReconcileReasonCode,
   ApplyResult,
   AccountHealth,
   ApiResponse,

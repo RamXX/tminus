@@ -133,6 +133,7 @@ export async function handleIncrementalSync(
   deps: SyncConsumerDeps = {},
 ): Promise<void> {
   const { account_id } = message;
+  const targetCalendarId = message.calendar_id ?? null;
 
   // Step 1: Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
@@ -173,6 +174,7 @@ export async function handleIncrementalSync(
       client,
       env,
       retryOpts,
+      targetCalendarId,
     );
     events = result.events;
     cursorUpdates = result.cursorUpdates;
@@ -201,6 +203,7 @@ export async function handleIncrementalSync(
           freshClient,
           env,
           retryOpts,
+          targetCalendarId,
         );
         events = result.events;
         cursorUpdates = result.cursorUpdates;
@@ -240,11 +243,17 @@ export async function handleIncrementalSync(
   // Step 6: Persist sync cursors.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
+  // Step 6b: Mark per-scope sync success for each updated cursor.
+  for (const update of cursorUpdates) {
+    await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
+  }
+
   // Step 7: Mark sync success.
   await markSyncSuccess(account_id, env);
 
+  const scopeLabel = targetCalendarId ? ` (scope: ${targetCalendarId})` : " (all scopes)";
   console.log(
-    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated`,
+    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id}${scopeLabel} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated`,
   );
 }
 
@@ -375,6 +384,11 @@ export async function handleFullSync(
   // Update sync cursor(s): scoped for Google, legacy-compatible for primary.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
+  // Mark per-scope sync success for each updated cursor.
+  for (const update of cursorUpdates) {
+    await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
+  }
+
   // Mark sync success
   await markSyncSuccess(account_id, env);
 
@@ -410,6 +424,7 @@ async function fetchIncrementalProviderEvents(
   client: ReturnType<typeof createCalendarProvider>,
   env: Env,
   retryOpts: RetryOptions,
+  targetCalendarId: string | null = null,
 ): Promise<ProviderFetchResult> {
   if (provider !== "google") {
     const syncToken = await getSyncToken(accountId, env);
@@ -426,7 +441,11 @@ async function fetchIncrementalProviderEvents(
     };
   }
 
-  const calendarIds = await listGoogleSyncCalendarIds(accountId, env);
+  // When targetCalendarId is set, only sync that specific scope.
+  // Otherwise, sync all registered Google calendar scopes.
+  const calendarIds = targetCalendarId
+    ? [targetCalendarId]
+    : await listGoogleSyncCalendarIds(accountId, env);
   const events: GoogleCalendarEvent[] = [];
   const cursorUpdates: SyncCursorUpdate[] = [];
   const skippedCalendarIds: string[] = [];
@@ -697,6 +716,9 @@ async function processAndApplyDeltas(
 ): Promise<number> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
+  // Cross-scope dedup: track origin_event_ids already seen so that the same
+  // event appearing in multiple calendar views produces only one delta.
+  const seenOriginEventIds = new Set<string>();
   const classificationStrategy = getClassificationStrategy(provider);
   let userId: string | null = null;
   let userGraphStub: DurableObjectStub | null = null;
@@ -803,6 +825,17 @@ async function processAndApplyDeltas(
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
         continue;
       }
+    }
+
+    // Cross-scope dedup: skip if we already have a delta for this origin event.
+    if (
+      typeof delta.origin_event_id === "string" &&
+      delta.origin_event_id.length > 0
+    ) {
+      if (seenOriginEventIds.has(delta.origin_event_id)) {
+        continue;
+      }
+      seenOriginEventIds.add(delta.origin_event_id);
     }
 
     // Origin or foreign_managed: include in ProviderDelta batch
@@ -1628,6 +1661,196 @@ async function markSyncFailure(
   if (!response.ok) {
     // Log but don't throw -- the original error is more important
     console.error("Failed to mark sync failure on AccountDO", response.status);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-scope sync health reporting (AC4)
+// ---------------------------------------------------------------------------
+
+/** Health state for a single calendar scope. */
+export interface ScopedSyncHealth {
+  readonly providerCalendarId: string;
+  readonly lastSyncTs: string | null;
+  readonly lastSuccessTs: string | null;
+  readonly errorMessage: string | null;
+  readonly hasCursor: boolean;
+}
+
+/** Aggregated sync health report for an account. */
+export interface SyncHealthReport {
+  readonly accountId: AccountId;
+  readonly provider: ProviderType;
+  readonly accountLevel: {
+    readonly lastSyncTs: string | null;
+    readonly lastSuccessTs: string | null;
+    readonly errorMessage: string | null;
+  };
+  readonly scopes: ScopedSyncHealth[];
+}
+
+/**
+ * Build a sync health report for an account, including per-scope freshness.
+ *
+ * Calls AccountDO endpoints for account-level and per-scope health.
+ * Non-fatal: 404/405 from AccountDO is treated as empty data.
+ */
+export async function getSyncHealthReport(
+  accountId: AccountId,
+  env: Env,
+): Promise<SyncHealthReport> {
+  const provider = await lookupProvider(accountId, env);
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  // Account-level health
+  let accountLevel = {
+    lastSyncTs: null as string | null,
+    lastSuccessTs: null as string | null,
+    errorMessage: null as string | null,
+  };
+  try {
+    const response = await stub.fetch(
+      new Request("https://account.internal/getSyncHealth", {
+        method: "POST",
+      }),
+    );
+    if (response.ok) {
+      const data = (await response.json()) as {
+        last_sync_ts?: string | null;
+        last_success_ts?: string | null;
+        error_message?: string | null;
+      };
+      accountLevel = {
+        lastSyncTs: data.last_sync_ts ?? null,
+        lastSuccessTs: data.last_success_ts ?? null,
+        errorMessage: data.error_message ?? null,
+      };
+    }
+  } catch {
+    // Non-fatal: account health unavailable
+  }
+
+  // Per-scope health
+  const scopes: ScopedSyncHealth[] = [];
+  const calendarScopes = await listCalendarScopes(accountId, env);
+  for (const scope of calendarScopes) {
+    try {
+      const response = await stub.fetch(
+        new Request("https://account.internal/getScopedSyncHealth", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider_calendar_id: scope.providerCalendarId }),
+        }),
+      );
+      if (response.ok) {
+        const data = (await response.json()) as {
+          last_sync_ts?: string | null;
+          last_success_ts?: string | null;
+          error_message?: string | null;
+          has_cursor?: boolean;
+        };
+        scopes.push({
+          providerCalendarId: scope.providerCalendarId,
+          lastSyncTs: data.last_sync_ts ?? null,
+          lastSuccessTs: data.last_success_ts ?? null,
+          errorMessage: data.error_message ?? null,
+          hasCursor: data.has_cursor ?? false,
+        });
+      } else {
+        scopes.push({
+          providerCalendarId: scope.providerCalendarId,
+          lastSyncTs: null,
+          lastSuccessTs: null,
+          errorMessage: null,
+          hasCursor: false,
+        });
+      }
+    } catch {
+      scopes.push({
+        providerCalendarId: scope.providerCalendarId,
+        lastSyncTs: null,
+        lastSuccessTs: null,
+        errorMessage: null,
+        hasCursor: false,
+      });
+    }
+  }
+
+  return {
+    accountId,
+    provider,
+    accountLevel,
+    scopes,
+  };
+}
+
+/**
+ * Mark a specific calendar scope as successfully synced on AccountDO.
+ * Non-fatal: 404/405 responses are silently ignored for backward compatibility.
+ */
+export async function markScopedSyncSuccess(
+  accountId: AccountId,
+  env: Env,
+  providerCalendarId: string,
+): Promise<void> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  try {
+    const response = await stub.fetch(
+      new Request("https://account.internal/markScopedSyncSuccess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_calendar_id: providerCalendarId,
+          ts: new Date().toISOString(),
+        }),
+      }),
+    );
+
+    if (!response.ok && response.status !== 404 && response.status !== 405) {
+      console.warn(
+        `sync-consumer: markScopedSyncSuccess failed for ${accountId}/${providerCalendarId} (${response.status})`,
+      );
+    }
+  } catch {
+    // Non-fatal: scoped health tracking is best-effort
+  }
+}
+
+/**
+ * Mark a specific calendar scope as failed on AccountDO.
+ * Non-fatal: 404/405 responses are silently ignored for backward compatibility.
+ */
+export async function markScopedSyncFailure(
+  accountId: AccountId,
+  env: Env,
+  providerCalendarId: string,
+  error: string,
+): Promise<void> {
+  const doId = env.ACCOUNT.idFromName(accountId);
+  const stub = env.ACCOUNT.get(doId);
+
+  try {
+    const response = await stub.fetch(
+      new Request("https://account.internal/markScopedSyncFailure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_calendar_id: providerCalendarId,
+          error,
+        }),
+      }),
+    );
+
+    if (!response.ok && response.status !== 404 && response.status !== 405) {
+      console.warn(
+        `sync-consumer: markScopedSyncFailure failed for ${accountId}/${providerCalendarId} (${response.status})`,
+      );
+    }
+  } catch {
+    // Non-fatal: scoped health tracking is best-effort
   }
 }
 

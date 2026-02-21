@@ -52,6 +52,8 @@ export interface AccountRow {
   readonly resource_id: string | null;
   /** Rolling error count (incremented on sync failure, reset on success). */
   readonly error_count: number;
+  /** Calendar ID watched by this account's webhook channel. NULL for legacy channels. */
+  readonly channel_calendar_id: string | null;
 }
 
 /** Row shape for the `ms_subscriptions` table (Microsoft Graph webhook routing). */
@@ -59,6 +61,8 @@ export interface MsSubscriptionRow {
   readonly subscription_id: string;
   readonly account_id: string;
   readonly created_at: string;
+  /** Calendar ID this subscription watches. NULL for legacy subscriptions. */
+  readonly calendar_id: string | null;
 }
 
 /** Row shape for the `api_keys` table. */

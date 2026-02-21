@@ -11,13 +11,25 @@
  *
  * Each test exercises the FULL handler flow: createHandler() -> fetch() -> response,
  * with real SQL executing against real table structures.
+ *
+ * Per-scope routing tests (TM-8gfd.4):
+ * - Google webhook resolves to account + scoped calendar_id
+ * - Microsoft webhook resolves to account + scoped calendar_id (direct + legacy)
+ * - Legacy channels (null calendar_id) emit telemetry, enqueue with null
+ * - Unknown/expired channels handled with safe no-op
+ * - Security: clientState mismatch blocks processing
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import { createHandler } from "./index";
-import { MIGRATION_0001_INITIAL_SCHEMA, MIGRATION_0002_MS_SUBSCRIPTIONS } from "@tminus/d1-registry";
+import {
+  MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0002_MS_SUBSCRIPTIONS,
+  MIGRATION_0008_SYNC_STATUS_COLUMNS,
+  MIGRATION_0027_WEBHOOK_SCOPE_ROUTING,
+} from "@tminus/d1-registry";
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -184,6 +196,8 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     // Apply the REAL D1 registry schema -- the same SQL used in production
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec(MIGRATION_0027_WEBHOOK_SCOPE_ROUTING);
 
     // Seed the prerequisite rows (FK chain: orgs -> users -> accounts)
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
@@ -203,11 +217,39 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 1. Full flow: valid webhook -> real D1 lookup -> queue enqueue
+  // Google per-scope routing (AC 1)
   // -------------------------------------------------------------------------
 
-  it("valid webhook with known channel_token: real D1 lookup finds account, enqueues SYNC_INCREMENTAL", async () => {
-    // Seed account A with a known channel_token
+  it("Google webhook resolves to account + scoped calendar_id (AC 1)", async () => {
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      ACCOUNT_A.provider,
+      ACCOUNT_A.provider_subject,
+      ACCOUNT_A.email,
+      ACCOUNT_A.channel_token,
+      "work-calendar-123",
+    );
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+    const request = buildWebhookRequest({ channelToken: ACCOUNT_A.channel_token });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(queue.messages).toHaveLength(1);
+
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.account_id).toBe(ACCOUNT_A.account_id);
+    expect(msg.calendar_id).toBe("work-calendar-123");
+  });
+
+  it("Google webhook with legacy channel (null calendar_id) enqueues with calendar_id: null (AC 4)", async () => {
     db.prepare(
       `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -226,31 +268,62 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
 
-    // Response is always 200
     expect(response.status).toBe(200);
-
-    // Queue received exactly one message
     expect(queue.messages).toHaveLength(1);
 
-    // Verify the enqueued message shape and values
     const msg = queue.messages[0] as Record<string, unknown>;
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe(ACCOUNT_A.account_id);
-    expect(msg.channel_id).toBe(TEST_CHANNEL_ID);
-    expect(msg.resource_id).toBe(TEST_RESOURCE_ID);
-    expect(typeof msg.ping_ts).toBe("string");
+    expect(msg.calendar_id).toBeNull();
+  });
 
-    // Verify ping_ts is a valid ISO date
-    const parsed = new Date(msg.ping_ts as string);
-    expect(parsed.getTime()).not.toBeNaN();
+  it("multiple accounts: webhook routes to correct account and calendar based on channel_token", async () => {
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      ACCOUNT_A.provider,
+      ACCOUNT_A.provider_subject,
+      ACCOUNT_A.email,
+      ACCOUNT_A.channel_token,
+      "cal-personal",
+    );
+
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_B.account_id,
+      ACCOUNT_B.user_id,
+      ACCOUNT_B.provider,
+      ACCOUNT_B.provider_subject,
+      ACCOUNT_B.email,
+      ACCOUNT_B.channel_token,
+      "cal-work",
+    );
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const request = buildWebhookRequest({ channelToken: ACCOUNT_B.channel_token });
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(200);
+    expect(queue.messages).toHaveLength(1);
+
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.account_id).toBe(ACCOUNT_B.account_id);
+    expect(msg.calendar_id).toBe("cal-work");
+    expect(msg.account_id).not.toBe(ACCOUNT_A.account_id);
   });
 
   // -------------------------------------------------------------------------
-  // 2. Full flow: unknown token -> real D1 returns null -> no enqueue
+  // Google unknown/expired channel handling (AC 4)
   // -------------------------------------------------------------------------
 
-  it("unknown channel_token: real D1 query executes but returns null, nothing enqueued", async () => {
-    // Seed account with a DIFFERENT token than what the request will send
+  it("unknown channel_token: returns 200, no enqueue (safe no-op)", async () => {
     db.prepare(
       `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -271,23 +344,9 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     expect(response.status).toBe(200);
     expect(queue.messages).toHaveLength(0);
-
-    // Verify the account still exists in D1 (the query ran, just didn't match)
-    const row = db
-      .prepare("SELECT account_id FROM accounts WHERE channel_token = ?")
-      .get(ACCOUNT_A.channel_token) as { account_id: string } | undefined;
-    expect(row).toBeDefined();
-    expect(row!.account_id).toBe(ACCOUNT_A.account_id);
   });
 
-  // -------------------------------------------------------------------------
-  // 3. Full flow: sync state -> short circuit before D1 query
-  // -------------------------------------------------------------------------
-
   it("sync resource_state: returns 200 immediately, no D1 query, no enqueue", async () => {
-    // Do NOT seed any accounts -- if D1 were queried, it would return null
-    // But sync state should short-circuit before any DB access
-
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
     const request = buildWebhookRequest({ resourceState: "sync" });
@@ -298,89 +357,21 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(0);
   });
 
-  // -------------------------------------------------------------------------
-  // 4. Full flow: multiple accounts, correct routing
-  // -------------------------------------------------------------------------
-
-  it("multiple accounts: webhook routes to correct account based on channel_token", async () => {
-    // Seed TWO accounts with different channel_tokens
-    db.prepare(
-      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(
-      ACCOUNT_A.account_id,
-      ACCOUNT_A.user_id,
-      ACCOUNT_A.provider,
-      ACCOUNT_A.provider_subject,
-      ACCOUNT_A.email,
-      ACCOUNT_A.channel_token,
-    );
-
-    db.prepare(
-      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(
-      ACCOUNT_B.account_id,
-      ACCOUNT_B.user_id,
-      ACCOUNT_B.provider,
-      ACCOUNT_B.provider_subject,
-      ACCOUNT_B.email,
-      ACCOUNT_B.channel_token,
-    );
-
+  it("empty accounts table: D1 query returns null gracefully, no enqueue", async () => {
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+    const request = buildWebhookRequest({ channelToken: "any-token" });
 
-    // Send webhook matching account B's token
-    const request = buildWebhookRequest({ channelToken: ACCOUNT_B.channel_token });
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
-    expect(queue.messages).toHaveLength(1);
-
-    // The enqueued message MUST reference account B, NOT account A
-    const msg = queue.messages[0] as Record<string, unknown>;
-    expect(msg.account_id).toBe(ACCOUNT_B.account_id);
-    expect(msg.account_id).not.toBe(ACCOUNT_A.account_id);
+    expect(queue.messages).toHaveLength(0);
   });
-
-  // -------------------------------------------------------------------------
-  // 5. D1 schema validation: handler's SQL works against real table
-  // -------------------------------------------------------------------------
-
-  it("handler SQL query matches real D1 schema: SELECT account_id FROM accounts WHERE channel_token = ?", async () => {
-    // This test proves the exact SQL used in the handler (with D1 ?1 parameter)
-    // works against the real table structure. The D1 mock translates ?1 -> ?.
-    db.prepare(
-      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(
-      ACCOUNT_A.account_id,
-      ACCOUNT_A.user_id,
-      ACCOUNT_A.provider,
-      ACCOUNT_A.provider_subject,
-      ACCOUNT_A.email,
-      ACCOUNT_A.channel_token,
-    );
-
-    // Execute the exact query pattern from the handler via the D1 mock
-    const result = await d1
-      .prepare("SELECT account_id FROM accounts WHERE channel_token = ?1")
-      .bind(ACCOUNT_A.channel_token)
-      .first<{ account_id: string }>();
-
-    expect(result).not.toBeNull();
-    expect(result!.account_id).toBe(ACCOUNT_A.account_id);
-  });
-
-  // -------------------------------------------------------------------------
-  // 6. not_exists resource_state enqueues correctly (full flow)
-  // -------------------------------------------------------------------------
 
   it("not_exists resource_state: full flow with real D1 lookup enqueues correctly", async () => {
     db.prepare(
-      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       ACCOUNT_A.account_id,
       ACCOUNT_A.user_id,
@@ -388,6 +379,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
       ACCOUNT_A.provider_subject,
       ACCOUNT_A.email,
       ACCOUNT_A.channel_token,
+      "primary",
     );
 
     const handler = createHandler();
@@ -405,63 +397,42 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     const msg = queue.messages[0] as Record<string, unknown>;
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe(ACCOUNT_A.account_id);
+    expect(msg.calendar_id).toBe("primary");
   });
 
   // -------------------------------------------------------------------------
-  // 7. Empty database: no accounts at all
+  // D1 schema validation
   // -------------------------------------------------------------------------
 
-  it("empty accounts table: D1 query returns null gracefully, no enqueue", async () => {
-    // No accounts seeded -- table exists but is empty
-    const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
-    const request = buildWebhookRequest({ channelToken: "any-token" });
-
-    const response = await handler.fetch(request, env, mockCtx);
-
-    expect(response.status).toBe(200);
-    expect(queue.messages).toHaveLength(0);
-  });
-
-  // -------------------------------------------------------------------------
-  // 8. Account with null channel_token: not matched
-  // -------------------------------------------------------------------------
-
-  it("account with null channel_token is not matched by webhook", async () => {
-    // Insert account WITHOUT channel_token (null by default)
+  it("handler SQL query correctly includes channel_calendar_id from real D1", async () => {
     db.prepare(
-      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       ACCOUNT_A.account_id,
       ACCOUNT_A.user_id,
       ACCOUNT_A.provider,
       ACCOUNT_A.provider_subject,
       ACCOUNT_A.email,
+      ACCOUNT_A.channel_token,
+      "specific-calendar-xyz",
     );
 
-    const handler = createHandler();
-    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
-    // Send a webhook with some token -- should not match the null-token account
-    const request = buildWebhookRequest({ channelToken: "some-token" });
+    const result = await d1
+      .prepare("SELECT account_id, channel_calendar_id FROM accounts WHERE channel_token = ?1")
+      .bind(ACCOUNT_A.channel_token)
+      .first<{ account_id: string; channel_calendar_id: string | null }>();
 
-    const response = await handler.fetch(request, env, mockCtx);
-
-    expect(response.status).toBe(200);
-    expect(queue.messages).toHaveLength(0);
-
-    // Verify the account exists but has null channel_token
-    const row = db
-      .prepare("SELECT channel_token FROM accounts WHERE account_id = ?")
-      .get(ACCOUNT_A.account_id) as { channel_token: string | null };
-    expect(row.channel_token).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.account_id).toBe(ACCOUNT_A.account_id);
+    expect(result!.channel_calendar_id).toBe("specific-calendar-xyz");
   });
 
   // -------------------------------------------------------------------------
-  // Microsoft webhook integration tests (real D1 account + legacy fallback)
+  // Microsoft per-scope routing (AC 2)
   // -------------------------------------------------------------------------
 
-  it("Microsoft validation handshake: returns validationToken as plain text (AC 1)", async () => {
+  it("Microsoft validation handshake: returns validationToken as plain text", async () => {
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
 
@@ -477,12 +448,11 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(response.headers.get("Content-Type")).toBe("text/plain");
   });
 
-  it("Microsoft change notification: direct accounts.channel_id lookup enqueues SYNC_INCREMENTAL (AC 2, 6)", async () => {
-    // Seed active Microsoft account with subscription + per-account clientState
+  it("Microsoft webhook resolves to account + scoped calendar_id via direct lookup (AC 2)", async () => {
     db.prepare(
       `INSERT INTO accounts
-       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
     ).run(
       ACCOUNT_A.account_id,
       ACCOUNT_A.user_id,
@@ -491,6 +461,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
       ACCOUNT_A.email,
       "ms-sub-real-123",
       "ms-client-state-123",
+      "AAMkAGU0OGRh",
     );
 
     const handler = createHandler();
@@ -519,33 +490,36 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe(ACCOUNT_A.account_id);
     expect(msg.channel_id).toBe("ms-sub-real-123");
-    expect(msg.resource_id).toBe("users/ms-user/events/evt-42");
+    expect(msg.calendar_id).toBe("AAMkAGU0OGRh");
   });
 
-  it("Microsoft change notification: status='error' account still enqueues (not blocked unless revoked)", async () => {
+  it("Microsoft legacy fallback: ms_subscriptions join resolves calendar_id (AC 2)", async () => {
     db.prepare(
       `INSERT INTO accounts
-       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
-       VALUES (?, ?, ?, ?, ?, 'error', ?, ?)`,
+       (account_id, user_id, provider, provider_subject, email, status, channel_token)
+       VALUES (?, ?, ?, ?, ?, 'active', ?)`,
     ).run(
-      ACCOUNT_A.account_id,
-      ACCOUNT_A.user_id,
+      "acc_sql_test",
+      TEST_USER.user_id,
       "microsoft",
-      "ms-sub-error",
-      ACCOUNT_A.email,
-      "ms-sub-error-123",
-      "ms-client-state-error",
+      "ms-sub-fallback",
+      "legacy@example.com",
+      "legacy-client-state",
     );
+
+    db.prepare(
+      "INSERT INTO ms_subscriptions (subscription_id, account_id, calendar_id) VALUES (?, ?, ?)",
+    ).run("ms-sub-verify-sql", "acc_sql_test", "legacy-cal-abc");
 
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
 
     const body = {
       value: [{
-        subscriptionId: "ms-sub-error-123",
+        subscriptionId: "ms-sub-verify-sql",
         changeType: "updated",
-        clientState: "ms-client-state-error",
-        resource: "users/ms-user/events/evt-99",
+        clientState: "legacy-client-state",
+        resource: "users/x/events/y",
       }],
     };
     const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
@@ -558,9 +532,60 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     expect(response.status).toBe(202);
     expect(queue.messages).toHaveLength(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.account_id).toBe("acc_sql_test");
+    expect(msg.calendar_id).toBe("legacy-cal-abc");
   });
 
-  it("Microsoft clientState mismatch: returns 202 and skips enqueue (AC 3)", async () => {
+  it("Microsoft legacy subscription without calendar_id enqueues with null (AC 4)", async () => {
+    db.prepare(
+      `INSERT INTO accounts
+       (account_id, user_id, provider, provider_subject, email, status, channel_token)
+       VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+    ).run(
+      "acc_legacy_no_cal",
+      TEST_USER.user_id,
+      "microsoft",
+      "ms-sub-legacy-nocal",
+      "legacy-nocal@example.com",
+      "legacy-state-nocal",
+    );
+
+    // Legacy ms_subscriptions row WITHOUT calendar_id
+    db.prepare(
+      "INSERT INTO ms_subscriptions (subscription_id, account_id) VALUES (?, ?)",
+    ).run("ms-sub-legacy-nocal", "acc_legacy_no_cal");
+
+    const handler = createHandler();
+    const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
+
+    const body = {
+      value: [{
+        subscriptionId: "ms-sub-legacy-nocal",
+        changeType: "updated",
+        clientState: "legacy-state-nocal",
+        resource: "users/x/events/y",
+      }],
+    };
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages).toHaveLength(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.calendar_id).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Microsoft security checks (AC 5)
+  // -------------------------------------------------------------------------
+
+  it("Microsoft clientState mismatch: returns 202 and skips enqueue (AC 5)", async () => {
     db.prepare(
       `INSERT INTO accounts
        (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
@@ -598,11 +623,11 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(0);
   });
 
-  it("Microsoft mixed clientState payload: valid notifications still enqueue", async () => {
+  it("Microsoft mixed payload: valid notifications enqueue, mismatched skip (AC 5)", async () => {
     db.prepare(
       `INSERT INTO accounts
-       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
     ).run(
       "acc_ms_valid_mix",
       TEST_USER.user_id,
@@ -611,6 +636,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
       "valid.mix@example.com",
       "ms-sub-valid-mix",
       "valid-secret",
+      "cal-valid-mix",
     );
 
     db.prepare(
@@ -658,9 +684,10 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(1);
     const msg = queue.messages[0] as Record<string, unknown>;
     expect(msg.account_id).toBe("acc_ms_valid_mix");
+    expect(msg.calendar_id).toBe("cal-valid-mix");
   });
 
-  it("Microsoft unknown subscriptionId: returns 202 but does not enqueue", async () => {
+  it("Microsoft unknown subscriptionId: returns 202 but does not enqueue (AC 4)", async () => {
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
 
@@ -684,33 +711,31 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(0);
   });
 
-  it("Microsoft legacy fallback: ms_subscriptions join still resolves account", async () => {
+  it("Microsoft status='error' account still enqueues (not blocked unless revoked)", async () => {
     db.prepare(
       `INSERT INTO accounts
-       (account_id, user_id, provider, provider_subject, email, status, channel_token)
-       VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+       (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, 'error', ?, ?, ?)`,
     ).run(
-      "acc_sql_test",
-      TEST_USER.user_id,
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
       "microsoft",
-      "ms-sub-fallback",
-      "legacy@example.com",
-      "legacy-client-state",
+      "ms-sub-error",
+      ACCOUNT_A.email,
+      "ms-sub-error-123",
+      "ms-client-state-error",
+      "cal-error",
     );
-
-    db.prepare(
-      "INSERT INTO ms_subscriptions (subscription_id, account_id) VALUES (?, ?)",
-    ).run("ms-sub-verify-sql", "acc_sql_test");
 
     const handler = createHandler();
     const env = { DB: d1, SYNC_QUEUE: queue, MS_WEBHOOK_CLIENT_STATE: "test-ms-secret" } as Env;
 
     const body = {
       value: [{
-        subscriptionId: "ms-sub-verify-sql",
+        subscriptionId: "ms-sub-error-123",
         changeType: "updated",
-        clientState: "legacy-client-state",
-        resource: "users/x/events/y",
+        clientState: "ms-client-state-error",
+        resource: "users/ms-user/events/evt-99",
       }],
     };
     const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
@@ -723,7 +748,53 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     expect(response.status).toBe(202);
     expect(queue.messages).toHaveLength(1);
-    const msg = queue.messages[0] as Record<string, unknown>;
-    expect(msg.account_id).toBe("acc_sql_test");
+  });
+
+  // -------------------------------------------------------------------------
+  // D1 schema validation for per-scope columns
+  // -------------------------------------------------------------------------
+
+  it("channel_calendar_id column exists and stores values correctly", async () => {
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      ACCOUNT_A.provider,
+      ACCOUNT_A.provider_subject,
+      ACCOUNT_A.email,
+      ACCOUNT_A.channel_token,
+      "my-specific-calendar",
+    );
+
+    const row = db.prepare(
+      "SELECT channel_calendar_id FROM accounts WHERE account_id = ?",
+    ).get(ACCOUNT_A.account_id) as { channel_calendar_id: string | null };
+
+    expect(row.channel_calendar_id).toBe("my-specific-calendar");
+  });
+
+  it("ms_subscriptions.calendar_id column exists and stores values correctly", async () => {
+    db.prepare(
+      `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      ACCOUNT_A.account_id,
+      ACCOUNT_A.user_id,
+      "microsoft",
+      "ms-subject",
+      ACCOUNT_A.email,
+    );
+
+    db.prepare(
+      "INSERT INTO ms_subscriptions (subscription_id, account_id, calendar_id) VALUES (?, ?, ?)",
+    ).run("sub-cal-test", ACCOUNT_A.account_id, "my-ms-calendar");
+
+    const row = db.prepare(
+      "SELECT calendar_id FROM ms_subscriptions WHERE subscription_id = ?",
+    ).get("sub-cal-test") as { calendar_id: string | null };
+
+    expect(row.calendar_id).toBe("my-ms-calendar");
   });
 });

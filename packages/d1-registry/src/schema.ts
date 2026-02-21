@@ -778,6 +778,24 @@ CREATE INDEX idx_rl_counters_expires ON org_rate_limit_counters(expires_at);
 ` as const;
 
 /**
+ * Migration 0027: Per-scope webhook routing (TM-8gfd.4).
+ *
+ * Adds channel_calendar_id to accounts and ms_subscriptions tables
+ * so webhook routing can resolve to account + specific calendar
+ * instead of account-level only.
+ *
+ * - accounts.channel_calendar_id: the calendar watched by this account's
+ *   Google Calendar push channel. NULL for legacy channels created before
+ *   per-scope routing.
+ * - ms_subscriptions.calendar_id: the calendar watched by this Microsoft
+ *   Graph subscription. NULL for legacy subscriptions.
+ */
+export const MIGRATION_0027_WEBHOOK_SCOPE_ROUTING = `
+ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;
+ALTER TABLE ms_subscriptions ADD COLUMN calendar_id TEXT;
+` as const;
+
+/**
  * All migration SQL strings in order. Apply them sequentially to bring
  * a fresh D1 database to the current schema version.
  */
@@ -808,4 +826,5 @@ export const ALL_MIGRATIONS = [
   MIGRATION_0024_DELEGATION_CACHE_AND_AUDIT,
   MIGRATION_0025_ORG_DISCOVERY,
   MIGRATION_0026_COMPLIANCE_AND_QUOTAS,
+  MIGRATION_0027_WEBHOOK_SCOPE_ROUTING,
 ] as const;

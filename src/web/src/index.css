@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * T-Minus design tokens.
+ *
+ * Values are raw HSL numbers (no hsl() wrapper) so Tailwind's
+ * opacity modifier (<alpha-value>) works correctly, e.g. bg-background/50.
+ *
+ * The palette is dark-slate by default. Light mode tokens are provided
+ * for completeness but T-Minus ships dark-only for now.
+ */
+@layer base {
+  :root {
+    /* -- Dark-slate palette (default) ------------------------------- */
+    --background: 222.2 47.4% 11.2%;      /* #0f172a  slate-900 */
+    --foreground: 210 40% 96.1%;           /* #f1f5f9  slate-100 */
+
+    --card: 217.2 32.6% 17.5%;            /* #1e293b  slate-800 */
+    --card-foreground: 210 40% 96.1%;      /* #f1f5f9  slate-100 */
+
+    --primary: 217.2 91.2% 59.8%;         /* #3b82f6  blue-500 */
+    --primary-foreground: 0 0% 100%;       /* #ffffff */
+
+    --secondary: 217.2 32.6% 17.5%;       /* #1e293b  slate-800 */
+    --secondary-foreground: 210 40% 96.1%; /* #f1f5f9  slate-100 */
+
+    --muted: 217.2 32.6% 17.5%;           /* #1e293b  slate-800 */
+    --muted-foreground: 215 20.2% 65.1%;   /* #94a3b8  slate-400 */
+
+    --accent: 217.2 91.2% 59.8%;          /* #3b82f6  blue-500 */
+    --accent-foreground: 0 0% 100%;        /* #ffffff */
+
+    --destructive: 0 84.2% 60.2%;         /* #ef4444  red-500 */
+    --destructive-foreground: 0 0% 100%;   /* #ffffff */
+
+    --success: 160 84.1% 39.4%;           /* #059669  emerald-600 */
+    --success-foreground: 0 0% 100%;       /* #ffffff */
+
+    --warning: 38 92.1% 50.2%;            /* #f59e0b  amber-500 */
+    --warning-foreground: 0 0% 0%;         /* #000000 */
+
+    --border: 217.2 32.6% 27.5%;          /* #334155  slate-700 */
+    --input: 217.2 32.6% 27.5%;           /* #334155  slate-700 */
+    --ring: 217.2 91.2% 59.8%;            /* #3b82f6  blue-500 */
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+}

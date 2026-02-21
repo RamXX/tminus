@@ -17,7 +17,9 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import {
   MIGRATION_0001_INITIAL_SCHEMA,
+  MIGRATION_0002_MS_SUBSCRIPTIONS,
   MIGRATION_0008_SYNC_STATUS_COLUMNS,
+  MIGRATION_0027_WEBHOOK_SCOPE_ROUTING,
 } from "@tminus/d1-registry";
 import { createHandler } from "../../index";
 
@@ -401,7 +403,9 @@ describe("Integration: POST /internal/accounts/:id/renew-channel", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0002_MS_SUBSCRIPTIONS);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec(MIGRATION_0027_WEBHOOK_SCOPE_ROUTING);
 
     // Seed org + user
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
@@ -554,18 +558,21 @@ describe("Integration: POST /internal/accounts/:id/renew-channel", () => {
     expect(body.data.expiry).toBeTruthy();
     expect(body.data.previous_channel_id).toBe(GOOGLE_ACCOUNT_WITH_CHANNEL.channel_id);
 
-    // Verify D1 was updated with new channel info
+    // Verify D1 was updated with new channel info (including per-scope calendar_id)
     const updatedRow = db
-      .prepare("SELECT channel_id, channel_expiry_ts, resource_id FROM accounts WHERE account_id = ?")
+      .prepare("SELECT channel_id, channel_expiry_ts, resource_id, channel_calendar_id FROM accounts WHERE account_id = ?")
       .get(GOOGLE_ACCOUNT_WITH_CHANNEL.account_id) as {
         channel_id: string;
         channel_expiry_ts: string;
         resource_id: string;
+        channel_calendar_id: string;
       };
 
     expect(updatedRow.channel_id).toBe("renewed-channel-xyz");
     expect(updatedRow.resource_id).toBe("renewed-resource-abc");
     expect(updatedRow.channel_expiry_ts).toBeTruthy();
+    // channel_calendar_id defaults to "primary" when not provided in request body
+    expect(updatedRow.channel_calendar_id).toBe("primary");
     // Verify expiry is in the future (7 days from now)
     const expiryDate = new Date(updatedRow.channel_expiry_ts);
     expect(expiryDate.getTime()).toBeGreaterThan(Date.now());

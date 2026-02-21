@@ -447,6 +447,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
         channel_id: "ch_test",
         resource_id: "res_test",
         ping_ts: new Date().toISOString(),
+        calendar_id: null,
       };
 
       // This calls the REAL AccountDO (getAccessToken, getSyncToken, setSyncToken, markSyncSuccess)
@@ -519,6 +520,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
         channel_id: "ch_test",
         resource_id: "res_test",
         ping_ts: new Date().toISOString(),
+        calendar_id: null,
       };
 
       await handleIncrementalSync(message, env, deps);
@@ -973,6 +975,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
         channel_id: "ch_test",
         resource_id: "res_test",
         ping_ts: new Date().toISOString(),
+        calendar_id: null,
       };
 
       // Should throw because AccountDO returns 500 "no tokens stored"
@@ -1025,6 +1028,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
           channel_id: "ch_test",
           resource_id: "res_test",
           ping_ts: new Date().toISOString(),
+          calendar_id: null,
         },
         env,
         deps,

@@ -4,9 +4,15 @@
  * Tests cover the 5-step renewal flow:
  * 1. Get access token from AccountDO
  * 2. Stop old channel (best-effort)
- * 3. Register new channel with Google
+ * 3. Register new channel with Google for a specific calendar
  * 4. Store new channel in AccountDO
- * 5. Update D1 with new channel info
+ * 5. Update D1 with new channel info including channel_calendar_id
+ *
+ * Per-scope renewal tests (TM-8gfd.4):
+ * - calendarId parameter controls which calendar the channel watches
+ * - Defaults to "primary" when calendarId is omitted
+ * - channel_calendar_id is stored in D1 (6 bind params instead of 5)
+ * - calendar_id is included in the result
  *
  * All external dependencies (AccountDO, Google Calendar API, D1) are mocked
  * since these are unit tests. Integration tests live in the worker packages.
@@ -146,7 +152,7 @@ describe("renewWebhookChannel", () => {
   // Happy path
   // -------------------------------------------------------------------------
 
-  it("completes the full 5-step renewal flow and returns result", async () => {
+  it("completes the full 5-step renewal flow and returns result with calendar_id", async () => {
     const stub = createMockDOStub();
     const db = createMockDB();
     const params = buildParams({ accountDOStub: stub, db });
@@ -159,6 +165,7 @@ describe("renewWebhookChannel", () => {
     expect(result.resource_id).toBe("new-resource-from-google");
     expect(result.expiry).toBeTruthy();
     expect(result.previous_channel_id).toBe("old-channel-123");
+    expect(result.calendar_id).toBe("primary"); // default
 
     // Verify Step 1: getAccessToken was called
     expect(stub.calls[0].path).toBe("/getAccessToken");
@@ -167,7 +174,7 @@ describe("renewWebhookChannel", () => {
     // Verify Step 2: stopChannel was called with old channel info
     expect(mockStopChannel).toHaveBeenCalledWith("old-channel-123", "old-resource-456");
 
-    // Verify Step 3: watchEvents was called
+    // Verify Step 3: watchEvents was called with "primary" calendar
     expect(mockWatchEvents).toHaveBeenCalledWith(
       "primary",
       "https://webhooks.tminus.ink/webhook/google",
@@ -175,7 +182,7 @@ describe("renewWebhookChannel", () => {
       "calendar_mock_id",
     );
 
-    // Verify Step 4: storeWatchChannel was called
+    // Verify Step 4: storeWatchChannel was called with calendar_id
     expect(stub.calls[1].path).toBe("/storeWatchChannel");
     expect(stub.calls[1].method).toBe("POST");
     expect(stub.calls[1].body).toEqual({
@@ -185,12 +192,58 @@ describe("renewWebhookChannel", () => {
       calendar_id: "primary",
     });
 
-    // Verify Step 5: D1 update was called
+    // Verify Step 5: D1 update was called with 6 params (includes channel_calendar_id)
     expect(db.runLog.length).toBe(1);
     expect(db.runLog[0].sql).toContain("UPDATE accounts");
     expect(db.runLog[0].params[0]).toBe("new-channel-from-google"); // channel_id
     expect(db.runLog[0].params[3]).toBe("new-resource-from-google"); // resource_id
-    expect(db.runLog[0].params[4]).toBe("acc_01HXYZ0000000000000000TEST"); // account_id
+    expect(db.runLog[0].params[4]).toBe("primary"); // channel_calendar_id
+    expect(db.runLog[0].params[5]).toBe("acc_01HXYZ0000000000000000TEST"); // account_id
+  });
+
+  it("uses custom calendarId for per-scope renewal (AC 3)", async () => {
+    const stub = createMockDOStub();
+    const db = createMockDB();
+    const params = buildParams({
+      accountDOStub: stub,
+      db,
+      calendarId: "work-calendar-xyz",
+    });
+
+    const result = await renewWebhookChannel(params);
+
+    // Result includes the custom calendar_id
+    expect(result.calendar_id).toBe("work-calendar-xyz");
+
+    // watchEvents called with custom calendar
+    expect(mockWatchEvents).toHaveBeenCalledWith(
+      "work-calendar-xyz",
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+
+    // storeWatchChannel called with custom calendar_id
+    expect(stub.calls[1].body).toEqual(
+      expect.objectContaining({ calendar_id: "work-calendar-xyz" }),
+    );
+
+    // D1 update stores custom calendar_id
+    expect(db.runLog[0].params[4]).toBe("work-calendar-xyz");
+  });
+
+  it("defaults calendarId to 'primary' when not specified", async () => {
+    const params = buildParams({ calendarId: undefined });
+
+    const result = await renewWebhookChannel(params);
+
+    expect(result.calendar_id).toBe("primary");
+    expect(mockWatchEvents).toHaveBeenCalledWith(
+      "primary",
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
   });
 
   it("correctly converts expiration from Unix milliseconds to ISO timestamp", async () => {
@@ -352,6 +405,7 @@ describe("renewWebhookChannel", () => {
 
     expect(result.previous_channel_id).toBeNull();
     expect(result.channel_id).toBe("new-channel-from-google");
+    expect(result.calendar_id).toBe("primary");
     expect(mockStopChannel).not.toHaveBeenCalled();
     expect(mockWatchEvents).toHaveBeenCalled();
     expect(db.runLog.length).toBe(1);
@@ -371,28 +425,30 @@ describe("renewWebhookChannel", () => {
     );
   });
 
-  it("writes correct D1 SQL with all five bind parameters", async () => {
+  it("writes correct D1 SQL with all six bind parameters", async () => {
     const db = createMockDB();
-    const params = buildParams({ db });
+    const params = buildParams({ db, calendarId: "work-cal" });
 
     await renewWebhookChannel(params);
 
     expect(db.runLog.length).toBe(1);
     const { sql, params: bindParams } = db.runLog[0];
 
-    // SQL should update channel_id, channel_token, channel_expiry_ts, resource_id
+    // SQL should update channel_id, channel_token, channel_expiry_ts, resource_id, channel_calendar_id
     expect(sql).toContain("channel_id = ?1");
     expect(sql).toContain("channel_token = ?2");
     expect(sql).toContain("channel_expiry_ts = ?3");
     expect(sql).toContain("resource_id = ?4");
-    expect(sql).toContain("account_id = ?5");
+    expect(sql).toContain("channel_calendar_id = ?5");
+    expect(sql).toContain("account_id = ?6");
 
-    // Bind params: [channel_id, token, expiry, resource_id, account_id]
-    expect(bindParams.length).toBe(5);
+    // Bind params: [channel_id, token, expiry, resource_id, calendar_id, account_id]
+    expect(bindParams.length).toBe(6);
     expect(bindParams[0]).toBe("new-channel-from-google");
     expect(bindParams[1]).toBe("calendar_mock_id"); // newToken from generateId
     expect(typeof bindParams[2]).toBe("string"); // ISO timestamp
     expect(bindParams[3]).toBe("new-resource-from-google");
-    expect(bindParams[4]).toBe("acc_01HXYZ0000000000000000TEST");
+    expect(bindParams[4]).toBe("work-cal"); // channel_calendar_id
+    expect(bindParams[5]).toBe("acc_01HXYZ0000000000000000TEST");
   });
 });

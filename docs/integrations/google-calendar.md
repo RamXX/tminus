@@ -46,6 +46,24 @@ Full sync uses paginated `events.list` without a syncToken.
 
 ## Webhook Handling
 
+### Per-Scope Routing
+
+Webhook routing resolves `channel_token` to both `account_id` and `channel_calendar_id` -- not just the account. This enables the sync-consumer to target only the specific calendar that received a change notification, rather than iterating all scopes for the account.
+
+The D1 lookup query:
+
+```sql
+SELECT account_id, channel_calendar_id
+FROM accounts
+WHERE channel_token = ?1
+```
+
+The resolved `channel_calendar_id` is included in the enqueued `SYNC_INCREMENTAL` message as the `calendar_id` field. When present, the sync-consumer syncs only that calendar scope. When absent (null), the sync-consumer falls back to syncing all scopes for the account.
+
+**Legacy channel behavior:** Channels created before per-scope routing have `channel_calendar_id = NULL` in D1. These channels still route correctly -- the webhook worker enqueues the message with `calendar_id: null` and emits telemetry indicating a legacy channel was used. The sync-consumer handles this gracefully by syncing all scopes. No data is lost.
+
+**Schema change:** MIGRATION_0027 added the `channel_calendar_id` column to the `accounts` table. It is nullable so existing rows default to NULL, preserving backward compatibility.
+
 ### Request Validation
 
 1. `X-Goog-Channel-ID` must match a known channel_id in D1
@@ -72,11 +90,13 @@ Google may send duplicate notifications. The sync-consumer handles this naturall
 
 - Channels typically expire after 7 days
 - Cron worker renews channels expiring within 24 hours or with no sync in 12 hours
-- Renewal process:
+- Renewal process (per-scope):
   1. Stop old channel with Google (best-effort)
-  2. Register new channel via `events.watch` API
-  3. Store new channel in AccountDO
-  4. Update D1 with new channel_id, token, expiry, resource_id
+  2. Register new channel via `events.watch` API with a `calendarId` parameter targeting the specific calendar scope (defaults to `"primary"` for backward compatibility)
+  3. Store new channel in AccountDO with the `calendar_id`
+  4. Update D1 with new channel_id, token, expiry, resource_id, and `channel_calendar_id`
+
+The `renewWebhookChannel()` function in `@tminus/shared` accepts an optional `calendarId` parameter. When provided, the renewed channel watches that specific calendar and the `channel_calendar_id` column in D1 is set accordingly. The `ChannelRenewalResult` includes the `calendar_id` so callers can confirm which calendar was renewed.
 
 ---
 

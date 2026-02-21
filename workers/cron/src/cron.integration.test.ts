@@ -367,6 +367,7 @@ describe("Cron integration tests: Channel Renewal (every 6h)", () => {
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -595,6 +596,7 @@ describe("Cron integration tests: Token Health Check (every 12h)", () => {
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -751,6 +753,7 @@ describe("Cron integration tests: Drift Reconciliation (daily 03:00 UTC)", () =>
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -902,6 +905,7 @@ describe("Cron integration tests: Microsoft Subscription Renewal (AC 5)", () => 
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1068,6 +1072,7 @@ describe("Cron dispatch routing", () => {
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1128,6 +1133,7 @@ describe("Cron integration tests: Social Drift Computation (daily 04:00 UTC)", (
     db.pragma("foreign_keys = ON");
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,
       TEST_ORG.name,
@@ -1475,6 +1481,7 @@ describe("Cron integration tests: ICS Feed Refresh (TM-d17.3)", () => {
     db.exec(MIGRATION_0001_INITIAL_SCHEMA);
     // Apply migrations for feed refresh columns
     db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
     db.exec(MIGRATION_0020_FEED_REFRESH);
     db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
       TEST_ORG.org_id,

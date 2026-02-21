@@ -18,7 +18,13 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { LinkedAccount, AccountProvider } from "../lib/api";
+import type {
+  LinkedAccount,
+  AccountProvider,
+  CalendarScope,
+  AccountScopesResponse,
+  ScopeUpdateItem,
+} from "../lib/api";
 import {
   buildOAuthStartUrl,
   statusColor,
@@ -39,6 +45,15 @@ export interface AccountsProps {
   /** Unlink an account by ID. Injected for testability. */
   unlinkAccount: (accountId: string) => Promise<void>;
   /**
+   * Fetch calendar scopes for an account. Injected for testability.
+   * Returns null/undefined if scope management is not available.
+   */
+  fetchScopes?: (accountId: string) => Promise<AccountScopesResponse>;
+  /**
+   * Update calendar scopes for an account. Injected for testability.
+   */
+  updateScopes?: (accountId: string, scopes: ScopeUpdateItem[]) => Promise<AccountScopesResponse>;
+  /**
    * Navigate to an OAuth URL. Defaults to window.location.assign.
    * Injected for testability (prevents actual navigation in tests).
    */
@@ -53,6 +68,8 @@ export function Accounts({
   currentUserId,
   fetchAccounts,
   unlinkAccount,
+  fetchScopes,
+  updateScopes,
   navigateToOAuth = (url) => {
     window.location.assign(url);
   },
@@ -66,6 +83,15 @@ export function Accounts({
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  // Scope management state
+  const [scopeTarget, setScopeTarget] = useState<LinkedAccount | null>(null);
+  const [scopes, setScopes] = useState<CalendarScope[]>([]);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const [scopeSaving, setScopeSaving] = useState(false);
+  const [pendingScopeChanges, setPendingScopeChanges] = useState<Map<string, ScopeUpdateItem>>(
+    new Map(),
+  );
 
   const mountedRef = useRef(true);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -195,6 +221,79 @@ export function Accounts({
     }
   }, [unlinkTarget, unlinkAccount, showStatus]);
 
+  // -- Scope management handlers --
+
+  const handleManageScopes = useCallback(
+    async (account: LinkedAccount) => {
+      if (!fetchScopes) return;
+      setScopeTarget(account);
+      setScopeLoading(true);
+      setPendingScopeChanges(new Map());
+      try {
+        const data = await fetchScopes(account.account_id);
+        if (!mountedRef.current) return;
+        setScopes(data.scopes);
+      } catch (err) {
+        if (!mountedRef.current) return;
+        showStatus(
+          "error",
+          `Failed to load scopes: ${err instanceof Error ? err.message : "Unknown error"}`,
+        );
+        setScopeTarget(null);
+      } finally {
+        if (mountedRef.current) setScopeLoading(false);
+      }
+    },
+    [fetchScopes, showStatus],
+  );
+
+  const handleScopeToggle = useCallback(
+    (providerCalendarId: string, field: "enabled" | "sync_enabled", value: boolean) => {
+      setPendingScopeChanges((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(providerCalendarId) ?? { provider_calendar_id: providerCalendarId };
+        next.set(providerCalendarId, { ...existing, [field]: value });
+        return next;
+      });
+      // Also update the visual state immediately
+      setScopes((prev) =>
+        prev.map((s) =>
+          s.provider_calendar_id === providerCalendarId
+            ? { ...s, [field]: value }
+            : s,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleScopesSave = useCallback(async () => {
+    if (!updateScopes || !scopeTarget || pendingScopeChanges.size === 0) return;
+    setScopeSaving(true);
+    try {
+      const changes = Array.from(pendingScopeChanges.values());
+      const data = await updateScopes(scopeTarget.account_id, changes);
+      if (!mountedRef.current) return;
+      setScopes(data.scopes);
+      setPendingScopeChanges(new Map());
+      showStatus("success", "Calendar scopes updated.");
+    } catch (err) {
+      if (!mountedRef.current) return;
+      showStatus(
+        "error",
+        `Failed to save scopes: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
+    } finally {
+      if (mountedRef.current) setScopeSaving(false);
+    }
+  }, [updateScopes, scopeTarget, pendingScopeChanges, showStatus]);
+
+  const handleScopesClose = useCallback(() => {
+    setScopeTarget(null);
+    setScopes([]);
+    setPendingScopeChanges(new Map());
+  }, []);
+
   // -- Loading state --
   if (loading) {
     return (
@@ -323,6 +422,15 @@ export function Accounts({
                     {providerLabel(account.provider)}
                   </td>
                   <td style={styles.td}>
+                    {fetchScopes && (
+                      <button
+                        data-testid={`scopes-btn-${account.account_id}`}
+                        onClick={() => handleManageScopes(account)}
+                        style={styles.scopesBtn}
+                      >
+                        Scopes
+                      </button>
+                    )}
                     <button
                       data-testid={`unlink-btn-${account.account_id}`}
                       onClick={() => handleUnlinkClick(account)}
@@ -375,6 +483,119 @@ export function Accounts({
               >
                 {unlinking ? "Unlinking..." : "Unlink"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Calendar scope management dialog */}
+      {scopeTarget && (
+        <div
+          data-testid="scopes-dialog"
+          style={styles.dialogOverlay}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Manage calendar scopes"
+        >
+          <div style={{ ...styles.dialog, maxWidth: "560px" }}>
+            <h2 style={styles.dialogTitle}>
+              Calendar Scopes -- {scopeTarget.email}
+            </h2>
+            <p style={styles.dialogText}>
+              Select which calendars to include in synchronization.
+              Recommended calendars are marked below. Scope tuning is optional
+              -- defaults work for most users.
+            </p>
+
+            {scopeLoading ? (
+              <div style={styles.loading} data-testid="scopes-loading">
+                Loading calendars...
+              </div>
+            ) : scopes.length === 0 ? (
+              <div style={styles.emptyState} data-testid="scopes-empty">
+                No calendars found for this account.
+              </div>
+            ) : (
+              <div data-testid="scopes-list" style={{ marginBottom: "1rem" }}>
+                {scopes.map((scope) => (
+                  <div
+                    key={scope.scope_id}
+                    data-testid={`scope-row-${scope.provider_calendar_id}`}
+                    style={styles.scopeRow}
+                  >
+                    <div style={styles.scopeInfo}>
+                      <span style={styles.scopeName}>
+                        {scope.display_name || scope.provider_calendar_id}
+                      </span>
+                      <span style={styles.scopeMeta}>
+                        {scope.access_level}
+                        {scope.recommended ? " (recommended)" : ""}
+                        {" -- "}
+                        {scope.capabilities.join(", ")}
+                      </span>
+                    </div>
+                    <div style={styles.scopeToggles}>
+                      <label style={styles.scopeToggleLabel}>
+                        <input
+                          type="checkbox"
+                          data-testid={`scope-enabled-${scope.provider_calendar_id}`}
+                          checked={scope.enabled}
+                          onChange={(e) =>
+                            handleScopeToggle(
+                              scope.provider_calendar_id,
+                              "enabled",
+                              e.target.checked,
+                            )
+                          }
+                        />
+                        Enabled
+                      </label>
+                      <label style={styles.scopeToggleLabel}>
+                        <input
+                          type="checkbox"
+                          data-testid={`scope-sync-${scope.provider_calendar_id}`}
+                          checked={scope.sync_enabled}
+                          disabled={!scope.capabilities.includes("write")}
+                          title={
+                            scope.capabilities.includes("write")
+                              ? "Enable sync for this calendar"
+                              : "Sync requires write capability"
+                          }
+                          onChange={(e) =>
+                            handleScopeToggle(
+                              scope.provider_calendar_id,
+                              "sync_enabled",
+                              e.target.checked,
+                            )
+                          }
+                        />
+                        Sync
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={styles.dialogActions}>
+              <button
+                data-testid="scopes-cancel"
+                onClick={handleScopesClose}
+                style={styles.cancelBtn}
+                disabled={scopeSaving}
+              >
+                {pendingScopeChanges.size === 0 ? "Close" : "Cancel"}
+              </button>
+              {pendingScopeChanges.size > 0 && (
+                <button
+                  data-testid="scopes-save"
+                  onClick={handleScopesSave}
+                  style={styles.scopeSaveBtn}
+                  disabled={scopeSaving}
+                >
+                  {scopeSaving ? "Saving..." : "Save Changes"}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -565,6 +786,62 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #ef4444",
     backgroundColor: "#7f1d1d",
     color: "#fca5a5",
+    cursor: "pointer",
+    fontSize: "0.875rem",
+    fontWeight: 600,
+  },
+  // Scope management styles
+  scopesBtn: {
+    padding: "0.35rem 0.75rem",
+    borderRadius: "6px",
+    border: "1px solid #3b82f6",
+    background: "transparent",
+    color: "#3b82f6",
+    cursor: "pointer",
+    fontSize: "0.8rem",
+    marginRight: "0.5rem",
+  },
+  scopeRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "0.5rem 0.75rem",
+    borderBottom: "1px solid #1e293b",
+  },
+  scopeInfo: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "0.15rem",
+    flex: 1,
+  },
+  scopeName: {
+    color: "#e2e8f0",
+    fontSize: "0.875rem",
+    fontWeight: 500,
+  },
+  scopeMeta: {
+    color: "#64748b",
+    fontSize: "0.75rem",
+  },
+  scopeToggles: {
+    display: "flex",
+    gap: "1rem",
+    alignItems: "center",
+  },
+  scopeToggleLabel: {
+    color: "#94a3b8",
+    fontSize: "0.8rem",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.3rem",
+    cursor: "pointer",
+  },
+  scopeSaveBtn: {
+    padding: "0.5rem 1rem",
+    borderRadius: "6px",
+    border: "1px solid #3b82f6",
+    backgroundColor: "#1e3a5f",
+    color: "#93c5fd",
     cursor: "pointer",
     fontSize: "0.875rem",
     fontWeight: 600,

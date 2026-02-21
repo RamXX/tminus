@@ -449,6 +449,9 @@ describe("Walking skeleton: webhook-to-busy-overlay pipeline", () => {
     d1Db = new Database(":memory:");
     d1Db.pragma("foreign_keys = ON");
     d1Db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    // Add channel_calendar_id column from migration 0027 (without ms_subscriptions
+    // ALTER since that table requires migration 0002 which this test doesn't use).
+    d1Db.exec("ALTER TABLE accounts ADD COLUMN channel_calendar_id TEXT;");
 
     // Seed org, user, and both accounts
     d1Db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(

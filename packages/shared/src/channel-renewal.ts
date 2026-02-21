@@ -9,6 +9,11 @@
  * This module provides a single implementation both can call, preventing
  * divergence as the protocol evolves (e.g., new steps, refined error handling).
  *
+ * Per-scope renewal (TM-8gfd.4): callers pass calendarId to renew a channel
+ * for a specific calendar. The calendar_id is stored in both AccountDO and
+ * D1 (channel_calendar_id column) so webhook routing can resolve to the
+ * specific calendar being watched.
+ *
  * See: TM-1s05 (tech debt: duplicated channel renewal logic)
  */
 
@@ -60,6 +65,11 @@ export interface RenewWebhookChannelParams {
   db: ChannelRenewalDB;
   /** The webhook URL for Google Calendar push notifications. */
   webhookUrl: string;
+  /**
+   * The specific calendar to watch. Defaults to "primary" for backward
+   * compatibility. Per-scope renewal passes the actual calendar ID.
+   */
+  calendarId?: string;
 }
 
 /**
@@ -72,6 +82,8 @@ export interface ChannelRenewalResult {
   resource_id: string;
   expiry: string;
   previous_channel_id: string | null;
+  /** The calendar this channel watches. */
+  calendar_id: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,14 +91,15 @@ export interface ChannelRenewalResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Re-register a Google Calendar watch channel for an account.
+ * Re-register a Google Calendar watch channel for an account and calendar.
  *
  * Steps:
  * 1. Get access token from AccountDO
  * 2. Stop the old channel with Google (best-effort, may already be dead)
- * 3. Register a new channel with Google via Calendar API
+ * 3. Register a new channel with Google via Calendar API for the target calendar
  * 4. Store new channel in AccountDO via storeWatchChannel
- * 5. Update D1 with new channel_id, channel_token, channel_expiry_ts
+ * 5. Update D1 with new channel_id, channel_token, channel_expiry_ts,
+ *    and channel_calendar_id for per-scope routing
  *
  * Throws on failure with a descriptive error message. Callers are
  * responsible for catch/log behavior appropriate to their context
@@ -102,6 +115,7 @@ export async function renewWebhookChannel(
     accountDOStub,
     db,
     webhookUrl,
+    calendarId = "primary",
   } = params;
 
   // Step 1: Get access token from AccountDO
@@ -132,12 +146,12 @@ export async function renewWebhookChannel(
     }
   }
 
-  // Step 3: Register new channel with Google
+  // Step 3: Register new channel with Google for the target calendar
   const newChannelId = generateId("calendar");
   const newToken = generateId("calendar");
 
   const watchResponse: WatchResponse = await client.watchEvents(
-    "primary",
+    calendarId,
     webhookUrl,
     newChannelId,
     newToken,
@@ -152,7 +166,7 @@ export async function renewWebhookChannel(
         channel_id: watchResponse.channelId,
         resource_id: watchResponse.resourceId,
         expiration: watchResponse.expiration,
-        calendar_id: "primary",
+        calendar_id: calendarId,
       }),
     }),
   );
@@ -163,7 +177,7 @@ export async function renewWebhookChannel(
     );
   }
 
-  // Step 5: Update D1 with new channel info
+  // Step 5: Update D1 with new channel info including per-scope calendar_id
   const expiryTs = new Date(
     parseInt(watchResponse.expiration, 10),
   ).toISOString();
@@ -171,14 +185,16 @@ export async function renewWebhookChannel(
   await db
     .prepare(
       `UPDATE accounts
-       SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3, resource_id = ?4
-       WHERE account_id = ?5`,
+       SET channel_id = ?1, channel_token = ?2, channel_expiry_ts = ?3,
+           resource_id = ?4, channel_calendar_id = ?5
+       WHERE account_id = ?6`,
     )
     .bind(
       watchResponse.channelId,
       newToken,
       expiryTs,
       watchResponse.resourceId,
+      calendarId,
       accountId,
     )
     .run();
@@ -189,5 +205,6 @@ export async function renewWebhookChannel(
     resource_id: watchResponse.resourceId,
     expiry: expiryTs,
     previous_channel_id: oldChannelId,
+    calendar_id: calendarId,
   };
 }

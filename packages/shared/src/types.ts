@@ -212,6 +212,12 @@ export interface SyncIncrementalMessage {
   readonly channel_id: string;
   readonly resource_id: string;
   readonly ping_ts: string;
+  /**
+   * The specific calendar this notification pertains to.
+   * Null when the webhook channel/subscription predates per-scope routing
+   * or when the scope could not be resolved (telemetry emitted in that case).
+   */
+  readonly calendar_id: string | null;
 }
 
 /** Full sync request -- onboarding, reconcile, or 410 recovery (sync-queue). */
@@ -250,11 +256,19 @@ export interface DeleteMirrorMessage {
   readonly idempotency_key: string;
 }
 
+/** Reason codes for reconciliation triggers. */
+export type ReconcileReasonCode = "scheduled" | "manual" | "drift_detected";
+
 /** Request to reconcile a specific account (reconcile-queue). */
 export interface ReconcileAccountMessage {
   readonly type: "RECONCILE_ACCOUNT";
   readonly account_id: AccountId;
-  readonly reason: "scheduled" | "manual" | "drift_detected";
+  readonly reason: ReconcileReasonCode;
+  /**
+   * Optional: restrict reconciliation to a single calendar scope.
+   * When null/undefined, reconcile iterates all scoped calendars.
+   */
+  readonly scope?: string | null;
 }
 
 // ---------------------------------------------------------------------------

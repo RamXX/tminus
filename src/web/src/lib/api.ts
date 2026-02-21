@@ -90,6 +90,44 @@ export interface LinkedAccount {
   status: AccountStatus;
 }
 
+/** Calendar capability derived from the calendar_role. */
+export type CalendarCapability = "read" | "write";
+
+/** Access level for a scoped calendar. */
+export type CalendarAccessLevel =
+  | "owner"
+  | "editor"
+  | "readonly"
+  | "freeBusyReader";
+
+/** A single scoped calendar with capability metadata. */
+export interface CalendarScope {
+  scope_id: string;
+  provider_calendar_id: string;
+  display_name: string | null;
+  calendar_role: string;
+  access_level: CalendarAccessLevel;
+  capabilities: CalendarCapability[];
+  enabled: boolean;
+  sync_enabled: boolean;
+  /** Whether this scope is recommended for default selection. */
+  recommended: boolean;
+}
+
+/** Response from GET /v1/accounts/:id/scopes. */
+export interface AccountScopesResponse {
+  account_id: string;
+  provider: string;
+  scopes: CalendarScope[];
+}
+
+/** Payload item for PUT /v1/accounts/:id/scopes. */
+export interface ScopeUpdateItem {
+  provider_calendar_id: string;
+  enabled?: boolean;
+  sync_enabled?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Error class
 // ---------------------------------------------------------------------------
@@ -947,5 +985,28 @@ export async function fetchSyncHistory(
   return apiFetch<import("./provider-health").SyncHistoryResponse>(
     `/v1/accounts/${encodeURIComponent(accountId)}/sync-history`,
     { token },
+  );
+}
+
+/** GET /api/v1/accounts/:id/scopes -- list scoped calendars with capabilities. */
+export async function fetchAccountScopes(
+  token: string,
+  accountId: string,
+): Promise<AccountScopesResponse> {
+  return apiFetch<AccountScopesResponse>(
+    `/v1/accounts/${encodeURIComponent(accountId)}/scopes`,
+    { token },
+  );
+}
+
+/** PUT /api/v1/accounts/:id/scopes -- update scoped calendars. */
+export async function updateAccountScopes(
+  token: string,
+  accountId: string,
+  scopes: ScopeUpdateItem[],
+): Promise<AccountScopesResponse> {
+  return apiFetch<AccountScopesResponse>(
+    `/v1/accounts/${encodeURIComponent(accountId)}/scopes`,
+    { method: "PUT", body: { scopes }, token },
   );
 }

@@ -39,6 +39,86 @@ Health is computed by the api-worker when `/v1/sync/status` is called:
 The `overall` field on the aggregate endpoint is the worst status among all
 accounts. This gives operators a single field to monitor.
 
+### Per-Scope Health
+
+Account-level health gives a coarse signal. Per-scope health drills into
+individual calendars so operators can pinpoint exactly which scope is
+degraded.
+
+#### `ScopedSyncHealth` Shape
+
+Each calendar scope produces a `ScopedSyncHealth` record:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `providerCalendarId` | `string` | The provider-specific calendar identifier (e.g. `user@example.com` for a Google calendar). |
+| `lastSyncTs` | `string \| null` | ISO 8601 timestamp of the last sync attempt (success or failure) for this scope. Null if the scope has never been synced. |
+| `lastSuccessTs` | `string \| null` | ISO 8601 timestamp of the last *successful* sync for this scope. Null if no sync has succeeded yet. |
+| `errorMessage` | `string \| null` | Non-null when the scope is in a failure state. Contains the error detail from the most recent failed sync attempt. |
+| `hasCursor` | `boolean` | Whether a sync token (page token / delta cursor) exists for this scope. `false` means the next sync will be a full bootstrap rather than an incremental delta. |
+
+#### `SyncHealthReport` Aggregation
+
+`getSyncHealthReport(accountId, env)` builds a `SyncHealthReport` by:
+
+1. Looking up the account's provider type.
+2. Calling AccountDO's `/getSyncHealth` endpoint for account-level health
+   (`lastSyncTs`, `lastSuccessTs`, `errorMessage`).
+3. Enumerating all calendar scopes via `listCalendarScopes`.
+4. For each scope, calling AccountDO's `/getScopedSyncHealth` endpoint to
+   populate a `ScopedSyncHealth` entry.
+
+The resulting report shape:
+
+```
+SyncHealthReport
+  accountId:    AccountId
+  provider:     ProviderType
+  accountLevel:
+    lastSyncTs:    string | null
+    lastSuccessTs: string | null
+    errorMessage:  string | null
+  scopes:       ScopedSyncHealth[]
+```
+
+If AccountDO returns a non-OK status (404/405) or throws, the function
+treats it as empty data rather than propagating the failure. This keeps the
+health endpoint available even when individual DOs are unreachable.
+
+#### `ReconcileReasonCode` Values
+
+Reconciliation can be triggered for different reasons, captured in the
+`ReconcileReasonCode` type:
+
+| Code | Meaning |
+|------|---------|
+| `scheduled` | Periodic reconciliation fired by cron. This is the normal background consistency check. |
+| `manual` | An operator or API caller explicitly requested reconciliation for an account or scope. |
+| `drift_detected` | The system detected a discrepancy between the canonical store and a mirror, and auto-triggered reconciliation to correct it. |
+
+These codes appear in `ReconcileAccountMessage` payloads on the
+reconcile-queue and can be used for filtering in logs and alerting.
+
+#### Alerting Guidance
+
+Scope-level metrics enable more precise alerting:
+
+- **`hasCursor = false` after onboarding completes**: The scope lost its
+  sync token and needs a full bootstrap. This can happen after a Google 410
+  (sync token invalidated) or if the scope was never fully onboarded. Flag
+  for investigation if it persists beyond the next sync cycle.
+- **`errorMessage` is non-null**: The scope is in a failure state. The
+  error string contains the root cause. Alert and investigate -- persistent
+  scope errors often indicate revoked permissions or provider-side issues
+  for that specific calendar.
+- **`lastSuccessTs` growing stale for a single scope**: If one scope's
+  `lastSuccessTs` is hours behind while others are current, that scope has
+  a localized problem. Apply the same staleness thresholds as account-level
+  health (1h degraded, 6h stale, 24h unhealthy) at the scope level.
+- **Reconcile reason `drift_detected`**: If this fires frequently for a
+  scope, there may be an external actor modifying mirrors or a bug in delta
+  application. Investigate the event journal for that scope.
+
 ### Alerting Integration Points
 
 The sync status model is designed for external alerting:

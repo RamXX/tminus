@@ -6,12 +6,14 @@
  * - POST /webhook/microsoft -> Microsoft Graph change notification handler
  *
  * Google handler: Receives POST /webhook/google from Google Calendar push
- * notifications, validates the channel_token against D1, and enqueues
+ * notifications, validates the channel_token against D1, resolves to
+ * account + scoped calendar via channel_calendar_id, and enqueues
  * SYNC_INCREMENTAL messages to sync-queue for actual sync processing.
  *
  * Microsoft handler: Handles two Microsoft Graph flows:
  * a. Subscription validation handshake: ?validationToken=<token> -> return token as plain text
- * b. Change notifications: validate clientState, enqueue SYNC_INCREMENTAL per notification
+ * b. Change notifications: validate clientState, resolve subscription to
+ *    account + scoped calendar, enqueue SYNC_INCREMENTAL per notification
  *
  * Key invariant: ALWAYS return 200 to Google. Non-200 responses trigger
  * exponential backoff and eventual channel expiry.
@@ -66,6 +68,11 @@ interface MicrosoftNotificationPayload {
  *
  * Always returns 200 to Google regardless of outcome. Failures are logged
  * but never surfaced as HTTP errors (Google would back off).
+ *
+ * Per-scope routing: resolves channel_token -> (account_id, channel_calendar_id).
+ * If channel_calendar_id is null, the channel predates per-scope routing;
+ * telemetry is emitted and the message is still enqueued with calendar_id: null
+ * so downstream consumers can handle gracefully.
  */
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const channelId = request.headers.get(HEADER_CHANNEL_ID);
@@ -91,15 +98,20 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     return new Response("OK", { status: 200 });
   }
 
-  // Look up the account by channel_token. This simultaneously verifies
-  // authenticity (the token is a secret shared at watch creation time)
-  // and identifies which account to sync.
-  let accountRow: { account_id: string } | null = null;
+  // Look up the account and scoped calendar by channel_token.
+  // This simultaneously verifies authenticity (the token is a secret shared
+  // at watch creation time) and identifies which account + calendar to sync.
+  let accountRow: {
+    account_id: string;
+    channel_calendar_id: string | null;
+  } | null = null;
   try {
     accountRow = await env.DB
-      .prepare("SELECT account_id FROM accounts WHERE channel_token = ?1")
+      .prepare(
+        "SELECT account_id, channel_calendar_id FROM accounts WHERE channel_token = ?1",
+      )
       .bind(channelToken)
-      .first<{ account_id: string }>();
+      .first<{ account_id: string; channel_calendar_id: string | null }>();
   } catch (err) {
     console.error("D1 query failed during webhook processing", err);
     return new Response("OK", { status: 200 });
@@ -113,6 +125,15 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     return new Response("OK", { status: 200 });
   }
 
+  // Telemetry for unresolved scope (legacy channel without calendar_id)
+  if (!accountRow.channel_calendar_id) {
+    console.warn("Webhook channel has no scoped calendar_id (legacy channel)", {
+      accountId: accountRow.account_id,
+      channelId,
+      resourceState,
+    });
+  }
+
   // Enqueue SYNC_INCREMENTAL for the sync-consumer to process.
   // TM-08pp: Canonicalize resource_id to eliminate URL-encoding variants
   // that Google may include in push notification headers.
@@ -122,6 +143,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     channel_id: channelId,
     resource_id: canonicalizeProviderEventId(resourceId),
     ping_ts: new Date().toISOString(),
+    calendar_id: accountRow.channel_calendar_id,
   };
 
   try {
@@ -129,6 +151,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     console.log("Enqueued SYNC_INCREMENTAL", {
       accountId: accountRow.account_id,
       channelId,
+      calendarId: accountRow.channel_calendar_id,
       resourceState,
     });
   } catch (err) {
@@ -151,9 +174,14 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
  * 1. Validation handshake: Microsoft POSTs with ?validationToken=<token>.
  *    Must respond with the token as plain text, 200 OK, within 10 seconds.
  * 2. Change notifications: POST with JSON body containing notifications.
- *    Validate clientState, look up subscriptionId -> account_id in D1,
- *    enqueue SYNC_INCREMENTAL for each valid notification.
+ *    Validate clientState, look up subscriptionId -> (account_id, calendar_id)
+ *    in D1, enqueue SYNC_INCREMENTAL for each valid notification.
  *    Return 202 Accepted.
+ *
+ * Per-scope routing: resolves subscription to account + calendar_id.
+ * Direct lookup uses accounts.channel_calendar_id; legacy fallback uses
+ * ms_subscriptions.calendar_id. If neither has a calendar_id, telemetry
+ * is emitted and the message is enqueued with calendar_id: null.
  */
 async function handleMicrosoftWebhook(
   request: Request,
@@ -190,31 +218,56 @@ async function handleMicrosoftWebhook(
   // Process each notification
   for (const notification of payload.value) {
     // First try direct lookup via accounts.channel_id (canonical source).
+    // Now also fetches channel_calendar_id for per-scope routing.
     // Fallback to ms_subscriptions table for legacy rows.
-    let accountRow: { account_id: string; channel_token: string | null } | null = null;
+    let accountRow: {
+      account_id: string;
+      channel_token: string | null;
+      calendar_id: string | null;
+    } | null = null;
     try {
-      accountRow = await env.DB
+      const directRow = await env.DB
         .prepare(
-          `SELECT account_id, channel_token
+          `SELECT account_id, channel_token, channel_calendar_id
            FROM accounts
            WHERE provider = 'microsoft'
              AND status != 'revoked'
              AND channel_id = ?1`,
         )
         .bind(notification.subscriptionId)
-        .first<{ account_id: string; channel_token: string | null }>();
+        .first<{
+          account_id: string;
+          channel_token: string | null;
+          channel_calendar_id: string | null;
+        }>();
+
+      if (directRow) {
+        accountRow = {
+          account_id: directRow.account_id,
+          channel_token: directRow.channel_token,
+          calendar_id: directRow.channel_calendar_id,
+        };
+      }
 
       if (!accountRow) {
-        accountRow = await env.DB
+        const legacyRow = await env.DB
           .prepare(
-            `SELECT a.account_id, a.channel_token
+            `SELECT a.account_id, a.channel_token, ms.calendar_id
              FROM ms_subscriptions ms
              JOIN accounts a ON a.account_id = ms.account_id
              WHERE ms.subscription_id = ?1
                AND a.status != 'revoked'`,
           )
           .bind(notification.subscriptionId)
-          .first<{ account_id: string; channel_token: string | null }>();
+          .first<{
+            account_id: string;
+            channel_token: string | null;
+            calendar_id: string | null;
+          }>();
+
+        if (legacyRow) {
+          accountRow = legacyRow;
+        }
       }
     } catch (err) {
       console.error("D1 query failed for Microsoft subscription lookup", err);
@@ -241,6 +294,14 @@ async function handleMicrosoftWebhook(
       continue;
     }
 
+    // Telemetry for unresolved scope (legacy subscription without calendar_id)
+    if (!accountRow.calendar_id) {
+      console.warn("Microsoft subscription has no scoped calendar_id (legacy subscription)", {
+        accountId: accountRow.account_id,
+        subscriptionId: notification.subscriptionId,
+      });
+    }
+
     // Enqueue SYNC_INCREMENTAL.
     // TM-08pp: Canonicalize resource path to eliminate URL-encoding variants
     // that Microsoft Graph may include in change notification payloads.
@@ -250,6 +311,7 @@ async function handleMicrosoftWebhook(
       channel_id: notification.subscriptionId,
       resource_id: canonicalizeProviderEventId(notification.resource),
       ping_ts: new Date().toISOString(),
+      calendar_id: accountRow.calendar_id,
     };
 
     try {
@@ -257,6 +319,7 @@ async function handleMicrosoftWebhook(
       console.log("Enqueued SYNC_INCREMENTAL for Microsoft notification", {
         accountId: accountRow.account_id,
         subscriptionId: notification.subscriptionId,
+        calendarId: accountRow.calendar_id,
         changeType: notification.changeType,
       });
     } catch (err) {

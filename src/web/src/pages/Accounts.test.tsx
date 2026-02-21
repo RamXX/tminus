@@ -18,7 +18,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
 import { Accounts, type AccountsProps } from "./Accounts";
-import type { LinkedAccount } from "../lib/api";
+import type { LinkedAccount, AccountScopesResponse, ScopeUpdateItem } from "../lib/api";
 import {
   buildOAuthStartUrl,
   statusColor,
@@ -88,6 +88,8 @@ async function renderAndWait(overrides: Partial<AccountsProps> = {}) {
   const fetchAccounts = overrides.fetchAccounts ?? createMockFetch();
   const unlinkAccount = overrides.unlinkAccount ?? createMockUnlink();
   const navigateToOAuth = overrides.navigateToOAuth ?? createMockNavigate();
+  const fetchScopes = overrides.fetchScopes;
+  const updateScopes = overrides.updateScopes;
   const currentUserId = overrides.currentUserId ?? "usr_test_123";
 
   const result = render(
@@ -96,6 +98,8 @@ async function renderAndWait(overrides: Partial<AccountsProps> = {}) {
       fetchAccounts={fetchAccounts}
       unlinkAccount={unlinkAccount}
       navigateToOAuth={navigateToOAuth}
+      fetchScopes={fetchScopes}
+      updateScopes={updateScopes}
     />,
   );
 
@@ -104,7 +108,7 @@ async function renderAndWait(overrides: Partial<AccountsProps> = {}) {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  return { ...result, fetchAccounts, unlinkAccount, navigateToOAuth };
+  return { ...result, fetchAccounts, unlinkAccount, navigateToOAuth, fetchScopes, updateScopes };
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +674,267 @@ describe("Accounts Page", () => {
 
       const label = within(row).getByTestId("account-status-label");
       expect(label.textContent).toBe("Pending");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Calendar scope management (TM-8gfd.2)
+  // -----------------------------------------------------------------------
+
+  describe("Calendar Scope Management", () => {
+    const MOCK_SCOPES_RESPONSE: AccountScopesResponse = {
+      account_id: "acc-google-work",
+      provider: "google",
+      scopes: [
+        {
+          scope_id: "cal_01",
+          provider_calendar_id: "primary",
+          display_name: "Main Calendar",
+          calendar_role: "owner",
+          access_level: "owner",
+          capabilities: ["read", "write"],
+          enabled: true,
+          sync_enabled: true,
+          recommended: true,
+        },
+        {
+          scope_id: "cal_02",
+          provider_calendar_id: "shared-team@group.calendar.google.com",
+          display_name: "Team Calendar",
+          calendar_role: "editor",
+          access_level: "editor",
+          capabilities: ["read", "write"],
+          enabled: true,
+          sync_enabled: false,
+          recommended: false,
+        },
+        {
+          scope_id: "cal_03",
+          provider_calendar_id: "holidays@calendar.google.com",
+          display_name: "Holidays",
+          calendar_role: "reader",
+          access_level: "readonly",
+          capabilities: ["read"],
+          enabled: false,
+          sync_enabled: false,
+          recommended: false,
+        },
+      ],
+    };
+
+    function createMockFetchScopes() {
+      return vi.fn(
+        async (_accountId: string): Promise<AccountScopesResponse> =>
+          MOCK_SCOPES_RESPONSE,
+      );
+    }
+
+    function createMockUpdateScopes() {
+      return vi.fn(
+        async (
+          _accountId: string,
+          _scopes: ScopeUpdateItem[],
+        ): Promise<AccountScopesResponse> => MOCK_SCOPES_RESPONSE,
+      );
+    }
+
+    it("shows Scopes button when fetchScopes is provided", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      // There should be a Scopes button for each account row
+      const scopeBtn = screen.getByTestId("scopes-btn-acc-google-work");
+      expect(scopeBtn).toBeInTheDocument();
+      expect(scopeBtn.textContent).toBe("Scopes");
+    });
+
+    it("does NOT show Scopes button when fetchScopes is not provided", async () => {
+      await renderAndWait(); // no fetchScopes
+
+      const scopeBtn = screen.queryByTestId("scopes-btn-acc-google-work");
+      expect(scopeBtn).not.toBeInTheDocument();
+    });
+
+    it("opens scope dialog when Scopes button is clicked", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      const scopeBtn = screen.getByTestId("scopes-btn-acc-google-work");
+
+      await act(async () => {
+        fireEvent.click(scopeBtn);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      const dialog = screen.getByTestId("scopes-dialog");
+      expect(dialog).toBeInTheDocument();
+      expect(fetchScopes).toHaveBeenCalledWith("acc-google-work");
+    });
+
+    it("renders scope rows with capability metadata", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Verify all scope rows are rendered
+      expect(screen.getByTestId("scope-row-primary")).toBeInTheDocument();
+      expect(
+        screen.getByTestId(
+          "scope-row-shared-team@group.calendar.google.com",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId("scope-row-holidays@calendar.google.com"),
+      ).toBeInTheDocument();
+
+      // Verify primary shows recommended
+      const primaryRow = screen.getByTestId("scope-row-primary");
+      expect(primaryRow.textContent).toContain("Main Calendar");
+      expect(primaryRow.textContent).toContain("(recommended)");
+      expect(primaryRow.textContent).toContain("read, write");
+    });
+
+    it("disables sync checkbox for read-only calendars", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Holidays calendar is readonly -- sync checkbox should be disabled
+      const syncCheckbox = screen.getByTestId(
+        "scope-sync-holidays@calendar.google.com",
+      ) as HTMLInputElement;
+      expect(syncCheckbox.disabled).toBe(true);
+
+      // Primary calendar is owner -- sync checkbox should be enabled
+      const primarySync = screen.getByTestId(
+        "scope-sync-primary",
+      ) as HTMLInputElement;
+      expect(primarySync.disabled).toBe(false);
+    });
+
+    it("shows Save button only when changes are pending", async () => {
+      const fetchScopes = createMockFetchScopes();
+      const updateScopes = createMockUpdateScopes();
+      await renderAndWait({ fetchScopes, updateScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // No save button yet -- no changes
+      expect(screen.queryByTestId("scopes-save")).not.toBeInTheDocument();
+      // Close button should say "Close"
+      expect(screen.getByTestId("scopes-cancel").textContent).toBe("Close");
+
+      // Toggle a scope
+      await act(async () => {
+        const enabledCheckbox = screen.getByTestId(
+          "scope-enabled-holidays@calendar.google.com",
+        );
+        fireEvent.click(enabledCheckbox);
+      });
+
+      // Save button should now appear
+      expect(screen.getByTestId("scopes-save")).toBeInTheDocument();
+      // Cancel button should say "Cancel"
+      expect(screen.getByTestId("scopes-cancel").textContent).toBe("Cancel");
+    });
+
+    it("calls updateScopes and shows success message on save", async () => {
+      const fetchScopes = createMockFetchScopes();
+      const updateScopes = createMockUpdateScopes();
+      await renderAndWait({ fetchScopes, updateScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Toggle sync for team calendar
+      await act(async () => {
+        fireEvent.click(
+          screen.getByTestId(
+            "scope-sync-shared-team@group.calendar.google.com",
+          ),
+        );
+      });
+
+      // Click save
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-save"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(updateScopes).toHaveBeenCalledWith("acc-google-work", [
+        {
+          provider_calendar_id: "shared-team@group.calendar.google.com",
+          sync_enabled: true,
+        },
+      ]);
+
+      // Success message should appear
+      const statusEl = screen.getByTestId("accounts-status");
+      expect(statusEl.textContent).toContain("Calendar scopes updated");
+    });
+
+    it("closes scope dialog on cancel", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getByTestId("scopes-dialog")).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-cancel"));
+      });
+
+      expect(screen.queryByTestId("scopes-dialog")).not.toBeInTheDocument();
+    });
+
+    it("shows error message when scope fetch fails", async () => {
+      const fetchScopes = vi.fn(async () => {
+        throw new Error("Scope fetch failed");
+      });
+      await renderAndWait({ fetchScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Dialog should NOT be open (fetch failed)
+      expect(screen.queryByTestId("scopes-dialog")).not.toBeInTheDocument();
+
+      // Error status should be shown
+      const statusEl = screen.getByTestId("accounts-status");
+      expect(statusEl.textContent).toContain("Failed to load scopes");
+    });
+
+    it("scope dialog contains optional/skippable messaging", async () => {
+      const fetchScopes = createMockFetchScopes();
+      await renderAndWait({ fetchScopes });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      const dialog = screen.getByTestId("scopes-dialog");
+      // Verify the dialog mentions scope tuning is optional
+      expect(dialog.textContent).toContain("optional");
     });
   });
 });

@@ -9,6 +9,7 @@
  *   Force-renew a Google Calendar webhook channel for an account.
  *   Delegates to the shared renewWebhookChannel() function from @tminus/shared
  *   (TM-1s05: extracted to eliminate duplication with the cron worker).
+ *   Accepts optional { calendar_id } body for per-scope renewal (TM-8gfd.4).
  */
 
 import { renewWebhookChannel } from "@tminus/shared";
@@ -51,7 +52,7 @@ function validateAdminKey(request: Request, env: Env): boolean {
 export type { ChannelRenewalResult } from "@tminus/shared";
 
 /**
- * Re-register a Google Calendar watch channel for an account.
+ * Re-register a Google Calendar watch channel for an account and calendar.
  *
  * Delegates to the shared renewWebhookChannel() function from @tminus/shared
  * (TM-1s05: extracted to eliminate duplication with the cron worker).
@@ -59,6 +60,7 @@ export type { ChannelRenewalResult } from "@tminus/shared";
  * This wrapper handles API-specific concerns:
  * - Validating WEBHOOK_URL is configured (cron always has it)
  * - Constructing the AccountDO stub from Env bindings
+ * - Passing calendarId for per-scope renewal (TM-8gfd.4)
  *
  * Throws on failure with a descriptive error message.
  */
@@ -67,6 +69,7 @@ export async function renewChannelForAccount(
   accountId: string,
   oldChannelId: string | null,
   oldResourceId: string | null,
+  calendarId?: string,
 ): Promise<ChannelRenewalResult> {
   const webhookUrl = env.WEBHOOK_URL;
   if (!webhookUrl) {
@@ -83,6 +86,7 @@ export async function renewChannelForAccount(
     accountDOStub: stub,
     db: env.DB,
     webhookUrl,
+    calendarId,
   });
 }
 
@@ -94,7 +98,9 @@ export async function renewChannelForAccount(
  * Force-renew a Google Calendar webhook channel for an account.
  *
  * Auth: X-Admin-Key header must match env.ADMIN_KEY.
- * Returns: new channel details (channel_id, resource_id, expiry) on success.
+ * Body (optional): { calendar_id?: string } for per-scope renewal.
+ *   If omitted, defaults to "primary".
+ * Returns: new channel details (channel_id, resource_id, expiry, calendar_id) on success.
  * Errors:
  * - 401: Missing/invalid admin key
  * - 404: Account not found
@@ -102,7 +108,7 @@ export async function renewChannelForAccount(
  * - 500: Channel renewal failed (token refresh, Google API error, etc.)
  */
 async function handleRenewChannel(
-  _request: Request,
+  request: Request,
   env: Env,
   accountId: string,
 ): Promise<Response> {
@@ -149,6 +155,10 @@ async function handleRenewChannel(
     );
   }
 
+  // Parse optional body for per-scope calendar_id
+  const body = await parseJsonBody<{ calendar_id?: string }>(request);
+  const calendarId = body?.calendar_id;
+
   // Perform the renewal
   try {
     const result = await renewChannelForAccount(
@@ -156,6 +166,7 @@ async function handleRenewChannel(
       accountId,
       row.channel_id,
       row.resource_id,
+      calendarId,
     );
 
     return jsonResponse(successEnvelope(result), 200);

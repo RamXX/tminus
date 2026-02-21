@@ -32,6 +32,7 @@ import type {
   FetchFn,
   DetailLevel,
   CalendarKind,
+  ReconcileReasonCode,
 } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -52,7 +53,13 @@ export interface ReconcileEnv {
 /** Input parameters for the reconcile workflow. */
 export interface ReconcileParams {
   readonly account_id: AccountId;
-  readonly reason: "scheduled" | "manual" | "drift_detected";
+  readonly reason: ReconcileReasonCode;
+  /**
+   * Optional: restrict reconciliation to a single calendar scope.
+   * When null/undefined, reconcile iterates all scoped calendars
+   * registered with the account's AccountDO.
+   */
+  readonly scope?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +183,7 @@ export class ReconcileWorkflow {
    */
   async run(params: ReconcileParams): Promise<ReconcileResult> {
     const { account_id } = params;
+    const targetScope = params.scope ?? null;
 
     // Look up user_id for this account
     const userId = await this.lookupUserId(account_id);
@@ -189,12 +197,47 @@ export class ReconcileWorkflow {
     const accessToken = await this.getAccessToken(account_id);
     const client = new GoogleCalendarClient(accessToken, this.deps.fetchFn);
 
-    const {
-      originEvents,
-      managedMirrors,
-      totalEvents,
-      syncToken,
-    } = await this.fetchAndClassifyAllEvents(client, account_id);
+    // Determine which calendar scopes to reconcile.
+    const calendarIds = targetScope
+      ? [targetScope]
+      : await this.listReconcileCalendarIds(account_id);
+
+    // Iterate all scopes, merging results with cross-scope deduplication.
+    const originEvents: ClassifiedOriginEvent[] = [];
+    const managedMirrors: ClassifiedManagedMirror[] = [];
+    let totalEvents = 0;
+    let syncToken: string | null = null;
+    const seenOriginEventIds = new Set<string>();
+
+    for (const calendarId of calendarIds) {
+      const scopeResult = await this.fetchAndClassifyAllEvents(
+        client,
+        account_id,
+        calendarId,
+      );
+
+      totalEvents += scopeResult.totalEvents;
+
+      // Deduplicate origin events by event ID across scopes.
+      for (const origin of scopeResult.originEvents) {
+        const eventId = origin.event.id ?? "";
+        if (eventId && seenOriginEventIds.has(eventId)) {
+          continue;
+        }
+        if (eventId) {
+          seenOriginEventIds.add(eventId);
+        }
+        originEvents.push(origin);
+      }
+
+      // Managed mirrors are scope-specific; no dedup needed.
+      managedMirrors.push(...scopeResult.managedMirrors);
+
+      // Keep the last non-null syncToken.
+      if (scopeResult.syncToken) {
+        syncToken = scopeResult.syncToken;
+      }
+    }
 
     const discrepancies: Discrepancy[] = [];
     let missingCanonicalsCreated = 0;
@@ -389,6 +432,7 @@ export class ReconcileWorkflow {
   private async fetchAndClassifyAllEvents(
     client: GoogleCalendarClient,
     accountId: AccountId,
+    calendarId: string = "primary",
   ): Promise<{
     originEvents: ClassifiedOriginEvent[];
     managedMirrors: ClassifiedManagedMirror[];
@@ -403,7 +447,7 @@ export class ReconcileWorkflow {
 
     do {
       const response = await client.listEvents(
-        "primary",
+        calendarId,
         undefined, // no syncToken -- full listing
         pageToken,
       );
@@ -915,6 +959,58 @@ export class ReconcileWorkflow {
       throw new Error(
         `AccountDO.markSyncSuccess failed (${response.status}): ${body}`,
       );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Calendar scope discovery
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve which calendar IDs to reconcile for a Google account.
+   *
+   * Calls AccountDO /listCalendarScopes to get the registered scopes.
+   * Falls back to ["primary"] when the DO returns no scopes (pre-scope
+   * accounts or non-Google providers).
+   */
+  private async listReconcileCalendarIds(
+    accountId: AccountId,
+  ): Promise<string[]> {
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    try {
+      const response = await stub.fetch(
+        new Request("https://account.internal/listCalendarScopes", {
+          method: "POST",
+        }),
+      );
+
+      if (!response.ok) {
+        console.warn(
+          `reconcile: listCalendarScopes failed (${response.status}) for ${accountId}, falling back to primary`,
+        );
+        return ["primary"];
+      }
+
+      const data = (await response.json()) as {
+        scopes: Array<{
+          providerCalendarId: string;
+          enabled: boolean;
+          syncEnabled: boolean;
+        }>;
+      };
+
+      const syncableIds = data.scopes
+        .filter((s) => s.enabled && s.syncEnabled)
+        .map((s) => s.providerCalendarId);
+
+      return syncableIds.length > 0 ? syncableIds : ["primary"];
+    } catch {
+      console.warn(
+        `reconcile: listCalendarScopes threw for ${accountId}, falling back to primary`,
+      );
+      return ["primary"];
     }
   }
 

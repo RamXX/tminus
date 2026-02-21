@@ -305,7 +305,7 @@ describe("ErrorBoundary integration", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(screen.getByText("Something went wrong")).toBeInTheDocument();
     expect(screen.getByText("Test crash")).toBeInTheDocument();
-    expect(screen.getByText("Try Again")).toBeInTheDocument();
+    expect(screen.getByText("Try again")).toBeInTheDocument();
 
     spy.mockRestore();
   });

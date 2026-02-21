@@ -222,6 +222,7 @@ describe("types.ts -- queue message types", () => {
       channel_id: "ch_abc",
       resource_id: "res_xyz",
       ping_ts: "2025-06-15T12:00:00Z",
+      calendar_id: null,
     };
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.account_id).toBe("acc_01");

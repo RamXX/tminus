@@ -3,6 +3,9 @@
  *
  * Simple form that authenticates via POST /api/v1/auth/login.
  * On success, stores JWT in React auth context and navigates to calendar.
+ *
+ * Converted from inline styles to Tailwind CSS while preserving
+ * the same DOM structure, labels, and form behavior so existing tests pass.
  */
 
 import { useState, type FormEvent } from "react";
@@ -40,14 +43,21 @@ export function Login() {
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.card}>
-        <h1 style={styles.title}>T-Minus</h1>
-        <p style={styles.subtitle}>Calendar Federation Engine</p>
+    <div className="flex min-h-screen items-center justify-center">
+      <div className="w-full max-w-[400px] rounded-lg bg-card p-8 shadow-md">
+        <h1 className="mb-1 text-[1.75rem] font-bold text-foreground">
+          T-Minus
+        </h1>
+        <p className="mb-6 text-sm text-muted-foreground">
+          Calendar Federation Engine
+        </p>
 
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <div style={styles.field}>
-            <label htmlFor="email" style={styles.label}>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="email"
+              className="text-sm font-medium text-slate-300"
+            >
               Email
             </label>
             <input
@@ -57,13 +67,16 @@ export function Login() {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoComplete="email"
-              style={styles.input}
+              className="rounded-md border border-border bg-background px-3 py-2.5 text-sm text-slate-200 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="you@example.com"
             />
           </div>
 
-          <div style={styles.field}>
-            <label htmlFor="password" style={styles.label}>
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="password"
+              className="text-sm font-medium text-slate-300"
+            >
               Password
             </label>
             <input
@@ -74,14 +87,18 @@ export function Login() {
               required
               autoComplete="current-password"
               minLength={8}
-              style={styles.input}
+              className="rounded-md border border-border bg-background px-3 py-2.5 text-sm text-slate-200 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="Enter password"
             />
           </div>
 
-          {error && <p style={styles.error}>{error}</p>}
+          {error && <p className="m-0 text-sm text-red-400">{error}</p>}
 
-          <button type="submit" disabled={loading} style={styles.button}>
+          <button
+            type="submit"
+            disabled={loading}
+            className="mt-2 cursor-pointer rounded-md border-none bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          >
             {loading ? "Signing in..." : "Sign In"}
           </button>
         </form>
@@ -89,75 +106,3 @@ export function Login() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (walking skeleton -- CSS framework added later)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    minHeight: "100vh",
-  },
-  card: {
-    background: "#1e293b",
-    borderRadius: "8px",
-    padding: "2rem",
-    width: "100%",
-    maxWidth: "400px",
-    boxShadow: "0 4px 6px rgba(0,0,0,0.3)",
-  },
-  title: {
-    fontSize: "1.75rem",
-    fontWeight: 700,
-    marginBottom: "0.25rem",
-    color: "#f1f5f9",
-  },
-  subtitle: {
-    fontSize: "0.875rem",
-    color: "#94a3b8",
-    marginBottom: "1.5rem",
-  },
-  form: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "1rem",
-  },
-  field: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.375rem",
-  },
-  label: {
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    color: "#cbd5e1",
-  },
-  input: {
-    padding: "0.625rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    background: "#0f172a",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    outline: "none",
-  },
-  error: {
-    color: "#f87171",
-    fontSize: "0.875rem",
-    margin: 0,
-  },
-  button: {
-    padding: "0.625rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#3b82f6",
-    color: "#ffffff",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    cursor: "pointer",
-    marginTop: "0.5rem",
-  },
-};
