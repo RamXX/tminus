@@ -35,9 +35,13 @@ Health is computed by the api-worker when `/v1/sync/status` is called:
 2. Read `channel_status` and `channel_expiry_ts` from AccountDO
 3. Count mirrors in `ERROR` state from UserGraphDO
 4. Apply thresholds above
+5. Call `getSyncHealthReport(accountId, env)` to populate per-scope health
+   (see Per-Scope Health below for the `ScopedSyncHealth` and
+   `SyncHealthReport` shapes)
 
 The `overall` field on the aggregate endpoint is the worst status among all
-accounts. This gives operators a single field to monitor.
+accounts. This gives operators a single field to monitor. Per-scope health
+is available in the `scopes` array of each account's `SyncHealthReport`.
 
 ### Per-Scope Health
 
@@ -126,6 +130,11 @@ The sync status model is designed for external alerting:
 - `GET /v1/sync/status` returns machine-readable health
 - Each account includes `last_success_ts` for threshold-based alerts
 - Each account includes `error_mirrors` count for anomaly detection
+- Each account includes a `scopes` array with per-scope `ScopedSyncHealth`
+  records exposing `lastSyncTs`, `lastSuccessTs`, `errorMessage`, and
+  `hasCursor` for fine-grained scope-level alerting
+- `getSyncHealthReport(accountId, env)` can be called programmatically to
+  build a `SyncHealthReport` combining account-level and scope-level health
 - The event journal can be queried for error patterns
 
 ### Viewing Worker Logs
