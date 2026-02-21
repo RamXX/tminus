@@ -134,7 +134,7 @@ const mockFetchEventsForOnboarding = vi.fn<() => Promise<typeof MOCK_EVENTS>>();
 const mockSubmitAppleCredentials = vi.fn<(userId: string, email: string, password: string) => Promise<{ account_id: string }>>();
 const mockGetOnboardingSession = vi.fn<() => Promise<null>>();
 const mockCreateOnboardingSession = vi.fn<() => Promise<{ session_id: string; user_id: string; step: string; accounts: never[]; session_token: string; created_at: string; updated_at: string }>>();
-const mockAddOnboardingAccount = vi.fn<() => Promise<void>>();
+const mockAddOnboardingAccount = vi.fn<(payload: unknown) => Promise<void>>();
 const mockCompleteOnboardingSession = vi.fn<() => Promise<void>>();
 
 const mockApiValue = {
