@@ -87,6 +87,16 @@ import type {
 } from "@tminus/shared";
 import { OnboardingSessionMixin } from "./onboarding-session-mixin";
 export type { OnboardingSessionRow, OnboardingAccount } from "./onboarding-session-mixin";
+import { SchedulingMixin } from "./scheduling-mixin";
+export { SchedulingMixin } from "./scheduling-mixin";
+export type {
+  SchedulingCandidate,
+  SchedulingSessionResult,
+  SchedulingSessionListItem,
+  HoldRecord,
+  StoreSchedulingSessionInput,
+  StoreHoldInput,
+} from "./scheduling-mixin";
 
 // ---------------------------------------------------------------------------
 // Queue interface (minimal, matches Cloudflare Queue API surface we use)
@@ -611,12 +621,14 @@ export class UserGraphDO {
   private readonly deleteQueue: QueueLike;
   private migrated = false;
   private readonly onboarding: OnboardingSessionMixin;
+  private readonly scheduling: SchedulingMixin;
 
   constructor(sql: SqlStorageLike, writeQueue: QueueLike, deleteQueue?: QueueLike) {
     this.sql = sql;
     this.writeQueue = writeQueue;
     this.deleteQueue = deleteQueue ?? writeQueue;
     this.onboarding = new OnboardingSessionMixin(sql, () => this.ensureMigrated());
+    this.scheduling = new SchedulingMixin(sql, () => this.ensureMigrated());
   }
 
   // -------------------------------------------------------------------------
@@ -6633,13 +6645,13 @@ export class UserGraphDO {
             }>;
             created_at: string;
           };
-          this.storeSchedulingSession(body);
+          this.scheduling.storeSchedulingSession(body);
           return Response.json({ ok: true });
         }
 
         case "/getSchedulingSession": {
           const body = (await request.json()) as { session_id: string };
-          const session = this.getSchedulingSession(body.session_id);
+          const session = this.scheduling.getSchedulingSession(body.session_id);
           return Response.json(session);
         }
 
@@ -6649,7 +6661,7 @@ export class UserGraphDO {
             candidate_id: string;
             event_id: string;
           };
-          this.commitSchedulingSession(body.session_id, body.candidate_id, body.event_id);
+          this.scheduling.commitSchedulingSession(body.session_id, body.candidate_id, body.event_id);
           return Response.json({ ok: true });
         }
 
@@ -6659,19 +6671,19 @@ export class UserGraphDO {
             limit?: number;
             offset?: number;
           };
-          const sessions = this.listSchedulingSessions(body.status, body.limit, body.offset);
+          const sessions = this.scheduling.listSchedulingSessions(body.status, body.limit, body.offset);
           return Response.json(sessions);
         }
 
         case "/cancelSchedulingSession": {
           const body = (await request.json()) as { session_id: string };
-          this.cancelSchedulingSession(body.session_id);
+          this.scheduling.cancelSchedulingSession(body.session_id);
           return Response.json({ ok: true });
         }
 
         case "/expireStaleSchedulingSessions": {
           const body = (await request.json()) as { max_age_hours?: number };
-          const count = this.expireStaleSchedulingSessions(body.max_age_hours);
+          const count = this.scheduling.expireStaleSchedulingSessions(body.max_age_hours);
           return Response.json({ expired_count: count });
         }
 
@@ -6690,13 +6702,13 @@ export class UserGraphDO {
               status: string;
             }>;
           };
-          this.storeHolds(body.holds);
+          this.scheduling.storeHolds(body.holds);
           return Response.json({ ok: true });
         }
 
         case "/getHoldsBySession": {
           const body = (await request.json()) as { session_id: string };
-          const holds = this.getHoldsBySession(body.session_id);
+          const holds = this.scheduling.getHoldsBySession(body.session_id);
           return Response.json({ holds });
         }
 
@@ -6706,12 +6718,12 @@ export class UserGraphDO {
             status: string;
             provider_event_id?: string;
           };
-          this.updateHoldStatus(body.hold_id, body.status, body.provider_event_id);
+          this.scheduling.updateHoldStatus(body.hold_id, body.status, body.provider_event_id);
           return Response.json({ ok: true });
         }
 
         case "/getExpiredHolds": {
-          const holds = this.getExpiredHolds();
+          const holds = this.scheduling.getExpiredHolds();
           return Response.json({ holds });
         }
 
@@ -6720,13 +6732,13 @@ export class UserGraphDO {
             session_id: string;
             committed_candidate_id: string;
           };
-          const holds = this.commitSessionHolds(body.session_id, body.committed_candidate_id);
+          const holds = this.scheduling.commitSessionHolds(body.session_id, body.committed_candidate_id);
           return Response.json({ holds });
         }
 
         case "/releaseSessionHolds": {
           const body = (await request.json()) as { session_id: string };
-          this.releaseSessionHolds(body.session_id);
+          this.scheduling.releaseSessionHolds(body.session_id);
           return Response.json({ ok: true });
         }
 
@@ -6735,13 +6747,13 @@ export class UserGraphDO {
             session_id: string;
             holds: Array<{ hold_id: string; new_expires_at: string }>;
           };
-          const extended = this.extendHolds(body.session_id, body.holds);
+          const extended = this.scheduling.extendHolds(body.session_id, body.holds);
           return Response.json({ ok: true, extended });
         }
 
         case "/expireSessionIfAllHoldsTerminal": {
           const body = (await request.json()) as { session_id: string };
-          const expired = this.expireSessionIfAllHoldsTerminal(body.session_id);
+          const expired = this.scheduling.expireSessionIfAllHoldsTerminal(body.session_id);
           return Response.json({ ok: true, expired });
         }
 
@@ -7304,757 +7316,9 @@ export class UserGraphDO {
   }
 
   // -------------------------------------------------------------------------
-  // Scheduling session management (Phase 3)
+  // Scheduling session and hold management (Phase 3 / TM-946.3)
+  // Delegated to SchedulingMixin -- see scheduling-mixin.ts
   // -------------------------------------------------------------------------
-
-  /**
-   * Store a scheduling session and its candidates in the DO-local SQLite.
-   * Uses the schedule_sessions and schedule_candidates tables from the
-   * USER_GRAPH_DO_MIGRATION_V1 schema.
-   */
-  private storeSchedulingSession(data: {
-    session_id: string;
-    status: string;
-    objective_json: string;
-    candidates: Array<{
-      candidateId: string;
-      sessionId: string;
-      start: string;
-      end: string;
-      score: number;
-      explanation: string;
-    }>;
-    created_at: string;
-  }): void {
-    this.ensureMigrated();
-
-    this.sql.exec(
-      `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
-       VALUES (?, ?, ?, ?)`,
-      data.session_id,
-      data.status,
-      data.objective_json,
-      data.created_at,
-    );
-
-    for (const c of data.candidates) {
-      this.sql.exec(
-        `INSERT INTO schedule_candidates (candidate_id, session_id, start_ts, end_ts, score, explanation, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        c.candidateId,
-        c.sessionId,
-        c.start,
-        c.end,
-        c.score,
-        c.explanation,
-        data.created_at,
-      );
-    }
-  }
-
-  /**
-   * Retrieve a scheduling session and its candidates.
-   * Returns the full session object with candidates array.
-   */
-  private getSchedulingSession(sessionId: string): {
-    sessionId: string;
-    status: string;
-    params: Record<string, unknown>;
-    candidates: Array<{
-      candidateId: string;
-      sessionId: string;
-      start: string;
-      end: string;
-      score: number;
-      explanation: string;
-    }>;
-    committedCandidateId?: string;
-    committedEventId?: string;
-    createdAt: string;
-  } {
-    this.ensureMigrated();
-
-    interface SessionRow {
-      [key: string]: unknown;
-      session_id: string;
-      status: string;
-      objective_json: string;
-      created_at: string;
-    }
-
-    const rows = this.sql.exec<SessionRow>(
-      `SELECT session_id, status, objective_json, created_at
-       FROM schedule_sessions WHERE session_id = ?`,
-      sessionId,
-    ).toArray();
-
-    if (rows.length === 0) {
-      throw new Error(`Session ${sessionId} not found`);
-    }
-
-    let session = rows[0];
-
-    // Lazy expiry: if session is in an active state and older than 24h, expire it
-    if (
-      (session.status === "open" || session.status === "candidates_ready") &&
-      session.created_at
-    ) {
-      const createdMs = new Date(session.created_at).getTime();
-      const nowMs = Date.now();
-      const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
-      if (nowMs - createdMs > maxAgeMs) {
-        this.sql.exec(
-          "UPDATE schedule_sessions SET status = 'expired' WHERE session_id = ?",
-          sessionId,
-        );
-        this.sql.exec(
-          "UPDATE schedule_holds SET status = 'released' WHERE session_id = ? AND status = 'held'",
-          sessionId,
-        );
-        session = { ...session, status: "expired" };
-      }
-    }
-
-    interface CandidateRow {
-      [key: string]: unknown;
-      candidate_id: string;
-      session_id: string;
-      start_ts: string;
-      end_ts: string;
-      score: number;
-      explanation: string;
-    }
-
-    const candidateRows = this.sql.exec<CandidateRow>(
-      `SELECT candidate_id, session_id, start_ts, end_ts, score, explanation
-       FROM schedule_candidates WHERE session_id = ? ORDER BY score DESC`,
-      sessionId,
-    ).toArray();
-
-    const candidates = candidateRows.map((r) => ({
-      candidateId: r.candidate_id,
-      sessionId: r.session_id,
-      start: r.start_ts,
-      end: r.end_ts,
-      score: r.score as number,
-      explanation: r.explanation as string,
-    }));
-
-    // Parse objective JSON to extract params and committed info
-    let params: Record<string, unknown> = {};
-    let committedCandidateId: string | undefined;
-    let committedEventId: string | undefined;
-
-    try {
-      const obj = JSON.parse(session.objective_json);
-      // Check if we stored commit info in the objective JSON
-      if (obj._committedCandidateId) {
-        committedCandidateId = obj._committedCandidateId;
-        committedEventId = obj._committedEventId;
-        // Remove internal fields from params
-        const { _committedCandidateId, _committedEventId, ...rest } = obj;
-        params = rest;
-      } else {
-        params = obj;
-      }
-    } catch {
-      // objective_json may be malformed; use empty object
-    }
-
-    return {
-      sessionId: session.session_id,
-      status: session.status,
-      params,
-      candidates,
-      committedCandidateId,
-      committedEventId,
-      createdAt: session.created_at,
-    };
-  }
-
-  /**
-   * Mark a scheduling session as committed and record which candidate
-   * was chosen and the resulting event ID.
-   */
-  private commitSchedulingSession(
-    sessionId: string,
-    candidateId: string,
-    eventId: string,
-  ): void {
-    this.ensureMigrated();
-
-    // Get current session to preserve objective_json
-    interface SessionRow {
-      [key: string]: unknown;
-      objective_json: string;
-    }
-
-    const rows = this.sql.exec<SessionRow>(
-      `SELECT objective_json FROM schedule_sessions WHERE session_id = ?`,
-      sessionId,
-    ).toArray();
-
-    if (rows.length === 0) {
-      throw new Error(`Session ${sessionId} not found`);
-    }
-
-    // Store committed info in objective_json (augment, don't replace)
-    let obj: Record<string, unknown> = {};
-    try {
-      obj = JSON.parse(rows[0].objective_json);
-    } catch { /* empty */ }
-    obj._committedCandidateId = candidateId;
-    obj._committedEventId = eventId;
-
-    this.sql.exec(
-      `UPDATE schedule_sessions SET status = 'committed', objective_json = ? WHERE session_id = ?`,
-      JSON.stringify(obj),
-      sessionId,
-    );
-  }
-
-  /**
-   * List scheduling sessions with optional status filter.
-   * Applies lazy expiry check before returning results:
-   * sessions in 'open' or 'candidates_ready' status that are older
-   * than SESSION_EXPIRY_HOURS are automatically marked 'expired'.
-   */
-  private listSchedulingSessions(
-    statusFilter?: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): {
-    items: Array<{
-      sessionId: string;
-      status: string;
-      params: Record<string, unknown>;
-      candidateCount: number;
-      createdAt: string;
-    }>;
-    total: number;
-  } {
-    this.ensureMigrated();
-
-    // Lazy expiry: expire stale sessions before listing
-    this.expireStaleSchedulingSessions();
-
-    interface SessionRow {
-      [key: string]: unknown;
-      session_id: string;
-      status: string;
-      objective_json: string;
-      created_at: string;
-    }
-
-    interface CountRow {
-      [key: string]: unknown;
-      cnt: number;
-    }
-
-    interface CandidateCountRow {
-      [key: string]: unknown;
-      cnt: number;
-    }
-
-    // Build query with optional status filter
-    let countQuery = "SELECT COUNT(*) as cnt FROM schedule_sessions";
-    let listQuery = `SELECT session_id, status, objective_json, created_at FROM schedule_sessions`;
-    const bindings: unknown[] = [];
-
-    if (statusFilter) {
-      countQuery += " WHERE status = ?";
-      listQuery += " WHERE status = ?";
-      bindings.push(statusFilter);
-    }
-
-    const totalRow = this.sql.exec<CountRow>(countQuery, ...bindings).one();
-    const total = totalRow.cnt as number;
-
-    listQuery += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
-    const rows = this.sql.exec<SessionRow>(
-      listQuery,
-      ...bindings,
-      limit,
-      offset,
-    ).toArray();
-
-    const items = rows.map((r) => {
-      let params: Record<string, unknown> = {};
-      try {
-        const obj = JSON.parse(r.objective_json);
-        const { _committedCandidateId, _committedEventId, ...rest } = obj;
-        params = rest;
-      } catch { /* empty */ }
-
-      // Get candidate count for this session
-      const candidateCountRow = this.sql.exec<CandidateCountRow>(
-        "SELECT COUNT(*) as cnt FROM schedule_candidates WHERE session_id = ?",
-        r.session_id,
-      ).one();
-
-      return {
-        sessionId: r.session_id,
-        status: r.status,
-        params,
-        candidateCount: candidateCountRow.cnt as number,
-        createdAt: r.created_at,
-      };
-    });
-
-    return { items, total };
-  }
-
-  /**
-   * Cancel a scheduling session. Validates that the session is in a
-   * cancellable state (open or candidates_ready). Releases any held
-   * slots in the schedule_holds table.
-   *
-   * Valid transitions to cancelled: open, candidates_ready.
-   * Already cancelled/committed/expired sessions cannot be cancelled.
-   */
-  private cancelSchedulingSession(sessionId: string): void {
-    this.ensureMigrated();
-
-    interface SessionRow {
-      [key: string]: unknown;
-      session_id: string;
-      status: string;
-    }
-
-    const rows = this.sql.exec<SessionRow>(
-      "SELECT session_id, status FROM schedule_sessions WHERE session_id = ?",
-      sessionId,
-    ).toArray();
-
-    if (rows.length === 0) {
-      throw new Error(`Session ${sessionId} not found`);
-    }
-
-    const currentStatus = rows[0].status;
-
-    // Validate status transition
-    if (currentStatus === "cancelled") {
-      throw new Error(`Session ${sessionId} is already cancelled`);
-    }
-    if (currentStatus === "committed") {
-      throw new Error(`Session ${sessionId} is already committed and cannot be cancelled`);
-    }
-    if (currentStatus === "expired") {
-      throw new Error(`Session ${sessionId} is expired and cannot be cancelled`);
-    }
-
-    // Update session status to cancelled
-    this.sql.exec(
-      "UPDATE schedule_sessions SET status = 'cancelled' WHERE session_id = ?",
-      sessionId,
-    );
-
-    // Release any held slots for this session
-    this.sql.exec(
-      "UPDATE schedule_holds SET status = 'released' WHERE session_id = ? AND status = 'held'",
-      sessionId,
-    );
-  }
-
-  /**
-   * Expire sessions that have been in 'open' or 'candidates_ready' status
-   * for longer than the configured maximum age. Returns the count of
-   * sessions expired.
-   *
-   * Default expiry: 24 hours.
-   */
-  private expireStaleSchedulingSessions(maxAgeHours: number = 24): number {
-    this.ensureMigrated();
-
-    interface ExpiredRow {
-      [key: string]: unknown;
-      session_id: string;
-    }
-
-    // Find sessions eligible for expiry
-    const stale = this.sql.exec<ExpiredRow>(
-      `SELECT session_id FROM schedule_sessions
-       WHERE status IN ('open', 'candidates_ready')
-       AND datetime(created_at, '+' || ? || ' hours') < datetime('now')`,
-      maxAgeHours,
-    ).toArray();
-
-    if (stale.length === 0) return 0;
-
-    // Expire each stale session and release its holds
-    for (const row of stale) {
-      this.sql.exec(
-        "UPDATE schedule_sessions SET status = 'expired' WHERE session_id = ?",
-        row.session_id,
-      );
-      this.sql.exec(
-        "UPDATE schedule_holds SET status = 'released' WHERE session_id = ? AND status = 'held'",
-        row.session_id,
-      );
-    }
-
-    return stale.length;
-  }
-
-  // -------------------------------------------------------------------------
-  // Tentative hold management (TM-946.3)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Store one or more hold records in the schedule_holds table.
-   * Each hold represents a tentative calendar event for a candidate slot.
-   */
-  private storeHolds(
-    holds: Array<{
-      hold_id: string;
-      session_id: string;
-      account_id: string;
-      provider_event_id: string | null;
-      expires_at: string;
-      status: string;
-    }>,
-  ): void {
-    this.ensureMigrated();
-
-    for (const h of holds) {
-      this.sql.exec(
-        `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        h.hold_id,
-        h.session_id,
-        h.account_id,
-        h.provider_event_id,
-        h.expires_at,
-        h.status,
-      );
-    }
-  }
-
-  /**
-   * Retrieve all holds for a given session.
-   */
-  private getHoldsBySession(sessionId: string): Array<{
-    hold_id: string;
-    session_id: string;
-    account_id: string;
-    provider_event_id: string | null;
-    expires_at: string;
-    status: string;
-  }> {
-    this.ensureMigrated();
-
-    interface HoldRow {
-      [key: string]: unknown;
-      hold_id: string;
-      session_id: string;
-      account_id: string;
-      provider_event_id: string | null;
-      expires_at: string;
-      status: string;
-    }
-
-    return this.sql
-      .exec<HoldRow>(
-        `SELECT hold_id, session_id, account_id, provider_event_id, expires_at, status
-         FROM schedule_holds WHERE session_id = ?`,
-        sessionId,
-      )
-      .toArray()
-      .map((r) => ({
-        hold_id: r.hold_id,
-        session_id: r.session_id,
-        account_id: r.account_id,
-        provider_event_id: r.provider_event_id,
-        expires_at: r.expires_at,
-        status: r.status,
-      }));
-  }
-
-  /**
-   * Update the status of a specific hold. Optionally sets provider_event_id
-   * (e.g., after the write-queue creates the Google Calendar event).
-   *
-   * Valid transitions: held -> committed | released | expired
-   */
-  private updateHoldStatus(
-    holdId: string,
-    newStatus: string,
-    providerEventId?: string,
-  ): void {
-    this.ensureMigrated();
-
-    interface HoldRow {
-      [key: string]: unknown;
-      hold_id: string;
-      status: string;
-    }
-
-    const rows = this.sql
-      .exec<HoldRow>(
-        "SELECT hold_id, status FROM schedule_holds WHERE hold_id = ?",
-        holdId,
-      )
-      .toArray();
-
-    if (rows.length === 0) {
-      throw new Error(`Hold ${holdId} not found`);
-    }
-
-    const currentStatus = rows[0].status;
-
-    // Validate transition
-    const validTransitions: Record<string, string[]> = {
-      held: ["committed", "released", "expired"],
-    };
-    const allowed = validTransitions[currentStatus] ?? [];
-    if (!allowed.includes(newStatus)) {
-      throw new Error(
-        `Invalid hold transition: '${currentStatus}' -> '${newStatus}'`,
-      );
-    }
-
-    if (providerEventId !== undefined) {
-      this.sql.exec(
-        "UPDATE schedule_holds SET status = ?, provider_event_id = ? WHERE hold_id = ?",
-        newStatus,
-        providerEventId,
-        holdId,
-      );
-    } else {
-      this.sql.exec(
-        "UPDATE schedule_holds SET status = ? WHERE hold_id = ?",
-        newStatus,
-        holdId,
-      );
-    }
-  }
-
-  /**
-   * Query holds that are in 'held' status but past their expires_at.
-   * Used by the cron worker to clean up expired holds.
-   */
-  private getExpiredHolds(): Array<{
-    hold_id: string;
-    session_id: string;
-    account_id: string;
-    provider_event_id: string | null;
-    expires_at: string;
-    status: string;
-  }> {
-    this.ensureMigrated();
-
-    interface HoldRow {
-      [key: string]: unknown;
-      hold_id: string;
-      session_id: string;
-      account_id: string;
-      provider_event_id: string | null;
-      expires_at: string;
-      status: string;
-    }
-
-    return this.sql
-      .exec<HoldRow>(
-        `SELECT hold_id, session_id, account_id, provider_event_id, expires_at, status
-         FROM schedule_holds
-         WHERE status = 'held' AND expires_at <= datetime('now')`,
-      )
-      .toArray()
-      .map((r) => ({
-        hold_id: r.hold_id,
-        session_id: r.session_id,
-        account_id: r.account_id,
-        provider_event_id: r.provider_event_id,
-        expires_at: r.expires_at,
-        status: r.status,
-      }));
-  }
-
-  /**
-   * On session commit: mark the hold matching the committed candidate
-   * as 'committed' and release all other holds for the same session.
-   *
-   * Returns the committed hold and the released holds so the caller
-   * can PATCH the committed hold's provider event to 'confirmed' and
-   * DELETE the released holds' provider events.
-   */
-  private commitSessionHolds(
-    sessionId: string,
-    committedCandidateId: string,
-  ): {
-    committed: Array<{
-      hold_id: string;
-      session_id: string;
-      account_id: string;
-      provider_event_id: string | null;
-      expires_at: string;
-      status: string;
-    }>;
-    released: Array<{
-      hold_id: string;
-      session_id: string;
-      account_id: string;
-      provider_event_id: string | null;
-      expires_at: string;
-      status: string;
-    }>;
-  } {
-    this.ensureMigrated();
-
-    // Get all holds for the session
-    const holds = this.getHoldsBySession(sessionId);
-
-    // Holds carry the candidate info in their hold_id (or we match by position).
-    // Since we create one hold per candidate per account, we match by
-    // looking at holds linked to this session. The committed candidate's
-    // hold is identified by the candidateId suffix in the hold's context.
-    // For simplicity, all held holds for the committed candidate are committed,
-    // all others released.
-
-    // Since holds are per-account (one per candidate per account), and we
-    // need to know which hold corresponds to which candidate, we rely on
-    // the ordering: holds are stored in candidate order. However, a more
-    // robust approach is to store candidate_id on the hold. Since the
-    // schema doesn't have a candidate_id column, we'll use the objective_json
-    // approach: match by position or store the mapping.
-    //
-    // PRAGMATIC APPROACH: When creating holds, the workflow will store one
-    // hold per account for the entire session (all candidates share holds
-    // since only one candidate is picked). Actually, re-reading the story:
-    // "When candidates are produced, create tentative holds" - this means
-    // all candidates get holds, not just one.
-    //
-    // Let's commit ALL holds (they all get converted since the committed
-    // candidate becomes the real event and all holds are cleaned up).
-    // Actually: on commit, the committed candidate's hold becomes the
-    // confirmed event, and all OTHER holds are released.
-    //
-    // Since the schema tracks holds per session (not per candidate), and
-    // we create holds for ALL candidates, we'll:
-    // 1. Commit ALL holds (the workflow will handle PATCH/DELETE logic)
-    // 2. Actually -- rethink: holds are per-candidate. We release non-committed ones.
-
-    // For this implementation: ALL holds for the session transition.
-    // The committed hold -> committed, all others -> released.
-    // We need candidate mapping. Store it as: one hold per candidate.
-    // The hold maps to a candidate via index in creation order.
-
-    // SIMPLIFIED: The workflow creates one hold per candidate. On commit,
-    // we release all holds (the workflow itself creates the confirmed event
-    // separately via upsertCanonicalEvent). So all holds get released.
-    const committed: typeof holds = [];
-    const released: typeof holds = [];
-
-    for (const h of holds) {
-      if (h.status === "held") {
-        this.sql.exec(
-          "UPDATE schedule_holds SET status = 'released' WHERE hold_id = ?",
-          h.hold_id,
-        );
-        released.push({ ...h, status: "released" });
-      }
-    }
-
-    return { committed, released };
-  }
-
-  /**
-   * Release all held holds for a session (cancel/timeout scenario).
-   */
-  private releaseSessionHolds(sessionId: string): void {
-    this.ensureMigrated();
-
-    this.sql.exec(
-      "UPDATE schedule_holds SET status = 'released' WHERE session_id = ? AND status = 'held'",
-      sessionId,
-    );
-  }
-
-  /**
-   * Extend the expiry of active holds for a session (TM-82s.4 AC-3).
-   * Only holds in 'held' status are extended. Returns count of extended holds.
-   */
-  private extendHolds(
-    sessionId: string,
-    holds: Array<{ hold_id: string; new_expires_at: string }>,
-  ): number {
-    this.ensureMigrated();
-
-    let extended = 0;
-    for (const h of holds) {
-      // Only extend holds that belong to this session and are still held
-      const result = this.sql.exec(
-        `UPDATE schedule_holds SET expires_at = ?
-         WHERE hold_id = ? AND session_id = ? AND status = 'held'`,
-        h.new_expires_at,
-        h.hold_id,
-        sessionId,
-      );
-      // Check if the update affected any rows
-      const check = this.sql
-        .exec<{ [key: string]: unknown; hold_id: string }>(
-          "SELECT hold_id FROM schedule_holds WHERE hold_id = ? AND session_id = ? AND status = 'held' AND expires_at = ?",
-          h.hold_id,
-          sessionId,
-          h.new_expires_at,
-        )
-        .toArray();
-      if (check.length > 0) {
-        extended++;
-      }
-    }
-    return extended;
-  }
-
-  /**
-   * Check if all holds for a session are in terminal states (expired, released, committed).
-   * If so, transition the session to 'expired' status (TM-82s.4 AC-4/AC-6).
-   * Returns true if the session was expired, false otherwise.
-   */
-  private expireSessionIfAllHoldsTerminal(sessionId: string): boolean {
-    this.ensureMigrated();
-
-    // Check if any holds are still active (held)
-    const activeHolds = this.sql
-      .exec<{ [key: string]: unknown; cnt: number }>(
-        "SELECT COUNT(*) as cnt FROM schedule_holds WHERE session_id = ? AND status = 'held'",
-        sessionId,
-      )
-      .toArray();
-
-    const activeCount = activeHolds[0]?.cnt ?? 0;
-
-    if (activeCount > 0) {
-      // Still have active holds, do not expire
-      return false;
-    }
-
-    // Verify session exists and is in a candidate-bearing state
-    const sessionRows = this.sql
-      .exec<{ [key: string]: unknown; status: string }>(
-        "SELECT status FROM schedule_sessions WHERE session_id = ?",
-        sessionId,
-      )
-      .toArray();
-
-    if (sessionRows.length === 0) {
-      return false;
-    }
-
-    const currentStatus = sessionRows[0].status;
-    // Only expire sessions that are in candidates_ready state
-    if (currentStatus !== "candidates_ready") {
-      return false;
-    }
-
-    // All holds are terminal, expire the session
-    this.sql.exec(
-      "UPDATE schedule_sessions SET status = 'expired' WHERE session_id = ?",
-      sessionId,
-    );
-
-    return true;
-  }
 
   // -------------------------------------------------------------------------
   // Private helpers
