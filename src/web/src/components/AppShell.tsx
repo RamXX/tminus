@@ -47,10 +47,9 @@ export function AppShell({ children }: AppShellProps) {
     setMobileMenuOpen((prev) => !prev);
   }, []);
 
-  // Show Admin link when user has an org context.
-  // For now, we always show it since the route itself handles access control
-  // via the :orgId param. A future story can refine this with actual org data.
-  const showAdmin = Boolean(user);
+  // Admin link hidden until auth layer exposes org context (user.orgId).
+  // Route at /admin/:orgId redirects without orgId anyway.
+  const showAdmin = false;
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
