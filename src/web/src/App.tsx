@@ -11,6 +11,7 @@
  * - Calendar, Accounts, SyncStatus (TM-wqip)
  * - Policies, ProviderHealth, ErrorRecovery (TM-b5g4)
  * - Billing, Scheduling, Governance (TM-6dgl)
+ * - Relationships, Reconnections (TM-9xih)
  * Remaining pages still use legacy prop-passing via route wrappers.
  */
 
@@ -79,33 +80,6 @@ function OnboardingRoute() {
 }
 
 
-function RelationshipsRoute() {
-  const api = useApi();
-  return (
-    <Relationships
-      fetchRelationships={api.fetchRelationships}
-      createRelationship={api.createRelationship}
-      fetchRelationship={api.fetchRelationship}
-      updateRelationship={api.updateRelationship}
-      deleteRelationship={api.deleteRelationship}
-      fetchReputation={api.fetchReputation}
-      fetchOutcomes={api.fetchOutcomes}
-      createOutcome={api.createOutcome}
-      fetchDriftReport={api.fetchDriftReport}
-    />
-  );
-}
-
-function ReconnectionsRoute() {
-  const api = useApi();
-  return (
-    <Reconnections
-      fetchReconnectionSuggestions={api.fetchReconnectionSuggestions}
-      fetchUpcomingMilestones={api.fetchUpcomingMilestones}
-    />
-  );
-}
-
 function AdminRoute() {
   const { orgId } = useParams<{ orgId: string }>();
   const { user } = useAuth();
@@ -160,8 +134,8 @@ function AuthenticatedRoutes() {
           <Route path="/billing" element={<Billing />} />
           <Route path="/scheduling" element={<Scheduling />} />
           <Route path="/governance" element={<Governance />} />
-          <Route path="/relationships" element={<RelationshipsRoute />} />
-          <Route path="/reconnections" element={<ReconnectionsRoute />} />
+          <Route path="/relationships" element={<Relationships />} />
+          <Route path="/reconnections" element={<Reconnections />} />
           <Route path="/provider-health" element={<ProviderHealth />} />
           <Route path="/admin/:orgId" element={<AdminRoute />} />
           <Route path="*" element={<Navigate to="/calendar" replace />} />

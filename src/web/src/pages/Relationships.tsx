@@ -16,18 +16,15 @@
  *   yellow = drifting (#eab308)
  *   red = overdue (#ef4444)
  *
- * The component accepts fetch/action functions as props for testability.
- * In production, these are wired to the API client with auth tokens in App.tsx.
+ * Uses useApi() for token-injected API calls (migrated from prop-passing).
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
 import type {
   Relationship,
-  CreateRelationshipPayload,
-  UpdateRelationshipPayload,
   ReputationScores,
   Outcome,
-  CreateOutcomePayload,
   DriftReport,
   RelationshipCategory,
 } from "../lib/relationships";
@@ -43,31 +40,8 @@ import {
   CATEGORIES,
   FREQUENCY_OPTIONS,
 } from "../lib/relationships";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface RelationshipsProps {
-  /** Fetch all relationships. */
-  fetchRelationships: () => Promise<Relationship[]>;
-  /** Create a new relationship. */
-  createRelationship: (payload: CreateRelationshipPayload) => Promise<Relationship>;
-  /** Fetch a single relationship by ID. */
-  fetchRelationship: (id: string) => Promise<Relationship>;
-  /** Update an existing relationship. */
-  updateRelationship: (id: string, payload: UpdateRelationshipPayload) => Promise<Relationship>;
-  /** Delete a relationship. */
-  deleteRelationship: (id: string) => Promise<void>;
-  /** Fetch reputation scores for a relationship. */
-  fetchReputation: (id: string) => Promise<ReputationScores>;
-  /** Fetch outcomes for a relationship. */
-  fetchOutcomes: (relationshipId: string) => Promise<Outcome[]>;
-  /** Create an outcome for a relationship. */
-  createOutcome: (relationshipId: string, payload: CreateOutcomePayload) => Promise<Outcome>;
-  /** Fetch drift report. */
-  fetchDriftReport: () => Promise<DriftReport>;
-}
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
 
 // ---------------------------------------------------------------------------
 // View type
@@ -79,17 +53,9 @@ type ViewMode = "list" | "detail" | "drift" | "add";
 // Component
 // ---------------------------------------------------------------------------
 
-export function Relationships({
-  fetchRelationships,
-  createRelationship,
-  fetchRelationship,
-  updateRelationship,
-  deleteRelationship,
-  fetchReputation,
-  fetchOutcomes,
-  createOutcome,
-  fetchDriftReport,
-}: RelationshipsProps) {
+export function Relationships() {
+  const api = useApi();
+
   // -- State: data --
   const [relationships, setRelationships] = useState<Relationship[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,7 +124,7 @@ export function Relationships({
 
   const loadRelationships = useCallback(async () => {
     try {
-      const result = await fetchRelationships();
+      const result = await api.fetchRelationships();
       if (!mountedRef.current) return;
       setRelationships(result);
       setError(null);
@@ -166,7 +132,7 @@ export function Relationships({
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Unknown error");
     }
-  }, [fetchRelationships]);
+  }, [api]);
 
   // Initial load
   useEffect(() => {
@@ -202,9 +168,9 @@ export function Relationships({
       setEditing(false);
       try {
         const [rel, rep, outs] = await Promise.all([
-          fetchRelationship(id),
-          fetchReputation(id),
-          fetchOutcomes(id),
+          api.fetchRelationship(id),
+          api.fetchReputation(id),
+          api.fetchOutcomes(id),
         ]);
         if (!mountedRef.current) return;
         setDetailRelationship(rel);
@@ -221,7 +187,7 @@ export function Relationships({
         if (mountedRef.current) setDetailLoading(false);
       }
     },
-    [fetchRelationship, fetchReputation, fetchOutcomes, showStatus],
+    [api, showStatus],
   );
 
   // -------------------------------------------------------------------------
@@ -233,7 +199,7 @@ export function Relationships({
 
     setSubmitting(true);
     try {
-      await createRelationship({
+      await api.createRelationship({
         name: formName.trim(),
         email: formEmail.trim(),
         category: formCategory,
@@ -262,13 +228,13 @@ export function Relationships({
     }
   }, [
     formName, formEmail, formCategory, formCity, formTimezone, formFrequency,
-    createRelationship, loadRelationships, showStatus,
+    api, loadRelationships, showStatus,
   ]);
 
   const handleDelete = useCallback(
     async (id: string) => {
       try {
-        await deleteRelationship(id);
+        await api.deleteRelationship(id);
         if (!mountedRef.current) return;
         showStatus("success", "Relationship deleted.");
         setView("list");
@@ -281,7 +247,7 @@ export function Relationships({
         );
       }
     },
-    [deleteRelationship, loadRelationships, showStatus],
+    [api, loadRelationships, showStatus],
   );
 
   const startEditing = useCallback(() => {
@@ -300,7 +266,7 @@ export function Relationships({
 
     setSubmitting(true);
     try {
-      const updated = await updateRelationship(selectedId, {
+      const updated = await api.updateRelationship(selectedId, {
         name: editName.trim(),
         email: editEmail.trim(),
         category: editCategory,
@@ -324,7 +290,7 @@ export function Relationships({
     }
   }, [
     selectedId, editName, editEmail, editCategory, editCity, editTimezone, editFrequency,
-    updateRelationship, loadRelationships, showStatus,
+    api, loadRelationships, showStatus,
   ]);
 
   // -------------------------------------------------------------------------
@@ -335,7 +301,7 @@ export function Relationships({
     setView("drift");
     setDriftLoading(true);
     try {
-      const report = await fetchDriftReport();
+      const report = await api.fetchDriftReport();
       if (!mountedRef.current) return;
       setDriftReport(report);
     } catch (err) {
@@ -348,7 +314,7 @@ export function Relationships({
     } finally {
       if (mountedRef.current) setDriftLoading(false);
     }
-  }, [fetchDriftReport, showStatus]);
+  }, [api, showStatus]);
 
   // -------------------------------------------------------------------------
   // Render: Loading
@@ -356,9 +322,9 @@ export function Relationships({
 
   if (loading) {
     return (
-      <div data-testid="relationships-loading" style={styles.container}>
-        <h1 style={styles.title}>Relationships</h1>
-        <div style={styles.loading}>Loading relationships...</div>
+      <div data-testid="relationships-loading" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+        <p className="text-muted-foreground text-center py-8">Loading relationships...</p>
       </div>
     );
   }
@@ -369,22 +335,23 @@ export function Relationships({
 
   if (error) {
     return (
-      <div data-testid="relationships-error" style={styles.container}>
-        <h1 style={styles.title}>Relationships</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="relationships-error" className="mx-auto max-w-[1200px]">
+        <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+        <div className="text-destructive text-center py-8">
           <p>Failed to load relationships: {error}</p>
-          <button
+          <Button
             onClick={async () => {
               setLoading(true);
               setError(null);
               await loadRelationships();
               setLoading(false);
             }}
-            style={styles.retryBtn}
+            variant="outline"
+            className="mt-2 border-destructive text-destructive hover:bg-destructive/10"
             aria-label="Retry"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -396,127 +363,126 @@ export function Relationships({
 
   if (view === "add") {
     return (
-      <div style={styles.container}>
-        <div style={styles.headerRow}>
-          <h1 style={styles.title}>Add Relationship</h1>
-          <button
+      <div className="mx-auto max-w-[1200px]">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h1 className="text-2xl font-bold text-foreground m-0">Add Relationship</h1>
+          <Button
             data-testid="back-to-list-btn"
             onClick={() => setView("list")}
-            style={styles.backBtn}
+            variant="outline"
+            className="border-border text-muted-foreground"
           >
             Back to List
-          </button>
+          </Button>
         </div>
 
         {statusMsg && (
           <div
             data-testid="relationships-status-msg"
-            style={{
-              ...styles.statusMessage,
-              ...(statusMsg.type === "success" ? styles.statusSuccess : styles.statusError),
-            }}
+            className={`px-4 py-2 rounded-md text-sm font-medium mb-4 border ${
+              statusMsg.type === "success"
+                ? "bg-emerald-950 text-emerald-300 border-emerald-600"
+                : "bg-red-950 text-red-300 border-red-700"
+            }`}
           >
             {statusMsg.text}
           </div>
         )}
 
-        <div data-testid="add-form" style={styles.card}>
-          <h2 style={styles.sectionTitle}>New Relationship</h2>
-          <div style={styles.formGrid}>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-name" style={styles.label}>Name</label>
-              <input
-                id="rel-name"
-                data-testid="form-name-input"
-                type="text"
-                value={formName}
-                onChange={(e) => setFormName(e.target.value)}
-                placeholder="Contact name"
-                style={styles.input}
-              />
+        <Card data-testid="add-form">
+          <CardContent className="p-6">
+            <h2 className="text-lg font-bold text-foreground mt-0 mb-4">New Relationship</h2>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 mb-4">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-name" className="block text-xs text-muted-foreground uppercase tracking-wider">Name</label>
+                <input
+                  id="rel-name"
+                  data-testid="form-name-input"
+                  type="text"
+                  value={formName}
+                  onChange={(e) => setFormName(e.target.value)}
+                  placeholder="Contact name"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-email" className="block text-xs text-muted-foreground uppercase tracking-wider">Email</label>
+                <input
+                  id="rel-email"
+                  data-testid="form-email-input"
+                  type="email"
+                  value={formEmail}
+                  onChange={(e) => setFormEmail(e.target.value)}
+                  placeholder="contact@example.com"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-category" className="block text-xs text-muted-foreground uppercase tracking-wider">Category</label>
+                <select
+                  id="rel-category"
+                  data-testid="form-category-select"
+                  value={formCategory}
+                  onChange={(e) => setFormCategory(e.target.value as RelationshipCategory)}
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                >
+                  {CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {categoryLabel(cat)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-city" className="block text-xs text-muted-foreground uppercase tracking-wider">City</label>
+                <input
+                  id="rel-city"
+                  data-testid="form-city-input"
+                  type="text"
+                  value={formCity}
+                  onChange={(e) => setFormCity(e.target.value)}
+                  placeholder="San Francisco"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-timezone" className="block text-xs text-muted-foreground uppercase tracking-wider">Timezone</label>
+                <input
+                  id="rel-timezone"
+                  data-testid="form-timezone-input"
+                  type="text"
+                  value={formTimezone}
+                  onChange={(e) => setFormTimezone(e.target.value)}
+                  placeholder="America/Los_Angeles"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rel-frequency" className="block text-xs text-muted-foreground uppercase tracking-wider">Contact Frequency</label>
+                <select
+                  id="rel-frequency"
+                  data-testid="form-frequency-select"
+                  value={formFrequency}
+                  onChange={(e) => setFormFrequency(Number(e.target.value))}
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                >
+                  {FREQUENCY_OPTIONS.map((opt) => (
+                    <option key={opt.days} value={opt.days}>
+                      {opt.label} ({opt.days} days)
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-email" style={styles.label}>Email</label>
-              <input
-                id="rel-email"
-                data-testid="form-email-input"
-                type="email"
-                value={formEmail}
-                onChange={(e) => setFormEmail(e.target.value)}
-                placeholder="contact@example.com"
-                style={styles.input}
-              />
-            </div>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-category" style={styles.label}>Category</label>
-              <select
-                id="rel-category"
-                data-testid="form-category-select"
-                value={formCategory}
-                onChange={(e) => setFormCategory(e.target.value as RelationshipCategory)}
-                style={styles.input}
-              >
-                {CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {categoryLabel(cat)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-city" style={styles.label}>City</label>
-              <input
-                id="rel-city"
-                data-testid="form-city-input"
-                type="text"
-                value={formCity}
-                onChange={(e) => setFormCity(e.target.value)}
-                placeholder="San Francisco"
-                style={styles.input}
-              />
-            </div>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-timezone" style={styles.label}>Timezone</label>
-              <input
-                id="rel-timezone"
-                data-testid="form-timezone-input"
-                type="text"
-                value={formTimezone}
-                onChange={(e) => setFormTimezone(e.target.value)}
-                placeholder="America/Los_Angeles"
-                style={styles.input}
-              />
-            </div>
-            <div style={styles.formGroup}>
-              <label htmlFor="rel-frequency" style={styles.label}>Contact Frequency</label>
-              <select
-                id="rel-frequency"
-                data-testid="form-frequency-select"
-                value={formFrequency}
-                onChange={(e) => setFormFrequency(Number(e.target.value))}
-                style={styles.input}
-              >
-                {FREQUENCY_OPTIONS.map((opt) => (
-                  <option key={opt.days} value={opt.days}>
-                    {opt.label} ({opt.days} days)
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <button
-            data-testid="submit-create-btn"
-            onClick={handleCreate}
-            disabled={submitting || !formName.trim() || !formEmail.trim()}
-            style={{
-              ...styles.addBtn,
-              opacity: submitting || !formName.trim() || !formEmail.trim() ? 0.5 : 1,
-              cursor: submitting || !formName.trim() || !formEmail.trim() ? "not-allowed" : "pointer",
-            }}
-          >
-            {submitting ? "Creating..." : "Create Relationship"}
-          </button>
-        </div>
+            <Button
+              data-testid="submit-create-btn"
+              onClick={handleCreate}
+              disabled={submitting || !formName.trim() || !formEmail.trim()}
+            >
+              {submitting ? "Creating..." : "Create Relationship"}
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -528,18 +494,18 @@ export function Relationships({
   if (view === "detail") {
     if (detailLoading) {
       return (
-        <div data-testid="detail-loading" style={styles.container}>
-          <h1 style={styles.title}>Relationships</h1>
-          <div style={styles.loading}>Loading contact details...</div>
+        <div data-testid="detail-loading" className="mx-auto max-w-[1200px]">
+          <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+          <p className="text-muted-foreground text-center py-8">Loading contact details...</p>
         </div>
       );
     }
 
     if (!detailRelationship) {
       return (
-        <div style={styles.container}>
-          <h1 style={styles.title}>Relationships</h1>
-          <div style={styles.loading}>Contact not found.</div>
+        <div className="mx-auto max-w-[1200px]">
+          <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+          <p className="text-muted-foreground text-center py-8">Contact not found.</p>
         </div>
       );
     }
@@ -547,289 +513,300 @@ export function Relationships({
     const catStyle = categoryStyle(detailRelationship.category);
 
     return (
-      <div style={styles.container}>
-        <div style={styles.headerRow}>
-          <h1 style={styles.title}>Relationships</h1>
-          <button
+      <div className="mx-auto max-w-[1200px]">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+          <Button
             data-testid="back-to-list-btn"
             onClick={() => setView("list")}
-            style={styles.backBtn}
+            variant="outline"
+            className="border-border text-muted-foreground"
           >
             Back to List
-          </button>
+          </Button>
         </div>
 
         {statusMsg && (
           <div
             data-testid="relationships-status-msg"
-            style={{
-              ...styles.statusMessage,
-              ...(statusMsg.type === "success" ? styles.statusSuccess : styles.statusError),
-            }}
+            className={`px-4 py-2 rounded-md text-sm font-medium mb-4 border ${
+              statusMsg.type === "success"
+                ? "bg-emerald-950 text-emerald-300 border-emerald-600"
+                : "bg-red-950 text-red-300 border-red-700"
+            }`}
           >
             {statusMsg.text}
           </div>
         )}
 
         {/* Contact Profile */}
-        <div data-testid="contact-detail" style={styles.card}>
-          <div style={styles.detailHeader}>
-            <div>
-              <h2 data-testid="detail-name" style={styles.detailName}>
-                {detailRelationship.name}
-              </h2>
-              <span data-testid="detail-email" style={styles.detailEmail}>
-                {detailRelationship.email}
+        <Card data-testid="contact-detail" className="mb-6">
+          <CardContent className="p-6">
+            <div className="flex justify-between items-start mb-4 flex-wrap gap-2">
+              <div>
+                <h2 data-testid="detail-name" className="text-xl font-bold text-foreground m-0">
+                  {detailRelationship.name}
+                </h2>
+                <span data-testid="detail-email" className="text-sm text-muted-foreground">
+                  {detailRelationship.email}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  data-testid="edit-btn"
+                  onClick={startEditing}
+                  variant="outline"
+                  size="sm"
+                  className="border-primary text-primary"
+                >
+                  Edit
+                </Button>
+                <Button
+                  data-testid="delete-btn"
+                  onClick={() => handleDelete(detailRelationship.id)}
+                  variant="outline"
+                  size="sm"
+                  className="border-destructive text-destructive hover:bg-destructive/10"
+                >
+                  Delete
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex gap-3 flex-wrap items-center">
+              <span
+                data-testid="detail-category"
+                className="px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap"
+                style={{
+                  color: catStyle.color,
+                  backgroundColor: catStyle.bg,
+                }}
+              >
+                {categoryLabel(detailRelationship.category)}
+              </span>
+              <span
+                data-testid="detail-drift"
+                className="px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap"
+                style={{
+                  color: driftColor(detailRelationship.drift_level),
+                  backgroundColor: driftBgColor(detailRelationship.drift_level),
+                }}
+              >
+                {driftLabel(detailRelationship.drift_level)}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {detailRelationship.city}
+                {detailRelationship.timezone && ` (${detailRelationship.timezone})`}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Frequency: every {detailRelationship.frequency_days} days
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Last interaction: {formatDate(detailRelationship.last_interaction)}
               </span>
             </div>
-            <div style={styles.detailActions}>
-              <button
-                data-testid="edit-btn"
-                onClick={startEditing}
-                style={styles.editBtn}
-              >
-                Edit
-              </button>
-              <button
-                data-testid="delete-btn"
-                onClick={() => handleDelete(detailRelationship.id)}
-                style={styles.removeBtn}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
 
-          <div style={styles.detailMeta}>
-            <span
-              data-testid="detail-category"
-              style={{
-                ...styles.badge,
-                color: catStyle.color,
-                backgroundColor: catStyle.bg,
-              }}
-            >
-              {categoryLabel(detailRelationship.category)}
-            </span>
-            <span
-              data-testid="detail-drift"
-              style={{
-                ...styles.badge,
-                color: driftColor(detailRelationship.drift_level),
-                backgroundColor: driftBgColor(detailRelationship.drift_level),
-              }}
-            >
-              {driftLabel(detailRelationship.drift_level)}
-            </span>
-            <span style={styles.metaText}>
-              {detailRelationship.city}
-              {detailRelationship.timezone && ` (${detailRelationship.timezone})`}
-            </span>
-            <span style={styles.metaText}>
-              Frequency: every {detailRelationship.frequency_days} days
-            </span>
-            <span style={styles.metaText}>
-              Last interaction: {formatDate(detailRelationship.last_interaction)}
-            </span>
-          </div>
-
-          {/* Edit Form (inline) */}
-          {editing && (
-            <div data-testid="edit-form" style={styles.editForm}>
-              <h3 style={styles.subsectionTitle}>Edit Relationship</h3>
-              <div style={styles.formGrid}>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-name" style={styles.label}>Name</label>
-                  <input
-                    id="edit-name"
-                    data-testid="edit-name-input"
-                    type="text"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    style={styles.input}
-                  />
+            {/* Edit Form (inline) */}
+            {editing && (
+              <div data-testid="edit-form" className="mt-6 border-t border-border pt-4">
+                <h3 className="text-base font-semibold text-foreground mt-0 mb-3">Edit Relationship</h3>
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 mb-4">
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-name" className="block text-xs text-muted-foreground uppercase tracking-wider">Name</label>
+                    <input
+                      id="edit-name"
+                      data-testid="edit-name-input"
+                      type="text"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-email" className="block text-xs text-muted-foreground uppercase tracking-wider">Email</label>
+                    <input
+                      id="edit-email"
+                      data-testid="edit-email-input"
+                      type="email"
+                      value={editEmail}
+                      onChange={(e) => setEditEmail(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-category" className="block text-xs text-muted-foreground uppercase tracking-wider">Category</label>
+                    <select
+                      id="edit-category"
+                      data-testid="edit-category-select"
+                      value={editCategory}
+                      onChange={(e) => setEditCategory(e.target.value as RelationshipCategory)}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    >
+                      {CATEGORIES.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {categoryLabel(cat)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-city" className="block text-xs text-muted-foreground uppercase tracking-wider">City</label>
+                    <input
+                      id="edit-city"
+                      data-testid="edit-city-input"
+                      type="text"
+                      value={editCity}
+                      onChange={(e) => setEditCity(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-timezone" className="block text-xs text-muted-foreground uppercase tracking-wider">Timezone</label>
+                    <input
+                      id="edit-timezone"
+                      data-testid="edit-timezone-input"
+                      type="text"
+                      value={editTimezone}
+                      onChange={(e) => setEditTimezone(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="edit-frequency" className="block text-xs text-muted-foreground uppercase tracking-wider">Frequency</label>
+                    <select
+                      id="edit-frequency"
+                      data-testid="edit-frequency-select"
+                      value={editFrequency}
+                      onChange={(e) => setEditFrequency(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm"
+                    >
+                      {FREQUENCY_OPTIONS.map((opt) => (
+                        <option key={opt.days} value={opt.days}>
+                          {opt.label} ({opt.days} days)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-email" style={styles.label}>Email</label>
-                  <input
-                    id="edit-email"
-                    data-testid="edit-email-input"
-                    type="email"
-                    value={editEmail}
-                    onChange={(e) => setEditEmail(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-category" style={styles.label}>Category</label>
-                  <select
-                    id="edit-category"
-                    data-testid="edit-category-select"
-                    value={editCategory}
-                    onChange={(e) => setEditCategory(e.target.value as RelationshipCategory)}
-                    style={styles.input}
+                <div className="flex gap-2 mt-2">
+                  <Button
+                    data-testid="save-edit-btn"
+                    onClick={handleUpdate}
+                    disabled={submitting || !editName.trim() || !editEmail.trim()}
                   >
-                    {CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {categoryLabel(cat)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-city" style={styles.label}>City</label>
-                  <input
-                    id="edit-city"
-                    data-testid="edit-city-input"
-                    type="text"
-                    value={editCity}
-                    onChange={(e) => setEditCity(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-timezone" style={styles.label}>Timezone</label>
-                  <input
-                    id="edit-timezone"
-                    data-testid="edit-timezone-input"
-                    type="text"
-                    value={editTimezone}
-                    onChange={(e) => setEditTimezone(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
-                <div style={styles.formGroup}>
-                  <label htmlFor="edit-frequency" style={styles.label}>Frequency</label>
-                  <select
-                    id="edit-frequency"
-                    data-testid="edit-frequency-select"
-                    value={editFrequency}
-                    onChange={(e) => setEditFrequency(Number(e.target.value))}
-                    style={styles.input}
+                    {submitting ? "Saving..." : "Save Changes"}
+                  </Button>
+                  <Button
+                    data-testid="cancel-edit-btn"
+                    onClick={() => setEditing(false)}
+                    variant="outline"
+                    className="border-border text-muted-foreground"
                   >
-                    {FREQUENCY_OPTIONS.map((opt) => (
-                      <option key={opt.days} value={opt.days}>
-                        {opt.label} ({opt.days} days)
-                      </option>
-                    ))}
-                  </select>
+                    Cancel
+                  </Button>
                 </div>
               </div>
-              <div style={styles.editActions}>
-                <button
-                  data-testid="save-edit-btn"
-                  onClick={handleUpdate}
-                  disabled={submitting || !editName.trim() || !editEmail.trim()}
-                  style={{
-                    ...styles.addBtn,
-                    opacity: submitting ? 0.5 : 1,
-                  }}
-                >
-                  {submitting ? "Saving..." : "Save Changes"}
-                </button>
-                <button
-                  data-testid="cancel-edit-btn"
-                  onClick={() => setEditing(false)}
-                  style={styles.backBtn}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Reputation Scores */}
         {reputation && (
-          <div data-testid="reputation-section" style={styles.card}>
-            <h2 style={styles.sectionTitle}>Reputation Scores</h2>
-            <div data-testid="reputation-scores" style={styles.scoresGrid}>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Overall</span>
-                <span data-testid="score-overall" style={styles.scoreValue}>
-                  {formatScore(reputation.overall_score)}
-                </span>
+          <Card data-testid="reputation-section" className="mb-6">
+            <CardContent className="p-6">
+              <h2 className="text-lg font-bold text-foreground mt-0 mb-4">Reputation Scores</h2>
+              <div data-testid="reputation-scores" className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Overall</span>
+                  <span data-testid="score-overall" className="text-lg font-bold text-foreground">
+                    {formatScore(reputation.overall_score)}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Reliability</span>
+                  <span data-testid="score-reliability" className="text-lg font-bold text-foreground">
+                    {formatScore(reputation.reliability_score)}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Responsiveness</span>
+                  <span data-testid="score-responsiveness" className="text-lg font-bold text-foreground">
+                    {formatScore(reputation.responsiveness_score)}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Follow-through</span>
+                  <span data-testid="score-follow-through" className="text-lg font-bold text-foreground">
+                    {formatScore(reputation.follow_through_score)}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Interactions</span>
+                  <span data-testid="score-interactions" className="text-lg font-bold text-foreground">
+                    {reputation.total_interactions}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Positive</span>
+                  <span data-testid="score-positive" className="text-lg font-bold text-green-500">
+                    {reputation.positive_outcomes}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center p-3 bg-background rounded-lg border border-border">
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Negative</span>
+                  <span data-testid="score-negative" className="text-lg font-bold text-red-500">
+                    {reputation.negative_outcomes}
+                  </span>
+                </div>
               </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Reliability</span>
-                <span data-testid="score-reliability" style={styles.scoreValue}>
-                  {formatScore(reputation.reliability_score)}
-                </span>
-              </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Responsiveness</span>
-                <span data-testid="score-responsiveness" style={styles.scoreValue}>
-                  {formatScore(reputation.responsiveness_score)}
-                </span>
-              </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Follow-through</span>
-                <span data-testid="score-follow-through" style={styles.scoreValue}>
-                  {formatScore(reputation.follow_through_score)}
-                </span>
-              </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Interactions</span>
-                <span data-testid="score-interactions" style={styles.scoreValue}>
-                  {reputation.total_interactions}
-                </span>
-              </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Positive</span>
-                <span data-testid="score-positive" style={{ ...styles.scoreValue, color: "#22c55e" }}>
-                  {reputation.positive_outcomes}
-                </span>
-              </div>
-              <div style={styles.scoreCard}>
-                <span style={styles.scoreLabel}>Negative</span>
-                <span data-testid="score-negative" style={{ ...styles.scoreValue, color: "#ef4444" }}>
-                  {reputation.negative_outcomes}
-                </span>
-              </div>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* Interaction Timeline */}
-        <div data-testid="outcomes-section" style={styles.card}>
-          <h2 style={styles.sectionTitle}>Interaction History</h2>
-          {outcomes.length === 0 ? (
-            <div data-testid="outcomes-empty" style={styles.emptyState}>
-              No interactions recorded yet.
-            </div>
-          ) : (
-            <div data-testid="outcomes-list" style={styles.outcomesList}>
-              {outcomes.map((outcome) => (
-                <div
-                  key={outcome.outcome_id}
-                  data-testid={`outcome-${outcome.outcome_id}`}
-                  style={styles.outcomeRow}
-                >
-                  <span
-                    data-testid={`outcome-type-${outcome.outcome_id}`}
-                    style={{
-                      ...styles.outcomeBadge,
-                      color: outcome.outcome_type === "positive"
-                        ? "#22c55e"
-                        : outcome.outcome_type === "negative"
-                          ? "#ef4444"
-                          : "#94a3b8",
-                      backgroundColor: outcome.outcome_type === "positive"
-                        ? "#052e16"
-                        : outcome.outcome_type === "negative"
-                          ? "#450a0a"
-                          : "#1e293b",
-                    }}
-                  >
-                    {outcome.outcome_type}
-                  </span>
-                  <span style={styles.outcomeDesc}>{outcome.description}</span>
-                  <span style={styles.outcomeDate}>{formatDate(outcome.occurred_at)}</span>
+        <Card className="mb-6">
+          <CardContent className="p-6">
+            <div data-testid="outcomes-section">
+              <h2 className="text-lg font-bold text-foreground mt-0 mb-4">Interaction History</h2>
+              {outcomes.length === 0 ? (
+                <div data-testid="outcomes-empty" className="text-muted-foreground text-center py-8">
+                  No interactions recorded yet.
                 </div>
-              ))}
+              ) : (
+                <div data-testid="outcomes-list" className="flex flex-col gap-2">
+                  {outcomes.map((outcome) => (
+                    <div
+                      key={outcome.outcome_id}
+                      data-testid={`outcome-${outcome.outcome_id}`}
+                      className="flex items-center gap-3 px-3 py-2 bg-background rounded-md border border-border flex-wrap"
+                    >
+                      <span
+                        data-testid={`outcome-type-${outcome.outcome_id}`}
+                        className="px-1.5 py-0.5 rounded text-[0.7rem] font-semibold capitalize"
+                        style={{
+                          color: outcome.outcome_type === "positive"
+                            ? "#22c55e"
+                            : outcome.outcome_type === "negative"
+                              ? "#ef4444"
+                              : "#94a3b8",
+                          backgroundColor: outcome.outcome_type === "positive"
+                            ? "#052e16"
+                            : outcome.outcome_type === "negative"
+                              ? "#450a0a"
+                              : "#1e293b",
+                        }}
+                      >
+                        {outcome.outcome_type}
+                      </span>
+                      <span className="text-sm text-foreground flex-1 min-w-[150px]">{outcome.description}</span>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">{formatDate(outcome.occurred_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -841,9 +818,9 @@ export function Relationships({
   if (view === "drift") {
     if (driftLoading) {
       return (
-        <div data-testid="drift-loading" style={styles.container}>
-          <h1 style={styles.title}>Relationships</h1>
-          <div style={styles.loading}>Loading drift report...</div>
+        <div data-testid="drift-loading" className="mx-auto max-w-[1200px]">
+          <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+          <p className="text-muted-foreground text-center py-8">Loading drift report...</p>
         </div>
       );
     }
@@ -853,90 +830,94 @@ export function Relationships({
       : [];
 
     return (
-      <div style={styles.container}>
-        <div style={styles.headerRow}>
-          <h1 style={styles.title}>Drift Report</h1>
-          <button
+      <div className="mx-auto max-w-[1200px]">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h1 className="text-2xl font-bold text-foreground m-0">Drift Report</h1>
+          <Button
             data-testid="back-to-list-btn"
             onClick={() => setView("list")}
-            style={styles.backBtn}
+            variant="outline"
+            className="border-border text-muted-foreground"
           >
             Back to List
-          </button>
+          </Button>
         </div>
 
         {statusMsg && (
           <div
             data-testid="relationships-status-msg"
-            style={{
-              ...styles.statusMessage,
-              ...(statusMsg.type === "success" ? styles.statusSuccess : styles.statusError),
-            }}
+            className={`px-4 py-2 rounded-md text-sm font-medium mb-4 border ${
+              statusMsg.type === "success"
+                ? "bg-emerald-950 text-emerald-300 border-emerald-600"
+                : "bg-red-950 text-red-300 border-red-700"
+            }`}
           >
             {statusMsg.text}
           </div>
         )}
 
-        <div data-testid="drift-report" style={styles.card}>
-          <h2 style={styles.sectionTitle}>Overdue Contacts</h2>
-          {sortedEntries.length === 0 ? (
-            <div data-testid="drift-empty" style={styles.emptyState}>
-              No overdue contacts. All relationships are on track.
-            </div>
-          ) : (
-            <div data-testid="drift-entries" style={styles.driftList}>
-              {sortedEntries.map((entry) => {
-                const catSt = categoryStyle(entry.category);
-                return (
-                  <div
-                    key={entry.relationship_id}
-                    data-testid={`drift-entry-${entry.relationship_id}`}
-                    style={styles.driftRow}
-                  >
-                    <div style={styles.driftInfo}>
-                      <span
-                        data-testid={`drift-name-${entry.relationship_id}`}
-                        style={styles.driftName}
-                      >
-                        {entry.name}
-                      </span>
-                      <span
-                        style={{
-                          ...styles.smallBadge,
-                          color: catSt.color,
-                          backgroundColor: catSt.bg,
-                        }}
-                      >
-                        {categoryLabel(entry.category)}
-                      </span>
+        <Card data-testid="drift-report">
+          <CardContent className="p-6">
+            <h2 className="text-lg font-bold text-foreground mt-0 mb-4">Overdue Contacts</h2>
+            {sortedEntries.length === 0 ? (
+              <div data-testid="drift-empty" className="text-muted-foreground text-center py-8">
+                No overdue contacts. All relationships are on track.
+              </div>
+            ) : (
+              <div data-testid="drift-entries" className="flex flex-col gap-2">
+                {sortedEntries.map((entry) => {
+                  const catSt = categoryStyle(entry.category);
+                  return (
+                    <div
+                      key={entry.relationship_id}
+                      data-testid={`drift-entry-${entry.relationship_id}`}
+                      className="flex justify-between items-center px-4 py-3 bg-background rounded-lg border border-border flex-wrap gap-2"
+                    >
+                      <div className="flex items-center gap-2 flex-1 min-w-[150px]">
+                        <span
+                          data-testid={`drift-name-${entry.relationship_id}`}
+                          className="text-sm text-foreground font-semibold"
+                        >
+                          {entry.name}
+                        </span>
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[0.7rem] font-semibold whitespace-nowrap"
+                          style={{
+                            color: catSt.color,
+                            backgroundColor: catSt.bg,
+                          }}
+                        >
+                          {categoryLabel(entry.category)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span
+                          data-testid={`drift-indicator-${entry.relationship_id}`}
+                          className="px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap"
+                          style={{
+                            color: driftColor(entry.drift_level),
+                            backgroundColor: driftBgColor(entry.drift_level),
+                          }}
+                        >
+                          {driftLabel(entry.drift_level)}
+                        </span>
+                        <span
+                          data-testid={`drift-days-${entry.relationship_id}`}
+                          className="text-xs font-semibold text-red-300"
+                        >
+                          {entry.days_overdue} days overdue
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          Last: {formatDate(entry.last_interaction)}
+                        </span>
+                      </div>
                     </div>
-                    <div style={styles.driftMeta}>
-                      <span
-                        data-testid={`drift-indicator-${entry.relationship_id}`}
-                        style={{
-                          ...styles.badge,
-                          color: driftColor(entry.drift_level),
-                          backgroundColor: driftBgColor(entry.drift_level),
-                        }}
-                      >
-                        {driftLabel(entry.drift_level)}
-                      </span>
-                      <span
-                        data-testid={`drift-days-${entry.relationship_id}`}
-                        style={styles.driftDays}
-                      >
-                        {entry.days_overdue} days overdue
-                      </span>
-                      <span style={styles.metaText}>
-                        Last: {formatDate(entry.last_interaction)}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -946,32 +927,32 @@ export function Relationships({
   // -------------------------------------------------------------------------
 
   return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <h1 style={styles.title}>Relationships</h1>
-        <div style={styles.headerActions}>
+    <div className="mx-auto max-w-[1200px]">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h1 className="text-2xl font-bold text-foreground m-0">Relationships</h1>
+        <div className="flex gap-3 items-center flex-wrap">
           <a
             href="#/reconnections"
             data-testid="reconnections-link"
-            style={styles.reconnectionsBtn}
+            className="px-4 py-2 rounded-md border border-violet-500 text-violet-500 text-sm font-semibold no-underline hover:bg-violet-500/10"
           >
             Reconnections
           </a>
-          <button
+          <Button
             data-testid="drift-report-btn"
             onClick={openDriftReport}
-            style={styles.driftReportBtn}
+            variant="outline"
+            className="border-yellow-500 text-yellow-500 font-semibold hover:bg-yellow-500/10"
           >
             Drift Report
-          </button>
-          <button
+          </Button>
+          <Button
             data-testid="add-relationship-btn"
             onClick={() => setView("add")}
-            style={styles.addBtn}
           >
             Add Relationship
-          </button>
-          <a href="#/calendar" style={styles.backLink}>
+          </Button>
+          <a href="#/calendar" className="text-muted-foreground text-sm no-underline hover:text-foreground">
             Back to Calendar
           </a>
         </div>
@@ -980,482 +961,87 @@ export function Relationships({
       {statusMsg && (
         <div
           data-testid="relationships-status-msg"
-          style={{
-            ...styles.statusMessage,
-            ...(statusMsg.type === "success" ? styles.statusSuccess : styles.statusError),
-          }}
+          className={`px-4 py-2 rounded-md text-sm font-medium mb-4 border ${
+            statusMsg.type === "success"
+              ? "bg-emerald-950 text-emerald-300 border-emerald-600"
+              : "bg-red-950 text-red-300 border-red-700"
+          }`}
         >
           {statusMsg.text}
         </div>
       )}
 
-      <div data-testid="contact-list" style={styles.card}>
-        <h2 style={styles.sectionTitle}>Contacts</h2>
-        {relationships.length === 0 ? (
-          <div data-testid="list-empty" style={styles.emptyState}>
-            No relationships yet. Add one to get started.
-          </div>
-        ) : (
-          <div data-testid="contact-rows" style={styles.contactList}>
-            {relationships.map((rel) => {
-              const catSt = categoryStyle(rel.category);
-              return (
-                <div
-                  key={rel.id}
-                  data-testid={`contact-row-${rel.id}`}
-                  style={styles.contactRow}
-                  onClick={() => openDetail(rel.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") openDetail(rel.id);
-                  }}
-                >
-                  <div style={styles.contactInfo}>
+      <Card data-testid="contact-list">
+        <CardContent className="p-6">
+          <h2 className="text-lg font-bold text-foreground mt-0 mb-4">Contacts</h2>
+          {relationships.length === 0 ? (
+            <div data-testid="list-empty" className="text-muted-foreground text-center py-8">
+              No relationships yet. Add one to get started.
+            </div>
+          ) : (
+            <div data-testid="contact-rows" className="flex flex-col gap-2">
+              {relationships.map((rel) => {
+                const catSt = categoryStyle(rel.category);
+                return (
+                  <div
+                    key={rel.id}
+                    data-testid={`contact-row-${rel.id}`}
+                    className="flex items-center gap-4 px-4 py-3 bg-background rounded-lg border border-border cursor-pointer flex-wrap transition-colors hover:border-primary/50"
+                    onClick={() => openDetail(rel.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") openDetail(rel.id);
+                    }}
+                  >
+                    <div className="flex flex-col gap-0.5 flex-1 min-w-[150px]">
+                      <span
+                        data-testid={`contact-name-${rel.id}`}
+                        className="text-sm text-foreground font-semibold"
+                      >
+                        {rel.name}
+                      </span>
+                      <span className="text-xs text-muted-foreground">{rel.email}</span>
+                    </div>
                     <span
-                      data-testid={`contact-name-${rel.id}`}
-                      style={styles.contactName}
+                      data-testid={`category-badge-${rel.id}`}
+                      className="px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap"
+                      style={{
+                        color: catSt.color,
+                        backgroundColor: catSt.bg,
+                      }}
                     >
-                      {rel.name}
+                      {categoryLabel(rel.category)}
                     </span>
-                    <span style={styles.contactEmail}>{rel.email}</span>
+                    <span
+                      data-testid={`drift-badge-${rel.id}`}
+                      className="px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap"
+                      style={{
+                        color: driftColor(rel.drift_level),
+                        backgroundColor: driftBgColor(rel.drift_level),
+                      }}
+                    >
+                      {driftLabel(rel.drift_level)}
+                    </span>
+                    <span
+                      data-testid={`last-interaction-${rel.id}`}
+                      className="text-xs text-muted-foreground whitespace-nowrap"
+                    >
+                      {formatDate(rel.last_interaction)}
+                    </span>
+                    <span
+                      data-testid={`reliability-${rel.id}`}
+                      className="text-xs font-semibold text-primary whitespace-nowrap"
+                    >
+                      {formatScore(rel.reliability_score)}
+                    </span>
                   </div>
-                  <span
-                    data-testid={`category-badge-${rel.id}`}
-                    style={{
-                      ...styles.badge,
-                      color: catSt.color,
-                      backgroundColor: catSt.bg,
-                    }}
-                  >
-                    {categoryLabel(rel.category)}
-                  </span>
-                  <span
-                    data-testid={`drift-badge-${rel.id}`}
-                    style={{
-                      ...styles.badge,
-                      color: driftColor(rel.drift_level),
-                      backgroundColor: driftBgColor(rel.drift_level),
-                    }}
-                  >
-                    {driftLabel(rel.drift_level)}
-                  </span>
-                  <span
-                    data-testid={`last-interaction-${rel.id}`}
-                    style={styles.lastInteraction}
-                  >
-                    {formatDate(rel.last_interaction)}
-                  </span>
-                  <span
-                    data-testid={`reliability-${rel.id}`}
-                    style={styles.reliabilityScore}
-                  >
-                    {formatScore(rel.reliability_score)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles (consistent with Governance.tsx / Scheduling.tsx patterns)
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "1rem",
-    flexWrap: "wrap" as const,
-    gap: "0.5rem",
-  },
-  headerActions: {
-    display: "flex",
-    gap: "0.75rem",
-    alignItems: "center",
-    flexWrap: "wrap" as const,
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  backBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  emptyState: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  statusMessage: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    marginBottom: "1rem",
-  },
-  statusSuccess: {
-    backgroundColor: "#064e3b",
-    color: "#6ee7b7",
-    border: "1px solid #059669",
-  },
-  statusError: {
-    backgroundColor: "#450a0a",
-    color: "#fca5a5",
-    border: "1px solid #dc2626",
-  },
-
-  // -- Card --
-  card: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "1.5rem",
-    border: "1px solid #334155",
-    marginBottom: "2rem",
-  },
-  sectionTitle: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    marginTop: 0,
-    marginBottom: "1rem",
-  },
-  subsectionTitle: {
-    fontSize: "0.95rem",
-    fontWeight: 600,
-    color: "#e2e8f0",
-    marginTop: "1.5rem",
-    marginBottom: "0.75rem",
-  },
-
-  // -- Contact List --
-  contactList: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.5rem",
-  },
-  contactRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "1rem",
-    padding: "0.75rem 1rem",
-    backgroundColor: "#0f172a",
-    borderRadius: "8px",
-    border: "1px solid #334155",
-    cursor: "pointer",
-    flexWrap: "wrap" as const,
-    transition: "border-color 0.2s",
-  },
-  contactInfo: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.15rem",
-    flex: 1,
-    minWidth: "150px",
-  },
-  contactName: {
-    fontSize: "0.875rem",
-    color: "#e2e8f0",
-    fontWeight: 600,
-  },
-  contactEmail: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-  },
-  badge: {
-    padding: "0.2rem 0.5rem",
-    borderRadius: "4px",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-  },
-  smallBadge: {
-    padding: "0.15rem 0.4rem",
-    borderRadius: "3px",
-    fontSize: "0.7rem",
-    fontWeight: 600,
-    whiteSpace: "nowrap" as const,
-  },
-  lastInteraction: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-    whiteSpace: "nowrap" as const,
-  },
-  reliabilityScore: {
-    fontSize: "0.8rem",
-    fontWeight: 600,
-    color: "#3b82f6",
-    whiteSpace: "nowrap" as const,
-  },
-
-  // -- Form --
-  formGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-    gap: "1rem",
-    marginBottom: "1rem",
-  },
-  formGroup: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.35rem",
-  },
-  label: {
-    display: "block",
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  input: {
-    padding: "0.5rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #475569",
-    backgroundColor: "#0f172a",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    width: "100%",
-    boxSizing: "border-box" as const,
-  },
-  addBtn: {
-    padding: "0.5rem 1.25rem",
-    borderRadius: "6px",
-    border: "none",
-    backgroundColor: "#3b82f6",
-    color: "#ffffff",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-  reconnectionsBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #8b5cf6",
-    background: "transparent",
-    color: "#8b5cf6",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    textDecoration: "none",
-  },
-  driftReportBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #eab308",
-    background: "transparent",
-    color: "#eab308",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-
-  // -- Detail View --
-  detailHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: "1rem",
-    flexWrap: "wrap" as const,
-    gap: "0.5rem",
-  },
-  detailName: {
-    fontSize: "1.25rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  detailEmail: {
-    fontSize: "0.875rem",
-    color: "#94a3b8",
-  },
-  detailActions: {
-    display: "flex",
-    gap: "0.5rem",
-  },
-  detailMeta: {
-    display: "flex",
-    gap: "0.75rem",
-    flexWrap: "wrap" as const,
-    alignItems: "center",
-  },
-  metaText: {
-    fontSize: "0.8rem",
-    color: "#94a3b8",
-  },
-  editBtn: {
-    padding: "0.35rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    background: "transparent",
-    color: "#3b82f6",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-    fontWeight: 600,
-  },
-  removeBtn: {
-    padding: "0.35rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-  },
-  editForm: {
-    marginTop: "1.5rem",
-    borderTop: "1px solid #334155",
-    paddingTop: "1rem",
-  },
-  editActions: {
-    display: "flex",
-    gap: "0.5rem",
-    marginTop: "0.5rem",
-  },
-
-  // -- Scores --
-  scoresGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-    gap: "0.75rem",
-  },
-  scoreCard: {
-    display: "flex",
-    flexDirection: "column" as const,
-    alignItems: "center",
-    padding: "0.75rem",
-    backgroundColor: "#0f172a",
-    borderRadius: "8px",
-    border: "1px solid #334155",
-  },
-  scoreLabel: {
-    fontSize: "0.75rem",
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    marginBottom: "0.35rem",
-  },
-  scoreValue: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#e2e8f0",
-  },
-
-  // -- Outcomes --
-  outcomesList: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.5rem",
-  },
-  outcomeRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    padding: "0.5rem 0.75rem",
-    backgroundColor: "#0f172a",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    flexWrap: "wrap" as const,
-  },
-  outcomeBadge: {
-    padding: "0.15rem 0.4rem",
-    borderRadius: "3px",
-    fontSize: "0.7rem",
-    fontWeight: 600,
-    textTransform: "capitalize" as const,
-  },
-  outcomeDesc: {
-    fontSize: "0.85rem",
-    color: "#e2e8f0",
-    flex: 1,
-    minWidth: "150px",
-  },
-  outcomeDate: {
-    fontSize: "0.75rem",
-    color: "#94a3b8",
-    whiteSpace: "nowrap" as const,
-  },
-
-  // -- Drift Report --
-  driftList: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "0.5rem",
-  },
-  driftRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "0.75rem 1rem",
-    backgroundColor: "#0f172a",
-    borderRadius: "8px",
-    border: "1px solid #334155",
-    flexWrap: "wrap" as const,
-    gap: "0.5rem",
-  },
-  driftInfo: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    flex: 1,
-    minWidth: "150px",
-  },
-  driftName: {
-    fontSize: "0.875rem",
-    color: "#e2e8f0",
-    fontWeight: 600,
-  },
-  driftMeta: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    flexWrap: "wrap" as const,
-  },
-  driftDays: {
-    fontSize: "0.8rem",
-    fontWeight: 600,
-    color: "#fca5a5",
-  },
-};

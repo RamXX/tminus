@@ -263,7 +263,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/relationships";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Relationships" })).toBeInTheDocument();
       });
     });
 
@@ -271,7 +271,7 @@ describe("App routing integration", () => {
       window.location.hash = "#/reconnections";
       render(<App />);
       await waitFor(() => {
-        expect(document.querySelector("[style]")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Reconnections" })).toBeInTheDocument();
       });
     });
 

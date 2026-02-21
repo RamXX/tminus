@@ -9,13 +9,16 @@
  * Uses React Testing Library with fireEvent for click interactions.
  * Same pattern as Relationships.test.tsx.
  *
+ * Since Reconnections now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
+ *
  * NOTE: We use fireEvent.click instead of userEvent.click because components
  * with timers interact poorly with userEvent's internal delay mechanism
  * under fake timers.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { Reconnections, type ReconnectionsProps } from "./Reconnections";
+import { render, screen, within, act } from "@testing-library/react";
+import { Reconnections } from "./Reconnections";
 import type {
   ReconnectionSuggestionFull,
   UpcomingMilestone,
@@ -113,15 +116,54 @@ const MOCK_MILESTONES: UpcomingMilestone[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Helper to create default props with mock functions
+// Mock the API provider and auth
 // ---------------------------------------------------------------------------
 
-function makeProps(overrides: Partial<ReconnectionsProps> = {}): ReconnectionsProps {
-  return {
-    fetchReconnectionSuggestions: vi.fn().mockResolvedValue(MOCK_SUGGESTIONS),
-    fetchUpcomingMilestones: vi.fn().mockResolvedValue(MOCK_MILESTONES),
-    ...overrides,
-  };
+const mockFetchReconnectionSuggestions = vi.fn<() => Promise<ReconnectionSuggestionFull[]>>();
+const mockFetchUpcomingMilestones = vi.fn<() => Promise<UpcomingMilestone[]>>();
+
+const mockApiValue = {
+  fetchReconnectionSuggestions: mockFetchReconnectionSuggestions,
+  fetchUpcomingMilestones: mockFetchUpcomingMilestones,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function setupMocks(overrides: {
+  suggestions?: ReconnectionSuggestionFull[];
+  suggestionsError?: string;
+  milestones?: UpcomingMilestone[];
+  milestonesError?: string;
+} = {}) {
+  if (overrides.suggestionsError) {
+    mockFetchReconnectionSuggestions.mockRejectedValue(new Error(overrides.suggestionsError));
+  } else {
+    mockFetchReconnectionSuggestions.mockResolvedValue(overrides.suggestions ?? MOCK_SUGGESTIONS);
+  }
+
+  if (overrides.milestonesError) {
+    mockFetchUpcomingMilestones.mockRejectedValue(new Error(overrides.milestonesError));
+  } else {
+    mockFetchUpcomingMilestones.mockResolvedValue(overrides.milestones ?? MOCK_MILESTONES);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +173,7 @@ function makeProps(overrides: Partial<ReconnectionsProps> = {}): ReconnectionsPr
 describe("Reconnections", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -143,12 +186,10 @@ describe("Reconnections", () => {
 
   describe("loading state", () => {
     it("shows loading indicator while data is being fetched", () => {
-      const props = makeProps({
-        fetchReconnectionSuggestions: vi.fn().mockReturnValue(new Promise(() => {})),
-        fetchUpcomingMilestones: vi.fn().mockReturnValue(new Promise(() => {})),
-      });
+      mockFetchReconnectionSuggestions.mockReturnValue(new Promise(() => {}));
+      mockFetchUpcomingMilestones.mockReturnValue(new Promise(() => {}));
 
-      render(<Reconnections {...props} />);
+      render(<Reconnections />);
       expect(screen.getByTestId("reconnections-loading")).toBeInTheDocument();
       expect(screen.getByText(/Loading reconnection data/i)).toBeInTheDocument();
     });
@@ -160,13 +201,10 @@ describe("Reconnections", () => {
 
   describe("error state", () => {
     it("shows error message when fetch fails", async () => {
-      const props = makeProps({
-        fetchReconnectionSuggestions: vi.fn().mockRejectedValue(new Error("Network error")),
-        fetchUpcomingMilestones: vi.fn().mockResolvedValue([]),
-      });
+      setupMocks({ suggestionsError: "Network error", milestones: [] });
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByTestId("reconnections-error")).toBeInTheDocument();
@@ -174,16 +212,10 @@ describe("Reconnections", () => {
     });
 
     it("shows retry button on error", async () => {
-      const fetchFn = vi.fn()
-        .mockRejectedValueOnce(new Error("Network error"))
-        .mockResolvedValueOnce(MOCK_SUGGESTIONS);
-
-      const props = makeProps({
-        fetchReconnectionSuggestions: fetchFn,
-      });
+      setupMocks({ suggestionsError: "Network error" });
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       const retryBtn = screen.getByLabelText("Retry");
@@ -197,10 +229,10 @@ describe("Reconnections", () => {
 
   describe("trip reconnection list", () => {
     it("renders trip groups with city headers", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByTestId("trip-reconnections")).toBeInTheDocument();
@@ -213,10 +245,10 @@ describe("Reconnections", () => {
     });
 
     it("shows reconnection cards within trip groups", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       // Alice and Bob in Berlin
@@ -227,10 +259,10 @@ describe("Reconnections", () => {
     });
 
     it("shows days overdue on each card", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByText("16 days overdue")).toBeInTheDocument();
@@ -239,10 +271,10 @@ describe("Reconnections", () => {
     });
 
     it("shows suggested action on each card", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByText("Coffee or meal")).toBeInTheDocument();
@@ -257,10 +289,10 @@ describe("Reconnections", () => {
 
   describe("reconnection cards", () => {
     it("shows schedule button on each card", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       const scheduleButtons = screen.getAllByTestId(/schedule-btn-/);
@@ -268,10 +300,10 @@ describe("Reconnections", () => {
     });
 
     it("schedule button navigates to scheduling page with pre-filled params", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       const scheduleBtn = screen.getByTestId("schedule-btn-rel_01");
@@ -285,10 +317,10 @@ describe("Reconnections", () => {
     });
 
     it("shows suggested duration on each card", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByText("1h")).toBeInTheDocument();
@@ -303,20 +335,20 @@ describe("Reconnections", () => {
 
   describe("milestone calendar", () => {
     it("renders milestone section", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByTestId("milestone-calendar")).toBeInTheDocument();
     });
 
     it("shows upcoming milestones grouped by month", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       // February milestone (Bob's funding) and March milestone (Alice's birthday)
@@ -330,10 +362,10 @@ describe("Reconnections", () => {
     });
 
     it("shows milestone kind labels", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByText("Birthday")).toBeInTheDocument();
@@ -341,10 +373,10 @@ describe("Reconnections", () => {
     });
 
     it("shows days until milestone", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByText(/13 days/)).toBeInTheDocument();
@@ -352,10 +384,10 @@ describe("Reconnections", () => {
     });
 
     it("filters out milestones beyond 30-day window by default", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       // Charlie's graduation is 120 days away -- should not appear
@@ -369,24 +401,20 @@ describe("Reconnections", () => {
 
   describe("empty states", () => {
     it("shows empty state when no reconnection suggestions", async () => {
-      const props = makeProps({
-        fetchReconnectionSuggestions: vi.fn().mockResolvedValue([]),
-      });
+      setupMocks({ suggestions: [] });
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByTestId("suggestions-empty")).toBeInTheDocument();
     });
 
     it("shows empty state when no upcoming milestones", async () => {
-      const props = makeProps({
-        fetchUpcomingMilestones: vi.fn().mockResolvedValue([]),
-      });
+      setupMocks({ milestones: [] });
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       expect(screen.getByTestId("milestones-empty")).toBeInTheDocument();
@@ -399,10 +427,10 @@ describe("Reconnections", () => {
 
   describe("navigation", () => {
     it("has a link back to relationships page", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       const backLink = screen.getByText("Back to Relationships");
@@ -417,10 +445,10 @@ describe("Reconnections", () => {
 
   describe("responsive design", () => {
     it("renders with responsive container styles", async () => {
-      const props = makeProps();
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
       // The container should have maxWidth for responsive layout
@@ -435,25 +463,23 @@ describe("Reconnections", () => {
 
   describe("API integration", () => {
     it("calls fetchReconnectionSuggestions on mount", async () => {
-      const fetchSuggestions = vi.fn().mockResolvedValue(MOCK_SUGGESTIONS);
-      const props = makeProps({ fetchReconnectionSuggestions: fetchSuggestions });
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
-      expect(fetchSuggestions).toHaveBeenCalledOnce();
+      expect(mockFetchReconnectionSuggestions).toHaveBeenCalledOnce();
     });
 
     it("calls fetchUpcomingMilestones on mount", async () => {
-      const fetchMilestones = vi.fn().mockResolvedValue(MOCK_MILESTONES);
-      const props = makeProps({ fetchUpcomingMilestones: fetchMilestones });
+      setupMocks();
 
       await act(async () => {
-        render(<Reconnections {...props} />);
+        render(<Reconnections />);
       });
 
-      expect(fetchMilestones).toHaveBeenCalledOnce();
+      expect(mockFetchUpcomingMilestones).toHaveBeenCalledOnce();
     });
   });
 });

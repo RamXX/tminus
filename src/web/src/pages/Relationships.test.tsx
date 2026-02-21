@@ -10,13 +10,16 @@
  * Uses React Testing Library with fireEvent for click interactions.
  * Same pattern as Governance.test.tsx.
  *
+ * Since Relationships now uses useApi() internally, tests mock the
+ * api-provider and auth modules instead of passing props.
+ *
  * NOTE: We use fireEvent.click instead of userEvent.click because components
  * with timers interact poorly with userEvent's internal delay mechanism
  * under fake timers.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
-import { Relationships, type RelationshipsProps } from "./Relationships";
+import { Relationships } from "./Relationships";
 import type {
   Relationship,
   CreateRelationshipPayload,
@@ -153,100 +156,104 @@ const MOCK_NEW_RELATIONSHIP: Relationship = {
 };
 
 // ---------------------------------------------------------------------------
+// Mock the API provider and auth
+// ---------------------------------------------------------------------------
+
+const mockFetchRelationships = vi.fn<() => Promise<Relationship[]>>();
+const mockCreateRelationship = vi.fn<(p: CreateRelationshipPayload) => Promise<Relationship>>();
+const mockFetchRelationship = vi.fn<(id: string) => Promise<Relationship>>();
+const mockUpdateRelationship = vi.fn<(id: string, p: UpdateRelationshipPayload) => Promise<Relationship>>();
+const mockDeleteRelationship = vi.fn<(id: string) => Promise<void>>();
+const mockFetchReputation = vi.fn<(id: string) => Promise<ReputationScores>>();
+const mockFetchOutcomes = vi.fn<(id: string) => Promise<Outcome[]>>();
+const mockCreateOutcome = vi.fn<(id: string, p: CreateOutcomePayload) => Promise<Outcome>>();
+const mockFetchDriftReport = vi.fn<() => Promise<DriftReport>>();
+
+const mockApiValue = {
+  fetchRelationships: mockFetchRelationships,
+  createRelationship: mockCreateRelationship,
+  fetchRelationship: mockFetchRelationship,
+  updateRelationship: mockUpdateRelationship,
+  deleteRelationship: mockDeleteRelationship,
+  fetchReputation: mockFetchReputation,
+  fetchOutcomes: mockFetchOutcomes,
+  createOutcome: mockCreateOutcome,
+  fetchDriftReport: mockFetchDriftReport,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: "user-1", email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockFetchRelationships(data: Relationship[] = MOCK_RELATIONSHIPS) {
-  return vi.fn(async (): Promise<Relationship[]> => data);
-}
+function setupMocks(overrides: {
+  relationships?: Relationship[];
+  relationshipsError?: string;
+  relationship?: Relationship;
+  reputation?: ReputationScores;
+  outcomes?: Outcome[];
+  createResult?: Relationship;
+  createError?: string;
+  updateResult?: Relationship;
+  deleteError?: string;
+  driftReport?: DriftReport;
+} = {}) {
+  if (overrides.relationshipsError) {
+    mockFetchRelationships.mockRejectedValue(new Error(overrides.relationshipsError));
+  } else {
+    mockFetchRelationships.mockResolvedValue(overrides.relationships ?? MOCK_RELATIONSHIPS);
+  }
 
-function createFailingFetchRelationships(message = "Network error") {
-  return vi.fn(async (): Promise<Relationship[]> => {
-    throw new Error(message);
-  });
-}
+  mockFetchRelationship.mockResolvedValue(overrides.relationship ?? MOCK_RELATIONSHIPS[0]);
+  mockFetchReputation.mockResolvedValue(overrides.reputation ?? MOCK_REPUTATION);
+  mockFetchOutcomes.mockResolvedValue(overrides.outcomes ?? MOCK_OUTCOMES);
 
-function createMockCreateRelationship(result: Relationship = MOCK_NEW_RELATIONSHIP) {
-  return vi.fn(async (_payload: CreateRelationshipPayload): Promise<Relationship> => result);
-}
+  if (overrides.createError) {
+    mockCreateRelationship.mockRejectedValue(new Error(overrides.createError));
+  } else {
+    mockCreateRelationship.mockResolvedValue(overrides.createResult ?? MOCK_NEW_RELATIONSHIP);
+  }
 
-function createMockFetchRelationship(result: Relationship = MOCK_RELATIONSHIPS[0]) {
-  return vi.fn(async (_id: string): Promise<Relationship> => result);
-}
+  if (overrides.deleteError) {
+    mockDeleteRelationship.mockRejectedValue(new Error(overrides.deleteError));
+  } else {
+    mockDeleteRelationship.mockResolvedValue(undefined);
+  }
 
-function createMockUpdateRelationship(result: Relationship = MOCK_RELATIONSHIPS[0]) {
-  return vi.fn(
-    async (_id: string, _payload: UpdateRelationshipPayload): Promise<Relationship> => result,
-  );
-}
-
-function createMockDeleteRelationship() {
-  return vi.fn(async (_id: string): Promise<void> => {});
-}
-
-function createMockFetchReputation(result: ReputationScores = MOCK_REPUTATION) {
-  return vi.fn(async (_id: string): Promise<ReputationScores> => result);
-}
-
-function createMockFetchOutcomes(result: Outcome[] = MOCK_OUTCOMES) {
-  return vi.fn(async (_id: string): Promise<Outcome[]> => result);
-}
-
-function createMockCreateOutcome() {
-  return vi.fn(
-    async (_id: string, _payload: CreateOutcomePayload): Promise<Outcome> => MOCK_OUTCOMES[0],
-  );
-}
-
-function createMockFetchDriftReport(result: DriftReport = MOCK_DRIFT_REPORT) {
-  return vi.fn(async (): Promise<DriftReport> => result);
+  mockUpdateRelationship.mockResolvedValue(overrides.updateResult ?? MOCK_RELATIONSHIPS[0]);
+  mockFetchDriftReport.mockResolvedValue(overrides.driftReport ?? MOCK_DRIFT_REPORT);
+  mockCreateOutcome.mockResolvedValue(MOCK_OUTCOMES[0]);
 }
 
 /**
  * Render the Relationships component and wait for initial async fetch.
  */
-async function renderAndWait(overrides: Partial<RelationshipsProps> = {}) {
-  const fetchRelationships = overrides.fetchRelationships ?? createMockFetchRelationships();
-  const createRelationship = overrides.createRelationship ?? createMockCreateRelationship();
-  const fetchRelationship = overrides.fetchRelationship ?? createMockFetchRelationship();
-  const updateRelationship = overrides.updateRelationship ?? createMockUpdateRelationship();
-  const deleteRelationship = overrides.deleteRelationship ?? createMockDeleteRelationship();
-  const fetchReputation = overrides.fetchReputation ?? createMockFetchReputation();
-  const fetchOutcomes = overrides.fetchOutcomes ?? createMockFetchOutcomes();
-  const createOutcome = overrides.createOutcome ?? createMockCreateOutcome();
-  const fetchDriftReport = overrides.fetchDriftReport ?? createMockFetchDriftReport();
+async function renderAndWait(overrides: Parameters<typeof setupMocks>[0] = {}) {
+  setupMocks(overrides);
 
-  const result = render(
-    <Relationships
-      fetchRelationships={fetchRelationships}
-      createRelationship={createRelationship}
-      fetchRelationship={fetchRelationship}
-      updateRelationship={updateRelationship}
-      deleteRelationship={deleteRelationship}
-      fetchReputation={fetchReputation}
-      fetchOutcomes={fetchOutcomes}
-      createOutcome={createOutcome}
-      fetchDriftReport={fetchDriftReport}
-    />,
-  );
+  const result = render(<Relationships />);
 
   // Flush microtasks so async fetch resolves
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  return {
-    ...result,
-    fetchRelationships,
-    createRelationship,
-    fetchRelationship,
-    updateRelationship,
-    deleteRelationship,
-    fetchReputation,
-    fetchOutcomes,
-    createOutcome,
-    fetchDriftReport,
-  };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +263,7 @@ async function renderAndWait(overrides: Partial<RelationshipsProps> = {}) {
 describe("Relationships Dashboard", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date("2026-02-15T12:00:00Z").getTime() });
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -300,9 +308,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("shows empty state when no relationships exist", async () => {
-      await renderAndWait({
-        fetchRelationships: createMockFetchRelationships([]),
-      });
+      await renderAndWait({ relationships: [] });
 
       expect(screen.getByTestId("list-empty")).toBeInTheDocument();
     });
@@ -445,9 +451,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("shows empty outcomes state when no interactions exist", async () => {
-      await renderAndWait({
-        fetchOutcomes: vi.fn(async () => []),
-      });
+      await renderAndWait({ outcomes: [] });
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -459,11 +463,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("fetches detail, reputation, and outcomes on click", async () => {
-      const fetchRelationship = createMockFetchRelationship();
-      const fetchReputation = createMockFetchReputation();
-      const fetchOutcomes = createMockFetchOutcomes();
-
-      await renderAndWait({ fetchRelationship, fetchReputation, fetchOutcomes });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -471,9 +471,9 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchRelationship).toHaveBeenCalledWith("rel_1");
-      expect(fetchReputation).toHaveBeenCalledWith("rel_1");
-      expect(fetchOutcomes).toHaveBeenCalledWith("rel_1");
+      expect(mockFetchRelationship).toHaveBeenCalledWith("rel_1");
+      expect(mockFetchReputation).toHaveBeenCalledWith("rel_1");
+      expect(mockFetchOutcomes).toHaveBeenCalledWith("rel_1");
     });
 
     it("navigates back to list view", async () => {
@@ -611,8 +611,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("calls createRelationship with form data on submit", async () => {
-      const createRelationship = createMockCreateRelationship();
-      await renderAndWait({ createRelationship });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("add-relationship-btn"));
 
@@ -641,8 +640,8 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(createRelationship).toHaveBeenCalledTimes(1);
-      expect(createRelationship).toHaveBeenCalledWith({
+      expect(mockCreateRelationship).toHaveBeenCalledTimes(1);
+      expect(mockCreateRelationship).toHaveBeenCalledWith({
         name: "Diana Prince",
         email: "diana@example.com",
         category: "community",
@@ -677,10 +676,9 @@ describe("Relationships Dashboard", () => {
     });
 
     it("refreshes list after creating", async () => {
-      const fetchRelationships = createMockFetchRelationships();
-      await renderAndWait({ fetchRelationships });
+      await renderAndWait();
 
-      expect(fetchRelationships).toHaveBeenCalledTimes(1);
+      expect(mockFetchRelationships).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByTestId("add-relationship-btn"));
 
@@ -697,14 +695,11 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchRelationships).toHaveBeenCalledTimes(2);
+      expect(mockFetchRelationships).toHaveBeenCalledTimes(2);
     });
 
     it("shows error message when create fails", async () => {
-      const createRelationship = vi.fn(async () => {
-        throw new Error("Duplicate email");
-      });
-      await renderAndWait({ createRelationship });
+      await renderAndWait({ createError: "Duplicate email" });
 
       fireEvent.click(screen.getByTestId("add-relationship-btn"));
 
@@ -794,8 +789,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("calls updateRelationship on save", async () => {
-      const updateRelationship = createMockUpdateRelationship();
-      await renderAndWait({ updateRelationship });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -815,8 +809,8 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(updateRelationship).toHaveBeenCalledTimes(1);
-      expect(updateRelationship).toHaveBeenCalledWith("rel_1", expect.objectContaining({
+      expect(mockUpdateRelationship).toHaveBeenCalledTimes(1);
+      expect(mockUpdateRelationship).toHaveBeenCalledWith("rel_1", expect.objectContaining({
         name: "Alice Updated",
       }));
     });
@@ -878,8 +872,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("calls deleteRelationship when clicking delete", async () => {
-      const deleteRelationship = createMockDeleteRelationship();
-      await renderAndWait({ deleteRelationship });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -893,8 +886,8 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(deleteRelationship).toHaveBeenCalledTimes(1);
-      expect(deleteRelationship).toHaveBeenCalledWith("rel_1");
+      expect(mockDeleteRelationship).toHaveBeenCalledTimes(1);
+      expect(mockDeleteRelationship).toHaveBeenCalledWith("rel_1");
     });
 
     it("returns to list after deleting", async () => {
@@ -936,10 +929,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("shows error when delete fails", async () => {
-      const deleteRelationship = vi.fn(async () => {
-        throw new Error("Cannot delete VIP");
-      });
-      await renderAndWait({ deleteRelationship });
+      await renderAndWait({ deleteError: "Cannot delete VIP" });
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -959,10 +949,9 @@ describe("Relationships Dashboard", () => {
     });
 
     it("refreshes list after deleting", async () => {
-      const fetchRelationships = createMockFetchRelationships();
-      await renderAndWait({ fetchRelationships });
+      await renderAndWait();
 
-      expect(fetchRelationships).toHaveBeenCalledTimes(1);
+      expect(mockFetchRelationships).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByTestId("contact-row-rel_1"));
 
@@ -976,7 +965,7 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchRelationships).toHaveBeenCalledTimes(2);
+      expect(mockFetchRelationships).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -1057,10 +1046,7 @@ describe("Relationships Dashboard", () => {
 
     it("shows empty drift report when all on track", async () => {
       await renderAndWait({
-        fetchDriftReport: vi.fn(async () => ({
-          entries: [],
-          generated_at: "2026-02-15T12:00:00Z",
-        })),
+        driftReport: { entries: [], generated_at: "2026-02-15T12:00:00Z" },
       });
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
@@ -1073,8 +1059,7 @@ describe("Relationships Dashboard", () => {
     });
 
     it("calls fetchDriftReport on view", async () => {
-      const fetchDriftReport = createMockFetchDriftReport();
-      await renderAndWait({ fetchDriftReport });
+      await renderAndWait();
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
@@ -1082,7 +1067,7 @@ describe("Relationships Dashboard", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      expect(fetchDriftReport).toHaveBeenCalledTimes(1);
+      expect(mockFetchDriftReport).toHaveBeenCalledTimes(1);
     });
 
     it("navigates back to list from drift report", async () => {
@@ -1110,47 +1095,36 @@ describe("Relationships Dashboard", () => {
 
   describe("integration: component loads data on mount", () => {
     it("calls fetchRelationships on mount", async () => {
-      const fetchRelationships = createMockFetchRelationships();
-      await renderAndWait({ fetchRelationships });
+      await renderAndWait();
 
-      expect(fetchRelationships).toHaveBeenCalledTimes(1);
+      expect(mockFetchRelationships).toHaveBeenCalledTimes(1);
     });
 
     it("shows loading state before fetch completes", () => {
-      const fetchRelationships = vi.fn(
-        (): Promise<Relationship[]> => new Promise(() => {}),
-      );
+      mockFetchRelationships.mockReturnValue(new Promise(() => {}));
+      mockFetchRelationship.mockResolvedValue(MOCK_RELATIONSHIPS[0]);
+      mockFetchReputation.mockResolvedValue(MOCK_REPUTATION);
+      mockFetchOutcomes.mockResolvedValue(MOCK_OUTCOMES);
+      mockCreateRelationship.mockResolvedValue(MOCK_NEW_RELATIONSHIP);
+      mockDeleteRelationship.mockResolvedValue(undefined);
+      mockUpdateRelationship.mockResolvedValue(MOCK_RELATIONSHIPS[0]);
+      mockFetchDriftReport.mockResolvedValue(MOCK_DRIFT_REPORT);
+      mockCreateOutcome.mockResolvedValue(MOCK_OUTCOMES[0]);
 
-      render(
-        <Relationships
-          fetchRelationships={fetchRelationships}
-          createRelationship={createMockCreateRelationship()}
-          fetchRelationship={createMockFetchRelationship()}
-          updateRelationship={createMockUpdateRelationship()}
-          deleteRelationship={createMockDeleteRelationship()}
-          fetchReputation={createMockFetchReputation()}
-          fetchOutcomes={createMockFetchOutcomes()}
-          createOutcome={createMockCreateOutcome()}
-          fetchDriftReport={createMockFetchDriftReport()}
-        />,
-      );
+      render(<Relationships />);
 
       expect(screen.getByTestId("relationships-loading")).toBeInTheDocument();
     });
 
     it("shows error state when fetchRelationships fails", async () => {
-      await renderAndWait({
-        fetchRelationships: createFailingFetchRelationships("API unavailable"),
-      });
+      await renderAndWait({ relationshipsError: "API unavailable" });
 
       expect(screen.getByTestId("relationships-error")).toBeInTheDocument();
       expect(screen.getByText(/api unavailable/i)).toBeInTheDocument();
     });
 
     it("shows retry button on error", async () => {
-      await renderAndWait({
-        fetchRelationships: createFailingFetchRelationships(),
-      });
+      await renderAndWait({ relationshipsError: "Network error" });
 
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
