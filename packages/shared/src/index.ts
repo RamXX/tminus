@@ -824,3 +824,6 @@ export type {
   FunnelConfig,
   EventSink,
 } from "./funnel-events";
+
+// Re-export provider event ID canonicalization (TM-08pp: eliminate encoding variants)
+export { canonicalizeProviderEventId } from "./normalize-provider-id";

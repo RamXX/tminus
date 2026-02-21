@@ -32,6 +32,7 @@ import {
   createCalendarProvider,
   getClassificationStrategy,
   normalizeProviderEvent,
+  canonicalizeProviderEventId,
 } from "@tminus/shared";
 import type {
   SyncIncrementalMessage,
@@ -748,7 +749,15 @@ async function processAndApplyDeltas(
       classificationStrategy,
       managedMirrorEventIds,
     );
-    const delta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
+    const rawDelta = normalizeProviderEvent(provider, rawEvent, accountId, classification);
+
+    // TM-08pp: Canonicalize provider_event_id at ingestion to eliminate
+    // encoding variants. All downstream storage and lookups use this
+    // canonical (fully-decoded) form.
+    const delta = {
+      ...rawDelta,
+      origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
+    };
 
     if (classification === "managed_mirror") {
       // Managed mirrors are never treated as origins (Invariant E), but if a
@@ -1056,6 +1065,9 @@ async function findMissingManagedMirrorProviderEventIds(
   return [...missing];
 }
 
+// TODO(Phase 3, TM-08pp): Remove providerEventIdVariants and decodeProviderEventIdSafe
+// after cron migration has canonicalized all stored provider_event_id values.
+// Once all data is canonical, lookups should use exact-match only.
 function providerEventIdVariants(providerEventId: string): string[] {
   const variants = [providerEventId];
   const decoded = decodeProviderEventIdSafe(providerEventId);

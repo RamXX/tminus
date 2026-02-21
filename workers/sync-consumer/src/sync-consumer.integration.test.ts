@@ -1816,6 +1816,199 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(accountDOState.syncFailureCalls).toHaveLength(1);
     expect(accountDOState.syncFailureCalls[0].error).toContain("invalid_grant");
   });
+
+  // -------------------------------------------------------------------------
+  // TM-08pp: Provider event ID canonicalization at ingestion
+  // -------------------------------------------------------------------------
+
+  it("TM-08pp: incremental sync normalizes URL-encoded provider_event_id to canonical form", async () => {
+    // Google returns an event with a URL-encoded ID (@ encoded as %40)
+    const encodedId = "event123_R20260215T090000%40google.com";
+    const expectedCanonicalId = "event123_R20260215T090000@google.com";
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: encodedId,
+          summary: "Encoded Event",
+        }),
+      ],
+      nextSyncToken: "sync-token-canonical-test",
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-canonical-1",
+      resource_id: "resource-canonical-1",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    // Verify deltas sent to UserGraphDO contain the canonical (decoded) ID
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
+      origin_event_id: string;
+    }>;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].origin_event_id).toBe(expectedCanonicalId);
+  });
+
+  it("TM-08pp: incremental sync normalizes double-encoded provider_event_id", async () => {
+    // Double-encoded: @ -> %40 -> %2540
+    const doubleEncodedId = "meeting%2540calendar.google.com";
+    const expectedCanonicalId = "meeting@calendar.google.com";
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: doubleEncodedId,
+          summary: "Double Encoded Event",
+        }),
+      ],
+      nextSyncToken: "sync-token-double-encoded",
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-canonical-2",
+      resource_id: "resource-canonical-2",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
+      origin_event_id: string;
+    }>;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].origin_event_id).toBe(expectedCanonicalId);
+  });
+
+  it("TM-08pp: plain (unencoded) provider_event_id passes through unchanged", async () => {
+    const plainId = "simple_event_id_no_encoding";
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: plainId,
+          summary: "Plain Event",
+        }),
+      ],
+      nextSyncToken: "sync-token-plain",
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-canonical-3",
+      resource_id: "resource-canonical-3",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
+      origin_event_id: string;
+    }>;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].origin_event_id).toBe(plainId);
+  });
+
+  it("TM-08pp: all encoding variants of same event resolve to same canonical form", async () => {
+    // Three different events with IDs that are encoding variants of the same logical ID.
+    // After canonicalization, they should all produce the same origin_event_id.
+    // The sync-consumer normalizes each delta's origin_event_id to canonical form.
+    // Actual dedup (upsert by origin_event_id) happens in UserGraphDO, not here.
+    // This test verifies all variants converge to the same canonical ID.
+    const canonicalId = "event@calendar/2026";
+    const singleEncoded = "event%40calendar%2F2026";
+    const doubleEncoded = "event%2540calendar%252F2026";
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({ id: singleEncoded, summary: "Single Encoded" }),
+        makeGoogleEvent({ id: doubleEncoded, summary: "Double Encoded" }),
+        makeGoogleEvent({ id: canonicalId, summary: "Already Canonical" }),
+      ],
+      nextSyncToken: "sync-token-variants",
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-canonical-4",
+      resource_id: "resource-canonical-4",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    // All three events produce deltas, each canonicalized to the same origin_event_id.
+    // UserGraphDO receives one applyProviderDelta call with 3 deltas.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
+      origin_event_id: string;
+    }>;
+    expect(deltas).toHaveLength(3);
+    // Every delta's origin_event_id must be the canonical (fully decoded) form.
+    for (const delta of deltas) {
+      expect(delta.origin_event_id).toBe(canonicalId);
+    }
+  });
+
+  it("TM-08pp: full sync normalizes provider_event_id values", async () => {
+    const encodedId = "full_sync_event%40provider.com";
+    const expectedCanonicalId = "full_sync_event@provider.com";
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({
+          id: encodedId,
+          summary: "Full Sync Encoded Event",
+        }),
+      ],
+      nextSyncToken: "sync-token-full-canonical",
+    });
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: ACCOUNT_A.account_id,
+      reason: "reconcile",
+    };
+
+    await handleFullSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const deltas = userGraphDOState.applyDeltaCalls[0].deltas as Array<{
+      origin_event_id: string;
+    }>;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].origin_event_id).toBe(expectedCanonicalId);
+  });
 });
 
 // ---------------------------------------------------------------------------

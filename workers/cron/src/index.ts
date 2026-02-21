@@ -1136,6 +1136,77 @@ async function handleFeedRefresh(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Provider Event ID Normalization (TM-08pp: batch migration)
+// ---------------------------------------------------------------------------
+
+/**
+ * Batch-normalize existing provider_event_id values in UserGraphDO storage.
+ *
+ * For each active user, calls UserGraphDO.normalizeProviderEventIds() which
+ * scans canonical_events and event_mirrors for provider_event_id values that
+ * contain URL encoding (contain '%') and rewrites them to canonical form.
+ *
+ * Runs as part of the daily reconciliation window. Idempotent: already-
+ * canonical values are no-ops. After all rows are normalized, this function
+ * effectively becomes a no-op and can be removed in Phase 3.
+ */
+async function handleProviderIdNormalization(env: Env): Promise<void> {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT DISTINCT user_id FROM accounts WHERE status = ?1 OR status = ?2`,
+    )
+    .bind("active", "error")
+    .all<{ user_id: string }>();
+
+  console.log(
+    `Provider ID normalization: processing ${results.length} users`,
+  );
+
+  let totalNormalized = 0;
+
+  for (const row of results) {
+    try {
+      const doId = env.USER_GRAPH.idFromName(row.user_id);
+      const stub = env.USER_GRAPH.get(doId);
+
+      const response = await stub.fetch(
+        new Request("https://user-graph.internal/normalizeProviderEventIds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      if (response.ok) {
+        const data = (await response.json()) as { normalized: number };
+        totalNormalized += data.normalized;
+        if (data.normalized > 0) {
+          console.log(
+            `Provider ID normalization: user ${row.user_id}: ${data.normalized} IDs normalized`,
+          );
+        }
+      } else if (response.status === 404 || response.status === 405) {
+        // UserGraphDO does not yet support this endpoint -- skip silently.
+        // This happens during rolling deploys.
+      } else {
+        console.error(
+          `Provider ID normalization: failed for user ${row.user_id}: ${response.status}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `Provider ID normalization error for user ${row.user_id}:`,
+        err,
+      );
+    }
+  }
+
+  console.log(
+    `Provider ID normalization: ${totalNormalized} total IDs normalized across ${results.length} users`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled handler dispatch
 // ---------------------------------------------------------------------------
 
@@ -1161,6 +1232,9 @@ async function handleScheduled(
 
     case CRON_RECONCILIATION:
       await handleReconciliation(env);
+      // TM-08pp: Batch-normalize provider event IDs during reconciliation.
+      // Runs after reconciliation so event data is fresh. Idempotent.
+      await handleProviderIdNormalization(env);
       break;
 
     case CRON_DELETION_CHECK:

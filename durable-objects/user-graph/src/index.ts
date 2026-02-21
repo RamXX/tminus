@@ -62,6 +62,7 @@ import {
   getRiskLevel,
   classifyEventCategory,
   computeProbabilisticAvailability,
+  canonicalizeProviderEventId,
 } from "@tminus/shared";
 import type { DriftReport, DriftAlert, DriftEntry, InteractionOutcome, ReputationResult, LedgerInput, ReconnectionSuggestion, EventBriefing, BriefingParticipantInput, MilestoneKind, Milestone, UpcomingMilestone } from "@tminus/shared";
 import type { SimulationScenario, SimulationSnapshot, SimulationEvent, SimulationConstraint, SimulationCommitment, ImpactReport } from "@tminus/shared";
@@ -3855,6 +3856,10 @@ export class UserGraphDO {
   /**
    * Find canonical_event_id by mirror lookup keys.
    * Used when a provider reports deletion for a managed mirror event.
+   *
+   * TODO(Phase 3, TM-08pp): After cron migration canonicalizes all stored
+   * provider_event_id values, remove the variant fallback below and use
+   * exact-match only (single query, no decode/encode candidates).
    */
   findCanonicalByMirror(
     targetAccountId: string,
@@ -3905,6 +3910,76 @@ export class UserGraphDO {
     }
 
     return null;
+  }
+
+  /**
+   * Batch-normalize provider_event_id values in canonical_events and
+   * event_mirrors tables. Called by the daily cron reconciliation pass
+   * to migrate existing data to canonical (fully-decoded) form.
+   *
+   * TM-08pp: Scans for rows containing '%' in origin_event_id /
+   * provider_event_id, applies canonicalizeProviderEventId, and updates
+   * in-place. Idempotent: rows already in canonical form are skipped.
+   *
+   * Returns the count of rows actually updated.
+   */
+  normalizeProviderEventIds(): number {
+    this.ensureMigrated();
+
+    let normalized = 0;
+
+    // Normalize canonical_events.origin_event_id
+    const canonicalRows = this.sql
+      .exec<{ canonical_event_id: string; origin_event_id: string }>(
+        `SELECT canonical_event_id, origin_event_id
+         FROM canonical_events
+         WHERE origin_event_id LIKE '%\\%%' ESCAPE '\\'`,
+      )
+      .toArray();
+
+    for (const row of canonicalRows) {
+      const canonical = canonicalizeProviderEventId(row.origin_event_id);
+      if (canonical !== row.origin_event_id) {
+        this.sql.exec(
+          `UPDATE canonical_events
+           SET origin_event_id = ?
+           WHERE canonical_event_id = ?`,
+          canonical,
+          row.canonical_event_id,
+        );
+        normalized++;
+      }
+    }
+
+    // Normalize event_mirrors.provider_event_id
+    const mirrorRows = this.sql
+      .exec<{
+        canonical_event_id: string;
+        target_account_id: string;
+        provider_event_id: string;
+      }>(
+        `SELECT canonical_event_id, target_account_id, provider_event_id
+         FROM event_mirrors
+         WHERE provider_event_id LIKE '%\\%%' ESCAPE '\\'`,
+      )
+      .toArray();
+
+    for (const row of mirrorRows) {
+      const canonical = canonicalizeProviderEventId(row.provider_event_id);
+      if (canonical !== row.provider_event_id) {
+        this.sql.exec(
+          `UPDATE event_mirrors
+           SET provider_event_id = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+          canonical,
+          row.canonical_event_id,
+          row.target_account_id,
+        );
+        normalized++;
+      }
+    }
+
+    return normalized;
   }
 
   /**
@@ -6038,9 +6113,16 @@ export class UserGraphDO {
             account_id: string;
             deltas: ProviderDelta[];
           };
+          // TM-08pp: Defense-in-depth canonicalization of provider event IDs.
+          // Primary normalization happens at sync-consumer ingestion; this
+          // ensures canonical form even for direct DO callers.
+          const canonicalizedDeltas = body.deltas.map((d) => ({
+            ...d,
+            origin_event_id: canonicalizeProviderEventId(d.origin_event_id),
+          }));
           const result = await this.applyProviderDelta(
             body.account_id,
-            body.deltas,
+            canonicalizedDeltas,
           );
           return Response.json(result);
         }
@@ -7096,6 +7178,15 @@ export class UserGraphDO {
           };
           await this.executeUpgradePlan(body);
           return Response.json({ ok: true });
+        }
+
+        // ---------------------------------------------------------------
+        // TM-08pp: Provider event ID normalization (batch migration)
+        // ---------------------------------------------------------------
+
+        case "/normalizeProviderEventIds": {
+          const normalized = this.normalizeProviderEventIds();
+          return Response.json({ normalized });
         }
 
         default:

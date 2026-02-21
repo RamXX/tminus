@@ -19,7 +19,7 @@
  */
 
 import type { SyncIncrementalMessage, AccountId } from "@tminus/shared";
-import { buildHealthResponse } from "@tminus/shared";
+import { buildHealthResponse, canonicalizeProviderEventId } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
 // Google webhook header names
@@ -113,12 +113,14 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     return new Response("OK", { status: 200 });
   }
 
-  // Enqueue SYNC_INCREMENTAL for the sync-consumer to process
+  // Enqueue SYNC_INCREMENTAL for the sync-consumer to process.
+  // TM-08pp: Canonicalize resource_id to eliminate URL-encoding variants
+  // that Google may include in push notification headers.
   const msg: SyncIncrementalMessage = {
     type: "SYNC_INCREMENTAL",
     account_id: accountRow.account_id as AccountId,
     channel_id: channelId,
-    resource_id: resourceId,
+    resource_id: canonicalizeProviderEventId(resourceId),
     ping_ts: new Date().toISOString(),
   };
 
@@ -239,12 +241,14 @@ async function handleMicrosoftWebhook(
       continue;
     }
 
-    // Enqueue SYNC_INCREMENTAL
+    // Enqueue SYNC_INCREMENTAL.
+    // TM-08pp: Canonicalize resource path to eliminate URL-encoding variants
+    // that Microsoft Graph may include in change notification payloads.
     const msg: SyncIncrementalMessage = {
       type: "SYNC_INCREMENTAL",
       account_id: accountRow.account_id as AccountId,
       channel_id: notification.subscriptionId,
-      resource_id: notification.resource,
+      resource_id: canonicalizeProviderEventId(notification.resource),
       ping_ts: new Date().toISOString(),
     };
 
