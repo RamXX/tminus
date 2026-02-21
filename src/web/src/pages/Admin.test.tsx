@@ -10,11 +10,12 @@
  * AC6: Accessible at /admin/:orgId route (tested via component rendering with orgId prop)
  *
  * Uses React Testing Library with fireEvent for interactions.
- * Props-based dependency injection -- no global mocks needed.
+ * Since Admin now uses useApi(), useAuth(), useParams(), and useAdminTierGate()
+ * internally, tests mock those modules instead of passing props.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, act, fireEvent, waitFor } from "@testing-library/react";
-import { Admin, type AdminProps } from "./Admin";
+import { Admin } from "./Admin";
 import type {
   OrgDetails,
   OrgMember,
@@ -109,36 +110,144 @@ const MOCK_USAGE: MemberUsage[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Mock the API provider, auth, router, and route-helpers
+// ---------------------------------------------------------------------------
+
+const mockFetchOrgDetails = vi.fn<(orgId: string) => Promise<OrgDetails>>();
+const mockFetchOrgMembers = vi.fn<(orgId: string) => Promise<OrgMember[]>>();
+const mockAddOrgMember = vi.fn<(orgId: string, userId: string, role: OrgRole) => Promise<void>>();
+const mockRemoveOrgMember = vi.fn<(orgId: string, userId: string) => Promise<void>>();
+const mockChangeOrgMemberRole = vi.fn<(orgId: string, userId: string, role: OrgRole) => Promise<void>>();
+const mockFetchOrgPolicies = vi.fn<(orgId: string) => Promise<OrgPolicy[]>>();
+const mockCreateOrgPolicy = vi.fn<(orgId: string, payload: CreatePolicyPayload) => Promise<void>>();
+const mockUpdateOrgPolicy = vi.fn<(orgId: string, policyId: string, payload: UpdatePolicyPayload) => Promise<void>>();
+const mockDeleteOrgPolicy = vi.fn<(orgId: string, policyId: string) => Promise<void>>();
+const mockFetchOrgUsage = vi.fn<(orgId: string) => Promise<MemberUsage[]>>();
+const mockFetchBillingStatus = vi.fn<() => Promise<{ tier: string }>>();
+
+const mockApiValue = {
+  fetchOrgDetails: mockFetchOrgDetails,
+  fetchOrgMembers: mockFetchOrgMembers,
+  addOrgMember: mockAddOrgMember,
+  removeOrgMember: mockRemoveOrgMember,
+  changeOrgMemberRole: mockChangeOrgMemberRole,
+  fetchOrgPolicies: mockFetchOrgPolicies,
+  createOrgPolicy: mockCreateOrgPolicy,
+  updateOrgPolicy: mockUpdateOrgPolicy,
+  deleteOrgPolicy: mockDeleteOrgPolicy,
+  fetchOrgUsage: mockFetchOrgUsage,
+  fetchBillingStatus: mockFetchBillingStatus,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+let mockCurrentUserId = ADMIN_USER_ID;
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: { id: mockCurrentUserId, email: "test@example.com" },
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual("react-router-dom");
+  return {
+    ...actual,
+    useParams: () => ({ orgId: ORG_ID }),
+    Navigate: ({ to }: { to: string }) => <div data-testid="navigate" data-to={to} />,
+  };
+});
+
+let mockUserTier = "enterprise";
+
+vi.mock("../lib/route-helpers", () => ({
+  useAdminTierGate: () => mockUserTier,
+}));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createDefaultProps(overrides: Partial<AdminProps> = {}): AdminProps {
-  return {
-    orgId: ORG_ID,
-    currentUserId: ADMIN_USER_ID,
-    userTier: "enterprise",
-    fetchOrgDetails: vi.fn(async () => MOCK_ORG),
-    fetchOrgMembers: vi.fn(async () => MOCK_MEMBERS),
-    addOrgMember: vi.fn(async () => {}),
-    removeOrgMember: vi.fn(async () => {}),
-    changeOrgMemberRole: vi.fn(async () => {}),
-    fetchOrgPolicies: vi.fn(async () => MOCK_POLICIES),
-    createOrgPolicy: vi.fn(async () => {}),
-    updateOrgPolicy: vi.fn(async () => {}),
-    deleteOrgPolicy: vi.fn(async () => {}),
-    fetchOrgUsage: vi.fn(async () => MOCK_USAGE),
-    ...overrides,
-  };
+function setupDefaultMocks(overrides: {
+  fetchOrgDetails?: () => Promise<OrgDetails>;
+  fetchOrgMembers?: () => Promise<OrgMember[]>;
+  addOrgMember?: () => Promise<void>;
+  removeOrgMember?: () => Promise<void>;
+  changeOrgMemberRole?: () => Promise<void>;
+  fetchOrgPolicies?: () => Promise<OrgPolicy[]>;
+  createOrgPolicy?: () => Promise<void>;
+  updateOrgPolicy?: () => Promise<void>;
+  deleteOrgPolicy?: () => Promise<void>;
+  fetchOrgUsage?: () => Promise<MemberUsage[]>;
+  currentUserId?: string;
+  userTier?: string;
+} = {}) {
+  mockCurrentUserId = overrides.currentUserId ?? ADMIN_USER_ID;
+  mockUserTier = overrides.userTier ?? "enterprise";
+
+  if (overrides.fetchOrgDetails) {
+    mockFetchOrgDetails.mockImplementation(overrides.fetchOrgDetails as never);
+  } else {
+    mockFetchOrgDetails.mockResolvedValue(MOCK_ORG);
+  }
+  if (overrides.fetchOrgMembers) {
+    mockFetchOrgMembers.mockImplementation(overrides.fetchOrgMembers as never);
+  } else {
+    mockFetchOrgMembers.mockResolvedValue(MOCK_MEMBERS);
+  }
+  mockAddOrgMember.mockImplementation(
+    (overrides.addOrgMember ?? (async () => {})) as never,
+  );
+  mockRemoveOrgMember.mockImplementation(
+    (overrides.removeOrgMember ?? (async () => {})) as never,
+  );
+  mockChangeOrgMemberRole.mockImplementation(
+    (overrides.changeOrgMemberRole ?? (async () => {})) as never,
+  );
+  if (overrides.fetchOrgPolicies) {
+    mockFetchOrgPolicies.mockImplementation(overrides.fetchOrgPolicies as never);
+  } else {
+    mockFetchOrgPolicies.mockResolvedValue(MOCK_POLICIES);
+  }
+  mockCreateOrgPolicy.mockImplementation(
+    (overrides.createOrgPolicy ?? (async () => {})) as never,
+  );
+  mockUpdateOrgPolicy.mockImplementation(
+    (overrides.updateOrgPolicy ?? (async () => {})) as never,
+  );
+  mockDeleteOrgPolicy.mockImplementation(
+    (overrides.deleteOrgPolicy ?? (async () => {})) as never,
+  );
+  if (overrides.fetchOrgUsage) {
+    mockFetchOrgUsage.mockImplementation(overrides.fetchOrgUsage as never);
+  } else {
+    mockFetchOrgUsage.mockResolvedValue(MOCK_USAGE);
+  }
+  mockFetchBillingStatus.mockResolvedValue({ tier: mockUserTier });
 }
 
-async function renderAdmin(overrides: Partial<AdminProps> = {}) {
-  const props = createDefaultProps(overrides);
+async function renderAdmin(overrides: Parameters<typeof setupDefaultMocks>[0] = {}) {
+  setupDefaultMocks(overrides);
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<Admin {...props} />);
+    result = render(<Admin />);
   });
-  return { ...result!, props };
+  return result!;
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockCurrentUserId = ADMIN_USER_ID;
+  mockUserTier = "enterprise";
+});
 
 // ---------------------------------------------------------------------------
 // AC5: Enterprise tier enforced
@@ -155,7 +264,7 @@ describe("AC5: Enterprise tier enforcement", () => {
   it("upgrade link points to billing page", async () => {
     await renderAdmin({ userTier: "pro" });
     const link = screen.getByText("Upgrade Plan");
-    expect(link).toHaveAttribute("href", "#/billing");
+    expect(link.closest("a")).toHaveAttribute("href", "#/billing");
   });
 
   it("does NOT show upgrade prompt for enterprise users", async () => {
@@ -176,14 +285,11 @@ describe("AC6: Route rendering with orgId", () => {
   });
 
   it("passes orgId to all fetch functions", async () => {
-    const props = createDefaultProps();
-    await act(async () => {
-      render(<Admin {...props} />);
-    });
-    expect(props.fetchOrgDetails).toHaveBeenCalledWith(ORG_ID);
-    expect(props.fetchOrgMembers).toHaveBeenCalledWith(ORG_ID);
-    expect(props.fetchOrgPolicies).toHaveBeenCalledWith(ORG_ID);
-    expect(props.fetchOrgUsage).toHaveBeenCalledWith(ORG_ID);
+    await renderAdmin();
+    expect(mockFetchOrgDetails).toHaveBeenCalledWith(ORG_ID);
+    expect(mockFetchOrgMembers).toHaveBeenCalledWith(ORG_ID);
+    expect(mockFetchOrgPolicies).toHaveBeenCalledWith(ORG_ID);
+    expect(mockFetchOrgUsage).toHaveBeenCalledWith(ORG_ID);
   });
 
   it("shows loading state while org is loading", async () => {
@@ -192,9 +298,9 @@ describe("AC6: Route rendering with orgId", () => {
     const fetchOrgDetails = vi.fn(
       () => new Promise<OrgDetails>((resolve) => { resolveOrgDetails = resolve; }),
     );
-    const props = createDefaultProps({ fetchOrgDetails });
+    setupDefaultMocks({ fetchOrgDetails: fetchOrgDetails as () => Promise<OrgDetails> });
     await act(async () => {
-      render(<Admin {...props} />);
+      render(<Admin />);
     });
     expect(screen.getByTestId("admin-loading")).toBeInTheDocument();
 
@@ -207,7 +313,7 @@ describe("AC6: Route rendering with orgId", () => {
 
   it("shows error state when org fetch fails", async () => {
     await renderAdmin({
-      fetchOrgDetails: vi.fn(async () => { throw new Error("Org not found"); }),
+      fetchOrgDetails: async () => { throw new Error("Org not found"); },
     });
     expect(screen.getByTestId("admin-error")).toBeInTheDocument();
     expect(screen.getByText(/Org not found/)).toBeInTheDocument();
@@ -259,7 +365,7 @@ describe("AC1: Admin member management", () => {
   });
 
   it("admin can add a member via form", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     // Fill in the form
     const idInput = screen.getByTestId("new-member-id-input");
@@ -275,29 +381,29 @@ describe("AC1: Admin member management", () => {
       fireEvent.click(addBtn);
     });
 
-    expect(props.addOrgMember).toHaveBeenCalledWith(ORG_ID, "user_new123", "member");
+    expect(mockAddOrgMember).toHaveBeenCalledWith(ORG_ID, "user_new123", "member");
   });
 
   it("admin can remove a member", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     const removeBtn = screen.getByTestId(`remove-member-btn-${MEMBER_USER_ID}`);
     await act(async () => {
       fireEvent.click(removeBtn);
     });
 
-    expect(props.removeOrgMember).toHaveBeenCalledWith(ORG_ID, MEMBER_USER_ID);
+    expect(mockRemoveOrgMember).toHaveBeenCalledWith(ORG_ID, MEMBER_USER_ID);
   });
 
   it("admin can change a member's role", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     const promoteBtn = screen.getByTestId(`change-role-btn-${MEMBER_USER_ID}`);
     await act(async () => {
       fireEvent.click(promoteBtn);
     });
 
-    expect(props.changeOrgMemberRole).toHaveBeenCalledWith(ORG_ID, MEMBER_USER_ID, "admin");
+    expect(mockChangeOrgMemberRole).toHaveBeenCalledWith(ORG_ID, MEMBER_USER_ID, "admin");
   });
 
   it("shows admin badge in header for admin users", async () => {
@@ -307,8 +413,12 @@ describe("AC1: Admin member management", () => {
   });
 
   it("shows error when add member fails", async () => {
-    const addOrgMember = vi.fn(async () => { throw new Error("User not found"); });
-    await renderAdmin({ addOrgMember });
+    setupDefaultMocks({
+      addOrgMember: async () => { throw new Error("User not found"); },
+    });
+    await act(async () => {
+      render(<Admin />);
+    });
 
     const idInput = screen.getByTestId("new-member-id-input");
     const addBtn = screen.getByTestId("add-member-btn");
@@ -393,7 +503,7 @@ describe("AC2: Admin policy management", () => {
   });
 
   it("admin can create a new policy", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     // Open create form
     await act(async () => {
@@ -417,7 +527,7 @@ describe("AC2: Admin policy management", () => {
       fireEvent.click(screen.getByTestId("policy-submit-btn"));
     });
 
-    expect(props.createOrgPolicy).toHaveBeenCalledWith(ORG_ID, {
+    expect(mockCreateOrgPolicy).toHaveBeenCalledWith(ORG_ID, {
       policy_type: "minimum_vip_priority",
       config: { min_weight: 75 },
     });
@@ -439,7 +549,7 @@ describe("AC2: Admin policy management", () => {
   });
 
   it("admin can update an existing policy", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     // Open edit form for pol_1
     await act(async () => {
@@ -457,19 +567,19 @@ describe("AC2: Admin policy management", () => {
       fireEvent.click(screen.getByTestId("policy-submit-btn"));
     });
 
-    expect(props.updateOrgPolicy).toHaveBeenCalledWith(ORG_ID, "pol_1", {
+    expect(mockUpdateOrgPolicy).toHaveBeenCalledWith(ORG_ID, "pol_1", {
       config: { start_hour: 9, end_hour: 18 },
     });
   });
 
   it("admin can delete a policy", async () => {
-    const { props } = await renderAdmin();
+    await renderAdmin();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("delete-policy-btn-pol_2"));
     });
 
-    expect(props.deleteOrgPolicy).toHaveBeenCalledWith(ORG_ID, "pol_2");
+    expect(mockDeleteOrgPolicy).toHaveBeenCalledWith(ORG_ID, "pol_2");
   });
 
   it("shows validation error for invalid policy config", async () => {
@@ -573,7 +683,7 @@ describe("AC3: Usage dashboard", () => {
   });
 
   it("shows empty state when no usage data", async () => {
-    await renderAdmin({ fetchOrgUsage: vi.fn(async () => []) });
+    await renderAdmin({ fetchOrgUsage: async () => [] });
     expect(screen.getByTestId("usage-empty")).toBeInTheDocument();
     expect(screen.getByTestId("usage-empty")).toHaveTextContent("No usage data available");
   });
@@ -648,12 +758,11 @@ describe("AC4: Member read-only view", () => {
 describe("Error handling", () => {
   it("shows member loading state", async () => {
     let resolveFn!: (value: OrgMember[]) => void;
-    const fetchOrgMembers = vi.fn(
-      () => new Promise<OrgMember[]>((resolve) => { resolveFn = resolve; }),
-    );
-    const props = createDefaultProps({ fetchOrgMembers });
+    setupDefaultMocks({
+      fetchOrgMembers: () => new Promise<OrgMember[]>((resolve) => { resolveFn = resolve; }),
+    });
     await act(async () => {
-      render(<Admin {...props} />);
+      render(<Admin />);
     });
     expect(screen.getByTestId("member-list-loading")).toBeInTheDocument();
 
@@ -664,12 +773,11 @@ describe("Error handling", () => {
 
   it("shows policy loading state", async () => {
     let resolveFn!: (value: OrgPolicy[]) => void;
-    const fetchOrgPolicies = vi.fn(
-      () => new Promise<OrgPolicy[]>((resolve) => { resolveFn = resolve; }),
-    );
-    const props = createDefaultProps({ fetchOrgPolicies });
+    setupDefaultMocks({
+      fetchOrgPolicies: () => new Promise<OrgPolicy[]>((resolve) => { resolveFn = resolve; }),
+    });
     await act(async () => {
-      render(<Admin {...props} />);
+      render(<Admin />);
     });
     expect(screen.getByTestId("policy-editor-loading")).toBeInTheDocument();
 
@@ -680,12 +788,11 @@ describe("Error handling", () => {
 
   it("shows usage loading state", async () => {
     let resolveFn!: (value: MemberUsage[]) => void;
-    const fetchOrgUsage = vi.fn(
-      () => new Promise<MemberUsage[]>((resolve) => { resolveFn = resolve; }),
-    );
-    const props = createDefaultProps({ fetchOrgUsage });
+    setupDefaultMocks({
+      fetchOrgUsage: () => new Promise<MemberUsage[]>((resolve) => { resolveFn = resolve; }),
+    });
     await act(async () => {
-      render(<Admin {...props} />);
+      render(<Admin />);
     });
     expect(screen.getByTestId("usage-dashboard-loading")).toBeInTheDocument();
 
@@ -698,7 +805,7 @@ describe("Error handling", () => {
     // When members fail to load, the component shows an error with retry,
     // NOT access denied (since we can't verify membership status).
     await renderAdmin({
-      fetchOrgMembers: vi.fn(async () => { throw new Error("Members fetch failed"); }),
+      fetchOrgMembers: async () => { throw new Error("Members fetch failed"); },
     });
     expect(screen.getByTestId("admin-members-error")).toBeInTheDocument();
     expect(screen.getByText(/Members fetch failed/)).toBeInTheDocument();
@@ -706,14 +813,14 @@ describe("Error handling", () => {
 
   it("shows policy editor error", async () => {
     await renderAdmin({
-      fetchOrgPolicies: vi.fn(async () => { throw new Error("Policies fetch failed"); }),
+      fetchOrgPolicies: async () => { throw new Error("Policies fetch failed"); },
     });
     expect(screen.getByTestId("policy-editor-error")).toBeInTheDocument();
   });
 
   it("shows usage dashboard error", async () => {
     await renderAdmin({
-      fetchOrgUsage: vi.fn(async () => { throw new Error("Usage fetch failed"); }),
+      fetchOrgUsage: async () => { throw new Error("Usage fetch failed"); },
     });
     expect(screen.getByTestId("usage-dashboard-error")).toBeInTheDocument();
   });
@@ -725,12 +832,13 @@ describe("Error handling", () => {
 
 describe("Integration: policy creation flow", () => {
   it("creates policy, form closes, and reload is triggered", async () => {
-    const createOrgPolicy = vi.fn(async () => {});
-    const fetchOrgPolicies = vi.fn(async () => MOCK_POLICIES);
-    const { props } = await renderAdmin({ createOrgPolicy, fetchOrgPolicies });
+    setupDefaultMocks();
+    await act(async () => {
+      render(<Admin />);
+    });
 
     // fetchOrgPolicies called once on mount
-    expect(fetchOrgPolicies).toHaveBeenCalledTimes(1);
+    expect(mockFetchOrgPolicies).toHaveBeenCalledTimes(1);
 
     // Open create form
     await act(async () => {
@@ -757,7 +865,7 @@ describe("Integration: policy creation flow", () => {
     });
 
     // Verify create was called with correct args
-    expect(createOrgPolicy).toHaveBeenCalledWith(ORG_ID, {
+    expect(mockCreateOrgPolicy).toHaveBeenCalledWith(ORG_ID, {
       policy_type: "minimum_vip_priority",
       config: { min_weight: 60 },
     });
@@ -766,6 +874,6 @@ describe("Integration: policy creation flow", () => {
     expect(screen.queryByTestId("policy-form")).not.toBeInTheDocument();
 
     // Verify policies were reloaded
-    expect(fetchOrgPolicies).toHaveBeenCalledTimes(2);
+    expect(mockFetchOrgPolicies).toHaveBeenCalledTimes(2);
   });
 });

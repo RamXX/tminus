@@ -12,6 +12,9 @@
  *
  * Uses React Testing Library with fireEvent.
  * Uses fake timers for retry/backoff behavior.
+ *
+ * Since Onboarding now uses useApi(), useAuth(), and useOnboardingCallbackId()
+ * internally, tests mock those modules instead of passing props.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
@@ -48,6 +51,50 @@ const MOCK_EVENTS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Mock the API provider, auth, and route helpers
+// ---------------------------------------------------------------------------
+
+const mockFetchAccountStatus = vi.fn<(accountId: string) => Promise<OnboardingSyncStatus>>();
+const mockFetchEventsForOnboarding = vi.fn<() => Promise<typeof MOCK_EVENTS>>();
+const mockSubmitAppleCredentials = vi.fn<(userId: string, email: string, password: string) => Promise<{ account_id: string }>>();
+const mockGetOnboardingSession = vi.fn<() => Promise<null>>();
+const mockCreateOnboardingSession = vi.fn();
+const mockAddOnboardingAccount = vi.fn<() => Promise<void>>();
+const mockCompleteOnboardingSession = vi.fn<() => Promise<void>>();
+
+const mockApiValue = {
+  fetchAccountStatus: mockFetchAccountStatus,
+  fetchEventsForOnboarding: mockFetchEventsForOnboarding,
+  submitAppleCredentials: mockSubmitAppleCredentials,
+  getOnboardingSession: mockGetOnboardingSession,
+  createOnboardingSession: mockCreateOnboardingSession,
+  addOnboardingAccount: mockAddOnboardingAccount,
+  completeOnboardingSession: mockCompleteOnboardingSession,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: MOCK_USER,
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+let mockCallbackAccountId: string | null = null;
+
+vi.mock("../lib/route-helpers", () => ({
+  useOnboardingCallbackId: () => mockCallbackAccountId,
+}));
+
+// ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
 
@@ -55,55 +102,54 @@ function createMockNavigate() {
   return vi.fn((_url: string) => {});
 }
 
-function createMockFetchStatus(
-  sequence: OnboardingSyncStatus[] = [MOCK_SYNC_STATUS_COMPLETE],
-) {
-  let callIndex = 0;
-  return vi.fn(async (_accountId: string): Promise<OnboardingSyncStatus> => {
-    const status = sequence[Math.min(callIndex, sequence.length - 1)];
-    callIndex++;
-    return status;
+function setupDefaultMocks(overrides: {
+  fetchAccountStatus?: (accountId: string) => Promise<OnboardingSyncStatus>;
+  callbackAccountId?: string | null;
+} = {}) {
+  mockCallbackAccountId = overrides.callbackAccountId ?? null;
+
+  if (overrides.fetchAccountStatus) {
+    mockFetchAccountStatus.mockImplementation(overrides.fetchAccountStatus);
+  } else {
+    mockFetchAccountStatus.mockResolvedValue(MOCK_SYNC_STATUS_COMPLETE);
+  }
+
+  mockFetchEventsForOnboarding.mockResolvedValue(MOCK_EVENTS);
+  mockSubmitAppleCredentials.mockResolvedValue({ account_id: "acc-apple-321" });
+  mockGetOnboardingSession.mockResolvedValue(null);
+  mockCreateOnboardingSession.mockResolvedValue({
+    session_id: "obs_DEFAULT",
+    user_id: MOCK_USER.id,
+    step: "welcome",
+    accounts: [],
+    session_token: "tok_abc",
+    created_at: "2026-02-15T10:00:00Z",
+    updated_at: "2026-02-15T10:00:00Z",
   });
+  mockAddOnboardingAccount.mockResolvedValue(undefined);
+  mockCompleteOnboardingSession.mockResolvedValue(undefined);
 }
 
-function createMockFetchEvents() {
-  return vi.fn(async () => MOCK_EVENTS);
-}
+async function renderOnboarding(overrides: Partial<OnboardingProps> & {
+  callbackAccountId?: string | null;
+  fetchAccountStatus?: (accountId: string) => Promise<OnboardingSyncStatus>;
+  submitAppleCredentials?: (userId: string, email: string, password: string) => Promise<{ account_id: string }>;
+} = {}) {
+  setupDefaultMocks({
+    callbackAccountId: overrides.callbackAccountId,
+    fetchAccountStatus: overrides.fetchAccountStatus,
+  });
 
-function createMockSubmitAppleCredentials() {
-  return vi.fn(
-    async (
-      _userId: string,
-      _email: string,
-      _password: string,
-    ): Promise<{ account_id: string }> => {
-      return { account_id: "acc-apple-321" };
-    },
-  );
-}
+  if (overrides.submitAppleCredentials) {
+    mockSubmitAppleCredentials.mockImplementation(overrides.submitAppleCredentials);
+  }
 
-async function renderOnboarding(overrides: Partial<OnboardingProps> = {}) {
   const navigateToOAuth = overrides.navigateToOAuth ?? createMockNavigate();
-  const fetchAccountStatus =
-    overrides.fetchAccountStatus ?? createMockFetchStatus();
-  const fetchEvents = overrides.fetchEvents ?? createMockFetchEvents();
-  const submitAppleCredentials =
-    overrides.submitAppleCredentials ?? createMockSubmitAppleCredentials();
 
   const result = render(
     <Onboarding
-      user={overrides.user ?? MOCK_USER}
       navigateToOAuth={navigateToOAuth}
-      fetchAccountStatus={fetchAccountStatus}
-      fetchEvents={fetchEvents}
-      callbackAccountId={overrides.callbackAccountId ?? null}
       oauthBaseUrl={overrides.oauthBaseUrl ?? "https://oauth.tminus.ink"}
-      submitAppleCredentials={submitAppleCredentials}
-      fetchOnboardingSession={overrides.fetchOnboardingSession}
-      createOnboardingSession={overrides.createOnboardingSession}
-      addAccountToServerSession={overrides.addAccountToServerSession}
-      completeServerSession={overrides.completeServerSession}
-      sessionId={overrides.sessionId}
       callbackError={overrides.callbackError}
       callbackProvider={overrides.callbackProvider}
       onErrorTelemetry={overrides.onErrorTelemetry}
@@ -115,11 +161,16 @@ async function renderOnboarding(overrides: Partial<OnboardingProps> = {}) {
   return {
     ...result,
     navigateToOAuth,
-    fetchAccountStatus,
-    fetchEvents,
-    submitAppleCredentials,
+    fetchAccountStatus: mockFetchAccountStatus,
+    fetchEvents: mockFetchEventsForOnboarding,
+    submitAppleCredentials: mockSubmitAppleCredentials,
   };
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockCallbackAccountId = null;
+});
 
 // ---------------------------------------------------------------------------
 // Integration: OAuth error recovery (AC 1, AC 3, AC 5)
@@ -240,12 +291,10 @@ describe("OAuth error recovery", () => {
     ];
 
     for (const code of errorCodes) {
+      setupDefaultMocks();
+
       const { unmount } = render(
         <Onboarding
-          user={MOCK_USER}
-          fetchAccountStatus={createMockFetchStatus()}
-          fetchEvents={createMockFetchEvents()}
-          callbackAccountId={null}
           callbackError={code}
           callbackProvider="google"
         />,
@@ -662,11 +711,9 @@ describe("success flow backward compatibility", () => {
   });
 
   it("successful OAuth callback still works (no callbackError)", async () => {
-    const fetchAccountStatus = createMockFetchStatus([MOCK_SYNC_STATUS_COMPLETE]);
-
     await renderOnboarding({
       callbackAccountId: "acc-google-456",
-      fetchAccountStatus,
+      fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
     });
 
     await act(async () => {

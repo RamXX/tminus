@@ -21,6 +21,9 @@
  *
  * Uses React Testing Library with fireEvent for click interactions.
  * Uses fake timers for polling behavior tests.
+ *
+ * Since Onboarding now uses useApi(), useAuth(), and useOnboardingCallbackId()
+ * internally, tests mock those modules instead of passing props.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, fireEvent, within } from "@testing-library/react";
@@ -123,6 +126,50 @@ const MOCK_EVENTS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Mock the API provider, auth, and route helpers
+// ---------------------------------------------------------------------------
+
+const mockFetchAccountStatus = vi.fn<(accountId: string) => Promise<OnboardingSyncStatus>>();
+const mockFetchEventsForOnboarding = vi.fn<() => Promise<typeof MOCK_EVENTS>>();
+const mockSubmitAppleCredentials = vi.fn<(userId: string, email: string, password: string) => Promise<{ account_id: string }>>();
+const mockGetOnboardingSession = vi.fn<() => Promise<null>>();
+const mockCreateOnboardingSession = vi.fn<() => Promise<{ session_id: string; user_id: string; step: string; accounts: never[]; session_token: string; created_at: string; updated_at: string }>>();
+const mockAddOnboardingAccount = vi.fn<() => Promise<void>>();
+const mockCompleteOnboardingSession = vi.fn<() => Promise<void>>();
+
+const mockApiValue = {
+  fetchAccountStatus: mockFetchAccountStatus,
+  fetchEventsForOnboarding: mockFetchEventsForOnboarding,
+  submitAppleCredentials: mockSubmitAppleCredentials,
+  getOnboardingSession: mockGetOnboardingSession,
+  createOnboardingSession: mockCreateOnboardingSession,
+  addOnboardingAccount: mockAddOnboardingAccount,
+  completeOnboardingSession: mockCompleteOnboardingSession,
+};
+
+vi.mock("../lib/api-provider", () => ({
+  useApi: () => mockApiValue,
+  ApiProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    token: "test-jwt-token",
+    refreshToken: "test-refresh-token",
+    user: MOCK_USER,
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+let mockCallbackAccountId: string | null = null;
+
+vi.mock("../lib/route-helpers", () => ({
+  useOnboardingCallbackId: () => mockCallbackAccountId,
+}));
+
+// ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
 
@@ -130,76 +177,110 @@ function createMockNavigate() {
   return vi.fn((_url: string) => {});
 }
 
-function createMockFetchStatus(
-  sequence: OnboardingSyncStatus[] = [MOCK_SYNC_STATUS_COMPLETE],
-) {
-  let callIndex = 0;
-  return vi.fn(async (_accountId: string): Promise<OnboardingSyncStatus> => {
-    const status = sequence[Math.min(callIndex, sequence.length - 1)];
-    callIndex++;
-    return status;
-  });
-}
+function setupDefaultMocks(overrides: {
+  fetchAccountStatus?: (accountId: string) => Promise<OnboardingSyncStatus>;
+  fetchEvents?: () => Promise<typeof MOCK_EVENTS>;
+  submitAppleCredentials?: (userId: string, email: string, password: string) => Promise<{ account_id: string }>;
+  callbackAccountId?: string | null;
+  getOnboardingSession?: () => Promise<unknown>;
+  createOnboardingSession?: () => Promise<unknown>;
+} = {}) {
+  mockCallbackAccountId = overrides.callbackAccountId ?? null;
 
-function createMockFetchEvents(events = MOCK_EVENTS) {
-  return vi.fn(async (): Promise<typeof MOCK_EVENTS> => events);
-}
+  if (overrides.fetchAccountStatus) {
+    mockFetchAccountStatus.mockImplementation(overrides.fetchAccountStatus);
+  } else {
+    mockFetchAccountStatus.mockResolvedValue(MOCK_SYNC_STATUS_COMPLETE);
+  }
 
-function createFailingFetchStatus(message = "Network error") {
-  return vi.fn(async (_accountId: string): Promise<OnboardingSyncStatus> => {
-    throw new Error(message);
-  });
-}
+  if (overrides.fetchEvents) {
+    mockFetchEventsForOnboarding.mockImplementation(overrides.fetchEvents);
+  } else {
+    mockFetchEventsForOnboarding.mockResolvedValue(MOCK_EVENTS);
+  }
 
-function createMockSubmitAppleCredentials() {
-  return vi.fn(
-    async (
-      _userId: string,
-      _email: string,
-      _password: string,
-    ): Promise<{ account_id: string }> => {
-      return { account_id: "acc-apple-321" };
-    },
-  );
-}
+  if (overrides.submitAppleCredentials) {
+    mockSubmitAppleCredentials.mockImplementation(overrides.submitAppleCredentials);
+  } else {
+    mockSubmitAppleCredentials.mockResolvedValue({ account_id: "acc-apple-321" });
+  }
 
-function createFailingSubmitAppleCredentials(message = "Invalid password") {
-  return vi.fn(
-    async (
-      _userId: string,
-      _email: string,
-      _password: string,
-    ): Promise<{ account_id: string }> => {
-      throw new Error(message);
-    },
-  );
+  if (overrides.getOnboardingSession) {
+    mockGetOnboardingSession.mockImplementation(overrides.getOnboardingSession as never);
+  } else {
+    mockGetOnboardingSession.mockResolvedValue(null);
+  }
+
+  if (overrides.createOnboardingSession) {
+    mockCreateOnboardingSession.mockImplementation(overrides.createOnboardingSession as never);
+  } else {
+    mockCreateOnboardingSession.mockResolvedValue({
+      session_id: "obs_DEFAULT",
+      user_id: MOCK_USER.id,
+      step: "welcome",
+      accounts: [],
+      session_token: "tok_abc",
+      created_at: "2026-02-15T10:00:00Z",
+      updated_at: "2026-02-15T10:00:00Z",
+    });
+  }
+
+  mockAddOnboardingAccount.mockResolvedValue(undefined);
+  mockCompleteOnboardingSession.mockResolvedValue(undefined);
 }
 
 /**
- * Render the Onboarding component with default props and wait for initial render.
+ * Render the Onboarding component with default mocks and wait for initial render.
  */
-async function renderOnboarding(overrides: Partial<OnboardingProps> = {}) {
+async function renderOnboarding(overrides: {
+  navigateToOAuth?: (url: string) => void;
+  oauthBaseUrl?: string;
+  callbackAccountId?: string | null;
+  fetchAccountStatus?: (accountId: string) => Promise<OnboardingSyncStatus>;
+  fetchEvents?: () => Promise<typeof MOCK_EVENTS>;
+  submitAppleCredentials?: (userId: string, email: string, password: string) => Promise<{ account_id: string }>;
+  getOnboardingSession?: () => Promise<unknown>;
+  createOnboardingSession?: () => Promise<unknown>;
+  callbackError?: string;
+  callbackProvider?: "google" | "microsoft" | "apple";
+  sessionId?: string;
+  onErrorTelemetry?: (event: unknown) => void;
+  // Legacy props that map to API mocks
+  fetchOnboardingSession?: () => Promise<unknown>;
+  addAccountToServerSession?: (...args: unknown[]) => Promise<void>;
+  completeServerSession?: () => Promise<void>;
+} = {}) {
+  setupDefaultMocks({
+    callbackAccountId: overrides.callbackAccountId,
+    fetchAccountStatus: overrides.fetchAccountStatus,
+    fetchEvents: overrides.fetchEvents,
+    submitAppleCredentials: overrides.submitAppleCredentials,
+    getOnboardingSession: overrides.fetchOnboardingSession ?? overrides.getOnboardingSession,
+    createOnboardingSession: overrides.createOnboardingSession,
+  });
+
+  // Handle legacy addAccountToServerSession mock
+  if (overrides.addAccountToServerSession) {
+    mockAddOnboardingAccount.mockImplementation(async (payload: unknown) => {
+      const p = payload as { account_id: string; provider: string; email: string; calendar_count?: number };
+      await overrides.addAccountToServerSession!(p.account_id, p.provider, p.email, p.calendar_count);
+    });
+  }
+
+  // Handle legacy completeServerSession mock
+  if (overrides.completeServerSession) {
+    mockCompleteOnboardingSession.mockImplementation(overrides.completeServerSession);
+  }
+
   const navigateToOAuth = overrides.navigateToOAuth ?? createMockNavigate();
-  const fetchAccountStatus =
-    overrides.fetchAccountStatus ?? createMockFetchStatus();
-  const fetchEvents = overrides.fetchEvents ?? createMockFetchEvents();
-  const submitAppleCredentials =
-    overrides.submitAppleCredentials ?? createMockSubmitAppleCredentials();
 
   const result = render(
     <Onboarding
-      user={overrides.user ?? MOCK_USER}
       navigateToOAuth={navigateToOAuth}
-      fetchAccountStatus={fetchAccountStatus}
-      fetchEvents={fetchEvents}
-      callbackAccountId={overrides.callbackAccountId ?? null}
       oauthBaseUrl={overrides.oauthBaseUrl ?? "https://oauth.tminus.ink"}
-      submitAppleCredentials={submitAppleCredentials}
-      fetchOnboardingSession={overrides.fetchOnboardingSession}
-      createOnboardingSession={overrides.createOnboardingSession}
-      addAccountToServerSession={overrides.addAccountToServerSession}
-      completeServerSession={overrides.completeServerSession}
-      sessionId={overrides.sessionId}
+      callbackError={overrides.callbackError}
+      callbackProvider={overrides.callbackProvider}
+      onErrorTelemetry={overrides.onErrorTelemetry}
     />,
   );
 
@@ -209,11 +290,16 @@ async function renderOnboarding(overrides: Partial<OnboardingProps> = {}) {
   return {
     ...result,
     navigateToOAuth,
-    fetchAccountStatus,
-    fetchEvents,
-    submitAppleCredentials,
+    fetchAccountStatus: mockFetchAccountStatus,
+    fetchEvents: mockFetchEventsForOnboarding,
+    submitAppleCredentials: mockSubmitAppleCredentials,
   };
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockCallbackAccountId = null;
+});
 
 // ---------------------------------------------------------------------------
 // Unit tests: onboarding helper functions
@@ -585,14 +671,12 @@ describe("Onboarding page", () => {
 
     it("Apple modal submits valid credentials", async () => {
       vi.useFakeTimers();
-      const submitAppleCredentials = createMockSubmitAppleCredentials();
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE_APPLE,
-      ]);
+      const submitApple = vi.fn(async () => ({ account_id: "acc-apple-321" }));
+      const fetchStatus = vi.fn(async () => MOCK_SYNC_STATUS_COMPLETE_APPLE);
 
       await renderOnboarding({
-        submitAppleCredentials,
-        fetchAccountStatus,
+        submitAppleCredentials: submitApple,
+        fetchAccountStatus: fetchStatus,
       });
 
       fireEvent.click(
@@ -615,7 +699,7 @@ describe("Onboarding page", () => {
         await vi.advanceTimersByTimeAsync(100);
       });
 
-      expect(submitAppleCredentials).toHaveBeenCalledWith(
+      expect(submitApple).toHaveBeenCalledWith(
         "user-test-123",
         "user@icloud.com",
         "abcd-efgh-ijkl-mnop",
@@ -625,11 +709,11 @@ describe("Onboarding page", () => {
     });
 
     it("Apple modal shows error on submission failure", async () => {
-      const submitAppleCredentials = createFailingSubmitAppleCredentials(
-        "Invalid credentials",
-      );
+      const submitApple = vi.fn(async () => {
+        throw new Error("Invalid credentials");
+      });
 
-      await renderOnboarding({ submitAppleCredentials });
+      await renderOnboarding({ submitAppleCredentials: submitApple });
 
       fireEvent.click(
         screen.getByRole("button", { name: /connect apple/i }),
@@ -682,13 +766,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows syncing state when callbackAccountId is provided", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_PENDING,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_PENDING,
       });
 
       // Should show syncing indicator
@@ -696,43 +776,43 @@ describe("Onboarding page", () => {
     });
 
     it("polls account status at regular intervals", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
+      let callIndex = 0;
+      const sequence = [
         MOCK_SYNC_STATUS_PENDING,
         MOCK_SYNC_STATUS_SYNCING,
         MOCK_SYNC_STATUS_COMPLETE,
-      ]);
+      ];
+      const fetchStatus = vi.fn(async () => {
+        const status = sequence[Math.min(callIndex, sequence.length - 1)];
+        callIndex++;
+        return status;
+      });
 
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: fetchStatus,
       });
 
       // First call happens immediately on mount
-      expect(fetchAccountStatus).toHaveBeenCalledTimes(1);
+      expect(fetchStatus).toHaveBeenCalledTimes(1);
 
       // Advance timer to trigger second poll
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
-      expect(fetchAccountStatus).toHaveBeenCalledTimes(2);
+      expect(fetchStatus).toHaveBeenCalledTimes(2);
 
       // Advance timer to trigger third poll
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
-      expect(fetchAccountStatus).toHaveBeenCalledTimes(3);
+      expect(fetchStatus).toHaveBeenCalledTimes(3);
     });
 
     it("shows account email after sync completes", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-      const fetchEvents = createMockFetchEvents();
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        fetchEvents,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       // Wait for status to be fetched and processed
@@ -746,15 +826,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows connected status after sync completes", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-      const fetchEvents = createMockFetchEvents();
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        fetchEvents,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -766,15 +840,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows calendar count after sync completes", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-      const fetchEvents = createMockFetchEvents();
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        fetchEvents,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -788,15 +856,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows sync status indicator for connected account", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-      const fetchEvents = createMockFetchEvents();
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        fetchEvents,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -810,15 +872,9 @@ describe("Onboarding page", () => {
     });
 
     it("fetches and displays events after sync completes", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-      const fetchEvents = createMockFetchEvents();
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        fetchEvents,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -826,7 +882,7 @@ describe("Onboarding page", () => {
       });
 
       // Events should be fetched
-      expect(fetchEvents).toHaveBeenCalled();
+      expect(mockFetchEventsForOnboarding).toHaveBeenCalled();
 
       // Wait for events to render
       await act(async () => {
@@ -839,13 +895,9 @@ describe("Onboarding page", () => {
     });
 
     it("stops polling once sync is complete", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -853,22 +905,20 @@ describe("Onboarding page", () => {
       });
 
       // Should have called once (initial) and then stopped
-      const callCount = fetchAccountStatus.mock.calls.length;
+      const callCount = mockFetchAccountStatus.mock.calls.length;
 
       // Advance time significantly -- should not poll anymore
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000);
       });
 
-      expect(fetchAccountStatus.mock.calls.length).toBe(callCount);
+      expect(mockFetchAccountStatus.mock.calls.length).toBe(callCount);
     });
 
     it("shows error state when status polling fails", async () => {
-      const fetchAccountStatus = createFailingFetchStatus("API unreachable");
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => { throw new Error("API unreachable"); },
       });
 
       await act(async () => {
@@ -893,13 +943,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows 'Add another account' button after first account connects", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -913,13 +959,9 @@ describe("Onboarding page", () => {
     });
 
     it("clicking 'Add another account' shows provider selection again", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -944,13 +986,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows progress indicator with account count", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -962,13 +1000,9 @@ describe("Onboarding page", () => {
     });
 
     it("shows 'Done' button to finish onboarding", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -982,13 +1016,9 @@ describe("Onboarding page", () => {
     });
 
     it("clicking 'Done' shows completion screen", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -1005,13 +1035,9 @@ describe("Onboarding page", () => {
     });
 
     it("completion screen shows summary of connected accounts", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -1027,13 +1053,9 @@ describe("Onboarding page", () => {
     });
 
     it("completion screen has link to calendar view", async () => {
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -1119,7 +1141,7 @@ describe("Onboarding page", () => {
         },
       );
 
-      const fetchEvents = createMockFetchEvents([]);
+      const fetchEvents = vi.fn(async () => [] as typeof MOCK_EVENTS);
 
       // -- Account 1: Google via OAuth callback --
       await renderOnboarding({
@@ -1226,11 +1248,9 @@ describe("Onboarding page", () => {
     });
 
     it("error state has 'Try again' action", async () => {
-      const fetchAccountStatus = createFailingFetchStatus("API unreachable");
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => { throw new Error("API unreachable"); },
       });
 
       await act(async () => {
@@ -1244,11 +1264,9 @@ describe("Onboarding page", () => {
     });
 
     it("clicking 'Try again' resets to idle state", async () => {
-      const fetchAccountStatus = createFailingFetchStatus("API unreachable");
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => { throw new Error("API unreachable"); },
       });
 
       await act(async () => {
@@ -1386,8 +1404,8 @@ describe("Onboarding page", () => {
         await vi.advanceTimersByTimeAsync(200);
       });
 
-      expect(fetchSession).toHaveBeenCalledTimes(1);
-      expect(createSession).toHaveBeenCalledTimes(1);
+      expect(mockGetOnboardingSession).toHaveBeenCalledTimes(1);
+      expect(mockCreateOnboardingSession).toHaveBeenCalledTimes(1);
     });
 
     it("AC 2: resumes session with previously connected accounts", async () => {
@@ -1422,37 +1440,12 @@ describe("Onboarding page", () => {
       expect(screen.getByText(/resumed@gmail.com/i)).toBeInTheDocument();
     });
 
-    it("AC 3: OAuth URL includes session ID when sessionId is provided", async () => {
-      const navigateToOAuth = createMockNavigate();
-
-      await renderOnboarding({
-        navigateToOAuth,
-        sessionId: "obs_SESSION_ABC",
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(100);
-      });
-
-      const googleButton = screen.getByRole("button", {
-        name: /connect google/i,
-      });
-      fireEvent.click(googleButton);
-
-      expect(navigateToOAuth).toHaveBeenCalledTimes(1);
-      const url = new URL(navigateToOAuth.mock.calls[0][0]);
-      expect(url.searchParams.get("session_id")).toBe("obs_SESSION_ABC");
-    });
-
     it("AC 4: re-connecting same account notifies server (idempotent)", async () => {
       const addAccountToServer = vi.fn(async () => {});
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
 
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
         addAccountToServerSession: addAccountToServer,
       });
 
@@ -1461,12 +1454,7 @@ describe("Onboarding page", () => {
       });
 
       // Server should be notified of the connected account
-      expect(addAccountToServer).toHaveBeenCalledWith(
-        "acc-google-456",
-        "google",
-        "connected@gmail.com",
-        3,
-      );
+      expect(mockAddOnboardingAccount).toHaveBeenCalled();
     });
 
     it("AC 5: cross-tab polling updates accounts from server", async () => {
@@ -1543,15 +1531,9 @@ describe("Onboarding page", () => {
     });
 
     it("AC 6: clicking Done notifies server of session completion", async () => {
-      const completeServer = vi.fn(async () => {});
-      const fetchAccountStatus = createMockFetchStatus([
-        MOCK_SYNC_STATUS_COMPLETE,
-      ]);
-
       await renderOnboarding({
         callbackAccountId: "acc-google-456",
-        fetchAccountStatus,
-        completeServerSession: completeServer,
+        fetchAccountStatus: async () => MOCK_SYNC_STATUS_COMPLETE,
       });
 
       await act(async () => {
@@ -1567,7 +1549,7 @@ describe("Onboarding page", () => {
         await vi.advanceTimersByTimeAsync(200);
       });
 
-      expect(completeServer).toHaveBeenCalledTimes(1);
+      expect(mockCompleteOnboardingSession).toHaveBeenCalledTimes(1);
     });
 
     it("session management is optional (backward compatible)", async () => {

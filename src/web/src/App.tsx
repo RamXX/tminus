@@ -7,17 +7,19 @@
  * - ErrorBoundary at app root for crash recovery
  * - Token refresh via AuthProvider
  *
- * Pages migrated to useApi():
+ * All pages now use useApi() internally (TM-hccd completed migration):
  * - Calendar, Accounts, SyncStatus (TM-wqip)
  * - Policies, ProviderHealth, ErrorRecovery (TM-b5g4)
  * - Billing, Scheduling, Governance (TM-6dgl)
  * - Relationships, Reconnections (TM-9xih)
- * Remaining pages still use legacy prop-passing via route wrappers.
+ * - Admin, Onboarding (TM-hccd)
+ *
+ * No more legacy prop-passing route wrappers.
  */
 
-import { HashRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
+import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./lib/auth";
-import { ApiProvider, useApi } from "./lib/api-provider";
+import { ApiProvider } from "./lib/api-provider";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppShell } from "./components/AppShell";
 import { Login } from "./pages/Login";
@@ -34,7 +36,6 @@ import { Reconnections } from "./pages/Reconnections";
 import { Admin } from "./pages/Admin";
 import { Onboarding } from "./pages/Onboarding";
 import { ProviderHealth } from "./pages/ProviderHealth";
-import { useOnboardingCallbackId, useAdminTierGate } from "./lib/route-helpers";
 
 // ---------------------------------------------------------------------------
 // Auth-aware route wrapper
@@ -60,50 +61,8 @@ function GuestOnly({ children }: { children: React.ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Page wrappers -- bridge legacy props to ApiProvider
+// Default route handler
 // ---------------------------------------------------------------------------
-
-function OnboardingRoute() {
-  const { user } = useAuth();
-  const api = useApi();
-  const callbackAccountId = useOnboardingCallbackId();
-  if (!user) return null;
-  return (
-    <Onboarding
-      user={user}
-      fetchAccountStatus={api.fetchAccountStatus}
-      fetchEvents={api.fetchEventsForOnboarding}
-      callbackAccountId={callbackAccountId}
-      submitAppleCredentials={api.submitAppleCredentials}
-    />
-  );
-}
-
-
-function AdminRoute() {
-  const { orgId } = useParams<{ orgId: string }>();
-  const { user } = useAuth();
-  const api = useApi();
-  const userTier = useAdminTierGate(api.fetchBillingStatus);
-  if (!orgId || !user) return <Navigate to="/calendar" replace />;
-  return (
-    <Admin
-      orgId={orgId}
-      currentUserId={user.id}
-      userTier={userTier}
-      fetchOrgDetails={api.fetchOrgDetails}
-      fetchOrgMembers={api.fetchOrgMembers}
-      addOrgMember={api.addOrgMember}
-      removeOrgMember={api.removeOrgMember}
-      changeOrgMemberRole={api.changeOrgMemberRole}
-      fetchOrgPolicies={api.fetchOrgPolicies}
-      createOrgPolicy={api.createOrgPolicy}
-      updateOrgPolicy={api.updateOrgPolicy}
-      deleteOrgPolicy={api.deleteOrgPolicy}
-      fetchOrgUsage={api.fetchOrgUsage}
-    />
-  );
-}
 
 /**
  * Handles the default route: redirects authenticated users to /calendar
@@ -137,7 +96,7 @@ function AuthenticatedRoutes() {
           <Route path="/relationships" element={<Relationships />} />
           <Route path="/reconnections" element={<Reconnections />} />
           <Route path="/provider-health" element={<ProviderHealth />} />
-          <Route path="/admin/:orgId" element={<AdminRoute />} />
+          <Route path="/admin/:orgId" element={<Admin />} />
           <Route path="*" element={<Navigate to="/calendar" replace />} />
         </Routes>
       </AppShell>
@@ -157,7 +116,7 @@ export function App() {
           <HashRouter>
             <Routes>
               <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
-              <Route path="/onboard" element={<RequireAuth><OnboardingRoute /></RequireAuth>} />
+              <Route path="/onboard" element={<RequireAuth><Onboarding /></RequireAuth>} />
               <Route path="/" element={<DefaultRoute />} />
               <Route path="/*" element={<AuthenticatedRoutes />} />
             </Routes>

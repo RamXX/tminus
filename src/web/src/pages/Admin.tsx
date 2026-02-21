@@ -14,10 +14,15 @@
  * Enterprise tier enforcement:
  * - Non-enterprise users see an upgrade prompt instead of the admin console
  *
- * Props follow the dependency injection pattern for testability.
+ * Uses useApi() for token-injected API calls (migrated from prop-passing).
+ * Uses useParams() for orgId extraction and useAdminTierGate() for tier.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useParams, Navigate } from "react-router-dom";
+import { useApi } from "../lib/api-provider";
+import { useAuth } from "../lib/auth";
+import { useAdminTierGate } from "../lib/route-helpers";
 import type {
   OrgDetails,
   OrgMember,
@@ -30,59 +35,41 @@ import type {
 import { OrgMemberList } from "../components/OrgMemberList";
 import { OrgPolicyEditor } from "../components/OrgPolicyEditor";
 import { OrgUsageDashboard } from "../components/OrgUsageDashboard";
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
-export interface AdminProps {
-  /** The org ID from the URL. */
-  orgId: string;
-  /** Current user's ID (from auth context). */
-  currentUserId: string;
-  /** Current user's billing tier. */
-  userTier: string;
-  /** Fetch org details. */
-  fetchOrgDetails: (orgId: string) => Promise<OrgDetails>;
-  /** Fetch org members. */
-  fetchOrgMembers: (orgId: string) => Promise<OrgMember[]>;
-  /** Add a member. */
-  addOrgMember: (orgId: string, userId: string, role: OrgRole) => Promise<void>;
-  /** Remove a member. */
-  removeOrgMember: (orgId: string, userId: string) => Promise<void>;
-  /** Change a member's role. */
-  changeOrgMemberRole: (orgId: string, userId: string, role: OrgRole) => Promise<void>;
-  /** Fetch org policies. */
-  fetchOrgPolicies: (orgId: string) => Promise<OrgPolicy[]>;
-  /** Create a policy. */
-  createOrgPolicy: (orgId: string, payload: CreatePolicyPayload) => Promise<void>;
-  /** Update a policy. */
-  updateOrgPolicy: (orgId: string, policyId: string, payload: UpdatePolicyPayload) => Promise<void>;
-  /** Delete a policy. */
-  deleteOrgPolicy: (orgId: string, policyId: string) => Promise<void>;
-  /** Fetch org usage stats. */
-  fetchOrgUsage: (orgId: string) => Promise<MemberUsage[]>;
-}
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
+import { Badge } from "../components/ui/badge";
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function Admin({
+export function Admin() {
+  const api = useApi();
+  const { user } = useAuth();
+  const { orgId } = useParams<{ orgId: string }>();
+  const userTier = useAdminTierGate(api.fetchBillingStatus);
+
+  // Redirect if missing orgId or user
+  if (!orgId || !user) return <Navigate to="/calendar" replace />;
+
+  return <AdminInner orgId={orgId} currentUserId={user.id} userTier={userTier} />;
+}
+
+// ---------------------------------------------------------------------------
+// Inner component (after guards)
+// ---------------------------------------------------------------------------
+
+function AdminInner({
   orgId,
   currentUserId,
   userTier,
-  fetchOrgDetails,
-  fetchOrgMembers,
-  addOrgMember,
-  removeOrgMember,
-  changeOrgMemberRole,
-  fetchOrgPolicies,
-  createOrgPolicy,
-  updateOrgPolicy,
-  deleteOrgPolicy,
-  fetchOrgUsage,
-}: AdminProps) {
+}: {
+  orgId: string;
+  currentUserId: string;
+  userTier: string;
+}) {
+  const api = useApi();
+
   // -- State --
   const [orgDetails, setOrgDetails] = useState<OrgDetails | null>(null);
   const [members, setMembers] = useState<OrgMember[]>([]);
@@ -114,7 +101,7 @@ export function Admin({
   const loadOrgDetails = useCallback(async () => {
     try {
       setLoadingOrg(true);
-      const details = await fetchOrgDetails(orgId);
+      const details = await api.fetchOrgDetails(orgId);
       if (!mountedRef.current) return;
       setOrgDetails(details);
       setOrgError(null);
@@ -124,12 +111,12 @@ export function Admin({
     } finally {
       if (mountedRef.current) setLoadingOrg(false);
     }
-  }, [orgId, fetchOrgDetails]);
+  }, [orgId, api]);
 
   const loadMembers = useCallback(async () => {
     try {
       setLoadingMembers(true);
-      const result = await fetchOrgMembers(orgId);
+      const result = await api.fetchOrgMembers(orgId);
       if (!mountedRef.current) return;
       setMembers(result);
       setMembersError(null);
@@ -139,12 +126,12 @@ export function Admin({
     } finally {
       if (mountedRef.current) setLoadingMembers(false);
     }
-  }, [orgId, fetchOrgMembers]);
+  }, [orgId, api]);
 
   const loadPolicies = useCallback(async () => {
     try {
       setLoadingPolicies(true);
-      const result = await fetchOrgPolicies(orgId);
+      const result = await api.fetchOrgPolicies(orgId);
       if (!mountedRef.current) return;
       setPolicies(result);
       setPoliciesError(null);
@@ -154,12 +141,12 @@ export function Admin({
     } finally {
       if (mountedRef.current) setLoadingPolicies(false);
     }
-  }, [orgId, fetchOrgPolicies]);
+  }, [orgId, api]);
 
   const loadUsage = useCallback(async () => {
     try {
       setLoadingUsage(true);
-      const result = await fetchOrgUsage(orgId);
+      const result = await api.fetchOrgUsage(orgId);
       if (!mountedRef.current) return;
       setUsage(result);
       setUsageError(null);
@@ -169,7 +156,7 @@ export function Admin({
     } finally {
       if (mountedRef.current) setLoadingUsage(false);
     }
-  }, [orgId, fetchOrgUsage]);
+  }, [orgId, api]);
 
   // -- Initial load --
   useEffect(() => {
@@ -183,73 +170,75 @@ export function Admin({
     };
   }, [loadOrgDetails, loadMembers, loadPolicies, loadUsage]);
 
-  // -- Action handlers (delegate to props, then reload) --
+  // -- Action handlers (delegate to api, then reload) --
 
   const handleAddMember = useCallback(
     async (userId: string, role: OrgRole) => {
-      await addOrgMember(orgId, userId, role);
+      await api.addOrgMember(orgId, userId, role);
       await loadMembers();
       await loadUsage();
     },
-    [orgId, addOrgMember, loadMembers, loadUsage],
+    [orgId, api, loadMembers, loadUsage],
   );
 
   const handleRemoveMember = useCallback(
     async (userId: string) => {
-      await removeOrgMember(orgId, userId);
+      await api.removeOrgMember(orgId, userId);
       await loadMembers();
       await loadUsage();
     },
-    [orgId, removeOrgMember, loadMembers, loadUsage],
+    [orgId, api, loadMembers, loadUsage],
   );
 
   const handleChangeRole = useCallback(
     async (userId: string, role: OrgRole) => {
-      await changeOrgMemberRole(orgId, userId, role);
+      await api.changeOrgMemberRole(orgId, userId, role);
       await loadMembers();
     },
-    [orgId, changeOrgMemberRole, loadMembers],
+    [orgId, api, loadMembers],
   );
 
   const handleCreatePolicy = useCallback(
     async (payload: CreatePolicyPayload) => {
-      await createOrgPolicy(orgId, payload);
+      await api.createOrgPolicy(orgId, payload);
       await loadPolicies();
     },
-    [orgId, createOrgPolicy, loadPolicies],
+    [orgId, api, loadPolicies],
   );
 
   const handleUpdatePolicy = useCallback(
     async (policyId: string, payload: UpdatePolicyPayload) => {
-      await updateOrgPolicy(orgId, policyId, payload);
+      await api.updateOrgPolicy(orgId, policyId, payload);
       await loadPolicies();
     },
-    [orgId, updateOrgPolicy, loadPolicies],
+    [orgId, api, loadPolicies],
   );
 
   const handleDeletePolicy = useCallback(
     async (policyId: string) => {
-      await deleteOrgPolicy(orgId, policyId);
+      await api.deleteOrgPolicy(orgId, policyId);
       await loadPolicies();
     },
-    [orgId, deleteOrgPolicy, loadPolicies],
+    [orgId, api, loadPolicies],
   );
 
   // -- Non-enterprise gate --
   if (!isEnterprise) {
     return (
-      <div data-testid="admin-upgrade-prompt" style={styles.container}>
-        <h1 style={styles.title}>Admin Console</h1>
-        <div style={styles.upgradeCard}>
-          <h2 style={styles.upgradeTitle}>Enterprise Tier Required</h2>
-          <p style={styles.upgradeText}>
-            The admin console is available on the Enterprise plan. Upgrade your
-            subscription to manage organizations, members, and policies.
-          </p>
-          <a href="#/billing" style={styles.upgradeLink}>
-            Upgrade Plan
-          </a>
-        </div>
+      <div data-testid="admin-upgrade-prompt" className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
+        <Card className="mt-8 text-center">
+          <CardContent className="pt-6">
+            <h2 className="text-xl font-bold text-slate-100 mt-0 mb-4">Enterprise Tier Required</h2>
+            <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+              The admin console is available on the Enterprise plan. Upgrade your
+              subscription to manage organizations, members, and policies.
+            </p>
+            <Button asChild>
+              <a href="#/billing">Upgrade Plan</a>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -257,9 +246,9 @@ export function Admin({
   // -- Org loading --
   if (loadingOrg) {
     return (
-      <div data-testid="admin-loading" style={styles.container}>
-        <h1 style={styles.title}>Admin Console</h1>
-        <div style={styles.loading}>Loading organization...</div>
+      <div data-testid="admin-loading" className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
+        <div className="text-slate-400 p-8 text-center">Loading organization...</div>
       </div>
     );
   }
@@ -267,13 +256,13 @@ export function Admin({
   // -- Org error --
   if (orgError) {
     return (
-      <div data-testid="admin-error" style={styles.container}>
-        <h1 style={styles.title}>Admin Console</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="admin-error" className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
+        <div className="text-red-300 p-8 text-center">
           <p>Failed to load organization: {orgError}</p>
-          <button onClick={loadOrgDetails} style={styles.retryBtn}>
+          <Button variant="outline" onClick={loadOrgDetails} className="mt-2 border-red-500 text-red-500 hover:bg-red-500/10">
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -282,13 +271,13 @@ export function Admin({
   // -- Members failed to load (cannot verify membership) --
   if (!loadingMembers && membersError) {
     return (
-      <div data-testid="admin-members-error" style={styles.container}>
-        <h1 style={styles.title}>Admin Console</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="admin-members-error" className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
+        <div className="text-red-300 p-8 text-center">
           <p>Failed to load members: {membersError}</p>
-          <button onClick={loadMembers} style={styles.retryBtn}>
+          <Button variant="outline" onClick={loadMembers} className="mt-2 border-red-500 text-red-500 hover:bg-red-500/10">
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -297,9 +286,9 @@ export function Admin({
   // -- Access denied (not a member) --
   if (!loadingMembers && !isMember) {
     return (
-      <div data-testid="admin-access-denied" style={styles.container}>
-        <h1 style={styles.title}>Admin Console</h1>
-        <div style={styles.errorBox}>
+      <div data-testid="admin-access-denied" className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
+        <div className="text-red-300 p-8 text-center">
           You are not a member of this organization.
         </div>
       </div>
@@ -308,23 +297,23 @@ export function Admin({
 
   // -- Main render --
   return (
-    <div data-testid="admin-console" style={styles.container}>
-      <div style={styles.headerRow}>
+    <div data-testid="admin-console" className="mx-auto max-w-5xl">
+      <div className="flex justify-between items-start mb-6 flex-wrap gap-2">
         <div>
-          <h1 style={styles.title}>Admin Console</h1>
+          <h1 className="text-2xl font-bold text-slate-100 m-0">Admin Console</h1>
           {orgDetails && (
-            <span data-testid="org-name" style={styles.orgName}>
+            <span data-testid="org-name" className="text-sm text-slate-400 mt-1 block">
               {orgDetails.name}
             </span>
           )}
         </div>
-        <div style={styles.headerLinks}>
+        <div className="flex items-center gap-3">
           {isAdmin && (
-            <span data-testid="admin-badge" style={styles.adminBadge}>
+            <Badge data-testid="admin-badge" variant="secondary" className="bg-blue-900/50 text-blue-400 text-xs font-bold tracking-wide">
               ADMIN
-            </span>
+            </Badge>
           )}
-          <a href="#/calendar" style={styles.backLink}>
+          <a href="#/calendar" className="text-slate-400 text-sm no-underline hover:text-slate-300">
             Back to Calendar
           </a>
         </div>
@@ -361,104 +350,3 @@ export function Admin({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-  },
-  headerRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: "1.5rem",
-    flexWrap: "wrap" as const,
-    gap: "0.5rem",
-  },
-  title: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    margin: 0,
-  },
-  orgName: {
-    fontSize: "0.9rem",
-    color: "#94a3b8",
-    marginTop: "0.25rem",
-    display: "block",
-  },
-  headerLinks: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-  },
-  adminBadge: {
-    padding: "0.2rem 0.6rem",
-    borderRadius: "4px",
-    fontSize: "0.7rem",
-    fontWeight: 700,
-    backgroundColor: "#1e3a5f",
-    color: "#60a5fa",
-    letterSpacing: "0.05em",
-  },
-  backLink: {
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    textDecoration: "none",
-  },
-  loading: {
-    color: "#94a3b8",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  errorBox: {
-    color: "#fca5a5",
-    padding: "2rem",
-    textAlign: "center" as const,
-  },
-  retryBtn: {
-    marginTop: "0.5rem",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #ef4444",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-  },
-  upgradeCard: {
-    backgroundColor: "#1e293b",
-    borderRadius: "12px",
-    padding: "2rem",
-    border: "1px solid #334155",
-    textAlign: "center" as const,
-    marginTop: "2rem",
-  },
-  upgradeTitle: {
-    fontSize: "1.25rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    marginTop: 0,
-    marginBottom: "1rem",
-  },
-  upgradeText: {
-    color: "#94a3b8",
-    fontSize: "0.9rem",
-    marginBottom: "1.5rem",
-    lineHeight: 1.6,
-  },
-  upgradeLink: {
-    display: "inline-block",
-    padding: "0.6rem 1.5rem",
-    borderRadius: "6px",
-    backgroundColor: "#3b82f6",
-    color: "#ffffff",
-    fontSize: "0.9rem",
-    fontWeight: 600,
-    textDecoration: "none",
-  },
-};

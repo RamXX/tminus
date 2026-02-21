@@ -27,11 +27,15 @@
  * - Recoverable: every error has a "Try again" or "Get help" action
  * - Provider-specific branding: deterministic colors per retro learning
  *
- * The component accepts injected fetch/navigate functions for testability.
- * In production, these are wired in App.tsx with auth tokens.
+ * Uses useApi() and useAuth() for token-injected API calls and user context.
+ * Uses useOnboardingCallbackId() for OAuth callback account ID extraction.
+ * Renders outside AppShell (full-page layout) with its own styling.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useApi } from "../lib/api-provider";
+import { useAuth } from "../lib/auth";
+import { useOnboardingCallbackId } from "../lib/route-helpers";
 import {
   buildOnboardingOAuthUrl,
   isSyncComplete,
@@ -57,6 +61,8 @@ import {
   type ErrorTelemetryEvent,
 } from "../lib/onboarding-errors";
 import type { AccountProvider } from "../lib/api";
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,90 +76,17 @@ export interface OnboardingEvent {
   end: string;
 }
 
+/** Props kept minimal -- only for testing overrides, not API injection. */
 export interface OnboardingProps {
-  /** Current authenticated user. */
-  user: { id: string; email: string };
-  /**
-   * Navigate to an OAuth URL. Defaults to window.location.assign.
-   * Injected for testability (prevents actual navigation in tests).
-   */
+  /** Override the navigate function (for testing, prevents actual navigation). */
   navigateToOAuth?: (url: string) => void;
-  /**
-   * Fetch account status for sync polling.
-   * Called with account_id, returns the account's sync status.
-   */
-  fetchAccountStatus: (accountId: string) => Promise<OnboardingSyncStatus>;
-  /**
-   * Fetch calendar events after sync completes.
-   * Returns the user's events for display.
-   */
-  fetchEvents: () => Promise<OnboardingEvent[]>;
-  /**
-   * Submit Apple app-specific credentials.
-   * Returns the created account_id for sync polling.
-   */
-  submitAppleCredentials?: (
-    userId: string,
-    email: string,
-    password: string,
-  ) => Promise<{ account_id: string }>;
-  /**
-   * Account ID from OAuth callback (null if not returning from OAuth).
-   * When provided, the component enters syncing state and polls for status.
-   */
-  callbackAccountId: string | null;
-  /**
-   * Base URL for the OAuth worker. Defaults to production.
-   * Overridable for local development and testing.
-   */
+  /** Override the OAuth base URL (for local dev/testing). */
   oauthBaseUrl?: string;
-  /**
-   * Fetch the current onboarding session from the server.
-   * Used for resume flow (AC 1, AC 2) and cross-tab polling (AC 5).
-   * When provided, enables server-side session management.
-   */
-  fetchOnboardingSession?: () => Promise<OnboardingSession | null>;
-  /**
-   * Create a new onboarding session on the server.
-   * Returns the created session.
-   */
-  createOnboardingSession?: () => Promise<OnboardingSession>;
-  /**
-   * Notify the server that an account was added to the session.
-   * BR-4: Idempotent -- re-connecting same account updates, not duplicates.
-   */
-  addAccountToServerSession?: (
-    accountId: string,
-    provider: string,
-    email: string,
-    calendarCount?: number,
-  ) => Promise<void>;
-  /**
-   * Notify the server that onboarding is complete.
-   * AC 6: Session marked complete on explicit user action.
-   */
-  completeServerSession?: () => Promise<void>;
-  /**
-   * Current onboarding session ID for OAuth state correlation.
-   * AC 3: OAuth state parameter includes session ID.
-   */
-  sessionId?: string;
-  /**
-   * Error code from OAuth callback (e.g., "access_denied", "state_mismatch").
-   * When provided, the component enters error state with a classified message.
-   * TM-2o2.6: Error recovery and resilience.
-   */
+  /** Callback error from OAuth redirect (e.g., "access_denied"). */
   callbackError?: string;
-  /**
-   * Provider that produced the callback error.
-   * Used to generate provider-specific error messages.
-   */
+  /** Provider that produced the callback error. */
   callbackProvider?: AccountProvider;
-  /**
-   * Callback for error telemetry events.
-   * Called with anonymized error events (no PII) for server-side logging.
-   * BR-4: Error telemetry is anonymized.
-   */
+  /** Callback for error telemetry events. */
   onErrorTelemetry?: (event: ErrorTelemetryEvent) => void;
 }
 
@@ -168,209 +101,61 @@ type ViewState =
   | "finished";    // All done, showing completion screen
 
 // ---------------------------------------------------------------------------
-// Styles (responsive, mobile-first)
-// ---------------------------------------------------------------------------
-
-const styles = {
-  container: {
-    maxWidth: 600,
-    width: "100%",
-    margin: "0 auto",
-    padding: "1.5rem 1rem",
-    fontFamily: "system-ui, -apple-system, sans-serif",
-    boxSizing: "border-box" as const,
-  },
-  branding: {
-    textAlign: "center" as const,
-    marginBottom: "2rem",
-  },
-  brandName: {
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    letterSpacing: "-0.02em",
-    color: "#1a1a2e",
-  },
-  heading: {
-    fontSize: "1.75rem",
-    fontWeight: 600,
-    color: "#1a1a2e",
-    margin: "0.5rem 0",
-  },
-  subtitle: {
-    color: "#64748b",
-    fontSize: "0.95rem",
-    margin: 0,
-  },
-  cardContainer: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "1rem",
-  },
-  providerCard: (color: string) => ({
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    padding: "1rem 1.5rem",
-    border: "1px solid #e2e8f0",
-    borderRadius: "0.75rem",
-    backgroundColor: "#fff",
-    cursor: "pointer",
-    fontSize: "1rem",
-    transition: "border-color 0.15s, box-shadow 0.15s",
-    borderLeft: `4px solid ${color}`,
-    width: "100%",
-    textAlign: "left" as const,
-  }),
-  providerIcon: (color: string) => ({
-    fontSize: "1.5rem",
-    fontWeight: 700,
-    color,
-    width: 40,
-    height: 40,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: "0.5rem",
-    backgroundColor: `${color}15`,
-    flexShrink: 0,
-  }),
-  connectButton: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0.75rem 2rem",
-    border: "none",
-    borderRadius: "0.5rem",
-    backgroundColor: "#2563eb",
-    color: "#fff",
-    fontSize: "1rem",
-    fontWeight: 600,
-    cursor: "pointer",
-    marginTop: "1rem",
-  },
-  secondaryButton: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0.75rem 2rem",
-    border: "1px solid #e2e8f0",
-    borderRadius: "0.5rem",
-    backgroundColor: "#fff",
-    color: "#1a1a2e",
-    fontSize: "1rem",
-    fontWeight: 500,
-    cursor: "pointer",
-  },
-  connectedCard: (color: string) => ({
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-    padding: "1rem 1.5rem",
-    border: "1px solid #e2e8f0",
-    borderRadius: "0.75rem",
-    backgroundColor: "#fff",
-    borderLeft: `4px solid ${color}`,
-    marginBottom: "0.75rem",
-  }),
-  successBanner: {
-    textAlign: "center" as const,
-    padding: "1.5rem",
-    backgroundColor: "#f0fdf4",
-    borderRadius: "0.75rem",
-    marginBottom: "1.5rem",
-  },
-  errorBanner: {
-    textAlign: "center" as const,
-    padding: "2rem",
-    backgroundColor: "#fef2f2",
-    borderRadius: "0.75rem",
-  },
-  progressText: {
-    textAlign: "center" as const,
-    color: "#64748b",
-    fontSize: "0.9rem",
-    marginBottom: "1rem",
-  },
-  modal: {
-    overlay: {
-      position: "fixed" as const,
-      inset: 0,
-      backgroundColor: "rgba(0,0,0,0.4)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      zIndex: 100,
-      padding: "1rem",
-    },
-    content: {
-      backgroundColor: "#fff",
-      borderRadius: "1rem",
-      padding: "2rem",
-      maxWidth: 480,
-      width: "100%",
-      maxHeight: "90vh",
-      overflow: "auto" as const,
-    },
-  },
-  input: {
-    width: "100%",
-    padding: "0.75rem",
-    border: "1px solid #e2e8f0",
-    borderRadius: "0.5rem",
-    fontSize: "1rem",
-    boxSizing: "border-box" as const,
-    marginTop: "0.25rem",
-  },
-  label: {
-    display: "block",
-    fontSize: "0.9rem",
-    fontWeight: 500,
-    color: "#374151",
-    marginBottom: "0.5rem",
-  },
-  validationError: {
-    color: "#dc2626",
-    fontSize: "0.85rem",
-    marginTop: "0.25rem",
-  },
-  completionScreen: {
-    textAlign: "center" as const,
-    padding: "2rem 0",
-  },
-  spinner: {
-    width: 40,
-    height: 40,
-    border: "3px solid #e2e8f0",
-    borderTopColor: "#2563eb",
-    borderRadius: "50%",
-    margin: "0 auto",
-    animation: "spin 1s linear infinite",
-  },
-};
-
-// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function Onboarding({
-  user,
   navigateToOAuth = (url) => {
     window.location.assign(url);
   },
-  fetchAccountStatus,
-  fetchEvents,
-  submitAppleCredentials,
-  callbackAccountId,
   oauthBaseUrl = "https://oauth.tminus.ink",
-  fetchOnboardingSession,
-  createOnboardingSession: createSession,
-  addAccountToServerSession,
-  completeServerSession,
-  sessionId: initialSessionId,
   callbackError,
   callbackProvider,
   onErrorTelemetry,
-}: OnboardingProps) {
+}: OnboardingProps = {}) {
+  const api = useApi();
+  const { user } = useAuth();
+  const callbackAccountId = useOnboardingCallbackId();
+
+  // Guard: user must be authenticated (RequireAuth should handle this, but be safe)
+  if (!user) return null;
+
+  return (
+    <OnboardingInner
+      user={user}
+      navigateToOAuth={navigateToOAuth}
+      oauthBaseUrl={oauthBaseUrl}
+      callbackAccountId={callbackAccountId}
+      callbackError={callbackError}
+      callbackProvider={callbackProvider}
+      onErrorTelemetry={onErrorTelemetry}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inner component (after guards, receives user directly)
+// ---------------------------------------------------------------------------
+
+function OnboardingInner({
+  user,
+  navigateToOAuth,
+  oauthBaseUrl,
+  callbackAccountId,
+  callbackError,
+  callbackProvider,
+  onErrorTelemetry,
+}: {
+  user: { id: string; email: string };
+  navigateToOAuth: (url: string) => void;
+  oauthBaseUrl: string;
+  callbackAccountId: string | null;
+  callbackError?: string;
+  callbackProvider?: AccountProvider;
+  onErrorTelemetry?: (event: ErrorTelemetryEvent) => void;
+}) {
+  const api = useApi();
+
   // View state management
   // If returning from OAuth with an error, go straight to error state
   const [viewState, setViewState] = useState<ViewState>(
@@ -405,7 +190,7 @@ export function Onboarding({
   const [appleSubmitting, setAppleSubmitting] = useState(false);
 
   // Session management state
-  const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const sessionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // -------------------------------------------------------------------------
@@ -426,12 +211,10 @@ export function Onboarding({
   // -------------------------------------------------------------------------
 
   useEffect(() => {
-    if (!fetchOnboardingSession) return;
-
     let cancelled = false;
     (async () => {
       try {
-        const session = await fetchOnboardingSession();
+        const session = await api.getOnboardingSession();
         if (cancelled) return;
 
         if (session) {
@@ -455,10 +238,10 @@ export function Onboarding({
             // Session already complete, redirect to calendar
             setViewState("finished");
           }
-        } else if (createSession && !callbackAccountId) {
+        } else if (!callbackAccountId) {
           // No existing session -- create one
           try {
-            const newSession = await createSession();
+            const newSession = await api.createOnboardingSession();
             if (!cancelled) {
               setSessionId(newSession.session_id);
             }
@@ -483,13 +266,12 @@ export function Onboarding({
   // -------------------------------------------------------------------------
 
   useEffect(() => {
-    if (!fetchOnboardingSession) return;
     // Only poll when in idle/connecting states where another tab might add accounts
     if (viewState !== "idle" && viewState !== "connecting") return;
 
     sessionPollRef.current = setInterval(async () => {
       try {
-        const session = await fetchOnboardingSession();
+        const session = await api.getOnboardingSession();
         if (!session) return;
 
         // Update connected accounts from server state
@@ -519,7 +301,7 @@ export function Onboarding({
         sessionPollRef.current = null;
       }
     };
-  }, [fetchOnboardingSession, viewState, connectedAccounts.length]);
+  }, [api, viewState, connectedAccounts.length]);
 
   // -------------------------------------------------------------------------
   // OAuth initiation (Google/Microsoft)
@@ -552,16 +334,12 @@ export function Onboarding({
       );
       return;
     }
-    if (!submitAppleCredentials) {
-      setAppleError("Apple Calendar connection is not configured");
-      return;
-    }
 
     setAppleError(null);
     setAppleSubmitting(true);
 
     try {
-      const result = await submitAppleCredentials(
+      const result = await api.submitAppleCredentials(
         user.id,
         appleEmail,
         applePassword,
@@ -584,7 +362,7 @@ export function Onboarding({
     } finally {
       setAppleSubmitting(false);
     }
-  }, [appleEmail, applePassword, submitAppleCredentials, user.id, onErrorTelemetry]);
+  }, [appleEmail, applePassword, api, user.id, onErrorTelemetry]);
 
   // -------------------------------------------------------------------------
   // Sync status polling
@@ -593,7 +371,7 @@ export function Onboarding({
   const pollStatus = useCallback(
     async (accountId: string) => {
       try {
-        const status = await fetchAccountStatus(accountId);
+        const status = await api.fetchAccountStatus(accountId);
         // Success: reset consecutive failure counter
         consecutiveFailuresRef.current = 0;
         setSyncStatus(status);
@@ -620,16 +398,14 @@ export function Onboarding({
           });
 
           // Notify server session of the connected account (best-effort)
-          if (addAccountToServerSession) {
-            addAccountToServerSession(
-              status.account_id,
-              status.provider,
-              status.email,
-              status.calendar_count,
-            ).catch(() => {
-              // Non-fatal: server session update failure doesn't block UI
-            });
-          }
+          api.addOnboardingAccount({
+            account_id: status.account_id,
+            provider: status.provider,
+            email: status.email,
+            calendar_count: status.calendar_count,
+          }).catch(() => {
+            // Non-fatal: server session update failure doesn't block UI
+          });
 
           setViewState("complete");
 
@@ -641,8 +417,8 @@ export function Onboarding({
 
           // Fetch events to display
           try {
-            const evts = await fetchEvents();
-            setEvents(evts);
+            const evts = await api.fetchEventsForOnboarding();
+            setEvents(evts as unknown as OnboardingEvent[]);
           } catch {
             // Non-fatal: events display is nice-to-have
           }
@@ -700,7 +476,7 @@ export function Onboarding({
         }
       }
     },
-    [fetchAccountStatus, fetchEvents, onErrorTelemetry],
+    [api, onErrorTelemetry],
   );
 
   // Start polling when we have an account to sync
@@ -745,12 +521,10 @@ export function Onboarding({
   const handleDone = useCallback(() => {
     setViewState("finished");
     // AC 6: Mark session complete on explicit user action
-    if (completeServerSession) {
-      completeServerSession().catch(() => {
-        // Non-fatal: server completion failure doesn't block UI transition
-      });
-    }
-  }, [completeServerSession]);
+    api.completeOnboardingSession().catch(() => {
+      // Non-fatal: server completion failure doesn't block UI transition
+    });
+  }, [api]);
 
   const handleRetry = useCallback(() => {
     setError(null);
@@ -782,49 +556,53 @@ export function Onboarding({
 
   return (
     <div
-      style={styles.container}
+      className="max-w-[600px] w-full mx-auto px-4 py-6 font-sans box-border"
       data-testid="onboarding-container"
     >
       {/* Branding */}
-      <div style={styles.branding}>
-        <div style={styles.brandName}>T-Minus</div>
-        <h1 style={styles.heading}>Connect Your Calendar</h1>
-        <p style={styles.subtitle}>
+      <div className="text-center mb-8">
+        <div className="text-2xl font-bold tracking-tight text-[#1a1a2e]">T-Minus</div>
+        <h1 className="text-3xl font-semibold text-[#1a1a2e] my-2">Connect Your Calendar</h1>
+        <p className="text-slate-500 text-base m-0">
           Link your calendar accounts to get started with intelligent scheduling
         </p>
       </div>
 
       {/* Connected accounts summary (shown in multi-account flow) */}
       {connectedAccounts.length > 0 && viewState !== "finished" && (
-        <div style={{ marginBottom: "1.5rem" }}>
+        <div className="mb-6">
           {connectedAccounts.map((account) => (
             <div
               key={account.account_id}
-              style={styles.connectedCard(PROVIDER_COLORS[account.provider])}
+              className="flex items-center gap-3 p-4 border border-slate-200 rounded-xl bg-white mb-3"
+              style={{ borderLeft: `4px solid ${PROVIDER_COLORS[account.provider]}` }}
               data-testid={`connected-account-${account.account_id}`}
             >
               <div
-                style={styles.providerIcon(PROVIDER_COLORS[account.provider])}
+                className="text-2xl font-bold w-10 h-10 flex items-center justify-center rounded-lg shrink-0"
+                style={{
+                  color: PROVIDER_COLORS[account.provider],
+                  backgroundColor: `${PROVIDER_COLORS[account.provider]}15`,
+                }}
               >
                 {PROVIDER_ICONS[account.provider]}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600 }}>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold">
                   {"\u2713"} {account.email}
                 </div>
-                <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+                <div className="text-sm text-slate-500">
                   {account.calendar_count}{" "}
                   {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
                   {"\u00B7"}{" "}
                   <span
-                    style={{
-                      color:
-                        account.sync_state === "synced"
-                          ? "#16a34a"
-                          : account.sync_state === "error"
-                            ? "#dc2626"
-                            : "#ca8a04",
-                    }}
+                    className={
+                      account.sync_state === "synced"
+                        ? "text-green-600"
+                        : account.sync_state === "error"
+                          ? "text-red-600"
+                          : "text-yellow-600"
+                    }
                   >
                     {account.sync_state === "synced"
                       ? "Synced"
@@ -837,7 +615,7 @@ export function Onboarding({
             </div>
           ))}
           {viewState === "idle" && (
-            <div style={styles.progressText}>
+            <div className="text-center text-slate-500 text-sm mb-4">
               {connectedAccounts.length}{" "}
               {connectedAccounts.length === 1 ? "account" : "accounts"}{" "}
               connected
@@ -867,26 +645,31 @@ export function Onboarding({
   function renderProviderCards() {
     return (
       <div
-        style={styles.cardContainer}
+        className="flex flex-col gap-4"
         data-testid="provider-cards"
       >
         {PROVIDERS.map((provider) => (
           <button
             key={provider.id}
             onClick={() => handleProviderClick(provider.id)}
-            style={styles.providerCard(PROVIDER_COLORS[provider.id])}
+            className="flex items-center gap-3 px-6 py-4 border border-slate-200 rounded-xl bg-white cursor-pointer text-base w-full text-left transition-colors hover:border-slate-300"
+            style={{ borderLeft: `4px solid ${PROVIDER_COLORS[provider.id]}` }}
             aria-label={`Connect ${provider.label}`}
             data-testid={`provider-card-${provider.id}`}
           >
             <div
-              style={styles.providerIcon(PROVIDER_COLORS[provider.id])}
+              className="text-2xl font-bold w-10 h-10 flex items-center justify-center rounded-lg shrink-0"
+              style={{
+                color: PROVIDER_COLORS[provider.id],
+                backgroundColor: `${PROVIDER_COLORS[provider.id]}15`,
+              }}
               data-testid={`provider-icon-${provider.id}`}
             >
               {PROVIDER_ICONS[provider.id]}
             </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600 }}>Connect {provider.label}</div>
-              <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold">Connect {provider.label}</div>
+              <div className="text-sm text-slate-500">
                 {provider.description}
               </div>
             </div>
@@ -898,36 +681,36 @@ export function Onboarding({
 
   function renderConnecting() {
     return (
-      <div style={{ textAlign: "center", padding: "2rem" }}>
-        <div style={{ fontSize: "1.25rem", marginBottom: "1rem" }}>
+      <div className="text-center p-8">
+        <div className="text-xl mb-4">
           Redirecting to your calendar provider...
         </div>
-        <div style={{ color: "#64748b" }}>
+        <div className="text-slate-500">
           You will be asked to grant calendar access
         </div>
-        <div style={{ ...styles.spinner, marginTop: "1.5rem" }} />
+        <div
+          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto mt-6"
+          style={{ animation: "spin 1s linear infinite" }}
+        />
       </div>
     );
   }
 
   function renderSyncing() {
     return (
-      <div style={{ textAlign: "center", padding: "2rem" }}>
-        <div
-          style={{
-            fontSize: "1.25rem",
-            marginBottom: "1rem",
-            color: "#2563eb",
-          }}
-        >
+      <div className="text-center p-8">
+        <div className="text-xl mb-4 text-blue-600">
           Syncing your calendar...
         </div>
         {syncStatus && (
-          <div style={{ color: "#64748b", marginBottom: "1rem" }}>
+          <div className="text-slate-500 mb-4">
             Connected as {syncStatus.email}
           </div>
         )}
-        <div style={styles.spinner} />
+        <div
+          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto"
+          style={{ animation: "spin 1s linear infinite" }}
+        />
       </div>
     );
   }
@@ -936,28 +719,22 @@ export function Onboarding({
     return (
       <div>
         {/* Success banner */}
-        <div style={styles.successBanner}>
-          <div
-            style={{
-              fontSize: "1.5rem",
-              color: "#16a34a",
-              marginBottom: "0.5rem",
-            }}
-          >
+        <div className="text-center p-6 bg-green-50 rounded-xl mb-6">
+          <div className="text-2xl text-green-600 mb-2">
             {"\u2713"} Connected
           </div>
           {syncStatus && (
             <>
-              <div style={{ color: "#374151", fontWeight: 500 }}>
+              <div className="text-gray-700 font-medium">
                 {syncStatus.email}
               </div>
-              <div style={{ color: "#64748b", fontSize: "0.9rem", marginTop: "0.25rem" }}>
+              <div className="text-slate-500 text-sm mt-1">
                 {syncStatus.calendar_count ?? 0}{" "}
                 {(syncStatus.calendar_count ?? 0) === 1
                   ? "calendar"
                   : "calendars"}{" "}
                 found {"\u00B7"}{" "}
-                <span style={{ color: "#16a34a" }}>Synced</span>
+                <span className="text-green-600">Synced</span>
               </div>
             </>
           )}
@@ -965,37 +742,20 @@ export function Onboarding({
 
         {/* Events list */}
         {events.length > 0 && (
-          <div style={{ marginBottom: "1.5rem" }}>
-            <h2
-              style={{
-                fontSize: "1.1rem",
-                fontWeight: 600,
-                marginBottom: "0.75rem",
-              }}
-            >
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold mb-3">
               Your upcoming events
             </h2>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.5rem",
-              }}
-            >
+            <div className="flex flex-col gap-2">
               {events.map((evt) => (
                 <div
                   key={evt.canonical_event_id}
-                  style={{
-                    padding: "0.75rem 1rem",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "0.375rem",
-                    backgroundColor: "#fff",
-                  }}
+                  className="px-4 py-3 border border-slate-200 rounded-md bg-white"
                 >
-                  <div style={{ fontWeight: 500 }}>
+                  <div className="font-medium">
                     {evt.summary ?? "(No title)"}
                   </div>
-                  <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+                  <div className="text-sm text-slate-500">
                     {formatEventTime(evt.start)} -- {formatEventTime(evt.end)}
                   </div>
                 </div>
@@ -1005,33 +765,25 @@ export function Onboarding({
         )}
 
         {/* Progress + actions */}
-        <div style={styles.progressText}>
+        <div className="text-center text-slate-500 text-sm mb-4">
           {connectedAccounts.length}{" "}
           {connectedAccounts.length === 1 ? "account" : "accounts"} connected
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: "0.75rem",
-            alignItems: "center",
-          }}
-        >
-          <button
+        <div className="flex flex-col gap-3 items-center">
+          <Button
             onClick={handleAddAnother}
-            style={styles.connectButton}
             aria-label="Add another account"
           >
             Add Another Account
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="outline"
             onClick={handleDone}
-            style={styles.secondaryButton}
             aria-label="Finish onboarding"
           >
             I{"'"}m Done
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -1047,26 +799,20 @@ export function Onboarding({
       : "Try Again";
 
     return (
-      <div style={styles.errorBanner}>
-        <div
-          style={{
-            fontSize: "1.25rem",
-            color: "#dc2626",
-            marginBottom: "0.5rem",
-          }}
-        >
+      <div className="text-center p-8 bg-red-50 rounded-xl">
+        <div className="text-xl text-red-600 mb-2">
           {classifiedError ? displayMessage : "Something went wrong"}
         </div>
         {!classifiedError && error && (
-          <div style={{ color: "#64748b", marginBottom: "1rem" }}>{error}</div>
+          <div className="text-slate-500 mb-4">{error}</div>
         )}
-        <button
+        <Button
+          variant="outline"
           onClick={handleRetry}
-          style={styles.secondaryButton}
           aria-label={recoveryLabel}
         >
           {recoveryLabel}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -1074,7 +820,7 @@ export function Onboarding({
   function renderAppleModal() {
     return (
       <div
-        style={styles.modal.overlay}
+        className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100] p-4"
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             setViewState("idle");
@@ -1084,54 +830,33 @@ export function Onboarding({
         <div
           role="dialog"
           aria-label="Connect Apple Calendar"
-          style={styles.modal.content}
+          className="bg-white rounded-2xl p-8 max-w-[480px] w-full max-h-[90vh] overflow-auto"
         >
-          <h2
-            style={{
-              fontSize: "1.25rem",
-              fontWeight: 600,
-              marginBottom: "1rem",
-              margin: 0,
-            }}
-          >
+          <h2 className="text-xl font-semibold mb-4 mt-0">
             Connect Apple Calendar
           </h2>
 
-          <p style={{ color: "#64748b", marginBottom: "1.5rem" }}>
+          <p className="text-slate-500 mb-6">
             Apple Calendar uses an app-specific password instead of a
             sign-in button. Follow these steps:
           </p>
 
           {/* Instructions */}
-          <div
-            style={{
-              backgroundColor: "#f8fafc",
-              borderRadius: "0.5rem",
-              padding: "1rem",
-              marginBottom: "1.5rem",
-              fontSize: "0.9rem",
-            }}
-          >
-            <ol
-              style={{
-                margin: 0,
-                paddingLeft: "1.25rem",
-                color: "#374151",
-              }}
-            >
-              <li style={{ marginBottom: "0.5rem" }}>
+          <div className="bg-slate-50 rounded-lg p-4 mb-6 text-sm">
+            <ol className="m-0 pl-5 text-gray-700">
+              <li className="mb-2">
                 Go to your{" "}
                 <a
                   href={APPLE_ID_SETTINGS_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Apple ID settings"
-                  style={{ color: "#2563eb" }}
+                  className="text-blue-600 hover:underline"
                 >
                   Apple ID settings
                 </a>
               </li>
-              <li style={{ marginBottom: "0.5rem" }}>
+              <li className="mb-2">
                 Navigate to Sign-In and Security, then App-Specific Passwords
               </li>
               <li>
@@ -1141,10 +866,10 @@ export function Onboarding({
           </div>
 
           {/* Form */}
-          <div style={{ marginBottom: "1rem" }}>
+          <div className="mb-4">
             <label
               htmlFor="apple-email"
-              style={styles.label}
+              className="block text-sm font-medium text-gray-700 mb-2"
             >
               Apple ID Email
             </label>
@@ -1154,15 +879,15 @@ export function Onboarding({
               value={appleEmail}
               onChange={(e) => setAppleEmail(e.target.value)}
               placeholder="your@icloud.com"
-              style={styles.input}
+              className="w-full px-3 py-3 border border-slate-200 rounded-lg text-base box-border mt-1"
               autoComplete="email"
             />
           </div>
 
-          <div style={{ marginBottom: "1rem" }}>
+          <div className="mb-4">
             <label
               htmlFor="apple-password"
-              style={styles.label}
+              className="block text-sm font-medium text-gray-700 mb-2"
             >
               App-Specific Password
             </label>
@@ -1172,46 +897,35 @@ export function Onboarding({
               value={applePassword}
               onChange={(e) => setApplePassword(e.target.value)}
               placeholder="xxxx-xxxx-xxxx-xxxx"
-              style={styles.input}
+              className="w-full px-3 py-3 border border-slate-200 rounded-lg text-base box-border mt-1"
               autoComplete="off"
             />
           </div>
 
           {/* Validation/submission errors */}
           {appleError && (
-            <div style={styles.validationError}>
+            <div className="text-red-600 text-sm mt-1">
               {appleError}
             </div>
           )}
 
           {/* Actions */}
-          <div
-            style={{
-              display: "flex",
-              gap: "0.75rem",
-              justifyContent: "flex-end",
-              marginTop: "1.5rem",
-            }}
-          >
-            <button
+          <div className="flex gap-3 justify-end mt-6">
+            <Button
+              variant="outline"
               onClick={() => setViewState("idle")}
-              style={styles.secondaryButton}
               aria-label="Cancel"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={handleAppleSubmit}
               disabled={appleSubmitting}
-              style={{
-                ...styles.connectButton,
-                marginTop: 0,
-                opacity: appleSubmitting ? 0.6 : 1,
-              }}
+              className={appleSubmitting ? "opacity-60" : ""}
               aria-label="Connect"
             >
               {appleSubmitting ? "Connecting..." : "Connect"}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -1220,45 +934,37 @@ export function Onboarding({
 
   function renderFinished() {
     return (
-      <div style={styles.completionScreen}>
-        <div
-          style={{
-            fontSize: "2rem",
-            marginBottom: "0.5rem",
-            color: "#16a34a",
-          }}
-        >
+      <div className="text-center py-8">
+        <div className="text-4xl mb-2 text-green-600">
           {"\u2713"}
         </div>
-        <h2
-          style={{
-            fontSize: "1.5rem",
-            fontWeight: 600,
-            color: "#1a1a2e",
-            marginBottom: "0.5rem",
-          }}
-        >
+        <h2 className="text-2xl font-semibold text-[#1a1a2e] mb-2">
           You{"'"}re All Set!
         </h2>
-        <p style={{ color: "#64748b", marginBottom: "2rem" }}>
+        <p className="text-slate-500 mb-8">
           Your calendars are connected and syncing. Here{"'"}s a summary:
         </p>
 
         {/* Account summary */}
-        <div style={{ marginBottom: "2rem", textAlign: "left" }}>
+        <div className="mb-8 text-left">
           {connectedAccounts.map((account) => (
             <div
               key={account.account_id}
-              style={styles.connectedCard(PROVIDER_COLORS[account.provider])}
+              className="flex items-center gap-3 p-4 border border-slate-200 rounded-xl bg-white mb-3"
+              style={{ borderLeft: `4px solid ${PROVIDER_COLORS[account.provider]}` }}
             >
               <div
-                style={styles.providerIcon(PROVIDER_COLORS[account.provider])}
+                className="text-2xl font-bold w-10 h-10 flex items-center justify-center rounded-lg shrink-0"
+                style={{
+                  color: PROVIDER_COLORS[account.provider],
+                  backgroundColor: `${PROVIDER_COLORS[account.provider]}15`,
+                }}
               >
                 {PROVIDER_ICONS[account.provider]}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600 }}>{account.email}</div>
-                <div style={{ fontSize: "0.85rem", color: "#64748b" }}>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold">{account.email}</div>
+                <div className="text-sm text-slate-500">
                   {account.calendar_count}{" "}
                   {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
                   {"\u00B7"} Synced
@@ -1269,25 +975,15 @@ export function Onboarding({
         </div>
 
         {/* Link to calendar view */}
-        <a
-          href="#/calendar"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "0.75rem 2rem",
-            border: "none",
-            borderRadius: "0.5rem",
-            backgroundColor: "#2563eb",
-            color: "#fff",
-            fontSize: "1rem",
-            fontWeight: 600,
-            textDecoration: "none",
-          }}
-          aria-label="Go to calendar"
-        >
-          Go to Calendar
-        </a>
+        <Button asChild>
+          <a
+            href="#/calendar"
+            aria-label="Go to calendar"
+            className="no-underline"
+          >
+            Go to Calendar
+          </a>
+        </Button>
       </div>
     );
   }
