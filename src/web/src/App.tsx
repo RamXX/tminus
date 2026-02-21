@@ -44,6 +44,16 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Wraps guest-only routes (e.g. /login). Redirects authenticated users
+ * to /calendar so they cannot revisit the login page while logged in.
+ */
+function GuestOnly({ children }: { children: React.ReactNode }) {
+  const { token } = useAuth();
+  if (token) return <Navigate to="/calendar" replace />;
+  return <>{children}</>;
+}
+
 // ---------------------------------------------------------------------------
 // Page wrappers -- bridge legacy props to ApiProvider
 // ---------------------------------------------------------------------------
@@ -229,7 +239,7 @@ export function App() {
           <HashRouter>
             <div style={{ minHeight: "100vh", padding: "1rem" }}>
               <Routes>
-                <Route path="/login" element={<Login />} />
+                <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
                 <Route path="/onboard" element={<RequireAuth><OnboardingRoute /></RequireAuth>} />
                 <Route path="/calendar" element={<RequireAuth><Calendar /></RequireAuth>} />
                 <Route path="/accounts" element={<RequireAuth><AccountsRoute /></RequireAuth>} />
