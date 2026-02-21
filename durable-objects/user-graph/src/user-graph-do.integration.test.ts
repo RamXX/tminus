@@ -5806,4 +5806,245 @@ describe("UserGraphDO buffer constraints", () => {
       );
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Transactional outbox (TM-66bw)
+  // -------------------------------------------------------------------------
+
+  describe("transactional outbox", () => {
+    it("outbox table is created by migration", () => {
+      // Force migration by calling ensureMigrated (triggered by any public method)
+      ug.listConstraints();
+
+      const tables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='outbox'`,
+        )
+        .all() as Array<{ name: string }>;
+      expect(tables).toHaveLength(1);
+      expect(tables[0].name).toBe("outbox");
+    });
+
+    it("applyProviderDelta drains outbox entries to queue", async () => {
+      // Trigger migration so policy table exists
+      ug.listConstraints();
+      // Set up a policy edge so projections produce mirror writes
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_test",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      const delta = makeCreatedDelta();
+      const result = await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      expect(result.mirrors_enqueued).toBe(1);
+
+      // Queue should have received the message (drained from outbox)
+      expect(queue.messages.length).toBeGreaterThanOrEqual(1);
+      const upsertMsg = queue.messages.find(
+        (m: unknown) => (m as Record<string, unknown>).type === "UPSERT_MIRROR",
+      ) as Record<string, unknown>;
+      expect(upsertMsg).toBeDefined();
+      expect(upsertMsg.target_account_id).toBe(OTHER_ACCOUNT_ID);
+
+      // Outbox should be empty after successful drain
+      const outboxRows = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxRows).toHaveLength(0);
+    });
+
+    it("failed drain leaves outbox entries for retry", async () => {
+      // Trigger migration so policy table exists
+      ug.listConstraints();
+      // Set up a policy edge so projections produce mirror writes
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_fail",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      // Create an event first with working queue
+      const createDelta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [createDelta]);
+      queue.clear();
+
+      // Now create a new DO instance with a failing queue
+      const failQueue: QueueLike = {
+        send: async () => { throw new Error("queue unavailable"); },
+        sendBatch: async () => { throw new Error("queue unavailable"); },
+      };
+      const ugFail = new UserGraphDO(sql, failQueue);
+
+      // Update the event -- this writes to outbox but drain will fail
+      const updateDelta = makeUpdatedDelta();
+      await ugFail.applyProviderDelta(TEST_ACCOUNT_ID, [updateDelta]);
+
+      // Outbox should have unsent entries (drain failed silently)
+      const outboxRows = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all() as Array<Record<string, unknown>>;
+      expect(outboxRows.length).toBeGreaterThanOrEqual(1);
+
+      // Verify the payload is correct
+      const payload = JSON.parse(outboxRows[0].payload_json as string) as Record<string, unknown>;
+      expect(payload.type).toBe("UPSERT_MIRROR");
+
+      // Now drain with a working queue -- entries should be recovered
+      const drained = await ug.drainOutbox();
+      expect(drained).toBeGreaterThanOrEqual(1);
+
+      // Queue should now have the message
+      expect(queue.messages.length).toBeGreaterThanOrEqual(1);
+
+      // Outbox should be empty
+      const outboxAfter = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxAfter).toHaveLength(0);
+    });
+
+    it("requeuePendingMirrors sweeps orphaned outbox entries", async () => {
+      // Trigger migration so policy table exists
+      ug.listConstraints();
+      // Set up a policy edge
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_sweep",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      // Create an event with working queue
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      queue.clear();
+
+      // Manually insert orphaned outbox entries (simulating DO eviction before drain)
+      db.prepare(
+        `INSERT INTO outbox (outbox_id, queue_name, payload_json, created_at)
+         VALUES (?, ?, ?, datetime('now'))`,
+      ).run(
+        "obx_orphan_1",
+        "write",
+        JSON.stringify({
+          type: "UPSERT_MIRROR",
+          canonical_event_id: "evt_test_orphan",
+          target_account_id: OTHER_ACCOUNT_ID,
+          target_calendar_id: OTHER_ACCOUNT_ID,
+          projected_hash: "hash_orphan",
+          projected_payload: {},
+          idempotency_key: "key_orphan",
+        }),
+      );
+
+      // Verify the orphan exists
+      const orphanBefore = db
+        .prepare(`SELECT * FROM outbox WHERE outbox_id = 'obx_orphan_1'`)
+        .all();
+      expect(orphanBefore).toHaveLength(1);
+
+      // requeuePendingMirrors should sweep orphaned outbox entries
+      const result = await ug.requeuePendingMirrors(200);
+      // The enqueued count includes the outbox drain
+      expect(result.enqueued).toBeGreaterThanOrEqual(1);
+
+      // Queue should have received the orphaned message
+      const orphanMsg = queue.messages.find(
+        (m: unknown) => {
+          const msg = m as Record<string, unknown>;
+          return msg.canonical_event_id === "evt_test_orphan";
+        },
+      );
+      expect(orphanMsg).toBeDefined();
+
+      // Outbox should be empty after sweep
+      const orphanAfter = db
+        .prepare(`SELECT * FROM outbox WHERE outbox_id = 'obx_orphan_1'`)
+        .all();
+      expect(orphanAfter).toHaveLength(0);
+    });
+
+    it("deleteCanonicalEvent uses outbox for DELETE_MIRROR messages", async () => {
+      // Trigger migration so policy table exists
+      ug.listConstraints();
+      // Set up policy edge and create an event with mirror
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_del",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Get the canonical event ID
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+      expect(events).toHaveLength(1);
+      const canonicalId = events[0].canonical_event_id;
+
+      queue.clear();
+
+      // Delete the event
+      const deleted = await ug.deleteCanonicalEvent(canonicalId, "user:test");
+      expect(deleted).toBe(true);
+
+      // Queue should have DELETE_MIRROR messages (drained from outbox)
+      const deleteMessages = queue.messages.filter(
+        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+      );
+      expect(deleteMessages.length).toBeGreaterThanOrEqual(1);
+
+      // Outbox should be empty after drain
+      const outboxRows = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxRows).toHaveLength(0);
+    });
+
+    it("unlinkAccount uses outbox for batch DELETE_MIRROR messages", async () => {
+      // Trigger migration so policy table exists
+      ug.listConstraints();
+      // Set up policy edge and create events
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_unlink",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      // Insert a calendar for the account
+      insertCalendar(db, {
+        calendarId: "cal_outbox_test",
+        accountId: TEST_ACCOUNT_ID,
+        providerCalendarId: "primary",
+      });
+
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      queue.clear();
+
+      // Unlink the account
+      const result = await ug.unlinkAccount(TEST_ACCOUNT_ID);
+      expect(result.mirrors_deleted).toBeGreaterThanOrEqual(1);
+
+      // Queue should have received DELETE_MIRROR messages from outbox
+      const deleteMessages = queue.messages.filter(
+        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+      );
+      expect(deleteMessages.length).toBeGreaterThanOrEqual(1);
+
+      // Outbox should be empty after drain
+      const outboxRows = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxRows).toHaveLength(0);
+    });
+
+    it("drainOutbox returns 0 when outbox is empty", async () => {
+      const drained = await ug.drainOutbox();
+      expect(drained).toBe(0);
+    });
+  });
 });

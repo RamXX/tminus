@@ -74,7 +74,7 @@ export interface ConstraintDeps {
     actor: string,
     patch: Record<string, unknown>,
   ): void;
-  enqueueDeleteMirror(message: unknown): Promise<void>;
+  enqueueDeleteMirror(message: unknown): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +455,7 @@ export class ConstraintMixin {
         .toArray();
 
       for (const mirror of mirrors) {
-        await this.deps.enqueueDeleteMirror({
+        this.deps.enqueueDeleteMirror({
           type: "DELETE_MIRROR",
           canonical_event_id: evt.canonical_event_id,
           target_account_id: mirror.target_account_id,
@@ -613,7 +613,7 @@ export class ConstraintMixin {
           .toArray();
 
         for (const mirror of mirrors) {
-          await this.deps.enqueueDeleteMirror({
+          this.deps.enqueueDeleteMirror({
             type: "DELETE_MIRROR",
             canonical_event_id: evt.canonical_event_id,
             target_account_id: mirror.target_account_id,

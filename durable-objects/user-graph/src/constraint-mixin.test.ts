@@ -39,7 +39,7 @@ function createMockSql(): SqlStorageLike {
 function createMockDeps(): ConstraintDeps {
   return {
     writeJournal: vi.fn(),
-    enqueueDeleteMirror: vi.fn().mockResolvedValue(undefined),
+    enqueueDeleteMirror: vi.fn(),
   };
 }
 

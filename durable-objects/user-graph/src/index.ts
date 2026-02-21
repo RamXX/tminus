@@ -532,6 +532,9 @@ export class UserGraphDO {
       }
     }
 
+    // Drain outbox: deliver queued messages after all state changes committed
+    await this.drainOutbox();
+
     return {
       created,
       updated,
@@ -935,7 +938,7 @@ export class UserGraphDO {
         `delete:${mirror.provider_event_id ?? ""}:${mirror.target_calendar_id}`,
       );
 
-      await this.enqueueDeleteMirror({
+      this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalId,
         target_account_id: mirror.target_account_id,
@@ -1126,7 +1129,7 @@ export class UserGraphDO {
           projectedHash,
         );
 
-        await this.enqueueUpsertMirror({
+        this.enqueueUpsertMirror({
           type: "UPSERT_MIRROR",
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
@@ -1161,7 +1164,7 @@ export class UserGraphDO {
           projectedHash,
         );
 
-        await this.enqueueUpsertMirror({
+        this.enqueueUpsertMirror({
           type: "UPSERT_MIRROR",
           canonical_event_id: canonicalEventId,
           target_account_id: edge.to_account_id,
@@ -1288,6 +1291,9 @@ export class UserGraphDO {
       originAccountId,
     );
 
+    // Drain outbox: deliver queued messages after all state changes committed
+    await this.drainOutbox();
+
     return canonicalId;
   }
 
@@ -1337,7 +1343,7 @@ export class UserGraphDO {
         `delete:${mirror.provider_event_id ?? ""}:${mirror.target_calendar_id}`,
       );
 
-      await this.enqueueDeleteMirror({
+      this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalEventId,
         target_account_id: mirror.target_account_id,
@@ -1360,7 +1366,7 @@ export class UserGraphDO {
         event.origin_account_id,
         `delete-origin:${event.origin_event_id}:primary`,
       );
-      await this.enqueueDeleteMirror({
+      this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalEventId,
         target_account_id: event.origin_account_id,
@@ -1410,6 +1416,9 @@ export class UserGraphDO {
 
     // Journal entry
     this.writeJournal(canonicalEventId, "deleted", source, {});
+
+    // Drain outbox: deliver queued messages after all state changes committed
+    await this.drainOutbox();
 
     return true;
   }
@@ -1562,6 +1571,9 @@ export class UserGraphDO {
       );
     }
 
+    // Drain outbox: deliver queued messages after all state changes committed
+    await this.drainOutbox();
+
     return totalEnqueued;
   }
 
@@ -1601,9 +1613,12 @@ export class UserGraphDO {
       );
     }
 
+    // Sweep: drain any orphaned outbox entries from prior interrupted operations
+    const outboxDrained = await this.drainOutbox();
+
     return {
       canonical_events: candidates.length,
-      enqueued: totalEnqueued,
+      enqueued: totalEnqueued + outboxDrained,
       limit: safeLimit,
     };
   }
@@ -2443,7 +2458,10 @@ export class UserGraphDO {
   }
 
   async deleteConstraint(constraintId: string): Promise<boolean> {
-    return this.constraints.deleteConstraint(constraintId);
+    const result = await this.constraints.deleteConstraint(constraintId);
+    // Drain outbox: constraint deletion may enqueue DELETE_MIRROR messages
+    await this.drainOutbox();
+    return result;
   }
 
   listConstraints(kind?: string): Constraint[] {
@@ -2460,7 +2478,10 @@ export class UserGraphDO {
     activeFrom: string | null,
     activeTo: string | null,
   ): Promise<Constraint | null> {
-    return this.constraints.updateConstraint(constraintId, configJson, activeFrom, activeTo);
+    const result = await this.constraints.updateConstraint(constraintId, configJson, activeFrom, activeTo);
+    // Drain outbox: constraint update may enqueue DELETE_MIRROR messages
+    await this.drainOutbox();
+    return result;
   }
 
   // -------------------------------------------------------------------------
@@ -2582,18 +2603,107 @@ export class UserGraphDO {
   // Account unlinking (per-account, not full-user deletion)
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Transactional outbox -- reliable queue message production (TM-66bw)
+  // -------------------------------------------------------------------------
+
   /**
-   * Enqueue write-queue messages in bounded batches.
+   * Write a queue message to the transactional outbox.
+   *
+   * This is a synchronous SQL INSERT that participates in the same implicit
+   * SQLite transaction as the surrounding state changes. If the transaction
+   * commits, the outbox entry is guaranteed to exist. If the DO is evicted
+   * before drainOutbox() runs, the entry survives and will be drained on
+   * next wake or by the requeuePendingMirrors sweep.
+   */
+  private writeOutbox(queueName: string, payload: unknown): void {
+    const outboxId = `obx_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    this.sql.exec(
+      `INSERT INTO outbox (outbox_id, queue_name, payload_json, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+      outboxId,
+      queueName,
+      JSON.stringify(payload),
+    );
+  }
+
+  /**
+   * Drain unsent outbox entries by sending them to the appropriate queue,
+   * then delete successfully sent entries.
+   *
+   * Called AFTER the implicit SQLite transaction commits (at the end of
+   * each top-level mutation method). If a queue send fails, the outbox
+   * entries remain and will be retried on next drain.
+   *
+   * Returns the number of entries successfully drained.
+   */
+  async drainOutbox(): Promise<number> {
+    this.ensureMigrated();
+
+    const entries = this.sql
+      .exec<{ outbox_id: string; queue_name: string; payload_json: string }>(
+        `SELECT outbox_id, queue_name, payload_json FROM outbox
+         WHERE sent_at IS NULL
+         ORDER BY created_at ASC`,
+      )
+      .toArray();
+
+    if (entries.length === 0) return 0;
+
+    // Group by queue_name for batch sending
+    const byQueue = new Map<string, { outbox_id: string; payload: unknown }[]>();
+    for (const entry of entries) {
+      const group = byQueue.get(entry.queue_name) ?? [];
+      group.push({
+        outbox_id: entry.outbox_id,
+        payload: JSON.parse(entry.payload_json),
+      });
+      byQueue.set(entry.queue_name, group);
+    }
+
+    let drained = 0;
+
+    for (const [queueName, items] of byQueue) {
+      const queue = queueName === "write" ? this.writeQueue : this.deleteQueue;
+
+      // Send in batches to respect queue limits
+      for (let i = 0; i < items.length; i += WRITE_QUEUE_BATCH_SIZE) {
+        const chunk = items.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
+        try {
+          if (chunk.length === 1) {
+            await queue.send(chunk[0].payload);
+          } else {
+            await queue.sendBatch(chunk.map((item) => ({ body: item.payload })));
+          }
+          // Delete successfully sent entries
+          for (const item of chunk) {
+            this.sql.exec(
+              `DELETE FROM outbox WHERE outbox_id = ?`,
+              item.outbox_id,
+            );
+          }
+          drained += chunk.length;
+        } catch {
+          // Queue send failed -- entries remain in outbox for retry.
+          // Break out of this queue's batches to avoid repeated failures.
+          break;
+        }
+      }
+    }
+
+    return drained;
+  }
+
+  /**
+   * Enqueue write-queue messages in bounded batches via the outbox.
    *
    * Durable Object account unlink can emit many DELETE_MIRROR messages.
-   * Sending one-by-one can exceed request timeouts for large accounts.
+   * Each message is written to the outbox synchronously in the current
+   * transaction; drainOutbox() sends them after commit.
    */
-  private async enqueueWriteBatch(messages: unknown[]): Promise<void> {
-    if (messages.length === 0) return;
-
-    for (let i = 0; i < messages.length; i += WRITE_QUEUE_BATCH_SIZE) {
-      const chunk = messages.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
-      await this.writeQueue.sendBatch(chunk.map((body) => ({ body })));
+  private enqueueWriteBatch(messages: unknown[]): void {
+    for (const msg of messages) {
+      this.writeOutbox("write", msg);
     }
   }
 
@@ -2616,42 +2726,41 @@ export class UserGraphDO {
     return eventEndMs <= pastCutoff || eventEndMs >= futureCutoff;
   }
 
-  /** Enqueue upsert writes, prioritizing near-term events. */
-  private async enqueueUpsertMirror(
+  /**
+   * Write an upsert-mirror message to the outbox, routing to the priority
+   * queue for near-term events.
+   */
+  private enqueueUpsertMirror(
     message: unknown,
     eventEndMs: number | null,
-  ): Promise<void> {
+  ): void {
     if (eventEndMs !== null) {
       const now = Date.now();
       const lookback = now - UPSERT_PRIORITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
       const lookahead = now + UPSERT_PRIORITY_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000;
       if (eventEndMs >= lookback && eventEndMs <= lookahead) {
-        await this.deleteQueue.send(message);
+        this.writeOutbox("delete", message);
         return;
       }
     }
-    await this.writeQueue.send(message);
+    this.writeOutbox("write", message);
   }
 
   /**
-   * Enqueue a mirror deletion message.
-   * Uses a dedicated priority queue when configured; otherwise falls back
-   * to the standard write queue.
+   * Write a mirror deletion message to the outbox.
+   * Targets the delete-priority queue during drain.
    */
-  private async enqueueDeleteMirror(message: unknown): Promise<void> {
-    await this.deleteQueue.send(message);
+  private enqueueDeleteMirror(message: unknown): void {
+    this.writeOutbox("delete", message);
   }
 
   /**
-   * Enqueue mirror deletion messages in bounded batches, targeting the
-   * delete-priority queue when available.
+   * Write mirror deletion messages to the outbox in bulk.
+   * All entries target the delete-priority queue during drain.
    */
-  private async enqueueDeleteBatch(messages: unknown[]): Promise<void> {
-    if (messages.length === 0) return;
-
-    for (let i = 0; i < messages.length; i += WRITE_QUEUE_BATCH_SIZE) {
-      const chunk = messages.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
-      await this.deleteQueue.sendBatch(chunk.map((body) => ({ body })));
+  private enqueueDeleteBatch(messages: unknown[]): void {
+    for (const msg of messages) {
+      this.writeOutbox("delete", msg);
     }
   }
 
@@ -2701,7 +2810,7 @@ export class UserGraphDO {
       target_calendar_id: mirror.target_calendar_id,
       provider_event_id: mirror.provider_event_id ?? "",
     }));
-    await this.enqueueDeleteBatch(outboundDeletes);
+    this.enqueueDeleteBatch(outboundDeletes);
     mirrorsDeleted += outboundDeletes.length;
 
     // Soft-delete outbound mirrors: transition to DELETING for write-consumer
@@ -2839,6 +2948,9 @@ export class UserGraphDO {
       },
       "account_unlinked",
     );
+
+    // Drain outbox: deliver queued messages after all state changes committed
+    await this.drainOutbox();
 
     return {
       events_deleted: eventsDeleted,

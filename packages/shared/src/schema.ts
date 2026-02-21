@@ -419,6 +419,29 @@ CREATE INDEX IF NOT EXISTS idx_onboard_user ON onboarding_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_onboard_token ON onboarding_sessions(session_token);
 ` as const;
 
+/**
+ * UserGraphDO migration v7: Transactional outbox for queue message production.
+ *
+ * Instead of fire-and-forget queue.send() calls that can be lost if the DO
+ * is evicted between a SQLite state change and the queue send, all queue
+ * messages are first written to this outbox table in the same implicit
+ * SQLite transaction as the state change. A drainOutbox() method then
+ * reads unsent entries and delivers them to the appropriate queue.
+ * If drain fails, entries survive and are retried on next wake or by
+ * requeuePendingMirrors sweep.
+ */
+export const USER_GRAPH_DO_MIGRATION_V7 = `
+CREATE TABLE IF NOT EXISTS outbox (
+  outbox_id    TEXT PRIMARY KEY,
+  queue_name   TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  sent_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_unsent ON outbox(sent_at) WHERE sent_at IS NULL;
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -450,6 +473,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 6,
     sql: USER_GRAPH_DO_MIGRATION_V6,
     description: "Add onboarding_sessions table for multi-account connection flow",
+  },
+  {
+    version: 7,
+    sql: USER_GRAPH_DO_MIGRATION_V7,
+    description: "Add transactional outbox table for reliable queue message production",
   },
 ] as const;
 
