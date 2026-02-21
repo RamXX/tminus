@@ -1,26 +1,20 @@
 /**
  * App root component.
  *
- * Simple hash-based router (no dependency needed for walking skeleton).
- * Routes:
- *   #/login       -> Login page
- *   #/onboard     -> Onboarding page (requires auth)
- *   #/calendar    -> Calendar page (requires auth)
- *   #/accounts    -> Account Management (requires auth)
- *   #/sync-status -> Sync Status Dashboard (requires auth)
- *   #/policies    -> Policy Management (requires auth)
- *   #/errors      -> Error Recovery (requires auth)
- *   #/billing     -> Billing & Subscription (requires auth)
- *   #/scheduling  -> Scheduling Dashboard (requires auth)
- *   #/governance  -> Governance Dashboard (requires auth)
- *   #/relationships -> Relationships Dashboard (requires auth)
- *   #/reconnections -> Reconnections Dashboard (requires auth)
- *   #/admin/:orgId  -> Admin Console (requires auth + enterprise)
- *   default       -> redirects to login or calendar based on auth state
+ * Architecture (TM-bjnt):
+ * - React Router v7 (HashRouter) for declarative routing
+ * - ApiProvider context for token-injected API functions
+ * - ErrorBoundary at app root for crash recovery
+ * - Token refresh via AuthProvider
+ *
+ * Both prop-passing (legacy) and useApi() (new) patterns coexist.
+ * Pages will be migrated to useApi() in TM-02x1.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { HashRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
 import { AuthProvider, useAuth } from "./lib/auth";
+import { ApiProvider, useApi } from "./lib/api-provider";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Login } from "./pages/Login";
 import { Calendar } from "./pages/Calendar";
 import { Accounts } from "./pages/Accounts";
@@ -34,585 +28,228 @@ import { Relationships } from "./pages/Relationships";
 import { Reconnections } from "./pages/Reconnections";
 import { Admin } from "./pages/Admin";
 import { Onboarding } from "./pages/Onboarding";
-import { parseOAuthCallback } from "./lib/onboarding";
-import type { OnboardingSyncStatus } from "./lib/onboarding";
-import {
-  apiFetch,
-  fetchSyncStatus,
-  fetchAccounts,
-  fetchAccountDetail,
-  fetchEvents,
-  unlinkAccount,
-  fetchErrorMirrors,
-  retryMirror,
-  fetchBillingStatus,
-  createCheckoutSession,
-  createPortalSession,
-  fetchBillingHistory,
-  createSchedulingSession,
-  listSessions,
-  commitCandidate,
-  cancelSession,
-  fetchCommitments,
-  fetchVips,
-  addVip,
-  removeVip,
-  exportCommitmentProof,
-  fetchRelationships,
-  createRelationship,
-  fetchRelationship,
-  updateRelationship,
-  deleteRelationship,
-  fetchReputation,
-  fetchOutcomes,
-  createOutcome,
-  fetchDriftReport,
-  fetchReconnectionSuggestionsFull,
-  fetchUpcomingMilestones,
-} from "./lib/api";
-import { fetchPolicies, updatePolicyEdge } from "./lib/policies";
-import {
-  fetchOrgDetails,
-  fetchOrgMembers,
-  addOrgMember,
-  removeOrgMember,
-  changeOrgMemberRole,
-  fetchOrgPolicies,
-  createOrgPolicy,
-  updateOrgPolicy,
-  deleteOrgPolicy,
-  fetchOrgUsage,
-} from "./lib/admin";
+import { ProviderHealth } from "./pages/ProviderHealth";
+import { useOnboardingCallbackId, useBillingAccountsCount, useAdminTierGate } from "./lib/route-helpers";
 
-function Router() {
-  const { token, user } = useAuth();
-  const hasOAuthCompletionParams = new URL(window.location.href).searchParams.has("account_id");
-  const [route, setRoute] = useState(window.location.hash || "#/");
-  const [accountsCount, setAccountsCount] = useState(0);
-  const [userTier, setUserTier] = useState<string>("free");
+// ---------------------------------------------------------------------------
+// Auth-aware route wrapper
+// ---------------------------------------------------------------------------
 
-  useEffect(() => {
-    const handler = () => setRoute(window.location.hash || "#/");
-    window.addEventListener("hashchange", handler);
-    // Catch hash mutations that may have happened before this effect mounted.
-    handler();
-    return () => window.removeEventListener("hashchange", handler);
-  }, []);
-
-  // Bound fetch for sync status -- injects current token
-  const boundFetchSyncStatus = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchSyncStatus(token);
-  }, [token]);
-
-  // Bound fetch/update for policies -- injects current token
-  const boundFetchPolicies = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchPolicies(token);
-  }, [token]);
-
-  const boundUpdatePolicyEdge = useCallback(
-    async (
-      policyId: string,
-      edge: {
-        from_account_id: string;
-        to_account_id: string;
-        detail_level: "BUSY" | "TITLE" | "FULL";
-      },
-    ) => {
-      if (!token) throw new Error("Not authenticated");
-      return updatePolicyEdge(token, policyId, edge);
-    },
-    [token],
-  );
-
-  // Bound fetch/unlink for accounts -- injects current token
-  const boundFetchAccounts = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchAccounts(token);
-  }, [token]);
-
-  const boundUnlinkAccount = useCallback(
-    async (accountId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return unlinkAccount(token, accountId);
-    },
-    [token],
-  );
-
-  // Bound fetch/retry for error recovery -- injects current token
-  const boundFetchErrors = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchErrorMirrors(token);
-  }, [token]);
-
-  const boundRetryMirror = useCallback(
-    async (mirrorId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return retryMirror(token, mirrorId);
-    },
-    [token],
-  );
-
-  // Fetch accounts count for billing page usage display
-  useEffect(() => {
-    if (!token) return;
-    const routePath = (window.location.hash || "#/").split("?")[0];
-    if (routePath === "#/billing") {
-      fetchAccounts(token).then(
-        (accounts) => setAccountsCount(accounts.length),
-        () => { /* non-critical */ },
-      );
-    }
-  }, [token, route]);
-
-  // Fetch billing tier for admin console enterprise gate
-  useEffect(() => {
-    if (!token) return;
-    const routePath = (window.location.hash || "#/").split("?")[0];
-    if (routePath.startsWith("#/admin/")) {
-      fetchBillingStatus(token).then(
-        (status) => setUserTier(status.tier),
-        () => { /* non-critical -- defaults to "free" which blocks access */ },
-      );
-    }
-  }, [token, route]);
-
-  // Bound billing functions -- injects current token
-  const boundFetchBillingStatus = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchBillingStatus(token);
-  }, [token]);
-
-  const boundCreateCheckoutSession = useCallback(
-    async (priceId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return createCheckoutSession(token, priceId);
-    },
-    [token],
-  );
-
-  const boundCreatePortalSession = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return createPortalSession(token);
-  }, [token]);
-
-  const boundFetchBillingHistory = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchBillingHistory(token);
-  }, [token]);
-
-  // Bound scheduling functions -- injects current token
-  const boundListSessions = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return listSessions(token);
-  }, [token]);
-
-  const boundCreateSchedulingSession = useCallback(
-    async (payload: import("./lib/scheduling").CreateSessionPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      return createSchedulingSession(token, payload);
-    },
-    [token],
-  );
-
-  const boundCommitCandidate = useCallback(
-    async (sessionId: string, candidateId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return commitCandidate(token, sessionId, candidateId);
-    },
-    [token],
-  );
-
-  const boundCancelSession = useCallback(
-    async (sessionId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return cancelSession(token, sessionId);
-    },
-    [token],
-  );
-
-  // Bound governance functions -- injects current token
-  const boundFetchCommitments = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchCommitments(token);
-  }, [token]);
-
-  const boundFetchVips = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchVips(token);
-  }, [token]);
-
-  const boundAddVip = useCallback(
-    async (payload: import("./lib/governance").AddVipPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      return addVip(token, payload);
-    },
-    [token],
-  );
-
-  const boundRemoveVip = useCallback(
-    async (vipId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return removeVip(token, vipId);
-    },
-    [token],
-  );
-
-  const boundExportProof = useCallback(
-    async (commitmentId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return exportCommitmentProof(token, commitmentId);
-    },
-    [token],
-  );
-
-  // Bound relationship functions -- injects current token
-  const boundFetchRelationships = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchRelationships(token);
-  }, [token]);
-
-  const boundCreateRelationship = useCallback(
-    async (payload: import("./lib/relationships").CreateRelationshipPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      return createRelationship(token, payload);
-    },
-    [token],
-  );
-
-  const boundFetchRelationship = useCallback(
-    async (id: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchRelationship(token, id);
-    },
-    [token],
-  );
-
-  const boundUpdateRelationship = useCallback(
-    async (id: string, payload: import("./lib/relationships").UpdateRelationshipPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      return updateRelationship(token, id, payload);
-    },
-    [token],
-  );
-
-  const boundDeleteRelationship = useCallback(
-    async (id: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return deleteRelationship(token, id);
-    },
-    [token],
-  );
-
-  const boundFetchReputation = useCallback(
-    async (id: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchReputation(token, id);
-    },
-    [token],
-  );
-
-  const boundFetchOutcomes = useCallback(
-    async (relationshipId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchOutcomes(token, relationshipId);
-    },
-    [token],
-  );
-
-  const boundCreateOutcome = useCallback(
-    async (relationshipId: string, payload: import("./lib/relationships").CreateOutcomePayload) => {
-      if (!token) throw new Error("Not authenticated");
-      return createOutcome(token, relationshipId, payload);
-    },
-    [token],
-  );
-
-  const boundFetchDriftReport = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchDriftReport(token);
-  }, [token]);
-
-  // Bound reconnection functions -- injects current token
-  const boundFetchReconnectionSuggestions = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchReconnectionSuggestionsFull(token);
-  }, [token]);
-
-  const boundFetchUpcomingMilestones = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchUpcomingMilestones(token);
-  }, [token]);
-
-  // Bound admin console functions -- injects current token
-  const boundFetchOrgDetails = useCallback(
-    async (orgId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchOrgDetails(token, orgId);
-    },
-    [token],
-  );
-
-  const boundFetchOrgMembers = useCallback(
-    async (orgId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchOrgMembers(token, orgId);
-    },
-    [token],
-  );
-
-  const boundAddOrgMember = useCallback(
-    async (orgId: string, userId: string, role: import("./lib/admin").OrgRole) => {
-      if (!token) throw new Error("Not authenticated");
-      await addOrgMember(token, orgId, { user_id: userId, role });
-    },
-    [token],
-  );
-
-  const boundRemoveOrgMember = useCallback(
-    async (orgId: string, userId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      await removeOrgMember(token, orgId, userId);
-    },
-    [token],
-  );
-
-  const boundChangeOrgMemberRole = useCallback(
-    async (orgId: string, userId: string, role: import("./lib/admin").OrgRole) => {
-      if (!token) throw new Error("Not authenticated");
-      await changeOrgMemberRole(token, orgId, userId, { role });
-    },
-    [token],
-  );
-
-  const boundFetchOrgPolicies = useCallback(
-    async (orgId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchOrgPolicies(token, orgId);
-    },
-    [token],
-  );
-
-  const boundCreateOrgPolicy = useCallback(
-    async (orgId: string, payload: import("./lib/admin").CreatePolicyPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      await createOrgPolicy(token, orgId, payload);
-    },
-    [token],
-  );
-
-  const boundUpdateOrgPolicy = useCallback(
-    async (orgId: string, policyId: string, payload: import("./lib/admin").UpdatePolicyPayload) => {
-      if (!token) throw new Error("Not authenticated");
-      await updateOrgPolicy(token, orgId, policyId, payload);
-    },
-    [token],
-  );
-
-  const boundDeleteOrgPolicy = useCallback(
-    async (orgId: string, policyId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      await deleteOrgPolicy(token, orgId, policyId);
-    },
-    [token],
-  );
-
-  const boundFetchOrgUsage = useCallback(
-    async (orgId: string) => {
-      if (!token) throw new Error("Not authenticated");
-      return fetchOrgUsage(token, orgId);
-    },
-    [token],
-  );
-
-  // Bound onboarding functions -- injects current token
-  const boundFetchAccountStatus = useCallback(
-    async (accountId: string): Promise<OnboardingSyncStatus> => {
-      if (!token) throw new Error("Not authenticated");
-      const detail = await fetchAccountDetail(token, accountId);
-      return {
-        account_id: detail.account_id,
-        email: detail.email,
-        provider: detail.provider,
-        status: detail.status,
-        health: detail.health,
-      };
-    },
-    [token],
-  );
-
-  const boundFetchEventsForOnboarding = useCallback(async () => {
-    if (!token) throw new Error("Not authenticated");
-    return fetchEvents(token);
-  }, [token]);
-
-  const boundSubmitAppleCredentials = useCallback(
-    async (userId: string, email: string, password: string) => {
-      if (!token) throw new Error("Not authenticated");
-      // POST to the API to create an Apple calendar account with app-specific password
-      const result = await apiFetch<{ account_id: string }>(
-        "/v1/accounts/apple",
-        { method: "POST", body: { user_id: userId, email, password }, token },
-      );
-      return result;
-    },
-    [token],
-  );
-
-  // Parse OAuth callback params from hash URL (e.g., #/onboard?account_id=acc-123)
-  const onboardCallbackAccountId = (() => {
-    if (!route.startsWith("#/onboard")) return null;
-    const { accountId } = parseOAuthCallback(
-      `${window.location.origin}${window.location.pathname}${route}`,
-    );
-    return accountId;
-  })();
-
-  // Redirect logic based on auth state
-  if (!token && route !== "#/login") {
-    window.location.hash = "#/login";
-    return null;
-  }
-
-  if (token && (route === "#/login" || route === "#/")) {
-    window.location.hash = hasOAuthCompletionParams
-      ? "#/accounts?linked=true"
-      : "#/calendar";
-    return null;
-  }
-
-  // Route matching: strip query params for switch but keep them in hash
-  // for OAuth callback handling (e.g., #/accounts?linked=true)
-  const routePath = route.split("?")[0];
-
-  switch (routePath) {
-    case "#/login":
-      return <Login />;
-    case "#/onboard":
-      return user ? (
-        <Onboarding
-          user={user}
-          fetchAccountStatus={boundFetchAccountStatus}
-          fetchEvents={boundFetchEventsForOnboarding}
-          callbackAccountId={onboardCallbackAccountId}
-          submitAppleCredentials={boundSubmitAppleCredentials}
-        />
-      ) : null;
-    case "#/calendar":
-      return <Calendar />;
-    case "#/accounts":
-      return (
-        <Accounts
-          currentUserId={user?.id ?? ""}
-          fetchAccounts={boundFetchAccounts}
-          unlinkAccount={boundUnlinkAccount}
-        />
-      );
-    case "#/sync-status":
-      return <SyncStatus fetchSyncStatus={boundFetchSyncStatus} />;
-    case "#/policies":
-      return (
-        <Policies
-          fetchPolicies={boundFetchPolicies}
-          updatePolicyEdge={boundUpdatePolicyEdge}
-        />
-      );
-    case "#/errors":
-      return (
-        <ErrorRecovery
-          fetchErrors={boundFetchErrors}
-          retryMirror={boundRetryMirror}
-        />
-      );
-    case "#/billing":
-      return (
-        <Billing
-          fetchBillingStatus={boundFetchBillingStatus}
-          createCheckoutSession={boundCreateCheckoutSession}
-          createPortalSession={boundCreatePortalSession}
-          fetchBillingHistory={boundFetchBillingHistory}
-          accountsUsed={accountsCount}
-        />
-      );
-    case "#/scheduling":
-      return (
-        <Scheduling
-          listSessions={boundListSessions}
-          fetchAccounts={boundFetchAccounts}
-          createSession={boundCreateSchedulingSession}
-          commitCandidate={boundCommitCandidate}
-          cancelSession={boundCancelSession}
-        />
-      );
-    case "#/governance":
-      return (
-        <Governance
-          fetchCommitments={boundFetchCommitments}
-          fetchVips={boundFetchVips}
-          addVip={boundAddVip}
-          removeVip={boundRemoveVip}
-          exportProof={boundExportProof}
-        />
-      );
-    case "#/relationships":
-      return (
-        <Relationships
-          fetchRelationships={boundFetchRelationships}
-          createRelationship={boundCreateRelationship}
-          fetchRelationship={boundFetchRelationship}
-          updateRelationship={boundUpdateRelationship}
-          deleteRelationship={boundDeleteRelationship}
-          fetchReputation={boundFetchReputation}
-          fetchOutcomes={boundFetchOutcomes}
-          createOutcome={boundCreateOutcome}
-          fetchDriftReport={boundFetchDriftReport}
-        />
-      );
-    case "#/reconnections":
-      return (
-        <Reconnections
-          fetchReconnectionSuggestions={boundFetchReconnectionSuggestions}
-          fetchUpcomingMilestones={boundFetchUpcomingMilestones}
-        />
-      );
-    default: {
-      // Dynamic route: #/admin/:orgId
-      if (routePath.startsWith("#/admin/")) {
-        const adminOrgId = decodeURIComponent(routePath.replace("#/admin/", ""));
-        if (adminOrgId && user) {
-          return (
-            <Admin
-              orgId={adminOrgId}
-              currentUserId={user.id}
-              userTier={userTier}
-              fetchOrgDetails={boundFetchOrgDetails}
-              fetchOrgMembers={boundFetchOrgMembers}
-              addOrgMember={boundAddOrgMember}
-              removeOrgMember={boundRemoveOrgMember}
-              changeOrgMemberRole={boundChangeOrgMemberRole}
-              fetchOrgPolicies={boundFetchOrgPolicies}
-              createOrgPolicy={boundCreateOrgPolicy}
-              updateOrgPolicy={boundUpdateOrgPolicy}
-              deleteOrgPolicy={boundDeleteOrgPolicy}
-              fetchOrgUsage={boundFetchOrgUsage}
-            />
-          );
-        }
-      }
-      // Unknown route -- redirect to calendar if authenticated, login otherwise
-      window.location.hash = token ? "#/calendar" : "#/login";
-      return null;
-    }
-  }
+/**
+ * Wraps authenticated routes. Redirects to /login when no token is present.
+ */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { token } = useAuth();
+  if (!token) return <Navigate to="/login" replace />;
+  return <>{children}</>;
 }
+
+// ---------------------------------------------------------------------------
+// Page wrappers -- bridge legacy props to ApiProvider
+// ---------------------------------------------------------------------------
+
+function OnboardingRoute() {
+  const { user } = useAuth();
+  const api = useApi();
+  const callbackAccountId = useOnboardingCallbackId();
+  if (!user) return null;
+  return (
+    <Onboarding
+      user={user}
+      fetchAccountStatus={api.fetchAccountStatus}
+      fetchEvents={api.fetchEventsForOnboarding}
+      callbackAccountId={callbackAccountId}
+      submitAppleCredentials={api.submitAppleCredentials}
+    />
+  );
+}
+
+function AccountsRoute() {
+  const { user } = useAuth();
+  const api = useApi();
+  return (
+    <Accounts
+      currentUserId={user?.id ?? ""}
+      fetchAccounts={api.fetchAccounts}
+      unlinkAccount={api.unlinkAccount}
+    />
+  );
+}
+
+function SyncStatusRoute() {
+  const api = useApi();
+  return <SyncStatus fetchSyncStatus={api.fetchSyncStatus} />;
+}
+
+function PoliciesRoute() {
+  const api = useApi();
+  return (
+    <Policies
+      fetchPolicies={api.fetchPolicies}
+      updatePolicyEdge={api.updatePolicyEdge}
+    />
+  );
+}
+
+function ErrorRecoveryRoute() {
+  const api = useApi();
+  return (
+    <ErrorRecovery
+      fetchErrors={api.fetchErrors}
+      retryMirror={api.retryMirror}
+    />
+  );
+}
+
+function BillingRoute() {
+  const api = useApi();
+  const accountsCount = useBillingAccountsCount(api.fetchAccounts);
+  return (
+    <Billing
+      fetchBillingStatus={api.fetchBillingStatus}
+      createCheckoutSession={api.createCheckoutSession}
+      createPortalSession={api.createPortalSession}
+      fetchBillingHistory={api.fetchBillingHistory}
+      accountsUsed={accountsCount}
+    />
+  );
+}
+
+function SchedulingRoute() {
+  const api = useApi();
+  return (
+    <Scheduling
+      listSessions={api.listSessions}
+      fetchAccounts={api.fetchAccounts}
+      createSession={api.createSchedulingSession}
+      commitCandidate={api.commitCandidate}
+      cancelSession={api.cancelSession}
+    />
+  );
+}
+
+function GovernanceRoute() {
+  const api = useApi();
+  return (
+    <Governance
+      fetchCommitments={api.fetchCommitments}
+      fetchVips={api.fetchVips}
+      addVip={api.addVip}
+      removeVip={api.removeVip}
+      exportProof={api.exportProof}
+    />
+  );
+}
+
+function RelationshipsRoute() {
+  const api = useApi();
+  return (
+    <Relationships
+      fetchRelationships={api.fetchRelationships}
+      createRelationship={api.createRelationship}
+      fetchRelationship={api.fetchRelationship}
+      updateRelationship={api.updateRelationship}
+      deleteRelationship={api.deleteRelationship}
+      fetchReputation={api.fetchReputation}
+      fetchOutcomes={api.fetchOutcomes}
+      createOutcome={api.createOutcome}
+      fetchDriftReport={api.fetchDriftReport}
+    />
+  );
+}
+
+function ReconnectionsRoute() {
+  const api = useApi();
+  return (
+    <Reconnections
+      fetchReconnectionSuggestions={api.fetchReconnectionSuggestions}
+      fetchUpcomingMilestones={api.fetchUpcomingMilestones}
+    />
+  );
+}
+
+function ProviderHealthRoute() {
+  const api = useApi();
+  return (
+    <ProviderHealth
+      fetchAccountsHealth={api.fetchAccountsHealth}
+      fetchSyncHistory={api.fetchSyncHistory}
+      reconnectAccount={api.reconnectAccount}
+      removeAccount={api.removeAccount}
+    />
+  );
+}
+
+function AdminRoute() {
+  const { orgId } = useParams<{ orgId: string }>();
+  const { user } = useAuth();
+  const api = useApi();
+  const userTier = useAdminTierGate(api.fetchBillingStatus);
+  if (!orgId || !user) return <Navigate to="/calendar" replace />;
+  return (
+    <Admin
+      orgId={orgId}
+      currentUserId={user.id}
+      userTier={userTier}
+      fetchOrgDetails={api.fetchOrgDetails}
+      fetchOrgMembers={api.fetchOrgMembers}
+      addOrgMember={api.addOrgMember}
+      removeOrgMember={api.removeOrgMember}
+      changeOrgMemberRole={api.changeOrgMemberRole}
+      fetchOrgPolicies={api.fetchOrgPolicies}
+      createOrgPolicy={api.createOrgPolicy}
+      updateOrgPolicy={api.updateOrgPolicy}
+      deleteOrgPolicy={api.deleteOrgPolicy}
+      fetchOrgUsage={api.fetchOrgUsage}
+    />
+  );
+}
+
+/**
+ * Handles the default route: redirects authenticated users to /calendar
+ * (or /accounts?linked=true on OAuth completion), unauthenticated to /login.
+ */
+function DefaultRoute() {
+  const { token } = useAuth();
+  const hasOAuthCompletionParams = new URL(window.location.href).searchParams.has("account_id");
+  if (!token) return <Navigate to="/login" replace />;
+  if (hasOAuthCompletionParams) return <Navigate to="/accounts?linked=true" replace />;
+  return <Navigate to="/calendar" replace />;
+}
+
+// ---------------------------------------------------------------------------
+// App shell
+// ---------------------------------------------------------------------------
 
 export function App() {
   return (
-    <AuthProvider>
-      <div style={{ minHeight: "100vh", padding: "1rem" }}>
-        <Router />
-      </div>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <ApiProvider>
+          <HashRouter>
+            <div style={{ minHeight: "100vh", padding: "1rem" }}>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/onboard" element={<RequireAuth><OnboardingRoute /></RequireAuth>} />
+                <Route path="/calendar" element={<RequireAuth><Calendar /></RequireAuth>} />
+                <Route path="/accounts" element={<RequireAuth><AccountsRoute /></RequireAuth>} />
+                <Route path="/sync-status" element={<RequireAuth><SyncStatusRoute /></RequireAuth>} />
+                <Route path="/policies" element={<RequireAuth><PoliciesRoute /></RequireAuth>} />
+                <Route path="/errors" element={<RequireAuth><ErrorRecoveryRoute /></RequireAuth>} />
+                <Route path="/billing" element={<RequireAuth><BillingRoute /></RequireAuth>} />
+                <Route path="/scheduling" element={<RequireAuth><SchedulingRoute /></RequireAuth>} />
+                <Route path="/governance" element={<RequireAuth><GovernanceRoute /></RequireAuth>} />
+                <Route path="/relationships" element={<RequireAuth><RelationshipsRoute /></RequireAuth>} />
+                <Route path="/reconnections" element={<RequireAuth><ReconnectionsRoute /></RequireAuth>} />
+                <Route path="/provider-health" element={<RequireAuth><ProviderHealthRoute /></RequireAuth>} />
+                <Route path="/admin/:orgId" element={<RequireAuth><AdminRoute /></RequireAuth>} />
+                <Route path="/" element={<DefaultRoute />} />
+                <Route path="*" element={<DefaultRoute />} />
+              </Routes>
+            </div>
+          </HashRouter>
+        </ApiProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
