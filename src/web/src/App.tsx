@@ -15,6 +15,7 @@ import { HashRouter, Routes, Route, Navigate, useParams } from "react-router-dom
 import { AuthProvider, useAuth } from "./lib/auth";
 import { ApiProvider, useApi } from "./lib/api-provider";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { AppShell } from "./components/AppShell";
 import { Login } from "./pages/Login";
 import { Calendar } from "./pages/Calendar";
 import { Accounts } from "./pages/Accounts";
@@ -228,7 +229,35 @@ function DefaultRoute() {
 }
 
 // ---------------------------------------------------------------------------
-// App shell
+// Authenticated routes wrapped in AppShell
+// ---------------------------------------------------------------------------
+
+function AuthenticatedRoutes() {
+  return (
+    <RequireAuth>
+      <AppShell>
+        <Routes>
+          <Route path="/calendar" element={<Calendar />} />
+          <Route path="/accounts" element={<AccountsRoute />} />
+          <Route path="/sync-status" element={<SyncStatusRoute />} />
+          <Route path="/policies" element={<PoliciesRoute />} />
+          <Route path="/errors" element={<ErrorRecoveryRoute />} />
+          <Route path="/billing" element={<BillingRoute />} />
+          <Route path="/scheduling" element={<SchedulingRoute />} />
+          <Route path="/governance" element={<GovernanceRoute />} />
+          <Route path="/relationships" element={<RelationshipsRoute />} />
+          <Route path="/reconnections" element={<ReconnectionsRoute />} />
+          <Route path="/provider-health" element={<ProviderHealthRoute />} />
+          <Route path="/admin/:orgId" element={<AdminRoute />} />
+          <Route path="*" element={<Navigate to="/calendar" replace />} />
+        </Routes>
+      </AppShell>
+    </RequireAuth>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// App root
 // ---------------------------------------------------------------------------
 
 export function App() {
@@ -237,26 +266,12 @@ export function App() {
       <AuthProvider>
         <ApiProvider>
           <HashRouter>
-            <div style={{ minHeight: "100vh", padding: "1rem" }}>
-              <Routes>
-                <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
-                <Route path="/onboard" element={<RequireAuth><OnboardingRoute /></RequireAuth>} />
-                <Route path="/calendar" element={<RequireAuth><Calendar /></RequireAuth>} />
-                <Route path="/accounts" element={<RequireAuth><AccountsRoute /></RequireAuth>} />
-                <Route path="/sync-status" element={<RequireAuth><SyncStatusRoute /></RequireAuth>} />
-                <Route path="/policies" element={<RequireAuth><PoliciesRoute /></RequireAuth>} />
-                <Route path="/errors" element={<RequireAuth><ErrorRecoveryRoute /></RequireAuth>} />
-                <Route path="/billing" element={<RequireAuth><BillingRoute /></RequireAuth>} />
-                <Route path="/scheduling" element={<RequireAuth><SchedulingRoute /></RequireAuth>} />
-                <Route path="/governance" element={<RequireAuth><GovernanceRoute /></RequireAuth>} />
-                <Route path="/relationships" element={<RequireAuth><RelationshipsRoute /></RequireAuth>} />
-                <Route path="/reconnections" element={<RequireAuth><ReconnectionsRoute /></RequireAuth>} />
-                <Route path="/provider-health" element={<RequireAuth><ProviderHealthRoute /></RequireAuth>} />
-                <Route path="/admin/:orgId" element={<RequireAuth><AdminRoute /></RequireAuth>} />
-                <Route path="/" element={<DefaultRoute />} />
-                <Route path="*" element={<DefaultRoute />} />
-              </Routes>
-            </div>
+            <Routes>
+              <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
+              <Route path="/onboard" element={<RequireAuth><OnboardingRoute /></RequireAuth>} />
+              <Route path="/" element={<DefaultRoute />} />
+              <Route path="/*" element={<AuthenticatedRoutes />} />
+            </Routes>
           </HashRouter>
         </ApiProvider>
       </AuthProvider>

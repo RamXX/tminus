@@ -545,7 +545,9 @@ describe("Phase 2C E2E Validation", () => {
       await renderAndLogin();
 
       expect(screen.getByText("T-Minus Calendar")).toBeInTheDocument();
-      expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+      // Email appears in both AppShell header and Calendar subtitle
+      const emailElements = screen.getAllByText("alice@example.com");
+      expect(emailElements.length).toBeGreaterThanOrEqual(1);
     });
 
     it("displays events from multiple accounts", async () => {
@@ -614,9 +616,11 @@ describe("Phase 2C E2E Validation", () => {
     it("navigation header links are present", async () => {
       await renderAndLogin();
 
-      expect(screen.getByText("Accounts")).toBeInTheDocument();
-      expect(screen.getByText("Policies")).toBeInTheDocument();
-      expect(screen.getByText("Sync Status")).toBeInTheDocument();
+      // These texts appear in both the Calendar page header nav and the
+      // AppShell sidebar, so use getAllByText to assert presence.
+      expect(screen.getAllByText("Accounts").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Policies").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Sync Status").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -693,7 +697,8 @@ describe("Phase 2C E2E Validation", () => {
       await renderAndLogin();
       await navigateTo("#/sync-status");
 
-      expect(screen.getByText("Sync Status")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav link
+      expect(screen.getByRole("heading", { name: "Sync Status" })).toBeInTheDocument();
     });
 
     it("shows overall health banner as healthy (green)", async () => {
@@ -868,7 +873,8 @@ describe("Phase 2C E2E Validation", () => {
       // -- STEP 3: Accounts --
       await navigateTo("#/accounts");
 
-      expect(screen.getByText("Accounts")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav link
+      expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
       const accountTable = screen.getByTestId("accounts-table");
       expect(within(accountTable).getByText("work@example.com")).toBeInTheDocument();
       expect(within(accountTable).getByText("personal@example.com")).toBeInTheDocument();
@@ -878,7 +884,8 @@ describe("Phase 2C E2E Validation", () => {
       // -- STEP 4: Sync Status --
       await navigateTo("#/sync-status");
 
-      expect(screen.getByText("Sync Status")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav link
+      expect(screen.getByRole("heading", { name: "Sync Status" })).toBeInTheDocument();
       const banner = screen.getByTestId("overall-health-banner");
       expect(banner).toHaveAttribute("data-health", "healthy");
 
@@ -900,7 +907,8 @@ describe("Phase 2C E2E Validation", () => {
       // -- STEP 6: Error Recovery --
       await navigateTo("#/errors");
 
-      expect(screen.getByText("Error Recovery")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav link
+      expect(screen.getByRole("heading", { name: "Error Recovery" })).toBeInTheDocument();
       expect(screen.getByTestId("error-row-mirror-err-001")).toBeInTheDocument();
       expect(screen.getByTestId("error-row-mirror-err-002")).toBeInTheDocument();
       expect(screen.getByText("Planning Meeting")).toBeInTheDocument();

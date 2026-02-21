@@ -526,8 +526,9 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       await renderAndLogin();
       await navigateTo("#/relationships");
 
-      // Page title and main structure rendered
-      expect(screen.getByText("Relationships")).toBeInTheDocument();
+      // Page title and main structure rendered (use heading role to
+      // disambiguate from sidebar nav links added by AppShell)
+      expect(screen.getByRole("heading", { name: "Relationships" })).toBeInTheDocument();
       expect(screen.getByTestId("contact-list")).toBeInTheDocument();
     });
 
@@ -987,7 +988,8 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // -- STEP 3: Navigate to Relationships --
       await navigateTo("#/relationships");
 
-      expect(screen.getByText("Relationships")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav links
+      expect(screen.getByRole("heading", { name: "Relationships" })).toBeInTheDocument();
       expect(screen.getByTestId("contact-list")).toBeInTheDocument();
 
       // All 5 contacts from diverse categories are visible
@@ -1177,7 +1179,8 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       await renderAndLogin();
 
       await navigateTo("#/relationships");
-      expect(screen.getByText("Relationships")).toBeInTheDocument();
+      // Use heading role to disambiguate from sidebar nav links
+      expect(screen.getByRole("heading", { name: "Relationships" })).toBeInTheDocument();
 
       // Back to Calendar link is present
       expect(screen.getByText("Back to Calendar")).toBeInTheDocument();

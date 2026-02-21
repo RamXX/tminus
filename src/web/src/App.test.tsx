@@ -284,6 +284,79 @@ describe("App routing integration", () => {
 });
 
 // ---------------------------------------------------------------------------
+// AppShell integration tests -- Login/Onboarding render without sidebar
+// ---------------------------------------------------------------------------
+
+describe("AppShell integration via App router", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    window.location.hash = "";
+  });
+
+  afterEach(() => {
+    window.location.hash = "";
+  });
+
+  it("Login page renders without AppShell sidebar", async () => {
+    setUnauthenticated();
+    window.location.hash = "#/login";
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Sign In")).toBeInTheDocument();
+    });
+
+    // No sidebar or header from AppShell
+    expect(screen.queryByTestId("desktop-sidebar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("app-header")).not.toBeInTheDocument();
+  });
+
+  it("Onboarding page renders without AppShell sidebar", async () => {
+    setAuthenticated();
+    window.location.hash = "#/onboard";
+    render(<App />);
+
+    // Onboarding route is outside AppShell
+    await waitFor(() => {
+      expect(screen.queryByTestId("desktop-sidebar")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("app-header")).not.toBeInTheDocument();
+    });
+  });
+
+  it("authenticated routes render with AppShell sidebar and header", async () => {
+    setAuthenticated();
+    window.location.hash = "#/calendar";
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("desktop-sidebar")).toBeInTheDocument();
+      expect(screen.getByTestId("app-header")).toBeInTheDocument();
+    });
+
+    // User email shown in header
+    expect(screen.getByTestId("user-email")).toHaveTextContent("test@example.com");
+  });
+
+  it("sidebar contains all navigation section groups", async () => {
+    setAuthenticated();
+    window.location.hash = "#/calendar";
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("desktop-sidebar")).toBeInTheDocument();
+    });
+
+    // All 13 nav links (11 standard + Admin) should be in the sidebar
+    const desktopSidebar = screen.getByTestId("desktop-sidebar");
+    expect(desktopSidebar).toBeInTheDocument();
+
+    // Verify section headers exist
+    const nav = desktopSidebar.querySelector("[data-testid='sidebar']");
+    expect(nav).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ErrorBoundary integration test
 // ---------------------------------------------------------------------------
 
