@@ -177,18 +177,10 @@ describe("App routing integration", () => {
     it("redirects from /login to /calendar when authenticated", async () => {
       window.location.hash = "#/login";
       render(<App />);
-      // The Login page should not render the redirect, but we should navigate to calendar.
-      // Actually Login page always renders when at /login -- let me check.
-      // The Login route doesn't have RequireAuth so it renders regardless.
-      // But in the old code, authenticated users at #/login were redirected to #/calendar.
-      // In the new code, Login is not wrapped in RequireAuth, and the Login component itself
-      // calls login() which triggers navigation. Let me check the old logic more carefully.
-      // The old code had: if (token && (route === "#/login" || route === "#/")) { redirect to #/calendar }
-      // In the new architecture, DefaultRoute handles "/" and "*", but "/login" is not gated.
-      // This is a design choice: let the Login page render even when authenticated.
-      // The Login component stores token on success -> triggers rerender -> pages work.
-      // Not a regression since Login page itself is harmless when authenticated.
-      expect(screen.getByText("T-Minus")).toBeInTheDocument();
+      // GuestOnly guard redirects authenticated users from /login to /calendar
+      await waitFor(() => {
+        expect(window.location.hash).toBe("#/calendar");
+      });
     });
 
     it("redirects from root to /calendar", async () => {
