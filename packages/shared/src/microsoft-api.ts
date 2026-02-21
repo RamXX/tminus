@@ -26,6 +26,7 @@ import type {
   WatchResponse,
 } from "./google-api";
 import type { MicrosoftGraphEvent } from "./normalize-microsoft";
+import { TMINUS_MANAGED_CATEGORY } from "./constants";
 
 // ---------------------------------------------------------------------------
 // Error types (parallel to Google error classes)
@@ -166,8 +167,6 @@ const MAILBOX_CONCURRENCY_BACKOFF_MS = 1000;
 
 /** T-Minus open extension name for managed markers. */
 const TMINUS_EXTENSION_NAME = "com.tminus.metadata";
-/** Fallback category marker for managed mirrors when delta payload omits extensions. */
-const TMINUS_MANAGED_CATEGORY = "T-Minus Managed";
 /** Full-sync bootstrap lookback window for calendarView/delta (days). */
 const FULL_SYNC_LOOKBACK_DAYS = 365;
 /** Full-sync bootstrap lookahead window for calendarView/delta (days). */

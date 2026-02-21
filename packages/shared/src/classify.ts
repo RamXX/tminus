@@ -16,12 +16,11 @@ import type { MicrosoftGraphEvent } from "./normalize-microsoft";
 import {
   EXTENDED_PROP_TMINUS,
   EXTENDED_PROP_MANAGED,
+  TMINUS_MANAGED_CATEGORY,
 } from "./constants";
 
 /** Open extension name used by T-Minus for Microsoft events. */
 const MS_EXTENSION_NAME = "com.tminus.metadata";
-/** Category fallback used when Graph delta payload omits open extensions. */
-const MS_MANAGED_CATEGORY = "T-Minus Managed";
 
 /**
  * Classify a Google Calendar provider event.
@@ -91,7 +90,7 @@ export function classifyMicrosoftEvent(
   }
 
   const categories = providerEvent.categories;
-  if (Array.isArray(categories) && categories.includes(MS_MANAGED_CATEGORY)) {
+  if (Array.isArray(categories) && categories.includes(TMINUS_MANAGED_CATEGORY)) {
     return "managed_mirror";
   }
 

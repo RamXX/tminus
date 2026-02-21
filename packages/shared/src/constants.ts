@@ -24,6 +24,19 @@ export const EXTENDED_PROP_CANONICAL_ID = "canonical_event_id" as const;
 export const EXTENDED_PROP_ORIGIN_ACCOUNT = "origin_account_id" as const;
 
 // ---------------------------------------------------------------------------
+// Microsoft Graph managed-mirror marker
+// ---------------------------------------------------------------------------
+
+/**
+ * Category string applied to Microsoft Graph events created by T-Minus.
+ *
+ * Used as a fallback loop-prevention signal when delta payloads omit
+ * open extensions. Must stay in sync between the write path
+ * (microsoft-api.ts) and the classify path (classify.ts).
+ */
+export const TMINUS_MANAGED_CATEGORY = "T-Minus Managed" as const;
+
+// ---------------------------------------------------------------------------
 // Calendar defaults
 // ---------------------------------------------------------------------------
 

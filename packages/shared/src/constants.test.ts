@@ -4,6 +4,7 @@ import {
   EXTENDED_PROP_MANAGED,
   EXTENDED_PROP_CANONICAL_ID,
   EXTENDED_PROP_ORIGIN_ACCOUNT,
+  TMINUS_MANAGED_CATEGORY,
   BUSY_OVERLAY_CALENDAR_NAME,
   DEFAULT_DETAIL_LEVEL,
   DEFAULT_CALENDAR_KIND,
@@ -27,6 +28,12 @@ describe("constants.ts -- extended property keys", () => {
 
   it("EXTENDED_PROP_ORIGIN_ACCOUNT is 'origin_account_id'", () => {
     expect(EXTENDED_PROP_ORIGIN_ACCOUNT).toBe("origin_account_id");
+  });
+});
+
+describe("constants.ts -- Microsoft managed-mirror marker", () => {
+  it("TMINUS_MANAGED_CATEGORY is 'T-Minus Managed'", () => {
+    expect(TMINUS_MANAGED_CATEGORY).toBe("T-Minus Managed");
   });
 });
 
