@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseType } from "better-sqlite3";
 import { MIGRATION_0001_INITIAL_SCHEMA } from "@tminus/d1-registry";
 import { OnboardingWorkflow } from "./index";
-import type { OnboardingEnv, OnboardingParams } from "./index";
+import type { OnboardingEnv, OnboardingParams, ScopeBootstrapResult } from "./index";
 import { BUSY_OVERLAY_CALENDAR_NAME } from "@tminus/shared";
 import type { AccountId } from "@tminus/shared";
 
@@ -302,6 +302,17 @@ function createOnboardingGoogleApiFetch(options: {
 interface AccountDOState {
   accessToken: string;
   setSyncTokenCalls: string[];
+  setScopedSyncTokenCalls: Array<{
+    provider_calendar_id: string;
+    sync_token: string;
+  }>;
+  upsertCalendarScopeCalls: Array<{
+    provider_calendar_id: string;
+    display_name: string;
+    calendar_role: string;
+    enabled: boolean;
+    sync_enabled: boolean;
+  }>;
   markSyncSuccessCalls: string[];
   storeWatchChannelCalls: Array<{
     channel_id: string;
@@ -347,6 +358,33 @@ function createMockAccountDO(state: AccountDOState) {
       if (path === "/setSyncToken") {
         const body = (await request.json()) as { sync_token: string };
         state.setSyncTokenCalls.push(body.sync_token);
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (path === "/setScopedSyncToken") {
+        const body = (await request.json()) as {
+          provider_calendar_id: string;
+          sync_token: string;
+        };
+        state.setScopedSyncTokenCalls.push(body);
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (path === "/upsertCalendarScope") {
+        const body = (await request.json()) as {
+          provider_calendar_id: string;
+          display_name: string;
+          calendar_role: string;
+          enabled: boolean;
+          sync_enabled: boolean;
+        };
+        state.upsertCalendarScopeCalls.push(body);
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -540,6 +578,8 @@ describe("OnboardingWorkflow integration tests (real SQLite, mocked Google API +
     accountDOState = {
       accessToken: TEST_ACCESS_TOKEN,
       setSyncTokenCalls: [],
+      setScopedSyncTokenCalls: [],
+      upsertCalendarScopeCalls: [],
       markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
       createMsSubscriptionCalls: [],
@@ -1354,6 +1394,8 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
     accountDOState = {
       accessToken: MS_ACCESS_TOKEN,
       setSyncTokenCalls: [],
+      setScopedSyncTokenCalls: [],
+      upsertCalendarScopeCalls: [],
       markSyncSuccessCalls: [],
       storeWatchChannelCalls: [],
       createMsSubscriptionCalls: [],
@@ -1719,5 +1761,824 @@ describe("OnboardingWorkflow -- Microsoft account integration tests", () => {
         user_id: TEST_USER.user_id,
       }),
     ).rejects.toThrow(/Account not found/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-scope bootstrap integration tests (TM-8gfd.3)
+// ---------------------------------------------------------------------------
+
+describe("OnboardingWorkflow -- multi-scope bootstrap (Google)", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let writeQueue: Queue & { messages: unknown[] };
+  let accountDOState: AccountDOState;
+  let userGraphDOState: UserGraphDOState;
+  let env: OnboardingEnv;
+
+  const WORK_CALENDAR_ID = "work-calendar@group.calendar.google.com";
+  const WORK_CALENDAR_SYNC_TOKEN = "work-calendar-sync-token-xyz";
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+    ).run(
+      ACCOUNT_NEW.account_id,
+      ACCOUNT_NEW.user_id,
+      ACCOUNT_NEW.provider,
+      ACCOUNT_NEW.provider_subject,
+      ACCOUNT_NEW.email,
+    );
+
+    d1 = createRealD1(db);
+    writeQueue = createMockQueue();
+
+    accountDOState = {
+      accessToken: TEST_ACCESS_TOKEN,
+      setSyncTokenCalls: [],
+      setScopedSyncTokenCalls: [],
+      upsertCalendarScopeCalls: [],
+      markSyncSuccessCalls: [],
+      storeWatchChannelCalls: [],
+      createMsSubscriptionCalls: [],
+    };
+
+    userGraphDOState = {
+      applyDeltaCalls: [],
+      storeCalendarsCalls: [],
+      ensureDefaultPolicyCalls: [],
+      recomputeProjectionsCalls: 0,
+    };
+
+    env = createMockEnv({
+      d1,
+      writeQueue,
+      accountDOState,
+      userGraphDOState,
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-1. Multi-scope bootstrap: sync + watch for multiple calendars (AC1, AC2, AC3)
+  // -------------------------------------------------------------------------
+
+  it("bootstraps primary + secondary calendars with per-scope sync/watch/cursor", async () => {
+    let eventsCallIndex = 0;
+    const googleFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      // calendarList.list
+      if (url.includes("/users/me/calendarList") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: PRIMARY_CALENDAR_ID,
+                summary: "Alice Personal",
+                primary: true,
+                accessRole: "owner",
+              },
+              {
+                id: WORK_CALENDAR_ID,
+                summary: "Work Calendar",
+                accessRole: "writer",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // calendars.insert
+      if (url.endsWith("/calendar/v3/calendars") && method === "POST") {
+        return new Response(
+          JSON.stringify({ id: OVERLAY_CALENDAR_ID }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // events.watch
+      if (url.includes("/events/watch") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: WATCH_CHANNEL_ID,
+            resourceId: WATCH_RESOURCE_ID,
+            expiration: WATCH_EXPIRATION,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // events.list -- return different events per call
+      if (url.includes("/calendars/") && url.includes("/events")) {
+        const eventPages = [
+          {
+            events: [
+              makeGoogleEvent({ id: "primary_evt_1", summary: "Primary Event 1" }),
+              makeGoogleEvent({ id: "primary_evt_2", summary: "Primary Event 2" }),
+            ],
+            nextSyncToken: TEST_SYNC_TOKEN,
+          },
+          {
+            events: [
+              makeGoogleEvent({ id: "work_evt_1", summary: "Work Event 1" }),
+            ],
+            nextSyncToken: WORK_CALENDAR_SYNC_TOKEN,
+          },
+        ];
+        const page = eventPages[eventsCallIndex] ?? eventPages[eventPages.length - 1];
+        eventsCallIndex++;
+
+        return new Response(
+          JSON.stringify({
+            items: page.events,
+            nextSyncToken: page.nextSyncToken,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+    const result = await workflow.run({
+      account_id: ACCOUNT_NEW.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // AC1: Multi-scope sync -- both calendars bootstrapped
+    expect(result.scopeResults).toHaveLength(2);
+    expect(result.scopeResults[0].calendarId).toBe(PRIMARY_CALENDAR_ID);
+    expect(result.scopeResults[0].calendarRole).toBe("primary");
+    expect(result.scopeResults[0].status).toBe("ok");
+    expect(result.scopeResults[0].eventSync!.totalEvents).toBe(2);
+
+    expect(result.scopeResults[1].calendarId).toBe(WORK_CALENDAR_ID);
+    expect(result.scopeResults[1].calendarRole).toBe("secondary");
+    expect(result.scopeResults[1].status).toBe("ok");
+    expect(result.scopeResults[1].eventSync!.totalEvents).toBe(1);
+
+    // Aggregate event sync totals across scopes
+    expect(result.eventSync.totalEvents).toBe(3);
+    expect(result.eventSync.totalDeltas).toBe(3);
+    expect(result.eventSync.syncToken).toBe(TEST_SYNC_TOKEN); // primary takes precedence
+
+    // AC2: Per-scope watch registration
+    expect(accountDOState.storeWatchChannelCalls).toHaveLength(2);
+    expect(accountDOState.storeWatchChannelCalls[0].calendar_id).toBe(PRIMARY_CALENDAR_ID);
+    expect(accountDOState.storeWatchChannelCalls[1].calendar_id).toBe(WORK_CALENDAR_ID);
+
+    // AC3: Per-scope cursor persistence
+    expect(accountDOState.setScopedSyncTokenCalls).toHaveLength(2);
+    const primaryScopedToken = accountDOState.setScopedSyncTokenCalls.find(
+      (c) => c.provider_calendar_id === PRIMARY_CALENDAR_ID,
+    );
+    expect(primaryScopedToken).toBeDefined();
+    expect(primaryScopedToken!.sync_token).toBe(TEST_SYNC_TOKEN);
+
+    const workScopedToken = accountDOState.setScopedSyncTokenCalls.find(
+      (c) => c.provider_calendar_id === WORK_CALENDAR_ID,
+    );
+    expect(workScopedToken).toBeDefined();
+    expect(workScopedToken!.sync_token).toBe(WORK_CALENDAR_SYNC_TOKEN);
+
+    // Legacy sync token also set for primary
+    expect(accountDOState.setSyncTokenCalls).toContain(TEST_SYNC_TOKEN);
+
+    // Scopes registered in AccountDO
+    expect(accountDOState.upsertCalendarScopeCalls).toHaveLength(2);
+    const primaryScope = accountDOState.upsertCalendarScopeCalls.find(
+      (c) => c.provider_calendar_id === PRIMARY_CALENDAR_ID,
+    );
+    expect(primaryScope).toBeDefined();
+    expect(primaryScope!.calendar_role).toBe("primary");
+    expect(primaryScope!.enabled).toBe(true);
+    expect(primaryScope!.sync_enabled).toBe(true);
+
+    const workScope = accountDOState.upsertCalendarScopeCalls.find(
+      (c) => c.provider_calendar_id === WORK_CALENDAR_ID,
+    );
+    expect(workScope).toBeDefined();
+    expect(workScope!.calendar_role).toBe("secondary");
+
+    // AC4: Bootstrap health status
+    expect(result.bootstrapHealth.totalScopes).toBe(2);
+    expect(result.bootstrapHealth.succeededScopes).toBe(2);
+    expect(result.bootstrapHealth.failedScopes).toBe(0);
+    expect(result.bootstrapHealth.healthy).toBe(true);
+    expect(result.bootstrapHealth.failureReasons).toHaveLength(0);
+
+    // Account activated
+    expect(result.accountActivated).toBe(true);
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_NEW.account_id) as { status: string };
+    expect(accountRow.status).toBe("active");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-2. Partial failure: one scope fails, account still activates (AC4)
+  // -------------------------------------------------------------------------
+
+  it("activates account when one scope fails but another succeeds (partial bootstrap)", async () => {
+    let eventsCallIndex = 0;
+    const googleFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      if (url.includes("/users/me/calendarList") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: PRIMARY_CALENDAR_ID,
+                summary: "Alice Personal",
+                primary: true,
+                accessRole: "owner",
+              },
+              {
+                id: WORK_CALENDAR_ID,
+                summary: "Work Calendar",
+                accessRole: "writer",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/calendar/v3/calendars") && method === "POST") {
+        return new Response(
+          JSON.stringify({ id: OVERLAY_CALENDAR_ID }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("/events/watch") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: WATCH_CHANNEL_ID,
+            resourceId: WATCH_RESOURCE_ID,
+            expiration: WATCH_EXPIRATION,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // events.list -- primary succeeds, work calendar fails
+      if (url.includes("/calendars/") && url.includes("/events")) {
+        eventsCallIndex++;
+        if (eventsCallIndex === 1) {
+          // Primary calendar: success
+          return new Response(
+            JSON.stringify({
+              items: [makeGoogleEvent({ id: "primary_evt_1" })],
+              nextSyncToken: TEST_SYNC_TOKEN,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        // Work calendar: failure (API returns 500)
+        return new Response("Internal Server Error", { status: 500 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+    const result = await workflow.run({
+      account_id: ACCOUNT_NEW.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // Primary scope succeeded
+    const primaryResult = result.scopeResults.find(
+      (r) => r.calendarId === PRIMARY_CALENDAR_ID,
+    );
+    expect(primaryResult).toBeDefined();
+    expect(primaryResult!.status).toBe("ok");
+    expect(primaryResult!.eventSync!.totalEvents).toBe(1);
+
+    // Work scope failed
+    const workResult = result.scopeResults.find(
+      (r) => r.calendarId === WORK_CALENDAR_ID,
+    );
+    expect(workResult).toBeDefined();
+    expect(workResult!.status).toBe("error");
+    expect(workResult!.error).toBeTruthy();
+    expect(workResult!.eventSync).toBeNull();
+    expect(workResult!.watchRegistration).toBeNull();
+
+    // AC4: Aggregate health reflects partial failure
+    expect(result.bootstrapHealth.totalScopes).toBe(2);
+    expect(result.bootstrapHealth.succeededScopes).toBe(1);
+    expect(result.bootstrapHealth.failedScopes).toBe(1);
+    expect(result.bootstrapHealth.healthy).toBe(true);
+    expect(result.bootstrapHealth.failureReasons).toHaveLength(1);
+    expect(result.bootstrapHealth.failureReasons[0].calendarId).toBe(
+      WORK_CALENDAR_ID,
+    );
+
+    // Account still activates (at least one scope succeeded)
+    expect(result.accountActivated).toBe(true);
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_NEW.account_id) as { status: string };
+    expect(accountRow.status).toBe("active");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-3. All scopes fail: account marked as error (AC4)
+  // -------------------------------------------------------------------------
+
+  it("marks account as error when all scopes fail bootstrap", async () => {
+    const googleFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      if (url.includes("/users/me/calendarList") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: PRIMARY_CALENDAR_ID,
+                summary: "Alice Personal",
+                primary: true,
+                accessRole: "owner",
+              },
+              {
+                id: WORK_CALENDAR_ID,
+                summary: "Work Calendar",
+                accessRole: "writer",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/calendar/v3/calendars") && method === "POST") {
+        return new Response(
+          JSON.stringify({ id: OVERLAY_CALENDAR_ID }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // All events.list calls fail
+      if (url.includes("/calendars/") && url.includes("/events")) {
+        return new Response("Internal Server Error", { status: 500 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+
+    await expect(
+      workflow.run({
+        account_id: ACCOUNT_NEW.account_id,
+        user_id: TEST_USER.user_id,
+      }),
+    ).rejects.toThrow(/All 2 calendar scope\(s\) failed bootstrap/);
+
+    // Account should be marked as error
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_NEW.account_id) as { status: string };
+    expect(accountRow.status).toBe("error");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-4. Overlay calendar excluded from scope bootstrap
+  // -------------------------------------------------------------------------
+
+  it("overlay calendar is excluded from scope selection", async () => {
+    const googleFetch = createOnboardingGoogleApiFetch({
+      calendars: [
+        {
+          id: PRIMARY_CALENDAR_ID,
+          summary: "Alice Personal",
+          primary: true,
+          accessRole: "owner",
+        },
+        {
+          id: OVERLAY_CALENDAR_ID,
+          summary: BUSY_OVERLAY_CALENDAR_NAME,
+          accessRole: "owner",
+        },
+      ],
+      overlayCalendarId: OVERLAY_CALENDAR_ID,
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+    const result = await workflow.run({
+      account_id: ACCOUNT_NEW.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // Only primary scope bootstrapped (overlay excluded)
+    expect(result.scopeResults).toHaveLength(1);
+    expect(result.scopeResults[0].calendarId).toBe(PRIMARY_CALENDAR_ID);
+    expect(result.scopeResults[0].calendarRole).toBe("primary");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-5. Re-activation of errored scopes (AC5)
+  // -------------------------------------------------------------------------
+
+  it("re-activates errored scopes without reprocessing successful ones", async () => {
+    let eventsCallIndex = 0;
+    const googleFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      if (url.includes("/users/me/calendarList") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: PRIMARY_CALENDAR_ID,
+                summary: "Alice Personal",
+                primary: true,
+                accessRole: "owner",
+              },
+              {
+                id: WORK_CALENDAR_ID,
+                summary: "Work Calendar",
+                accessRole: "writer",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/calendar/v3/calendars") && method === "POST") {
+        return new Response(
+          JSON.stringify({ id: OVERLAY_CALENDAR_ID }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("/events/watch") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: WATCH_CHANNEL_ID,
+            resourceId: WATCH_RESOURCE_ID,
+            expiration: WATCH_EXPIRATION,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // events.list -- all succeed now
+      if (url.includes("/calendars/") && url.includes("/events")) {
+        eventsCallIndex++;
+        return new Response(
+          JSON.stringify({
+            items: [makeGoogleEvent({ id: `reactivate_evt_${eventsCallIndex}` })],
+            nextSyncToken: `reactivate-sync-token-${eventsCallIndex}`,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    // Simulate account in error state (from prior partial failure)
+    db.prepare("UPDATE accounts SET status = 'error' WHERE account_id = ?").run(
+      ACCOUNT_NEW.account_id,
+    );
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+
+    // Only re-activate the previously errored work calendar
+    const reactivation = await workflow.reactivateErroredScopes(
+      {
+        account_id: ACCOUNT_NEW.account_id,
+        user_id: TEST_USER.user_id,
+      },
+      [WORK_CALENDAR_ID],
+    );
+
+    // Only the errored scope was retried
+    expect(reactivation.scopeResults).toHaveLength(1);
+    expect(reactivation.scopeResults[0].calendarId).toBe(WORK_CALENDAR_ID);
+    expect(reactivation.scopeResults[0].status).toBe("ok");
+    expect(reactivation.scopeResults[0].eventSync!.totalEvents).toBe(1);
+
+    expect(reactivation.bootstrapHealth.totalScopes).toBe(1);
+    expect(reactivation.bootstrapHealth.succeededScopes).toBe(1);
+    expect(reactivation.bootstrapHealth.healthy).toBe(true);
+
+    // Account re-activated from error to active
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(ACCOUNT_NEW.account_id) as { status: string };
+    expect(accountRow.status).toBe("active");
+  });
+
+  // -------------------------------------------------------------------------
+  // MS-6. Single scope backward compatibility (existing path preserved)
+  // -------------------------------------------------------------------------
+
+  it("single-scope account works identically to legacy behavior", async () => {
+    const googleFetch = createOnboardingGoogleApiFetch({
+      eventPages: [
+        {
+          events: [makeGoogleEvent()],
+          nextSyncToken: TEST_SYNC_TOKEN,
+        },
+      ],
+    });
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: googleFetch });
+    const result = await workflow.run({
+      account_id: ACCOUNT_NEW.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // Only one scope (primary)
+    expect(result.scopeResults).toHaveLength(1);
+    expect(result.scopeResults[0].calendarId).toBe(PRIMARY_CALENDAR_ID);
+    expect(result.scopeResults[0].calendarRole).toBe("primary");
+    expect(result.scopeResults[0].status).toBe("ok");
+
+    // Backward-compatible aggregate fields
+    expect(result.eventSync.totalEvents).toBe(1);
+    expect(result.eventSync.syncToken).toBe(TEST_SYNC_TOKEN);
+    expect(result.watchRegistration.channelId).toBe(WATCH_CHANNEL_ID);
+    expect(result.accountActivated).toBe(true);
+
+    // Legacy sync token set
+    expect(accountDOState.setSyncTokenCalls).toContain(TEST_SYNC_TOKEN);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-scope bootstrap: Microsoft integration tests (TM-8gfd.3)
+// ---------------------------------------------------------------------------
+
+describe("OnboardingWorkflow -- multi-scope bootstrap (Microsoft)", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+  let writeQueue: Queue & { messages: unknown[] };
+  let accountDOState: AccountDOState;
+  let userGraphDOState: UserGraphDOState;
+  let env: OnboardingEnv;
+
+  const MS_WORK_CALENDAR_ID = "AAMkADQ0ZGJmWorkCalId";
+  const MS_WORK_SYNC_TOKEN = "https://graph.microsoft.com/v1.0/me/calendars/work/events?$deltatoken=work123";
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    db.prepare(
+      "INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+    ).run(
+      MS_ACCOUNT.account_id,
+      MS_ACCOUNT.user_id,
+      MS_ACCOUNT.provider,
+      MS_ACCOUNT.provider_subject,
+      MS_ACCOUNT.email,
+    );
+
+    d1 = createRealD1(db);
+    writeQueue = createMockQueue();
+
+    accountDOState = {
+      accessToken: MS_ACCESS_TOKEN,
+      setSyncTokenCalls: [],
+      setScopedSyncTokenCalls: [],
+      upsertCalendarScopeCalls: [],
+      markSyncSuccessCalls: [],
+      storeWatchChannelCalls: [],
+      createMsSubscriptionCalls: [],
+    };
+
+    userGraphDOState = {
+      applyDeltaCalls: [],
+      storeCalendarsCalls: [],
+      ensureDefaultPolicyCalls: [],
+      recomputeProjectionsCalls: 0,
+    };
+
+    env = createMockEnv({
+      d1,
+      writeQueue,
+      accountDOState,
+      userGraphDOState,
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  it("bootstraps multiple Microsoft calendars with per-scope subscriptions and cursors", async () => {
+    let eventsCallIndex = 0;
+    const msFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const method =
+        (typeof input === "object" && "method" in input
+          ? (input as Request).method
+          : init?.method) ?? "GET";
+
+      if (url.endsWith("/me/calendars") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_PRIMARY_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+              {
+                id: MS_WORK_CALENDAR_ID,
+                name: "Work Meetings",
+                isDefaultCalendar: false,
+                canEdit: true,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.endsWith("/me/calendars") && method === "POST") {
+        return new Response(
+          JSON.stringify({ id: MS_OVERLAY_CALENDAR_ID }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // Subscriptions
+      if (url.endsWith("/subscriptions") && method === "POST") {
+        const reqBody = await (input as Request).json() as Record<string, unknown>;
+        const resource = reqBody.resource as string;
+        return new Response(
+          JSON.stringify({
+            id: `sub-${eventsCallIndex}`,
+            resource,
+            expirationDateTime: MS_SUBSCRIPTION_EXPIRY,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      // Events delta
+      if (
+        method === "GET" &&
+        url.includes("/me/calendars/") &&
+        (url.includes("/calendarView/delta") || url.includes("/events"))
+      ) {
+        eventsCallIndex++;
+        const tokens = [MS_SYNC_TOKEN, MS_WORK_SYNC_TOKEN];
+        const token = tokens[eventsCallIndex - 1] ?? tokens[tokens.length - 1];
+
+        return new Response(
+          JSON.stringify({
+            value: [makeMicrosoftEvent({ id: `ms_evt_scope_${eventsCallIndex}` })],
+            "@odata.deltaLink": token,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const workflow = new OnboardingWorkflow(env, { fetchFn: msFetch });
+    const result = await workflow.run({
+      account_id: MS_ACCOUNT.account_id,
+      user_id: TEST_USER.user_id,
+    });
+
+    // Both scopes bootstrapped
+    expect(result.scopeResults).toHaveLength(2);
+
+    const primaryResult = result.scopeResults.find(
+      (r) => r.calendarId === MS_PRIMARY_CALENDAR_ID,
+    );
+    expect(primaryResult).toBeDefined();
+    expect(primaryResult!.status).toBe("ok");
+    expect(primaryResult!.calendarRole).toBe("primary");
+
+    const workResult = result.scopeResults.find(
+      (r) => r.calendarId === MS_WORK_CALENDAR_ID,
+    );
+    expect(workResult).toBeDefined();
+    expect(workResult!.status).toBe("ok");
+    expect(workResult!.calendarRole).toBe("secondary");
+
+    // Per-scope subscriptions created
+    expect(accountDOState.createMsSubscriptionCalls).toHaveLength(2);
+    const primarySubCall = accountDOState.createMsSubscriptionCalls.find(
+      (c) => c.calendar_id === MS_PRIMARY_CALENDAR_ID,
+    );
+    expect(primarySubCall).toBeDefined();
+    expect(primarySubCall!.webhook_url).toBe("https://webhook.tminus.dev/v1/microsoft");
+
+    const workSubCall = accountDOState.createMsSubscriptionCalls.find(
+      (c) => c.calendar_id === MS_WORK_CALENDAR_ID,
+    );
+    expect(workSubCall).toBeDefined();
+
+    // Per-scope cursors stored
+    expect(accountDOState.setScopedSyncTokenCalls).toHaveLength(2);
+
+    // Aggregate health
+    expect(result.bootstrapHealth.totalScopes).toBe(2);
+    expect(result.bootstrapHealth.succeededScopes).toBe(2);
+    expect(result.bootstrapHealth.healthy).toBe(true);
+
+    // Account activated
+    expect(result.accountActivated).toBe(true);
+    const accountRow = db
+      .prepare("SELECT status FROM accounts WHERE account_id = ?")
+      .get(MS_ACCOUNT.account_id) as { status: string };
+    expect(accountRow.status).toBe("active");
   });
 });

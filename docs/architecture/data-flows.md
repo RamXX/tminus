@@ -135,41 +135,63 @@ Step  Actor              Action
          |
          v
   OnboardingWorkflow
-  +-------------------------------------------+
-  |                                           |
-  |  Step 1: Fetch calendar list              |
-  |          Create "External Busy" calendar  |
-  |          Store calendar IDs in DO         |
-  |                                           |
-  |  Step 2: Paginated events.list            |
-  |          (no syncToken = full list)       |
-  |          For each page:                   |
-  |            classify events                |
-  |            call UserGraphDO               |
-  |              .applyProviderDelta(batch)   |
-  |                                           |
-  |  Step 3: Register watch channel           |
-  |          POST events/watch                |
-  |          Store channel_id in AccountDO    |
-  |          Store channel_id in D1 accounts  |
-  |                                           |
-  |  Step 4: Store syncToken in AccountDO     |
-  |                                           |
-  |  Step 5: Mark account status = 'active'   |
-  |          in D1                            |
-  |                                           |
-  +-------------------------------------------+
+  +---------------------------------------------------+
+  |                                                   |
+  |  Step 1: Fetch calendar list                      |
+  |          Create "External Busy" overlay calendar  |
+  |          Store calendar IDs in DO                 |
+  |                                                   |
+  |  Step 2: Select bootstrap scopes                  |
+  |          All non-overlay calendars selected        |
+  |          Primary calendar sorted first             |
+  |                                                   |
+  |  Step 3: For EACH scoped calendar:                |
+  |    3a. Register scope in AccountDO                |
+  |        (upsertCalendarScope)                      |
+  |    3b. Paginated events.list (full sync)          |
+  |        For each page: classify, apply deltas      |
+  |    3c. Register watch/subscription                |
+  |        Google: POST events/watch per calendar     |
+  |        Microsoft: POST subscriptions per calendar |
+  |    3d. Store scoped sync cursor                   |
+  |        (setScopedSyncToken per calendar)           |
+  |    3e. Mark scope sync success in AccountDO       |
+  |                                                   |
+  |  Step 4: Aggregate bootstrap health               |
+  |          Count succeeded vs failed scopes          |
+  |          Record failure reasons per scope           |
+  |          healthy = at least one scope succeeded     |
+  |                                                   |
+  |  Step 5: If healthy:                              |
+  |            Store primary watch channel in D1       |
+  |            Mark account status = 'active'          |
+  |          If all failed:                            |
+  |            Mark account status = 'error'           |
+  |            Include failure reasons                 |
+  |                                                   |
+  +---------------------------------------------------+
+
+  Re-activation (errored scopes):
+  +---------------------------------------------------+
+  |  reactivateErroredScopes(calendarIds[])           |
+  |    For each errored calendar:                      |
+  |      Re-run step 3a-3e (same as above)            |
+  |    If any succeed: re-activate account             |
+  +---------------------------------------------------+
 ```
 
 ### Step-by-Step
 
 | Step | Actor | Action |
 |------|-------|--------|
-| 1 | User | Initiates OAuth in UI. oauth-worker redirects to Google. |
-| 2 | Google | User authorizes, redirects back with auth code. |
-| 3 | oauth-worker | Exchanges code for tokens. Creates account in D1 registry. Creates AccountDO with encrypted tokens. Starts OnboardingWorkflow. |
-| 4 | OnboardingWorkflow | Steps 1-5: Fetches calendar list, creates busy overlay calendar, paginates events, registers watch channel, stores syncToken, marks account active. |
-| 5 | UserGraphDO | Processes deltas from step 4 same as Flow A. Enqueues initial mirror writes for all existing canonical events to the new account per policy. |
+| 1 | User | Initiates OAuth in UI. oauth-worker redirects to Google/Microsoft. |
+| 2 | Provider | User authorizes, redirects back with auth code. |
+| 3 | oauth-worker | Exchanges code for tokens. Creates account in D1 registry. Creates AccountDO with encrypted tokens. Starts OnboardingWorkflow with selected scopes. |
+| 4 | OnboardingWorkflow | Fetches calendar list, creates busy overlay calendar. Selects bootstrap scopes (all non-overlay calendars). |
+| 5 | OnboardingWorkflow | For each scoped calendar: registers scope in AccountDO, performs full event sync (paginated), registers watch channel or subscription, stores scoped sync cursor, marks scope sync success. Partial failures are tolerated -- each scope is independent. |
+| 6 | OnboardingWorkflow | Aggregates bootstrap health. If at least one scope succeeds: stores primary watch channel in D1, marks account active. If all scopes fail: marks account as error with failure reasons. |
+| 7 | UserGraphDO | Processes deltas from step 5 same as Flow A. Enqueues initial mirror writes for all existing canonical events to the new account per policy. |
+| 8 | OnboardingWorkflow | (Re-activation path) If previously errored scopes exist, reactivateErroredScopes() re-runs bootstrap for only those calendars without reprocessing already-successful scopes. |
 
 ---
 

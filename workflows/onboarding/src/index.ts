@@ -4,15 +4,19 @@
  * Runs after a new account is linked via OAuth (Google or Microsoft). Steps:
  * 1. Look up account provider from D1
  * 2. Fetch calendar list, identify primary, create busy overlay calendar
- * 3. Paginated full event sync (classify, normalize, apply deltas)
- * 4. Register watch channel / subscription with provider
- * 5. Store initial syncToken in AccountDO
- * 6. Mark account active in D1
- * 7. Create default bidirectional BUSY policy edges
- * 8. Project existing canonical events to new account
+ * 3. For EACH selected scope (recommended defaults = all non-overlay calendars):
+ *    a. Paginated full event sync (classify, normalize, apply deltas)
+ *    b. Register watch channel / subscription with provider
+ *    c. Store initial syncToken per scope in AccountDO
+ *    d. Register scope in AccountDO via upsertCalendarScope
+ * 4. Aggregate bootstrap health: account activates only when >= 1 scope succeeds
+ * 5. Mark account active in D1 (with primary scope's channel info)
+ * 6. Create default bidirectional BUSY policy edges
+ * 7. Project existing canonical events to new account
  *
- * Error handling: if any step fails, the account is marked with error status
- * in D1 and the error is logged. The workflow can be retried manually.
+ * Partial failures: if some scopes fail, the account still activates with the
+ * successful scopes. Failed scopes are recorded with explicit error reasons.
+ * Re-activation retries only errored scopes.
  *
  * Follows the same injectable-dependency pattern as sync-consumer for
  * testability: provider API via injectable FetchFn, DOs via fetch stubs.
@@ -93,14 +97,50 @@ export interface WatchRegistrationResult {
   readonly token: string;
 }
 
-/** Complete onboarding result. */
+// ---------------------------------------------------------------------------
+// Per-scope bootstrap types (AC1-AC5)
+// ---------------------------------------------------------------------------
+
+/** Status of a single scope's bootstrap. */
+export type ScopeBootstrapStatus = "ok" | "error";
+
+/** Result of bootstrapping a single calendar scope. */
+export interface ScopeBootstrapResult {
+  readonly calendarId: string;
+  readonly displayName: string;
+  readonly calendarRole: "primary" | "secondary";
+  readonly status: ScopeBootstrapStatus;
+  readonly error: string | null;
+  readonly eventSync: EventSyncResult | null;
+  readonly watchRegistration: WatchRegistrationResult | null;
+}
+
+/** Aggregate bootstrap health for the account (AC4). */
+export interface BootstrapHealthStatus {
+  readonly totalScopes: number;
+  readonly succeededScopes: number;
+  readonly failedScopes: number;
+  readonly healthy: boolean;
+  readonly failureReasons: ReadonlyArray<{
+    readonly calendarId: string;
+    readonly error: string;
+  }>;
+}
+
+/** Complete onboarding result (multi-scope). */
 export interface OnboardingResult {
   readonly calendarSetup: CalendarSetupResult;
+  /** Aggregate event sync across all scopes (backward-compatible). */
   readonly eventSync: EventSyncResult;
+  /** Primary scope's watch registration (backward-compatible). */
   readonly watchRegistration: WatchRegistrationResult;
   readonly policyEdgesCreated: boolean;
   readonly projectionEnqueued: boolean;
   readonly accountActivated: boolean;
+  /** Per-scope bootstrap results (new in multi-scope). */
+  readonly scopeResults: readonly ScopeBootstrapResult[];
+  /** Aggregate health status (AC4). */
+  readonly bootstrapHealth: BootstrapHealthStatus;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,8 +168,8 @@ export class OnboardingWorkflow {
    * Run the full onboarding flow for a newly linked account.
    *
    * Steps execute sequentially (each depends on the prior).
-   * If any step fails, the account is marked with error status in D1
-   * and the error is re-thrown for the Workflow runtime to handle retry.
+   * Multi-scope: bootstraps all selected calendars (recommended defaults),
+   * not just primary. Account activates if at least one scope succeeds.
    */
   async run(params: OnboardingParams): Promise<OnboardingResult> {
     const { account_id, user_id } = params;
@@ -147,35 +187,44 @@ export class OnboardingWorkflow {
         user_id,
       );
 
-      // Step 3: Full event sync (paginated)
-      const eventSync = await this.fullEventSync(
+      // Step 3: Select scopes for bootstrap (recommended defaults = all
+      // non-overlay calendars). Primary is always included.
+      const selectedScopes = this.selectBootstrapScopes(calendarSetup);
+
+      // Step 4: Bootstrap each scope independently (sync + watch + cursor)
+      const scopeResults = await this.bootstrapAllScopes(
         client,
-        calendarSetup.primaryCalendarId,
+        selectedScopes,
         account_id,
         user_id,
         provider,
       );
 
-      // Step 4: Register watch channel / subscription
-      const watchRegistration = await this.registerWatchChannel(
-        client,
-        calendarSetup.primaryCalendarId,
-        account_id,
-        provider,
-      );
+      // Step 5: Aggregate health status
+      const bootstrapHealth = this.aggregateBootstrapHealth(scopeResults);
 
-      // Step 5: Store syncToken in AccountDO
-      if (eventSync.syncToken) {
-        await this.setSyncToken(account_id, eventSync.syncToken);
+      // At least one scope must succeed for the account to activate
+      if (bootstrapHealth.succeededScopes === 0) {
+        throw new Error(
+          `All ${bootstrapHealth.totalScopes} calendar scope(s) failed bootstrap: ${bootstrapHealth.failureReasons.map((r) => `${r.calendarId}: ${r.error}`).join("; ")}`,
+        );
       }
-      await this.markSyncSuccess(account_id);
 
-      // Step 6: Mark account active in D1 + store channel_id
+      // Build backward-compatible aggregate eventSync and watchRegistration
+      // from the primary scope (or first successful scope)
+      const primaryResult = scopeResults.find(
+        (r) => r.calendarRole === "primary" && r.status === "ok",
+      ) ?? scopeResults.find((r) => r.status === "ok")!;
+
+      const aggregateEventSync = this.aggregateEventSyncResults(scopeResults);
+      const primaryWatch = primaryResult.watchRegistration!;
+
+      // Step 6: Mark account active in D1 + store primary channel_id
       await this.activateAccount(
         account_id,
-        watchRegistration.channelId,
-        watchRegistration.token,
-        watchRegistration.expiration,
+        primaryWatch.channelId,
+        primaryWatch.token,
+        primaryWatch.expiration,
       );
       const accountActivated = true;
 
@@ -190,11 +239,13 @@ export class OnboardingWorkflow {
 
       return {
         calendarSetup,
-        eventSync,
-        watchRegistration,
+        eventSync: aggregateEventSync,
+        watchRegistration: primaryWatch,
         policyEdgesCreated,
         projectionEnqueued,
         accountActivated,
+        scopeResults,
+        bootstrapHealth,
       };
     } catch (err) {
       // Mark account as error in D1
@@ -203,6 +254,315 @@ export class OnboardingWorkflow {
       });
       throw err;
     }
+  }
+
+  /**
+   * Re-activate errored scopes by re-running bootstrap steps only for
+   * scopes that previously failed (AC5).
+   *
+   * Accepts the list of errored scope calendar IDs. For each, attempts
+   * sync + watch + cursor registration. Returns updated scope results.
+   */
+  async reactivateErroredScopes(
+    params: OnboardingParams,
+    erroredCalendarIds: string[],
+  ): Promise<{
+    scopeResults: ScopeBootstrapResult[];
+    bootstrapHealth: BootstrapHealthStatus;
+  }> {
+    const { account_id, user_id } = params;
+
+    const provider = await this.getAccountProvider(account_id);
+    const accessToken = await this.getAccessToken(account_id);
+    const client = createCalendarProvider(provider, accessToken, this.deps.fetchFn);
+
+    // Fetch current calendar list to get display names
+    const calendars = await client.listCalendars();
+
+    const scopes: Array<{
+      calendarId: string;
+      displayName: string;
+      calendarRole: "primary" | "secondary";
+    }> = [];
+
+    for (const calendarId of erroredCalendarIds) {
+      const cal = calendars.find((c) => c.id === calendarId);
+      const displayName = cal?.summary ?? calendarId;
+      const isPrimary = cal?.primary === true;
+      scopes.push({
+        calendarId,
+        displayName,
+        calendarRole: isPrimary ? "primary" : "secondary",
+      });
+    }
+
+    const scopeResults = await this.bootstrapAllScopes(
+      client,
+      scopes,
+      account_id,
+      user_id,
+      provider,
+    );
+
+    const bootstrapHealth = this.aggregateBootstrapHealth(scopeResults);
+
+    // If any scope recovered, update D1 status to active if currently errored
+    if (bootstrapHealth.succeededScopes > 0) {
+      const row = await this.env.DB.prepare(
+        "SELECT status FROM accounts WHERE account_id = ?1",
+      )
+        .bind(account_id)
+        .first<{ status: string }>();
+
+      if (row?.status === "error") {
+        // Find first successful scope's watch for D1 update
+        const firstOk = scopeResults.find((r) => r.status === "ok");
+        if (firstOk?.watchRegistration) {
+          await this.activateAccount(
+            account_id,
+            firstOk.watchRegistration.channelId,
+            firstOk.watchRegistration.token,
+            firstOk.watchRegistration.expiration,
+          );
+        }
+      }
+    }
+
+    return { scopeResults, bootstrapHealth };
+  }
+
+  // -------------------------------------------------------------------------
+  // Scope selection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Select calendar scopes for bootstrap. Recommended defaults are
+   * auto-selected: all non-overlay calendars (primary + secondaries).
+   * The overlay calendar is excluded since it is managed by T-Minus.
+   */
+  selectBootstrapScopes(
+    calendarSetup: CalendarSetupResult,
+  ): Array<{
+    calendarId: string;
+    displayName: string;
+    calendarRole: "primary" | "secondary";
+  }> {
+    const scopes: Array<{
+      calendarId: string;
+      displayName: string;
+      calendarRole: "primary" | "secondary";
+    }> = [];
+
+    for (const cal of calendarSetup.allCalendars) {
+      // Skip the overlay calendar -- it is managed by T-Minus
+      if (cal.id === calendarSetup.overlayCalendarId) continue;
+      if (cal.summary === BUSY_OVERLAY_CALENDAR_NAME) continue;
+
+      const isPrimary = cal.primary === true;
+      scopes.push({
+        calendarId: cal.id,
+        displayName: cal.summary,
+        calendarRole: isPrimary ? "primary" : "secondary",
+      });
+    }
+
+    // Ensure primary is always first (for backward compatibility in D1 channel)
+    scopes.sort((a, b) => {
+      if (a.calendarRole === "primary") return -1;
+      if (b.calendarRole === "primary") return 1;
+      return 0;
+    });
+
+    return scopes;
+  }
+
+  // -------------------------------------------------------------------------
+  // Multi-scope bootstrap
+  // -------------------------------------------------------------------------
+
+  /**
+   * Bootstrap all selected scopes. Each scope is bootstrapped independently
+   * so that a failure in one does not block others (AC1, AC4).
+   */
+  async bootstrapAllScopes(
+    client: CalendarProvider,
+    scopes: ReadonlyArray<{
+      calendarId: string;
+      displayName: string;
+      calendarRole: "primary" | "secondary";
+    }>,
+    accountId: AccountId,
+    userId: string,
+    provider: ProviderType,
+  ): Promise<ScopeBootstrapResult[]> {
+    const results: ScopeBootstrapResult[] = [];
+
+    for (const scope of scopes) {
+      const result = await this.bootstrapSingleScope(
+        client,
+        scope,
+        accountId,
+        userId,
+        provider,
+      );
+      results.push(result);
+    }
+
+    return results;
+  }
+
+  /**
+   * Bootstrap a single calendar scope:
+   * 1. Register scope in AccountDO
+   * 2. Full event sync
+   * 3. Register watch/subscription
+   * 4. Store scoped sync cursor
+   * 5. Mark scoped sync success
+   */
+  private async bootstrapSingleScope(
+    client: CalendarProvider,
+    scope: {
+      calendarId: string;
+      displayName: string;
+      calendarRole: "primary" | "secondary";
+    },
+    accountId: AccountId,
+    userId: string,
+    provider: ProviderType,
+  ): Promise<ScopeBootstrapResult> {
+    try {
+      // Register scope in AccountDO
+      await this.upsertCalendarScope(accountId, {
+        providerCalendarId: scope.calendarId,
+        displayName: scope.displayName,
+        calendarRole: scope.calendarRole,
+        enabled: true,
+        syncEnabled: true,
+      });
+
+      // Full event sync for this scope
+      const eventSync = await this.fullEventSync(
+        client,
+        scope.calendarId,
+        accountId,
+        userId,
+        provider,
+      );
+
+      // Register watch/subscription for this scope
+      const watchRegistration = await this.registerWatchChannel(
+        client,
+        scope.calendarId,
+        accountId,
+        provider,
+      );
+
+      // Store scoped sync cursor in AccountDO
+      if (eventSync.syncToken) {
+        await this.setScopedSyncToken(
+          accountId,
+          scope.calendarId,
+          eventSync.syncToken,
+        );
+        // Also update legacy sync token for primary (backward compatibility)
+        if (scope.calendarRole === "primary") {
+          await this.setSyncToken(accountId, eventSync.syncToken);
+        }
+      }
+
+      // Mark scoped sync success
+      await this.markSyncSuccess(accountId);
+
+      return {
+        calendarId: scope.calendarId,
+        displayName: scope.displayName,
+        calendarRole: scope.calendarRole,
+        status: "ok",
+        error: null,
+        eventSync,
+        watchRegistration,
+      };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error(
+        `Onboarding: scope bootstrap failed for calendar ${scope.calendarId}: ${errorMessage}`,
+      );
+
+      return {
+        calendarId: scope.calendarId,
+        displayName: scope.displayName,
+        calendarRole: scope.calendarRole,
+        status: "error",
+        error: errorMessage,
+        eventSync: null,
+        watchRegistration: null,
+      };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Bootstrap health aggregation (AC4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Aggregate per-scope results into account-level health status.
+   * The account is healthy if at least one scope bootstrapped successfully.
+   */
+  aggregateBootstrapHealth(
+    scopeResults: readonly ScopeBootstrapResult[],
+  ): BootstrapHealthStatus {
+    const succeededScopes = scopeResults.filter(
+      (r) => r.status === "ok",
+    ).length;
+    const failedScopes = scopeResults.filter(
+      (r) => r.status === "error",
+    ).length;
+
+    const failureReasons = scopeResults
+      .filter((r) => r.status === "error" && r.error !== null)
+      .map((r) => ({
+        calendarId: r.calendarId,
+        error: r.error!,
+      }));
+
+    return {
+      totalScopes: scopeResults.length,
+      succeededScopes,
+      failedScopes,
+      healthy: succeededScopes > 0,
+      failureReasons,
+    };
+  }
+
+  /**
+   * Merge per-scope EventSyncResults into a single aggregate for backward
+   * compatibility. Primary scope's syncToken takes precedence.
+   */
+  private aggregateEventSyncResults(
+    scopeResults: readonly ScopeBootstrapResult[],
+  ): EventSyncResult {
+    let totalEvents = 0;
+    let totalDeltas = 0;
+    let pagesProcessed = 0;
+    let syncToken: string | null = null;
+
+    for (const result of scopeResults) {
+      if (result.status === "ok" && result.eventSync) {
+        totalEvents += result.eventSync.totalEvents;
+        totalDeltas += result.eventSync.totalDeltas;
+        pagesProcessed += result.eventSync.pagesProcessed;
+        // Primary scope's token takes precedence for backward compat
+        if (result.calendarRole === "primary" && result.eventSync.syncToken) {
+          syncToken = result.eventSync.syncToken;
+        }
+        // Fall back to any scope's token if primary has none
+        if (syncToken === null && result.eventSync.syncToken) {
+          syncToken = result.eventSync.syncToken;
+        }
+      }
+    }
+
+    return { totalEvents, totalDeltas, syncToken, pagesProcessed };
   }
 
   // -------------------------------------------------------------------------
@@ -308,12 +668,12 @@ export class OnboardingWorkflow {
   // -------------------------------------------------------------------------
 
   /**
-   * Paginate through all events on the primary calendar.
+   * Paginate through all events on a calendar scope.
    * Classify, normalize, and apply deltas to UserGraphDO.
    */
   async fullEventSync(
     client: CalendarProvider,
-    primaryCalendarId: string,
+    calendarId: string,
     accountId: AccountId,
     userId: string,
     provider: ProviderType,
@@ -326,7 +686,7 @@ export class OnboardingWorkflow {
 
     do {
       const response = await client.listEvents(
-        primaryCalendarId,
+        calendarId,
         undefined, // no syncToken for full sync
         pageToken,
       );
@@ -367,7 +727,7 @@ export class OnboardingWorkflow {
    */
   async registerWatchChannel(
     client: CalendarProvider,
-    primaryCalendarId: string,
+    calendarId: string,
     accountId: AccountId,
     provider: ProviderType,
   ): Promise<WatchRegistrationResult> {
@@ -380,7 +740,7 @@ export class OnboardingWorkflow {
     if (provider === "microsoft") {
       const subscription = await this.createMsSubscription(
         accountId,
-        primaryCalendarId,
+        calendarId,
         token,
       );
       return {
@@ -395,7 +755,7 @@ export class OnboardingWorkflow {
 
     // Register watch channel / subscription with provider
     const watchResponse: WatchResponse = await client.watchEvents(
-      primaryCalendarId,
+      calendarId,
       webhookUrl,
       channelId,
       token,
@@ -407,7 +767,7 @@ export class OnboardingWorkflow {
       watchResponse.channelId,
       watchResponse.resourceId,
       watchResponse.expiration,
-      primaryCalendarId,
+      calendarId,
     );
 
     return {
@@ -630,6 +990,68 @@ export class OnboardingWorkflow {
       const body = await response.text();
       throw new Error(
         `AccountDO.setSyncToken failed (${response.status}): ${body}`,
+      );
+    }
+  }
+
+  private async setScopedSyncToken(
+    accountId: AccountId,
+    providerCalendarId: string,
+    token: string,
+  ): Promise<void> {
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    const response = await stub.fetch(
+      new Request("https://account.internal/setScopedSyncToken", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_calendar_id: providerCalendarId,
+          sync_token: token,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `AccountDO.setScopedSyncToken failed (${response.status}): ${body}`,
+      );
+    }
+  }
+
+  private async upsertCalendarScope(
+    accountId: AccountId,
+    scope: {
+      providerCalendarId: string;
+      displayName: string;
+      calendarRole: string;
+      enabled: boolean;
+      syncEnabled: boolean;
+    },
+  ): Promise<void> {
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    const response = await stub.fetch(
+      new Request("https://account.internal/upsertCalendarScope", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider_calendar_id: scope.providerCalendarId,
+          display_name: scope.displayName,
+          calendar_role: scope.calendarRole,
+          enabled: scope.enabled,
+          sync_enabled: scope.syncEnabled,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `AccountDO.upsertCalendarScope failed (${response.status}): ${body}`,
       );
     }
   }
