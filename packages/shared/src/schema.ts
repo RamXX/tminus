@@ -442,6 +442,24 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS idx_outbox_unsent ON outbox(sent_at) WHERE sent_at IS NULL;
 ` as const;
 
+/**
+ * UserGraphDO migration v8: Authority markers and conflict tracking.
+ *
+ * Adds authority_markers column to canonical_events to track which
+ * authority (provider account or tminus) owns each field. Adds
+ * conflict_type and resolution columns to event_journal for recording
+ * when a provider modifies a field owned by a different authority.
+ *
+ * authority_markers is a JSON object mapping field names to authority
+ * strings (e.g., {"title": "provider:acc_01...", "location": "tminus"}).
+ * Empty {} means all fields are provider-owned (backward compatibility).
+ */
+export const USER_GRAPH_DO_MIGRATION_V8 = `
+ALTER TABLE canonical_events ADD COLUMN authority_markers TEXT DEFAULT '{}';
+ALTER TABLE event_journal ADD COLUMN conflict_type TEXT DEFAULT 'none';
+ALTER TABLE event_journal ADD COLUMN resolution TEXT;
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -478,6 +496,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 7,
     sql: USER_GRAPH_DO_MIGRATION_V7,
     description: "Add transactional outbox table for reliable queue message production",
+  },
+  {
+    version: 8,
+    sql: USER_GRAPH_DO_MIGRATION_V8,
+    description: "Add authority_markers to canonical_events, conflict_type and resolution to event_journal",
   },
 ] as const;
 

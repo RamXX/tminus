@@ -147,6 +147,7 @@ interface CanonicalEventRow {
   created_at: string;
   updated_at: string;
   constraint_id: string | null;
+  authority_markers: string;
 }
 
 // ConstraintRow is now defined in constraint-mixin.ts.
@@ -197,6 +198,171 @@ interface JournalRow {
   change_type: string;
   patch_json: string | null;
   reason: string | null;
+  conflict_type: string;
+  resolution: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Authority tracking types and pure functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps field names to authority strings.
+ * Authority format: "provider:<account_id>" or "tminus".
+ * Empty {} means all fields are provider-owned (backward compat).
+ */
+export type AuthorityMarkers = Record<string, string>;
+
+/**
+ * The set of mutable fields on canonical_events that authority tracking
+ * applies to. These are the fields providers can modify via delta sync.
+ */
+export const AUTHORITY_TRACKED_FIELDS = [
+  "title",
+  "description",
+  "location",
+  "start_ts",
+  "end_ts",
+  "timezone",
+  "status",
+  "visibility",
+  "transparency",
+  "recurrence_rule",
+] as const;
+
+export type AuthorityTrackedField = (typeof AUTHORITY_TRACKED_FIELDS)[number];
+
+/**
+ * Result of conflict detection for a single field.
+ */
+export interface FieldConflict {
+  readonly field: AuthorityTrackedField;
+  readonly current_authority: string;
+  readonly incoming_authority: string;
+  readonly old_value: unknown;
+  readonly new_value: unknown;
+}
+
+/**
+ * Build authority markers for a new INSERT. All non-null fields are
+ * marked as owned by the given provider account.
+ */
+export function buildAuthorityMarkersForInsert(
+  accountId: string,
+  fieldValues: Record<string, unknown>,
+): AuthorityMarkers {
+  const markers: AuthorityMarkers = {};
+  const authority = `provider:${accountId}`;
+
+  for (const field of AUTHORITY_TRACKED_FIELDS) {
+    if (fieldValues[field] !== null && fieldValues[field] !== undefined) {
+      markers[field] = authority;
+    }
+  }
+
+  return markers;
+}
+
+/**
+ * Resolve authority markers for an existing event. If markers are empty
+ * (legacy/backward compat), treat all existing non-null fields as
+ * provider-owned by the origin account.
+ */
+export function resolveAuthorityMarkers(
+  raw: string | null | undefined,
+  originAccountId: string,
+  currentRow: Record<string, unknown>,
+): AuthorityMarkers {
+  const parsed: AuthorityMarkers = raw ? JSON.parse(raw) : {};
+
+  // If markers exist and are populated, use as-is
+  if (Object.keys(parsed).length > 0) return parsed;
+
+  // Backward compatibility: treat all non-null fields as provider-owned
+  const markers: AuthorityMarkers = {};
+  const authority = `provider:${originAccountId}`;
+  for (const field of AUTHORITY_TRACKED_FIELDS) {
+    if (currentRow[field] !== null && currentRow[field] !== undefined) {
+      markers[field] = authority;
+    }
+  }
+
+  return markers;
+}
+
+/**
+ * Detect authority conflicts when a provider update modifies fields
+ * owned by a different authority. Returns the list of conflicting fields.
+ *
+ * Resolution rules:
+ * - Provider modifies provider-owned field (same authority): ALLOW, no conflict
+ * - Provider modifies tminus-owned field: CONFLICT, provider wins but logged
+ * - Provider modifies field owned by different provider: CONFLICT, incoming wins but logged
+ */
+export function detectAuthorityConflicts(
+  incomingAccountId: string,
+  currentMarkers: AuthorityMarkers,
+  currentRow: Record<string, unknown>,
+  incomingValues: Record<string, unknown>,
+): FieldConflict[] {
+  const conflicts: FieldConflict[] = [];
+  const incomingAuthority = `provider:${incomingAccountId}`;
+
+  for (const field of AUTHORITY_TRACKED_FIELDS) {
+    const incomingVal = incomingValues[field];
+    const currentVal = currentRow[field];
+
+    // Skip fields not being changed
+    if (incomingVal === undefined) continue;
+
+    // Normalize for comparison: null == null, same string == same
+    if (incomingVal === currentVal) continue;
+    // Also handle numeric vs boolean (all_day is stored as 0/1)
+    if (String(incomingVal) === String(currentVal)) continue;
+
+    // Field is being changed -- check authority
+    const currentAuthority = currentMarkers[field];
+
+    // No authority recorded = provider-owned by default (backward compat)
+    if (!currentAuthority) continue;
+
+    // Same authority = no conflict
+    if (currentAuthority === incomingAuthority) continue;
+
+    // Different authority = conflict (provider wins, but we log it)
+    conflicts.push({
+      field,
+      current_authority: currentAuthority,
+      incoming_authority: incomingAuthority,
+      old_value: currentVal,
+      new_value: incomingVal,
+    });
+  }
+
+  return conflicts;
+}
+
+/**
+ * Compute updated authority markers after an update. The incoming
+ * provider claims authority over all non-null fields it provides.
+ * Fields not being changed retain their existing authority.
+ */
+export function updateAuthorityMarkers(
+  currentMarkers: AuthorityMarkers,
+  incomingAccountId: string,
+  incomingValues: Record<string, unknown>,
+): AuthorityMarkers {
+  const updated = { ...currentMarkers };
+  const authority = `provider:${incomingAccountId}`;
+
+  for (const field of AUTHORITY_TRACKED_FIELDS) {
+    const val = incomingValues[field];
+    if (val !== undefined && val !== null) {
+      updated[field] = authority;
+    }
+  }
+
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +758,28 @@ export class UserGraphDO {
   }
 
   /**
+   * Extract the tracked field values from a delta event payload into a flat
+   * Record suitable for authority marker functions. Maps the EventDateTime
+   * structure to the start_ts/end_ts/timezone column names.
+   */
+  private extractFieldValues(
+    evt: NonNullable<ProviderDelta["event"]>,
+  ): Record<string, unknown> {
+    return {
+      title: evt.title ?? null,
+      description: evt.description ?? null,
+      location: evt.location ?? null,
+      start_ts: evt.start.dateTime ?? evt.start.date ?? "",
+      end_ts: evt.end.dateTime ?? evt.end.date ?? "",
+      timezone: evt.start.timeZone ?? null,
+      status: evt.status ?? "confirmed",
+      visibility: evt.visibility ?? "default",
+      transparency: evt.transparency ?? "opaque",
+      recurrence_rule: evt.recurrence_rule ?? null,
+    };
+  }
+
+  /**
    * Find a single legacy canonical event for the same origin_event_id that can
    * be safely rebound to the current account.
    *
@@ -671,9 +859,12 @@ export class UserGraphDO {
 
     if (existingRows.length > 0) {
       // Event already exists -- update it instead of inserting a duplicate.
-      // Delegate to handleUpdated which already handles the update logic.
       const canonicalId = existingRows[0].canonical_event_id;
       const newVersion = existingRows[0].version + 1;
+
+      // Compute updated authority markers for dedup update
+      const fieldValues = this.extractFieldValues(evt);
+      const dedupMarkers = buildAuthorityMarkersForInsert(accountId, fieldValues);
 
       this.sql.exec(
         `UPDATE canonical_events SET
@@ -681,7 +872,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
-          version = ?, updated_at = datetime('now')
+          version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         evt.title ?? null,
         evt.description ?? null,
@@ -695,6 +886,7 @@ export class UserGraphDO {
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
         newVersion,
+        JSON.stringify(dedupMarkers),
         canonicalId,
       );
 
@@ -718,6 +910,10 @@ export class UserGraphDO {
       const canonicalId = legacy.canonical_event_id;
       const newVersion = legacy.version + 1;
 
+      // On legacy rebind, all fields become owned by the new provider
+      const fieldValues = this.extractFieldValues(evt);
+      const rebindMarkers = buildAuthorityMarkersForInsert(accountId, fieldValues);
+
       this.sql.exec(
         `UPDATE canonical_events SET
           origin_account_id = ?,
@@ -725,7 +921,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
-          version = ?, updated_at = datetime('now')
+          version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         accountId,
         evt.title ?? null,
@@ -740,6 +936,7 @@ export class UserGraphDO {
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
         newVersion,
+        JSON.stringify(rebindMarkers),
         canonicalId,
       );
 
@@ -755,13 +952,17 @@ export class UserGraphDO {
     // New event -- insert with a fresh canonical_event_id
     const canonicalId = generateId("event");
 
+    // Build authority markers: all non-null fields owned by this provider
+    const fieldValues = this.extractFieldValues(evt);
+    const markers = buildAuthorityMarkersForInsert(accountId, fieldValues);
+
     this.sql.exec(
       `INSERT INTO canonical_events (
         canonical_event_id, origin_account_id, origin_event_id,
         title, description, location, start_ts, end_ts, timezone,
         all_day, status, visibility, transparency, recurrence_rule,
-        source, version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provider', 1, datetime('now'), datetime('now'))`,
+        source, version, authority_markers, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provider', 1, ?, datetime('now'), datetime('now'))`,
       canonicalId,
       accountId,
       delta.origin_event_id,
@@ -776,6 +977,7 @@ export class UserGraphDO {
       evt.visibility ?? "default",
       evt.transparency ?? "opaque",
       evt.recurrence_rule ?? null,
+      JSON.stringify(markers),
     );
 
     this.writeJournal(canonicalId, "created", `provider:${accountId}`, {
@@ -793,10 +995,11 @@ export class UserGraphDO {
       throw new Error("Updated delta must include event payload");
     }
 
-    // Find existing canonical event by origin keys
+    // Find existing canonical event by origin keys -- fetch full row for
+    // authority conflict detection
     const rows = this.sql
-      .exec<{ canonical_event_id: string; version: number }>(
-        `SELECT canonical_event_id, version FROM canonical_events
+      .exec<CanonicalEventRow>(
+        `SELECT * FROM canonical_events
          WHERE origin_account_id = ? AND origin_event_id = ?`,
         accountId,
         delta.origin_event_id,
@@ -806,10 +1009,12 @@ export class UserGraphDO {
     let canonicalId: string;
     let newVersion: number;
     let legacyRebindFrom: string | null = null;
+    let currentRow: CanonicalEventRow | null = null;
 
     if (rows.length > 0) {
-      canonicalId = rows[0].canonical_event_id;
-      newVersion = rows[0].version + 1;
+      currentRow = rows[0];
+      canonicalId = currentRow.canonical_event_id;
+      newVersion = currentRow.version + 1;
     } else {
       const legacy = this.findLegacyRebindCandidate(
         accountId,
@@ -823,12 +1028,55 @@ export class UserGraphDO {
       canonicalId = legacy.canonical_event_id;
       newVersion = legacy.version + 1;
       legacyRebindFrom = legacy.origin_account_id;
+
+      // Fetch full row for the legacy candidate for authority tracking
+      const legacyRows = this.sql
+        .exec<CanonicalEventRow>(
+          `SELECT * FROM canonical_events WHERE canonical_event_id = ?`,
+          canonicalId,
+        )
+        .toArray();
+      currentRow = legacyRows.length > 0 ? legacyRows[0] : null;
     }
 
     const evt = delta.event;
 
     const startTs = evt.start.dateTime ?? evt.start.date ?? "";
     const endTs = evt.end.dateTime ?? evt.end.date ?? "";
+
+    // Authority conflict detection: compare incoming field values against
+    // current authority markers before applying the update
+    const incomingValues = this.extractFieldValues(evt);
+    let conflicts: FieldConflict[] = [];
+    let currentMarkers: AuthorityMarkers = {};
+
+    if (currentRow) {
+      currentMarkers = resolveAuthorityMarkers(
+        currentRow.authority_markers,
+        currentRow.origin_account_id,
+        currentRow as unknown as Record<string, unknown>,
+      );
+
+      // Skip conflict detection for legacy rebinds: the old account is
+      // orphaned and the rebind is an intentional ownership transfer,
+      // not an authority dispute.
+      if (!legacyRebindFrom) {
+        conflicts = detectAuthorityConflicts(
+          accountId,
+          currentMarkers,
+          currentRow as unknown as Record<string, unknown>,
+          incomingValues,
+        );
+      }
+    }
+
+    // Compute updated authority markers: incoming provider claims all
+    // fields it provides (provider wins, conflicts are logged)
+    const updatedMarkers = updateAuthorityMarkers(
+      currentMarkers,
+      accountId,
+      incomingValues,
+    );
 
     if (legacyRebindFrom) {
       this.sql.exec(
@@ -838,7 +1086,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
-          version = ?, updated_at = datetime('now')
+          version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         accountId,
         evt.title ?? null,
@@ -853,6 +1101,7 @@ export class UserGraphDO {
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
         newVersion,
+        JSON.stringify(updatedMarkers),
         canonicalId,
       );
     } else {
@@ -862,7 +1111,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
-          version = ?, updated_at = datetime('now')
+          version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         evt.title ?? null,
         evt.description ?? null,
@@ -876,10 +1125,12 @@ export class UserGraphDO {
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
         newVersion,
+        JSON.stringify(updatedMarkers),
         canonicalId,
       );
     }
 
+    // Standard journal entry for the update
     const patch: Record<string, unknown> = {
       origin_event_id: delta.origin_event_id,
       new_version: newVersion,
@@ -888,6 +1139,30 @@ export class UserGraphDO {
       patch.legacy_rebind_from = legacyRebindFrom;
     }
     this.writeJournal(canonicalId, "updated", `provider:${accountId}`, patch);
+
+    // Record authority conflicts as separate journal entries
+    if (conflicts.length > 0) {
+      const resolution = {
+        strategy: "provider_wins",
+        conflicts: conflicts.map((c) => ({
+          field: c.field,
+          current_authority: c.current_authority,
+          incoming_authority: c.incoming_authority,
+          old_value: c.old_value,
+          new_value: c.new_value,
+        })),
+      };
+
+      this.writeJournal(
+        canonicalId,
+        "authority_conflict",
+        `provider:${accountId}`,
+        { origin_event_id: delta.origin_event_id },
+        undefined,
+        "field_override",
+        JSON.stringify(resolution),
+      );
+    }
 
     return canonicalId;
   }
@@ -4519,18 +4794,23 @@ export class UserGraphDO {
     actor: string,
     patch: Record<string, unknown>,
     reason?: string,
+    conflictType?: string,
+    resolution?: string,
   ): void {
     const journalId = generateId("journal");
     this.sql.exec(
       `INSERT INTO event_journal (
-        journal_id, canonical_event_id, ts, actor, change_type, patch_json, reason
-      ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?)`,
+        journal_id, canonical_event_id, ts, actor, change_type, patch_json, reason,
+        conflict_type, resolution
+      ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`,
       journalId,
       canonicalEventId,
       actor,
       changeType,
       JSON.stringify(patch),
       reason ?? null,
+      conflictType ?? "none",
+      resolution ?? null,
     );
   }
 
