@@ -716,6 +716,13 @@ async function processAndApplyDeltas(
 ): Promise<number> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
+  // TM-9eu: Collect modified mirror events for writeback to canonical.
+  // Each entry holds the raw provider event (for re-normalization) and the
+  // mirror's provider_event_id (for canonical resolution).
+  const managedMirrorModifiedEvents: Array<{
+    rawEvent: unknown;
+    providerEventId: string;
+  }> = [];
   // Cross-scope dedup: track origin_event_ids already seen so that the same
   // event appearing in multiple calendar views produces only one delta.
   const seenOriginEventIds = new Set<string>();
@@ -791,6 +798,17 @@ async function processAndApplyDeltas(
         delta.origin_event_id.length > 0
       ) {
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
+      } else if (
+        // TM-9eu: Mirror-side modifications write back to the canonical event.
+        // Collect the raw event for re-normalization with full payload.
+        delta.type === "updated" &&
+        typeof delta.origin_event_id === "string" &&
+        delta.origin_event_id.length > 0
+      ) {
+        managedMirrorModifiedEvents.push({
+          rawEvent,
+          providerEventId: delta.origin_event_id,
+        });
       }
       continue;
     }
@@ -842,7 +860,7 @@ async function processAndApplyDeltas(
     deltas.push(delta);
   }
 
-  if (deltas.length > 0 || managedMirrorDeletedEventIds.size > 0) {
+  if (deltas.length > 0 || managedMirrorDeletedEventIds.size > 0 || managedMirrorModifiedEvents.length > 0) {
     // Look up user_id from D1 accounts table for the account_id
     if (!userId) {
       userId = await lookupUserId(accountId, env);
@@ -864,6 +882,17 @@ async function processAndApplyDeltas(
       userId!,
       [...managedMirrorDeletedEventIds],
       env,
+    );
+  }
+
+  // TM-9eu: Write back mirror-side modifications to their canonical events.
+  if (managedMirrorModifiedEvents.length > 0) {
+    await applyManagedMirrorModifications(
+      accountId,
+      userId!,
+      managedMirrorModifiedEvents,
+      env,
+      provider,
     );
   }
 
@@ -1329,6 +1358,142 @@ async function applyManagedMirrorDeletes(
     if (!deleted) {
       console.warn(
         `sync-consumer: managed mirror delete resolved canonical but delete returned false (canonical_event_id=${canonicalEventId})`,
+      );
+    }
+  }
+}
+
+/**
+ * TM-9eu: Write back mirror-side modifications to their canonical events.
+ *
+ * When a user edits a mirrored event in the target calendar, the change
+ * must propagate back to the canonical event so the projection engine can
+ * cascade it to all other mirrors.
+ *
+ * For each modified mirror:
+ * 1. Resolve provider_event_id -> canonical_event_id via findCanonicalByMirror
+ * 2. Fetch the canonical event to obtain its origin keys
+ * 3. Re-normalize the raw provider event as "origin" to extract the full payload
+ * 4. Emit an "updated" ProviderDelta using the canonical's origin keys
+ * 5. The existing projection engine cascades to all mirrors automatically
+ */
+async function applyManagedMirrorModifications(
+  accountId: AccountId,
+  userId: string,
+  modifiedEvents: Array<{ rawEvent: unknown; providerEventId: string }>,
+  env: Env,
+  provider: ProviderType,
+): Promise<void> {
+  if (modifiedEvents.length === 0) return;
+
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const writebackDeltas: ProviderDelta[] = [];
+
+  for (const { rawEvent, providerEventId } of modifiedEvents) {
+    // Step 1: Resolve mirror -> canonical
+    const canonicalEventId = await findCanonicalIdByMirror(
+      userGraphStub,
+      accountId,
+      providerEventId,
+    );
+    if (!canonicalEventId) {
+      // AC5: Orphaned mirror -- graceful degradation with warning log
+      console.warn(
+        `sync-consumer: mirror writeback skipped, orphaned mirror (account=${accountId}, provider_event_id=${providerEventId})`,
+      );
+      continue;
+    }
+
+    // Step 2: Fetch canonical event to get origin keys
+    const canonicalResponse = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/getCanonicalEvent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ canonical_event_id: canonicalEventId }),
+      }),
+    );
+
+    if (!canonicalResponse.ok) {
+      const body = await canonicalResponse.text();
+      console.warn(
+        `sync-consumer: mirror writeback skipped, getCanonicalEvent failed (canonical_event_id=${canonicalEventId}): ${body}`,
+      );
+      continue;
+    }
+
+    const canonicalResult = (await canonicalResponse.json()) as {
+      event: { origin_account_id: string; origin_event_id: string };
+    } | null;
+
+    if (!canonicalResult?.event) {
+      console.warn(
+        `sync-consumer: mirror writeback skipped, canonical event not found (canonical_event_id=${canonicalEventId})`,
+      );
+      continue;
+    }
+
+    // Step 3: Re-normalize the raw provider event as "origin" to get the full
+    // event payload (managed_mirror classification strips the payload).
+    const originDelta = normalizeProviderEvent(
+      provider,
+      rawEvent,
+      accountId,
+      "origin",
+    );
+
+    if (!originDelta.event) {
+      console.warn(
+        `sync-consumer: mirror writeback skipped, no event payload after re-normalization (provider_event_id=${providerEventId})`,
+      );
+      continue;
+    }
+
+    // Step 4: Construct writeback delta using canonical's origin keys
+    // so the DO's handleUpdated can look up the right canonical event.
+    const writebackDelta: ProviderDelta = {
+      type: "updated",
+      origin_event_id: canonicalResult.event.origin_event_id,
+      origin_account_id: canonicalResult.event.origin_account_id as AccountId,
+      event: originDelta.event,
+    };
+
+    writebackDeltas.push(writebackDelta);
+
+    // AC4: Audit log for mirror writeback traceability
+    console.info(
+      `sync-consumer: mirror_writeback (account=${accountId}, provider_event_id=${providerEventId}, canonical_event_id=${canonicalEventId}, origin_account_id=${canonicalResult.event.origin_account_id})`,
+    );
+  }
+
+  if (writebackDeltas.length === 0) return;
+
+  // Step 5: Apply writeback deltas through the standard path, grouped by
+  // origin_account_id (deltas from different canonical sources must be
+  // sent with the correct account_id for the DO lookup).
+  const deltasByOriginAccount = new Map<AccountId, ProviderDelta[]>();
+  for (const delta of writebackDeltas) {
+    const existing = deltasByOriginAccount.get(delta.origin_account_id) ?? [];
+    existing.push(delta);
+    deltasByOriginAccount.set(delta.origin_account_id, existing);
+  }
+
+  for (const [originAccountId, groupedDeltas] of deltasByOriginAccount) {
+    const response = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/applyProviderDelta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_id: originAccountId,
+          deltas: groupedDeltas,
+        }),
+      }),
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `UserGraphDO.applyProviderDelta (mirror_writeback) failed (${response.status}): ${body}`,
       );
     }
   }

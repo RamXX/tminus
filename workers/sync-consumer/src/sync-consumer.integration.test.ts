@@ -302,6 +302,12 @@ interface UserGraphDOState {
     target_calendar_id?: string | null;
   }>;
   mirrorLookupByProviderEventId: Record<string, string>;
+  // TM-9eu: Canonical events lookup for mirror writeback (getCanonicalEvent)
+  canonicalEventsById: Record<
+    string,
+    { event: { origin_account_id: string; origin_event_id: string }; mirrors: unknown[] }
+  >;
+  getCanonicalEventCalls: Array<{ canonical_event_id: string }>;
 }
 
 function createMockAccountDO(state: AccountDOState) {
@@ -477,6 +483,18 @@ function createMockUserGraphDO(state: UserGraphDOState) {
           headers: { "Content-Type": "application/json" },
         });
       }
+      // TM-9eu: getCanonicalEvent support for mirror writeback tests
+      if (url.pathname === "/getCanonicalEvent") {
+        const body = (await request.json()) as {
+          canonical_event_id: string;
+        };
+        state.getCanonicalEventCalls.push(body);
+        const result = state.canonicalEventsById[body.canonical_event_id] ?? null;
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response("Not found", { status: 404 });
     },
   };
@@ -588,6 +606,8 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       canonicalOriginEvents: [],
       activeMirrors: [],
       mirrorLookupByProviderEventId: {},
+      canonicalEventsById: {},
+      getCanonicalEventCalls: [],
     };
 
     env = createMockEnv({
@@ -1020,6 +1040,155 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
         source: `provider:${ACCOUNT_A.account_id}`,
       },
     ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // TM-9eu: Mirror-side modifications write back to canonical
+  // -------------------------------------------------------------------------
+
+  it("TM-9eu: modified managed mirror writes back to canonical event", async () => {
+    // Setup: mirror lookup resolves to a canonical event
+    const CANONICAL_EVENT_ID = "evt_01HXYZ00000000000000000001";
+    const ORIGIN_ACCOUNT_ID = "acc_01HXYZ0000000000000000000B";
+    const ORIGIN_EVENT_ID = "google_evt_origin_100";
+
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_200: CANONICAL_EVENT_ID,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [CANONICAL_EVENT_ID]: {
+        event: {
+          origin_account_id: ORIGIN_ACCOUNT_ID,
+          origin_event_id: ORIGIN_EVENT_ID,
+        },
+        mirrors: [],
+      },
+    };
+
+    // The mirror event was modified (title changed) -- NOT deleted
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeManagedMirrorEvent({
+          summary: "Updated Mirror Title",
+          location: "New Room",
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-mirror-writeback-1",
+      resource_id: "resource-mirror-writeback-1",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // Verify: findCanonicalByMirror was called for the mirror
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: ACCOUNT_A.account_id,
+        provider_event_id: "google_evt_mirror_200",
+      },
+    ]);
+
+    // Verify: getCanonicalEvent was called to fetch origin keys
+    expect(userGraphDOState.getCanonicalEventCalls).toEqual([
+      { canonical_event_id: CANONICAL_EVENT_ID },
+    ]);
+
+    // Verify: applyProviderDelta was called with the canonical's origin keys
+    // and the mirror's modified event payload
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    const call = userGraphDOState.applyDeltaCalls[0];
+    expect(call.account_id).toBe(ORIGIN_ACCOUNT_ID);
+    expect(call.deltas).toHaveLength(1);
+
+    const delta = call.deltas[0] as Record<string, unknown>;
+    expect(delta.type).toBe("updated");
+    expect(delta.origin_event_id).toBe(ORIGIN_EVENT_ID);
+    expect(delta.origin_account_id).toBe(ORIGIN_ACCOUNT_ID);
+    expect(delta.event).toBeDefined();
+
+    const evt = delta.event as Record<string, unknown>;
+    expect(evt.title).toBe("Updated Mirror Title");
+    expect(evt.location).toBe("New Room");
+
+    // Verify: no canonical deletes occurred (modification, not deletion)
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+  });
+
+  it("TM-9eu: mirror deletion still uses existing delete path (not writeback)", async () => {
+    // This verifies AC3: mirror delete behavior is unchanged
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_200: "evt_01HXYZ00000000000000000001",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeManagedMirrorEvent({ status: "cancelled" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-mirror-delete-unchanged",
+      resource_id: "resource-mirror-delete-unchanged",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // Delete path: findCanonicalByMirror + deleteCanonicalEvent (no applyProviderDelta)
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    // getCanonicalEvent should NOT be called for deletes
+    expect(userGraphDOState.getCanonicalEventCalls).toHaveLength(0);
+  });
+
+  it("TM-9eu: orphaned mirror (no canonical found) is silently skipped", async () => {
+    // mirrorLookupByProviderEventId is empty -- no canonical for this mirror
+    userGraphDOState.mirrorLookupByProviderEventId = {};
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeManagedMirrorEvent({
+          summary: "Orphaned Mirror Edit",
+        }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-mirror-orphan-1",
+      resource_id: "resource-mirror-orphan-1",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // No applyProviderDelta or deleteCanonicalEvent calls
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+    // getCanonicalEvent should NOT be called (we short-circuited)
+    expect(userGraphDOState.getCanonicalEventCalls).toHaveLength(0);
+
+    // Verify warning was logged for orphaned mirror
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("mirror writeback skipped, orphaned mirror"),
+    );
+
+    warnSpy.mockRestore();
   });
 
   it("google incremental sync reads overlay scopes and propagates overlay deletes", async () => {
@@ -2573,6 +2742,8 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
       canonicalOriginEvents: [],
       activeMirrors: [],
       mirrorLookupByProviderEventId: {},
+      canonicalEventsById: {},
+      getCanonicalEventCalls: [],
     };
 
     env = createMockEnv({
