@@ -17,25 +17,43 @@
  * No more legacy prop-passing route wrappers.
  */
 
+import { lazy, Suspense } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { ApiProvider } from "./lib/api-provider";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppShell } from "./components/AppShell";
-import { Login } from "./pages/Login";
-import { Calendar } from "./pages/Calendar";
-import { Accounts } from "./pages/Accounts";
-import { SyncStatus } from "./pages/SyncStatus";
-import { Policies } from "./pages/Policies";
-import { ErrorRecovery } from "./pages/ErrorRecovery";
-import { Billing } from "./pages/Billing";
-import { Scheduling } from "./pages/Scheduling";
-import { Governance } from "./pages/Governance";
-import { Relationships } from "./pages/Relationships";
-import { Reconnections } from "./pages/Reconnections";
-import { Admin } from "./pages/Admin";
-import { Onboarding } from "./pages/Onboarding";
-import { ProviderHealth } from "./pages/ProviderHealth";
+
+// ---------------------------------------------------------------------------
+// Lazy-loaded page components (TM-w9ql: code-splitting to reduce bundle size)
+// ---------------------------------------------------------------------------
+
+const Login = lazy(() => import("./pages/Login").then((m) => ({ default: m.Login })));
+const Calendar = lazy(() => import("./pages/Calendar").then((m) => ({ default: m.Calendar })));
+const Accounts = lazy(() => import("./pages/Accounts").then((m) => ({ default: m.Accounts })));
+const SyncStatus = lazy(() => import("./pages/SyncStatus").then((m) => ({ default: m.SyncStatus })));
+const Policies = lazy(() => import("./pages/Policies").then((m) => ({ default: m.Policies })));
+const ErrorRecovery = lazy(() => import("./pages/ErrorRecovery").then((m) => ({ default: m.ErrorRecovery })));
+const Billing = lazy(() => import("./pages/Billing").then((m) => ({ default: m.Billing })));
+const Scheduling = lazy(() => import("./pages/Scheduling").then((m) => ({ default: m.Scheduling })));
+const Governance = lazy(() => import("./pages/Governance").then((m) => ({ default: m.Governance })));
+const Relationships = lazy(() => import("./pages/Relationships").then((m) => ({ default: m.Relationships })));
+const Reconnections = lazy(() => import("./pages/Reconnections").then((m) => ({ default: m.Reconnections })));
+const Admin = lazy(() => import("./pages/Admin").then((m) => ({ default: m.Admin })));
+const Onboarding = lazy(() => import("./pages/Onboarding").then((m) => ({ default: m.Onboarding })));
+const ProviderHealth = lazy(() => import("./pages/ProviderHealth").then((m) => ({ default: m.ProviderHealth })));
+
+// ---------------------------------------------------------------------------
+// Suspense loading fallback
+// ---------------------------------------------------------------------------
+
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center min-h-[200px]">
+      <span className="text-muted-foreground text-sm">Loading...</span>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Auth-aware route wrapper
@@ -114,12 +132,14 @@ export function App() {
       <AuthProvider>
         <ApiProvider>
           <HashRouter>
-            <Routes>
-              <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
-              <Route path="/onboard" element={<RequireAuth><Onboarding /></RequireAuth>} />
-              <Route path="/" element={<DefaultRoute />} />
-              <Route path="/*" element={<AuthenticatedRoutes />} />
-            </Routes>
+            <Suspense fallback={<PageLoader />}>
+              <Routes>
+                <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
+                <Route path="/onboard" element={<RequireAuth><Onboarding /></RequireAuth>} />
+                <Route path="/" element={<DefaultRoute />} />
+                <Route path="/*" element={<AuthenticatedRoutes />} />
+              </Routes>
+            </Suspense>
           </HashRouter>
         </ApiProvider>
       </AuthProvider>

@@ -23,9 +23,32 @@
  *   AC4: Reputation scores computed
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
 import { App } from "./App";
+
+// Pre-load all lazy-loaded page modules so React.lazy() resolves synchronously
+// during tests. Without this, dynamic import() under fake timers can race with
+// act() and produce flaky test failures.
+beforeAll(async () => {
+  await Promise.all([
+    import("./pages/Login"),
+    import("./pages/Calendar"),
+    import("./pages/Accounts"),
+    import("./pages/SyncStatus"),
+    import("./pages/Policies"),
+    import("./pages/ErrorRecovery"),
+    import("./pages/Billing"),
+    import("./pages/Scheduling"),
+    import("./pages/Governance"),
+    import("./pages/Relationships"),
+    import("./pages/Reconnections"),
+    import("./pages/Admin"),
+    import("./pages/Onboarding"),
+    import("./pages/ProviderHealth"),
+  ]);
+});
+
 import type {
   Relationship,
   ReputationScores,
@@ -448,6 +471,22 @@ function mockResponse(status: number, body: unknown): Response {
 // ---------------------------------------------------------------------------
 
 /**
+ * Flush pending microtasks (e.g. React.lazy import resolution) under fake timers.
+ * Multiple flushes are needed because lazy-loaded components resolve asynchronously.
+ */
+async function flushLazy() {
+  // Flush pending timers and microtasks. Page modules are pre-loaded via
+  // beforeAll, so React.lazy() resolves synchronously. Two flushes cover the
+  // initial Suspense resolution and any subsequent data-fetching state updates.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+}
+
+/**
  * Navigate to a hash route and flush the component update cycle.
  */
 async function navigateTo(hash: string) {
@@ -455,9 +494,7 @@ async function navigateTo(hash: string) {
     window.location.hash = hash;
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -472,12 +509,7 @@ async function performLogin() {
   });
   fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
 
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -485,9 +517,7 @@ async function performLogin() {
  */
 async function renderAndLogin() {
   render(<App />);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
   await performLogin();
 }
 
@@ -599,9 +629,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Submit
       fireEvent.click(screen.getByTestId("submit-create-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Verify POST was called
       const createCalls = mockFetchData.calls.filter(
@@ -677,9 +705,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Click Drift Report button
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Drift report is shown
       expect(screen.getByTestId("drift-report")).toBeInTheDocument();
@@ -697,9 +723,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Mike Torres: 46 days overdue, red
       expect(screen.getByTestId("drift-days-rel_friend_02")).toHaveTextContent(
@@ -726,9 +750,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const driftCalls = mockFetchData.calls.filter(
         (c) => c.url === "/api/v1/drift-report" && c.method === "GET",
@@ -742,9 +764,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("drift-name-rel_friend_02")).toHaveTextContent("Mike Torres");
       expect(screen.getByTestId("drift-name-rel_investor_03")).toHaveTextContent("Elena Vasquez");
@@ -757,17 +777,13 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("drift-report")).toBeInTheDocument();
 
       fireEvent.click(screen.getByTestId("back-to-list-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("contact-list")).toBeInTheDocument();
     });
@@ -784,9 +800,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Click the first contact (Sarah Chen, who has outcomes)
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Detail view is shown
       expect(screen.getByTestId("contact-detail")).toBeInTheDocument();
@@ -806,9 +820,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Outcome types
       expect(screen.getByTestId("outcome-type-out_01")).toHaveTextContent("positive");
@@ -822,9 +834,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const outcome1 = screen.getByTestId("outcome-out_01");
       expect(within(outcome1).getByText("Attended quarterly review meeting")).toBeInTheDocument();
@@ -841,9 +851,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const outcomeCalls = mockFetchData.calls.filter(
         (c) =>
@@ -861,9 +869,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Click James Park (no outcomes)
       fireEvent.click(screen.getByTestId("contact-row-rel_colleague_04"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("outcomes-empty")).toBeInTheDocument();
       expect(
@@ -877,9 +883,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("detail-category")).toHaveTextContent("Professional");
       expect(screen.getByTestId("detail-drift")).toHaveTextContent("On Track");
@@ -896,9 +900,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("reputation-section")).toBeInTheDocument();
       expect(screen.getByTestId("reputation-scores")).toBeInTheDocument();
@@ -910,9 +912,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("score-overall")).toHaveTextContent("91/100");
     });
@@ -923,9 +923,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("score-reliability")).toHaveTextContent("95/100");
       expect(screen.getByTestId("score-responsiveness")).toHaveTextContent("90/100");
@@ -938,9 +936,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("score-interactions")).toHaveTextContent("15");
       expect(screen.getByTestId("score-positive")).toHaveTextContent("12");
@@ -953,9 +949,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
 
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const repCalls = mockFetchData.calls.filter(
         (c) =>
@@ -974,9 +968,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
     it("full flow: login -> calendar -> relationships -> detail w/ reputation -> drift report -> back", async () => {
       // -- STEP 1: Login --
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByText("T-Minus")).toBeInTheDocument();
       await performLogin();
@@ -1005,9 +997,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // -- STEP 4: Open contact detail with reputation --
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Detail view loaded with all data
       expect(screen.getByTestId("contact-detail")).toBeInTheDocument();
@@ -1039,17 +1029,13 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // -- STEP 5: Back to list, then open drift report --
       fireEvent.click(screen.getByTestId("back-to-list-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("contact-list")).toBeInTheDocument();
 
       fireEvent.click(screen.getByTestId("drift-report-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("drift-report")).toBeInTheDocument();
       expect(screen.getByTestId("drift-entries")).toBeInTheDocument();
@@ -1066,9 +1052,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // -- STEP 6: Back to list, navigate back to calendar --
       fireEvent.click(screen.getByTestId("back-to-list-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("contact-list")).toBeInTheDocument();
 
@@ -1089,9 +1073,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Open detail
       fireEvent.click(screen.getByTestId("contact-row-rel_client_01"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Click edit
       fireEvent.click(screen.getByTestId("edit-btn"));
@@ -1108,9 +1090,7 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Save
       fireEvent.click(screen.getByTestId("save-edit-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // PUT call was made
       const putCalls = mockFetchData.calls.filter(
@@ -1136,18 +1116,14 @@ describe("Phase 4A E2E Validation -- Relationship Graph Pipeline", () => {
       // Open detail of colleague
       fireEvent.click(screen.getByTestId("contact-row-rel_colleague_04"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByTestId("detail-name")).toHaveTextContent("James Park");
 
       // Delete
       fireEvent.click(screen.getByTestId("delete-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // DELETE call was made
       const deleteCalls = mockFetchData.calls.filter(

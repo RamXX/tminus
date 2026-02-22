@@ -14,9 +14,31 @@
  * hitting real network calls.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, fireEvent } from "@testing-library/react";
 import { App } from "./App";
+
+// Pre-load all lazy-loaded page modules so React.lazy() resolves synchronously
+// during tests. Without this, dynamic import() under fake timers can race with
+// act() and produce flaky test failures.
+beforeAll(async () => {
+  await Promise.all([
+    import("./pages/Login"),
+    import("./pages/Calendar"),
+    import("./pages/Accounts"),
+    import("./pages/SyncStatus"),
+    import("./pages/Policies"),
+    import("./pages/ErrorRecovery"),
+    import("./pages/Billing"),
+    import("./pages/Scheduling"),
+    import("./pages/Governance"),
+    import("./pages/Relationships"),
+    import("./pages/Reconnections"),
+    import("./pages/Admin"),
+    import("./pages/Onboarding"),
+    import("./pages/ProviderHealth"),
+  ]);
+});
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -323,6 +345,22 @@ function mockResponse(status: number, body: unknown): Response {
 // ---------------------------------------------------------------------------
 
 /**
+ * Flush pending microtasks (e.g. React.lazy import resolution) under fake timers.
+ * Multiple flushes are needed because lazy-loaded components resolve asynchronously.
+ */
+async function flushLazy() {
+  // Flush pending timers and microtasks. Page modules are pre-loaded via
+  // beforeAll, so React.lazy() resolves synchronously. Two flushes cover the
+  // initial Suspense resolution and any subsequent data-fetching state updates.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+}
+
+/**
  * Navigate to a hash route and flush the component update cycle.
  */
 async function navigateTo(hash: string) {
@@ -330,9 +368,7 @@ async function navigateTo(hash: string) {
     window.location.hash = hash;
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -347,12 +383,7 @@ async function performLogin() {
   });
   fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
 
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -360,9 +391,7 @@ async function performLogin() {
  */
 async function renderAndLogin() {
   render(<App />);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
   await performLogin();
 }
 
@@ -425,9 +454,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
     it("login page renders WITHOUT desktop sidebar", async () => {
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // On login page, no AppShell is rendered
       expect(screen.queryByTestId("desktop-sidebar")).not.toBeInTheDocument();
@@ -478,9 +505,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Calendar"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/calendar");
     });
@@ -490,9 +515,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Accounts"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/accounts");
       expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
@@ -503,9 +526,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Sync Status"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/sync-status");
       expect(screen.getByRole("heading", { name: "Sync Status" })).toBeInTheDocument();
@@ -516,9 +537,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Policies"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/policies");
     });
@@ -528,9 +547,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Provider Health"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/provider-health");
       expect(screen.getByRole("heading", { name: "Provider Health" })).toBeInTheDocument();
@@ -541,9 +558,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Error Recovery"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/errors");
       expect(screen.getByRole("heading", { name: "Error Recovery" })).toBeInTheDocument();
@@ -554,9 +569,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Scheduling"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/scheduling");
       expect(screen.getByRole("heading", { name: "Scheduling" })).toBeInTheDocument();
@@ -567,9 +580,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Governance"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/governance");
       expect(screen.getByRole("heading", { name: "Governance Dashboard" })).toBeInTheDocument();
@@ -580,9 +591,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Relationships"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/relationships");
       expect(screen.getByRole("heading", { name: "Relationships" })).toBeInTheDocument();
@@ -593,9 +602,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Reconnections"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/reconnections");
       expect(screen.getByRole("heading", { name: "Reconnections" })).toBeInTheDocument();
@@ -606,9 +613,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Billing"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/billing");
       expect(screen.getByRole("heading", { name: "Billing" })).toBeInTheDocument();
@@ -730,9 +735,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
       for (const route of sidebarRoutes) {
         const sidebar = screen.getByTestId("desktop-sidebar");
         fireEvent.click(within(sidebar).getByText(route.label));
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(0);
-        });
+        await flushLazy();
 
         expect(window.location.hash).toBe(route.hash);
 
@@ -849,9 +852,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       // Click a nav link in the mobile sidebar
       fireEvent.click(within(mobileSidebar).getByText("Accounts"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Sidebar should close after navigation
       expect(mobileSidebar.className).toContain("-translate-x-full");
@@ -872,9 +873,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
       // Click logout
       fireEvent.click(screen.getByTestId("logout-button"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Should be on login page
       expect(window.location.hash).toBe("#/login");
@@ -910,9 +909,7 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
       it(`redirects unauthenticated access to ${route} to login`, async () => {
         window.location.hash = route;
         const { unmount } = render(<App />);
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(0);
-        });
+        await flushLazy();
 
         expect(window.location.hash).toBe("#/login");
         unmount();

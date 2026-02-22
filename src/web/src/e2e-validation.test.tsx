@@ -16,9 +16,31 @@
  * bound API functions -> components without any real network calls.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { render, screen, within, act, waitFor, fireEvent } from "@testing-library/react";
 import { App } from "./App";
+
+// Pre-load all lazy-loaded page modules so React.lazy() resolves synchronously
+// during tests. Without this, dynamic import() under fake timers can race with
+// act() and produce flaky test failures.
+beforeAll(async () => {
+  await Promise.all([
+    import("./pages/Login"),
+    import("./pages/Calendar"),
+    import("./pages/Accounts"),
+    import("./pages/SyncStatus"),
+    import("./pages/Policies"),
+    import("./pages/ErrorRecovery"),
+    import("./pages/Billing"),
+    import("./pages/Scheduling"),
+    import("./pages/Governance"),
+    import("./pages/Relationships"),
+    import("./pages/Reconnections"),
+    import("./pages/Admin"),
+    import("./pages/Onboarding"),
+    import("./pages/ProviderHealth"),
+  ]);
+});
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -402,6 +424,22 @@ function mockResponse(status: number, body: unknown): Response {
 // ---------------------------------------------------------------------------
 
 /**
+ * Flush pending microtasks (e.g. React.lazy import resolution) under fake timers.
+ * Multiple flushes are needed because lazy-loaded components resolve asynchronously.
+ */
+async function flushLazy() {
+  // Flush pending timers and microtasks. Page modules are pre-loaded via
+  // beforeAll, so React.lazy() resolves synchronously. Two flushes cover the
+  // initial Suspense resolution and any subsequent data-fetching state updates.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+}
+
+/**
  * Navigate to a hash route and flush the component update cycle.
  * With fake timers, we use vi.advanceTimersByTimeAsync to flush
  * both timers and microtasks.
@@ -411,10 +449,7 @@ async function navigateTo(hash: string) {
     window.location.hash = hash;
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  // Flush async state updates from data loading in the new page
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -430,14 +465,7 @@ async function performLogin() {
   });
   fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
 
-  // Flush login API call and auth state update
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
-  // Flush redirect to calendar and events loading
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
 }
 
 /**
@@ -445,9 +473,7 @@ async function performLogin() {
  */
 async function renderAndLogin() {
   render(<App />);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+  await flushLazy();
   await performLogin();
 }
 
@@ -483,9 +509,7 @@ describe("Phase 2C E2E Validation", () => {
   describe("AC 1: Authentication flow", () => {
     it("shows login page when not authenticated", async () => {
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByText("T-Minus")).toBeInTheDocument();
       expect(screen.getByText("Calendar Federation Engine")).toBeInTheDocument();
@@ -497,18 +521,14 @@ describe("Phase 2C E2E Validation", () => {
     it("redirects unauthenticated users to login", async () => {
       window.location.hash = "#/calendar";
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/login");
     });
 
     it("shows error for invalid credentials", async () => {
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       fireEvent.change(screen.getByLabelText("Email"), {
         target: { value: "wrong@example.com" },
@@ -518,18 +538,14 @@ describe("Phase 2C E2E Validation", () => {
       });
       fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByText("Invalid credentials")).toBeInTheDocument();
     });
 
     it("successful login navigates to calendar", async () => {
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       await performLogin();
 
@@ -572,9 +588,7 @@ describe("Phase 2C E2E Validation", () => {
       fireEvent.click(eventChip);
 
       // Flush BriefingPanel's async fetch that fires when EventDetail renders
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Detail panel renders the event -- text now appears in both chip and panel
       const standupElements = screen.getAllByText("Team Standup");
@@ -602,9 +616,7 @@ describe("Phase 2C E2E Validation", () => {
       await renderAndLogin();
 
       fireEvent.click(screen.getByRole("button", { name: "Month" }));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Month view renders day-of-week headers
       expect(screen.getByText("Sun")).toBeInTheDocument();
@@ -650,9 +662,7 @@ describe("Phase 2C E2E Validation", () => {
       // Submit
       fireEvent.click(screen.getByTestId("event-create-submit"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const createCalls = mockFetchData.calls.filter(
         (c) => c.url === "/api/v1/events" && c.method === "POST",
@@ -678,9 +688,7 @@ describe("Phase 2C E2E Validation", () => {
       });
       fireEvent.click(screen.getByTestId("event-create-submit"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       // Optimistic update should display the new event
       expect(screen.getByText("Coffee with Bob")).toBeInTheDocument();
@@ -805,9 +813,7 @@ describe("Phase 2C E2E Validation", () => {
       const cellBtn = screen.getByTestId("cell-btn-acc-work-acc-personal");
       fireEvent.click(cellBtn);
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const putCalls = mockFetchData.calls.filter(
         (c) => c.url.includes("/api/v1/policies/") && c.method === "PUT",
@@ -830,9 +836,7 @@ describe("Phase 2C E2E Validation", () => {
 
       fireEvent.click(screen.getByTestId("cell-btn-acc-work-acc-personal"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const statusEl = screen.getByTestId("policy-status");
       expect(statusEl).toHaveAttribute("data-status-type", "success");
@@ -855,9 +859,7 @@ describe("Phase 2C E2E Validation", () => {
     it("full flow: login -> calendar -> accounts -> sync-status -> policies -> errors", async () => {
       // -- STEP 1: Login --
       render(<App />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.getByText("T-Minus")).toBeInTheDocument();
       await performLogin();
@@ -986,9 +988,7 @@ describe("Phase 2C E2E Validation", () => {
 
       fireEvent.click(screen.getByTestId("retry-btn-mirror-err-001"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const retryCalls = mockFetchData.calls.filter(
         (c) => c.url.includes("/api/v1/sync/retry/") && c.method === "POST",
@@ -1005,9 +1005,7 @@ describe("Phase 2C E2E Validation", () => {
 
       fireEvent.click(screen.getByTestId("retry-btn-mirror-err-001"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(screen.queryByTestId("error-row-mirror-err-001")).not.toBeInTheDocument();
 
@@ -1021,9 +1019,7 @@ describe("Phase 2C E2E Validation", () => {
 
       fireEvent.click(screen.getByTestId("batch-retry-btn"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       const retryCalls = mockFetchData.calls.filter(
         (c) => c.url.includes("/api/v1/sync/retry/") && c.method === "POST",
@@ -1044,9 +1040,7 @@ describe("Phase 2C E2E Validation", () => {
 
       fireEvent.click(screen.getByTestId("logout-button"));
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      await flushLazy();
 
       expect(window.location.hash).toBe("#/login");
     });
