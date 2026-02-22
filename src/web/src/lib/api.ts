@@ -605,10 +605,13 @@ export async function getSession(
 export async function listSessions(
   token: string,
 ): Promise<import("./scheduling").SchedulingSession[]> {
-  return apiFetch<import("./scheduling").SchedulingSession[]>(
-    "/v1/scheduling/sessions",
-    { token },
-  );
+  // The backend returns a paginated wrapper { items, total }.
+  // Unwrap .items so callers receive a plain array.
+  const result = await apiFetch<{
+    items: import("./scheduling").SchedulingSession[];
+    total: number;
+  }>("/v1/scheduling/sessions", { token });
+  return result.items;
 }
 
 /** DELETE /api/v1/scheduling/sessions/:id -- cancel a scheduling session. */
