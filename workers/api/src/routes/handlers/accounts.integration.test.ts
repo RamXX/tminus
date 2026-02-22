@@ -803,6 +803,352 @@ describe("Integration: Calendar scope endpoints", () => {
   });
 
   // -----------------------------------------------------------------------
+  // GET /v1/accounts/health (TM-qyjm)
+  // -----------------------------------------------------------------------
+
+  describe("GET /v1/accounts/health", () => {
+    it("returns 401 without auth header", async () => {
+      const handler = createHandler();
+      const env = buildEnv(d1);
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health"),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(401);
+    });
+
+    it("returns enriched AccountsHealthResponse shape with accounts, count, and tier_limit", async () => {
+      insertAccount(db, ACCOUNT_A);
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: {
+          accounts: Array<{
+            account_id: string;
+            email: string;
+            provider: string;
+            status: string;
+            calendar_count: number;
+            calendar_names: string[];
+            last_successful_sync: string | null;
+            is_syncing: boolean;
+            error_message: string | null;
+            token_expires_at: string | null;
+            created_at: string;
+          }>;
+          account_count: number;
+          tier_limit: number;
+        };
+      };
+
+      expect(body.ok).toBe(true);
+
+      // Verify top-level shape
+      expect(body.data).toHaveProperty("accounts");
+      expect(body.data).toHaveProperty("account_count");
+      expect(body.data).toHaveProperty("tier_limit");
+
+      // Verify account_count matches accounts length
+      expect(body.data.account_count).toBe(body.data.accounts.length);
+      expect(body.data.accounts).toHaveLength(1);
+
+      // Verify tier_limit is the free tier limit (no subscription inserted)
+      expect(body.data.tier_limit).toBe(2);
+
+      // Verify enriched account fields
+      const account = body.data.accounts[0];
+      expect(account.account_id).toBe(ACCOUNT_A.account_id);
+      expect(account.email).toBe(ACCOUNT_A.email);
+      expect(account.provider).toBe("google");
+      expect(account.status).toBe("active");
+      expect(typeof account.calendar_count).toBe("number");
+      expect(Array.isArray(account.calendar_names)).toBe(true);
+      expect(typeof account.is_syncing).toBe("boolean");
+    });
+
+    it("returns empty accounts array when user has no accounts", async () => {
+      const handler = createHandler();
+      const env = buildEnv(d1);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: {
+          accounts: unknown[];
+          account_count: number;
+          tier_limit: number;
+        };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.accounts).toHaveLength(0);
+      expect(body.data.account_count).toBe(0);
+      expect(body.data.tier_limit).toBe(2); // free tier default
+    });
+
+    it("returns multiple accounts when user has more than one", async () => {
+      insertAccount(db, ACCOUNT_A);
+      // Insert second account for same user
+      insertAccount(db, {
+        account_id: "acc_01HXY0000000000000000000BB",
+        user_id: TEST_USER.user_id,
+        provider: "microsoft",
+        provider_subject: "ms-sub-scope-b",
+        email: "scopes@outlook.com",
+        status: "active",
+      });
+
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: {
+          accounts: Array<{ account_id: string; provider: string }>;
+          account_count: number;
+          tier_limit: number;
+        };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.accounts).toHaveLength(2);
+      expect(body.data.account_count).toBe(2);
+    });
+
+    it("tier_limit varies by subscription tier (premium=5)", async () => {
+      insertAccount(db, ACCOUNT_A);
+
+      // Insert a premium subscription for the test user
+      db.prepare(
+        `INSERT INTO subscriptions (subscription_id, user_id, tier, status)
+         VALUES (?, ?, ?, ?)`,
+      ).run("sub_test_premium", TEST_USER.user_id, "premium", "active");
+
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: { tier_limit: number };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.tier_limit).toBe(5); // premium limit
+    });
+
+    it("tier_limit varies by subscription tier (enterprise=10)", async () => {
+      insertAccount(db, ACCOUNT_A);
+
+      // Insert an enterprise subscription
+      db.prepare(
+        `INSERT INTO subscriptions (subscription_id, user_id, tier, status)
+         VALUES (?, ?, ?, ?)`,
+      ).run("sub_test_enterprise", TEST_USER.user_id, "enterprise", "active");
+
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: { tier_limit: number };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.tier_limit).toBe(10); // enterprise limit
+    });
+
+    it("calendar_count and calendar_names derived from enabled scopes", async () => {
+      insertAccount(db, ACCOUNT_A);
+      // MOCK_SCOPES has 3 scopes: 2 enabled (Main Calendar, Team Calendar), 1 disabled (Holidays)
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: {
+          accounts: Array<{
+            calendar_count: number;
+            calendar_names: string[];
+          }>;
+        };
+      };
+
+      expect(body.ok).toBe(true);
+      const account = body.data.accounts[0];
+      // Only enabled scopes count: Main Calendar (owner, enabled) and Team Calendar (editor, enabled)
+      expect(account.calendar_count).toBe(2);
+      expect(account.calendar_names).toContain("Main Calendar");
+      expect(account.calendar_names).toContain("Team Calendar");
+      // Holidays is disabled, should NOT appear
+      expect(account.calendar_names).not.toContain("Holidays");
+    });
+
+    it("excludes revoked accounts from health response", async () => {
+      // Insert a revoked account
+      insertAccount(db, { ...ACCOUNT_A, status: "revoked" });
+      const handler = createHandler();
+      const env = buildEnv(d1);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: { accounts: unknown[]; account_count: number };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.accounts).toHaveLength(0);
+      expect(body.data.account_count).toBe(0);
+    });
+
+    it("does not include other user's accounts", async () => {
+      // Insert accounts for both users
+      insertAccount(db, ACCOUNT_A);
+
+      db.prepare("INSERT OR IGNORE INTO orgs (org_id, name) VALUES (?, ?)").run(
+        OTHER_USER.org_id,
+        "Other Org",
+      );
+      db.prepare(
+        "INSERT OR IGNORE INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+      ).run(OTHER_USER.user_id, OTHER_USER.org_id, OTHER_USER.email);
+      insertAccount(db, OTHER_ACCOUNT);
+
+      const accountDO = createMockAccountDO();
+      const handler = createHandler();
+      const env = buildEnv(d1, accountDO);
+      const authHeader = await makeAuthHeader(TEST_USER.user_id);
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts/health", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: {
+          accounts: Array<{ account_id: string }>;
+          account_count: number;
+        };
+      };
+
+      expect(body.ok).toBe(true);
+      expect(body.data.accounts).toHaveLength(1);
+      expect(body.data.accounts[0].account_id).toBe(ACCOUNT_A.account_id);
+    });
+
+    it("existing GET /v1/accounts endpoint still works unchanged", async () => {
+      insertAccount(db, ACCOUNT_A);
+      const handler = createHandler();
+      const env = buildEnv(d1);
+      const authHeader = await makeAuthHeader();
+
+      const response = await handler.fetch(
+        new Request("https://api.tminus.dev/v1/accounts", {
+          headers: { Authorization: authHeader },
+        }),
+        env,
+        mockCtx,
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        ok: boolean;
+        data: Array<{ account_id: string; email: string }>;
+      };
+
+      expect(body.ok).toBe(true);
+      // Original endpoint returns flat array, NOT the health shape
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data[0].account_id).toBe(ACCOUNT_A.account_id);
+      // Verify it does NOT have the health shape fields
+      expect(body.data).not.toHaveProperty("accounts");
+      expect(body.data).not.toHaveProperty("tier_limit");
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // Persistence round-trip: PUT then GET proves scope changes survive reload
   // -----------------------------------------------------------------------
 

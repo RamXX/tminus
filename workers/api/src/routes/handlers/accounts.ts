@@ -6,7 +6,9 @@
  */
 
 import { isValidId } from "@tminus/shared";
-import { enforceAccountLimit } from "../../middleware/feature-gate";
+import { enforceAccountLimit, ACCOUNT_LIMITS } from "../../middleware/feature-gate";
+import type { FeatureTier } from "../../middleware/feature-gate";
+import { getUserTier } from "../billing";
 import {
   type RouteGroupHandler,
   type AuthContext,
@@ -357,6 +359,174 @@ async function handleGetSyncHistory(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Aggregated health endpoint for Provider Health dashboard (TM-qyjm)
+// ---------------------------------------------------------------------------
+
+/** Shape returned by AccountDO /getHealth. */
+interface AccountDOHealth {
+  lastSyncTs: string | null;
+  lastSuccessTs: string | null;
+  fullSyncNeeded: boolean;
+}
+
+/**
+ * GET /v1/accounts/health
+ *
+ * Returns enriched account health data for the Provider Health dashboard.
+ * Joins accounts with calendar scopes (from AccountDO), sync health (from
+ * AccountDO /getHealth), sync history (from UserGraphDO /getSyncHistory),
+ * and subscription tier (from D1 subscriptions table).
+ *
+ * The response shape matches AccountsHealthResponse expected by the frontend.
+ */
+async function handleGetAccountsHealth(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  try {
+    // 1. Get all non-revoked accounts for this user
+    const result = await env.DB
+      .prepare(
+        `SELECT account_id, user_id, provider, email, status, created_at
+         FROM accounts
+         WHERE user_id = ?1
+           AND status != 'revoked'`,
+      )
+      .bind(auth.userId)
+      .all<{
+        account_id: string;
+        user_id: string;
+        provider: string;
+        email: string;
+        status: string;
+        created_at: string;
+      }>();
+
+    const accounts = result.results ?? [];
+
+    // 2. Get subscription tier and derive tier_limit
+    const tier = await getUserTier(env.DB, auth.userId);
+    const tierLimit = ACCOUNT_LIMITS[tier as FeatureTier] ?? ACCOUNT_LIMITS.free;
+
+    // 3. Enrich each account with health data from DOs
+    const enrichedAccounts = await Promise.all(
+      accounts.map(async (account) => {
+        // Get health from AccountDO
+        let lastSuccessfulSync: string | null = null;
+        let isSyncing = false;
+        let errorMessage: string | null = null;
+        let tokenExpiresAt: string | null = null;
+
+        try {
+          const health = await callDO<AccountDOHealth>(
+            env.ACCOUNT,
+            account.account_id,
+            "/getHealth",
+          );
+          if (health.ok && health.data) {
+            lastSuccessfulSync = health.data.lastSuccessTs ?? null;
+          }
+        } catch {
+          // AccountDO health call failed -- continue with defaults
+        }
+
+        // Get sync history from UserGraphDO for error/syncing status
+        try {
+          const syncResult = await callDO<{
+            events: Array<{
+              id: string;
+              timestamp: string;
+              event_count: number;
+              status: string;
+              error_message?: string;
+            }>;
+          }>(env.USER_GRAPH, auth.userId, "/getSyncHistory", {
+            account_id: account.account_id,
+            limit: 1,
+          });
+
+          if (syncResult.ok && syncResult.data.events?.length > 0) {
+            const lastEvent = syncResult.data.events[0];
+            if (lastEvent.status === "error" && lastEvent.error_message) {
+              errorMessage = lastEvent.error_message;
+            }
+            // Consider "in_progress" status or very recent sync as syncing
+            if (lastEvent.status === "in_progress") {
+              isSyncing = true;
+            }
+          }
+        } catch {
+          // Sync history unavailable -- continue with defaults
+        }
+
+        // Get calendar scopes from AccountDO
+        let calendarCount = 0;
+        let calendarNames: string[] = [];
+
+        try {
+          const scopeResult = await callDO<{ scopes: DOScopeEntry[] }>(
+            env.ACCOUNT,
+            account.account_id,
+            "/listCalendarScopes",
+          );
+          if (scopeResult.ok && scopeResult.data.scopes) {
+            const enabledScopes = scopeResult.data.scopes.filter((s) => s.enabled);
+            calendarCount = enabledScopes.length;
+            calendarNames = enabledScopes
+              .map((s) => s.displayName ?? s.providerCalendarId)
+              .filter(Boolean);
+          }
+        } catch {
+          // Scopes unavailable -- continue with 0/empty
+        }
+
+        // Get token expiry from AccountDO
+        try {
+          const tokenResult = await callDO<{
+            expiresAt: string | null;
+          }>(env.ACCOUNT, account.account_id, "/getTokenInfo");
+          if (tokenResult.ok && tokenResult.data) {
+            tokenExpiresAt = tokenResult.data.expiresAt ?? null;
+          }
+        } catch {
+          // Token info unavailable -- continue with null
+        }
+
+        return {
+          account_id: account.account_id,
+          email: account.email,
+          provider: account.provider,
+          status: account.status,
+          calendar_count: calendarCount,
+          calendar_names: calendarNames,
+          last_successful_sync: lastSuccessfulSync,
+          is_syncing: isSyncing,
+          error_message: errorMessage,
+          token_expires_at: tokenExpiresAt,
+          created_at: account.created_at,
+        };
+      }),
+    );
+
+    return jsonResponse(
+      successEnvelope({
+        accounts: enrichedAccounts,
+        account_count: enrichedAccounts.length,
+        tier_limit: tierLimit,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to get accounts health", err);
+    return jsonResponse(
+      errorEnvelope("Failed to get accounts health", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Calendar scope management (TM-8gfd.2)
@@ -789,6 +959,10 @@ export const routeAccountRoutes: RouteGroupHandler = async (request, method, pat
     const accountLimited = await enforceAccountLimit(auth.userId, env.DB);
     if (accountLimited) return accountLimited;
     return handleAccountLink(request, auth, env);
+  }
+
+  if (method === "GET" && pathname === "/v1/accounts/health") {
+    return handleGetAccountsHealth(request, auth, env);
   }
 
   if (method === "GET" && pathname === "/v1/accounts") {
