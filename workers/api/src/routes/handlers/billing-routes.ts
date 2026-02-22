@@ -20,6 +20,10 @@ import {
 
 // ---------------------------------------------------------------------------
 // Route group: Billing
+//
+// NOTE: The webhook endpoint (POST /v1/billing/webhook) is intentionally NOT
+// in this route group. It lives in index.ts as a public route because it
+// bypasses JWT auth -- Stripe authenticates via Stripe-Signature (HMAC).
 // ---------------------------------------------------------------------------
 
 export const routeBillingRoutes: RouteGroupHandler = async (request, method, pathname, auth, env) => {

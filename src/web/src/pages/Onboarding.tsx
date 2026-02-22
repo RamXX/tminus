@@ -689,8 +689,7 @@ function OnboardingInner({
           You will be asked to grant calendar access
         </div>
         <div
-          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto mt-6"
-          style={{ animation: "spin 1s linear infinite" }}
+          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto mt-6 animate-spin"
         />
       </div>
     );
@@ -708,8 +707,7 @@ function OnboardingInner({
           </div>
         )}
         <div
-          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto"
-          style={{ animation: "spin 1s linear infinite" }}
+          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto animate-spin"
         />
       </div>
     );
