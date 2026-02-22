@@ -981,6 +981,12 @@ export async function handleGetBillingEvents(
 
     return apiSuccessResponse(rows.results ?? []);
   } catch (err) {
+    // If the billing_events table doesn't exist (migration not applied),
+    // return an empty array instead of crashing.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("no such table") || message.includes("D1_ERROR")) {
+      return apiSuccessResponse([]);
+    }
     console.error("Failed to get billing events", err);
     return apiErrorResponse("INTERNAL_ERROR", "Failed to get billing events", 500);
   }
@@ -1046,6 +1052,18 @@ export async function handleGetBillingStatus(
       },
     });
   } catch (err) {
+    // If the subscriptions table doesn't exist (migration not applied),
+    // return the free-tier default instead of crashing. This makes the
+    // billing status endpoint work for all users regardless of whether
+    // Stripe billing infrastructure has been set up.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("no such table") || message.includes("D1_ERROR")) {
+      return apiSuccessResponse({
+        tier: "free",
+        status: "none",
+        subscription: null,
+      });
+    }
     console.error("Failed to get billing status", err);
     return apiErrorResponse("INTERNAL_ERROR", "Failed to get billing status", 500);
   }

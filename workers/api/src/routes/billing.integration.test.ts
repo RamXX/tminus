@@ -1184,3 +1184,132 @@ describe("Integration: Billing routes", () => {
     expect(body.data.received).toBe(true);
   });
 });
+
+// ===========================================================================
+// Integration: Billing status resilience when subscriptions table is missing
+// (TM-y5jf)
+// ===========================================================================
+
+describe("Integration: Billing status -- missing subscriptions table resilience", () => {
+  let db: DatabaseType;
+  let d1NoSubs: D1Database;
+
+  beforeEach(() => {
+    // Create database WITHOUT subscriptions migration -- simulates
+    // production D1 where migration 0012 has not been applied.
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0004_AUTH_FIELDS);
+    // Deliberately NOT applying MIGRATION_0012_SUBSCRIPTIONS or 0013
+    d1NoSubs = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  it("GET /v1/billing/status returns free-tier default when subscriptions table is missing", async () => {
+    const { token } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1NoSubs);
+
+    const request = new Request("https://api.tminus.ink/v1/billing/status", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { tier: string; status: string; subscription: null };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("free");
+    expect(body.data.status).toBe("none");
+    expect(body.data.subscription).toBeNull();
+  });
+
+  it("GET /v1/billing/status returns free-tier default with table present but no rows", async () => {
+    // Apply subscriptions migration so table exists but has no data
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
+
+    const { token } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1NoSubs);
+
+    const request = new Request("https://api.tminus.ink/v1/billing/status", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { tier: string; status: string; subscription: null };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("free");
+    expect(body.data.status).toBe("none");
+    expect(body.data.subscription).toBeNull();
+  });
+
+  it("GET /v1/billing/status returns subscription data when row exists", async () => {
+    // Apply subscriptions migrations
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
+
+    const { userId, token } = await createTestUser(db);
+    const handler = createHandler();
+    const env = buildEnv(d1NoSubs);
+
+    // Insert a subscription directly
+    const periodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    db.exec(
+      `INSERT INTO subscriptions
+       (subscription_id, user_id, tier, stripe_customer_id, stripe_subscription_id,
+        current_period_end, status, cancel_at_period_end)
+       VALUES ('sub_intg_001', '${userId}', 'premium', 'cus_intg_001', 'sub_stripe_intg_001',
+               '${periodEnd}', 'active', 0)`,
+    );
+
+    const request = new Request("https://api.tminus.ink/v1/billing/status", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: {
+        tier: string;
+        status: string;
+        subscription: {
+          subscription_id: string;
+          stripe_customer_id: string;
+          stripe_subscription_id: string;
+          cancel_at_period_end: boolean;
+        };
+      };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("premium");
+    expect(body.data.status).toBe("active");
+    expect(body.data.subscription).not.toBeNull();
+    expect(body.data.subscription.subscription_id).toBe("sub_intg_001");
+    expect(body.data.subscription.stripe_customer_id).toBe("cus_intg_001");
+    expect(body.data.subscription.stripe_subscription_id).toBe("sub_stripe_intg_001");
+    expect(body.data.subscription.cancel_at_period_end).toBe(false);
+  });
+});

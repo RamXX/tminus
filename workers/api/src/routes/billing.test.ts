@@ -25,6 +25,8 @@ import {
   handleSubscriptionUpdated,
   handleSubscriptionDeleted,
   handlePaymentFailed,
+  handleGetBillingStatus,
+  handleGetBillingEvents,
   billingSuccessResponse,
   billingErrorResponse,
   getUserTier,
@@ -35,7 +37,7 @@ import {
   GRACE_PERIOD_DAYS,
   TIER_LEVELS,
 } from "./billing";
-import type { StripeSubscription } from "./billing";
+import type { StripeSubscription, BillingEnv } from "./billing";
 
 // ---------------------------------------------------------------------------
 // Stripe webhook signature test helpers
@@ -759,5 +761,182 @@ describe("Billing: response helpers", () => {
     expect(body.ok).toBe(false);
     expect(body.error).toBe("Payment failed");
     expect(body.error_code).toBe("STRIPE_ERROR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetBillingStatus -- missing table resilience (TM-y5jf)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a mock D1 that throws "no such table" errors on any query,
+ * simulating a D1 database where the subscriptions migration has not
+ * been applied.
+ */
+function createMissingTableD1(): D1Database {
+  return {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async first(): Promise<null> {
+              throw new Error("no such table: subscriptions");
+            },
+            async all(): Promise<{ results: never[] }> {
+              throw new Error("no such table: billing_events");
+            },
+            async run(): Promise<D1Result<unknown>> {
+              throw new Error("no such table: subscriptions");
+            },
+          };
+        },
+      };
+    },
+    exec: vi.fn(),
+    batch: vi.fn(),
+    dump: vi.fn(),
+  } as unknown as D1Database;
+}
+
+function buildMockBillingEnv(db: D1Database): BillingEnv {
+  return {
+    DB: db,
+    STRIPE_SECRET_KEY: "sk_test_fake",
+    STRIPE_WEBHOOK_SECRET: "whsec_test_fake",
+  };
+}
+
+describe("Billing: handleGetBillingStatus -- missing table resilience", () => {
+  it("returns free-tier default when subscriptions table does not exist", async () => {
+    const db = createMissingTableD1();
+    const env = buildMockBillingEnv(db);
+
+    const response = await handleGetBillingStatus("usr_test_user_1", env);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { tier: string; status: string; subscription: null };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("free");
+    expect(body.data.status).toBe("none");
+    expect(body.data.subscription).toBeNull();
+  });
+
+  it("returns free-tier default when no subscription row exists for user", async () => {
+    const db = createMockD1(); // empty rows
+    const env = buildMockBillingEnv(db);
+
+    const response = await handleGetBillingStatus("usr_test_user_1", env);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { tier: string; status: string; subscription: null };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("free");
+    expect(body.data.status).toBe("none");
+    expect(body.data.subscription).toBeNull();
+  });
+
+  it("returns subscription data when a record exists", async () => {
+    const db = createMockD1([{
+      subscription_id: "sub_internal_1",
+      tier: "premium",
+      stripe_customer_id: "cus_test_456",
+      stripe_subscription_id: "sub_stripe_789",
+      current_period_end: "2026-03-15T00:00:00.000Z",
+      status: "active",
+      grace_period_end: null,
+      cancel_at_period_end: 0,
+      previous_tier: null,
+      created_at: "2026-02-15T00:00:00.000Z",
+      updated_at: "2026-02-15T00:00:00.000Z",
+    }]);
+    const env = buildMockBillingEnv(db);
+
+    const response = await handleGetBillingStatus("usr_test_user_1", env);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: {
+        tier: string;
+        status: string;
+        subscription: {
+          subscription_id: string;
+          stripe_customer_id: string;
+          cancel_at_period_end: boolean;
+        };
+      };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("premium");
+    expect(body.data.status).toBe("active");
+    expect(body.data.subscription).not.toBeNull();
+    expect(body.data.subscription.subscription_id).toBe("sub_internal_1");
+    expect(body.data.subscription.cancel_at_period_end).toBe(false);
+  });
+
+  it("returns free-tier default on D1_ERROR (generic D1 failure)", async () => {
+    const db = {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async first(): Promise<null> {
+                throw new Error("D1_ERROR: some database error");
+              },
+              async all(): Promise<{ results: never[] }> {
+                throw new Error("D1_ERROR: some database error");
+              },
+              async run(): Promise<D1Result<unknown>> {
+                throw new Error("D1_ERROR: some database error");
+              },
+            };
+          },
+        };
+      },
+      exec: vi.fn(),
+      batch: vi.fn(),
+      dump: vi.fn(),
+    } as unknown as D1Database;
+    const env = buildMockBillingEnv(db);
+
+    const response = await handleGetBillingStatus("usr_test_user_1", env);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: { tier: string; status: string; subscription: null };
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data.tier).toBe("free");
+    expect(body.data.status).toBe("none");
+    expect(body.data.subscription).toBeNull();
+  });
+});
+
+describe("Billing: handleGetBillingEvents -- missing table resilience", () => {
+  it("returns empty array when billing_events table does not exist", async () => {
+    const db = createMissingTableD1();
+    const env = buildMockBillingEnv(db);
+
+    const response = await handleGetBillingEvents("usr_test_user_1", env);
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as {
+      ok: boolean;
+      data: unknown[];
+    };
+
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual([]);
   });
 });
