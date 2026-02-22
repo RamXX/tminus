@@ -953,7 +953,7 @@ export async function fetchAccountsHealth(
   token: string,
 ): Promise<import("./provider-health").AccountsHealthResponse> {
   return apiFetch<import("./provider-health").AccountsHealthResponse>(
-    "/v1/accounts",
+    "/v1/accounts/health",
     { token },
   );
 }

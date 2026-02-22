@@ -163,22 +163,9 @@ const MOCK_DRIFT_ALERTS: unknown[] = [];
 function createMockFetch() {
   const calls: Array<{ url: string; method: string; body?: unknown }> = [];
 
-  /**
-   * Controls the shape of the /api/v1/accounts response.
-   *
-   * Both fetchAccounts() (Accounts page) and fetchAccountsHealth()
-   * (ProviderHealth page) call the same URL /api/v1/accounts via apiFetch().
-   * But they expect different response shapes:
-   *   - "list": returns LinkedAccount[] (for Accounts page)
-   *   - "health": returns {accounts, account_count, tier_limit} (for ProviderHealth)
-   *
-   * Tests set this before navigating to the appropriate page.
-   */
-  let accountsMode: "list" | "health" = "list";
-
-  const setAccountsMode = (mode: "list" | "health") => {
-    accountsMode = mode;
-  };
+  // fetchAccounts() calls /api/v1/accounts (flat list).
+  // fetchAccountsHealth() calls /api/v1/accounts/health (enriched health shape).
+  // Each has its own URL and mock response -- no mode switching needed.
 
   const mockFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -225,18 +212,19 @@ function createMockFetch() {
     }
 
     // -- Accounts --
-    // Returns different shapes depending on accountsMode (see comment above).
+    // /v1/accounts/health returns enriched health shape for Provider Health page.
+    // /v1/accounts returns flat account list for other pages.
+    if (url === "/api/v1/accounts/health" && method === "GET") {
+      return mockResponse(200, {
+        ok: true,
+        data: {
+          accounts: MOCK_ACCOUNTS_HEALTH_DATA,
+          account_count: MOCK_ACCOUNTS_HEALTH_DATA.length,
+          tier_limit: 5,
+        },
+      });
+    }
     if (url === "/api/v1/accounts" && method === "GET") {
-      if (accountsMode === "health") {
-        return mockResponse(200, {
-          ok: true,
-          data: {
-            accounts: MOCK_ACCOUNTS_HEALTH_DATA,
-            account_count: MOCK_ACCOUNTS_HEALTH_DATA.length,
-            tier_limit: 5,
-          },
-        });
-      }
       return mockResponse(200, { ok: true, data: MOCK_ACCOUNTS });
     }
 
@@ -306,7 +294,7 @@ function createMockFetch() {
     return mockResponse(404, { ok: false, error: `Not found: ${method} ${url}` });
   });
 
-  return { mockFetch, calls, setAccountsMode };
+  return { mockFetch, calls };
 }
 
 function mockResponse(status: number, body: unknown): Response {
@@ -537,7 +525,6 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
     it("sidebar Provider Health link navigates to /provider-health", async () => {
       await renderAndLogin();
-      mockFetchData.setAccountsMode("health");
 
       const sidebar = screen.getByTestId("desktop-sidebar");
       fireEvent.click(within(sidebar).getByText("Provider Health"));
@@ -664,7 +651,6 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
 
     it("Provider Health page shows health heading", async () => {
       await renderAndLogin();
-      mockFetchData.setAccountsMode("health");
       await navigateTo("#/provider-health");
 
       expect(screen.getByRole("heading", { name: "Provider Health" })).toBeInTheDocument();
@@ -742,15 +728,6 @@ describe("E2E Navigation -- AppShell, sidebar, and page rendering", () => {
       ];
 
       for (const route of sidebarRoutes) {
-        // Toggle accounts response shape for ProviderHealth vs other pages.
-        // Both fetchAccounts() and fetchAccountsHealth() call /api/v1/accounts
-        // but expect different response shapes.
-        if (route.label === "Provider Health") {
-          mockFetchData.setAccountsMode("health");
-        } else {
-          mockFetchData.setAccountsMode("list");
-        }
-
         const sidebar = screen.getByTestId("desktop-sidebar");
         fireEvent.click(within(sidebar).getByText(route.label));
         await act(async () => {
