@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createEvent, fetchEvents, updateEvent } from "./api";
+import { createEvent, fetchEvents, listSessions, updateEvent } from "./api";
 
 function makeEnvelope<T>(data: T) {
   return {
@@ -273,5 +273,94 @@ describe("api event contract adapters", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].canonical_event_id).toBe("evt_ok");
+  });
+});
+
+describe("api listSessions paginated response unwrapping", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("unwraps paginated { items, total } into a plain SchedulingSession array", async () => {
+    const sessions = [
+      {
+        session_id: "sess_1",
+        status: "pending",
+        duration_minutes: 30,
+        window_start: "2026-02-20T00:00:00Z",
+        window_end: "2026-02-22T00:00:00Z",
+        participants: [{ account_id: "acc_1", email: "a@example.com" }],
+        constraints: {
+          avoid_early_morning: false,
+          avoid_late_evening: false,
+          prefer_existing_gaps: true,
+        },
+        candidates: [],
+        created_at: "2026-02-15T10:00:00Z",
+        updated_at: "2026-02-15T10:00:00Z",
+      },
+      {
+        session_id: "sess_2",
+        status: "candidates_ready",
+        duration_minutes: 60,
+        window_start: "2026-02-20T00:00:00Z",
+        window_end: "2026-02-22T00:00:00Z",
+        participants: [{ account_id: "acc_2", email: "b@example.com" }],
+        constraints: {
+          avoid_early_morning: true,
+          avoid_late_evening: true,
+          prefer_existing_gaps: false,
+        },
+        candidates: [
+          {
+            candidate_id: "cand_1",
+            start: "2026-02-20T10:00:00Z",
+            end: "2026-02-20T10:30:00Z",
+            score: 0.9,
+            explanation: "Good slot",
+          },
+        ],
+        created_at: "2026-02-15T09:00:00Z",
+        updated_at: "2026-02-15T09:05:00Z",
+      },
+    ];
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeEnvelope({ items: sessions, total: 2 })),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await listSessions("jwt-sched");
+
+    // Must be a plain array, not { items, total }
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(2);
+    expect(result[0].session_id).toBe("sess_1");
+    expect(result[1].session_id).toBe("sess_2");
+    expect(result[1].candidates).toHaveLength(1);
+
+    // Verify .find works (the original crash site)
+    const found = result.find((s) => s.session_id === "sess_2");
+    expect(found).toBeDefined();
+    expect(found!.status).toBe("candidates_ready");
+  });
+
+  it("returns empty array when backend returns zero sessions", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeEnvelope({ items: [], total: 0 })),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await listSessions("jwt-empty");
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(0);
   });
 });

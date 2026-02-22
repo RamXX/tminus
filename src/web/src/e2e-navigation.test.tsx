@@ -124,7 +124,7 @@ const MOCK_BILLING_STATUS = {
 
 const MOCK_BILLING_EVENTS: unknown[] = [];
 
-const MOCK_SCHEDULING_SESSIONS: unknown[] = [];
+const MOCK_SCHEDULING_SESSIONS = { items: [] as unknown[], total: 0 };
 
 const MOCK_COMMITMENTS: unknown[] = [];
 
