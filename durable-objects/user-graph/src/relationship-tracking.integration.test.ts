@@ -1337,10 +1337,46 @@ describe("UserGraphDO relationship tracking integration", () => {
       }).toThrow("not a trip");
     });
 
-    it("throws error when neither city nor trip_id provided", () => {
-      expect(() => {
-        dObj.getReconnectionSuggestions(null, null);
-      }).toThrow("No city available");
+    it("returns all overdue suggestions when neither city nor trip_id provided", () => {
+      // Create relationships in different cities
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in SF",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        "America/Los_Angeles",
+        7, // weekly target
+      );
+      dObj.createRelationship(
+        TEST_REL_ID_2,
+        TEST_PARTICIPANT_HASH_2,
+        "Bob in NYC",
+        "COLLEAGUE",
+        0.6,
+        "New York",
+        "America/New_York",
+        14, // biweekly target
+      );
+
+      // Both are overdue (no interactions recorded). No filter returns all.
+      const result = dObj.getReconnectionSuggestions(null, null);
+      expect(result.city).toBeNull();
+      expect(result.trip_id).toBeNull();
+      expect(result.suggestions.length).toBe(2);
+
+      // Suggestions include city from the relationship data
+      const alice = result.suggestions.find((s) => s.display_name === "Alice in SF");
+      const bob = result.suggestions.find((s) => s.display_name === "Bob in NYC");
+      expect(alice).toBeDefined();
+      expect(bob).toBeDefined();
+      expect(alice!.city).toBe("San Francisco");
+      expect(bob!.city).toBe("New York");
+
+      // total_in_city counts all relationships when unfiltered
+      expect(result.total_in_city).toBe(2);
+      expect(result.total_overdue_in_city).toBe(2);
     });
 
     it("returns empty suggestions when no relationships in city", () => {
@@ -1360,6 +1396,32 @@ describe("UserGraphDO relationship tracking integration", () => {
       expect(result.suggestions.length).toBe(0);
       expect(result.total_in_city).toBe(0);
       expect(result.total_overdue_in_city).toBe(0);
+    });
+
+    it("returns empty array when no relationships exist and no params provided", () => {
+      const result = dObj.getReconnectionSuggestions(null, null);
+      expect(result.city).toBeNull();
+      expect(result.trip_id).toBeNull();
+      expect(result.suggestions).toEqual([]);
+      expect(result.total_in_city).toBe(0);
+      expect(result.total_overdue_in_city).toBe(0);
+    });
+
+    it("city-filtered suggestions include city field on each suggestion", () => {
+      dObj.createRelationship(
+        TEST_REL_ID,
+        TEST_PARTICIPANT_HASH,
+        "Alice in SF",
+        "FRIEND",
+        0.8,
+        "San Francisco",
+        null,
+        7,
+      );
+
+      const result = dObj.getReconnectionSuggestions("San Francisco");
+      expect(result.suggestions.length).toBe(1);
+      expect(result.suggestions[0].city).toBe("San Francisco");
     });
 
     it("excludes relationships without frequency target from suggestions", () => {

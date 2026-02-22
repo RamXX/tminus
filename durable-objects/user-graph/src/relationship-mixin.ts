@@ -142,14 +142,14 @@ export interface LedgerEntry {
   readonly ts: string;
 }
 
-/** Reconnection suggestions report: overdue contacts in a specific city. */
+/** Reconnection suggestions report: overdue contacts, optionally scoped to a city. */
 export interface ReconnectionReport {
-  readonly city: string;
+  readonly city: string | null;
   readonly trip_id: string | null;
   readonly trip_name: string | null;
   readonly trip_start: string | null;
   readonly trip_end: string | null;
-  readonly suggestions: readonly ReconnectionSuggestion[];
+  readonly suggestions: readonly (ReconnectionSuggestion & { city?: string | null })[];
   readonly total_in_city: number;
   readonly total_overdue_in_city: number;
   readonly computed_at: string;
@@ -785,19 +785,29 @@ export class RelationshipMixin {
       tripTimezone = typeof config.timezone === "string" ? config.timezone : null;
     }
 
-    if (!targetCity) {
+    // When a trip_id was provided but no city could be resolved, that's an
+    // error -- the caller expected trip-scoped suggestions but the trip has
+    // no destination_city.  When neither param was provided, returning all
+    // suggestions is the intended dashboard behavior.
+    if (tripId && !targetCity) {
       throw new Error("No city available. Provide city parameter or use a trip with destination_city set.");
     }
 
-    // Get all relationships in the target city (alias-aware via matchCityWithAliases, TM-xwn.3)
+    // Get relationships -- filter by city if provided, otherwise use all
     const allRelationships = this.listRelationships();
-    const cityRelationships = allRelationships.filter(
-      (r) => matchCityWithAliases(r.city, targetCity),
-    );
+    const filteredRelationships = targetCity
+      ? allRelationships.filter((r) => matchCityWithAliases(r.city, targetCity))
+      : allRelationships;
 
-    // Compute drift for city-filtered relationships
+    // Build a map of relationship_id -> city for attaching city to each suggestion
+    const cityByRelId = new Map<string, string | null>();
+    for (const rel of filteredRelationships) {
+      cityByRelId.set(rel.relationship_id, rel.city);
+    }
+
+    // Compute drift for the selected relationships
     const now = new Date().toISOString();
-    const driftReport = computeDrift(cityRelationships, now);
+    const driftReport = computeDrift(filteredRelationships, now);
 
     // Enrich suggestions with suggested_duration_minutes and time windows
     const enriched = enrichSuggestionsWithTimeWindows(
@@ -808,11 +818,11 @@ export class RelationshipMixin {
 
     // Layer timezone-aware meeting windows on top (TM-xwn.3)
     // User timezone = trip timezone (where the traveler will be) or look up from city
-    const userTimezone = tripTimezone || cityToTimezone(targetCity);
+    const userTimezone = tripTimezone || (targetCity ? cityToTimezone(targetCity) : null);
 
     // Build contact timezone map from relationship data
     const contactTimezones = new Map<string, string | null>();
-    for (const rel of cityRelationships) {
+    for (const rel of filteredRelationships) {
       // Use relationship's stored timezone, or look up from city
       contactTimezones.set(
         rel.relationship_id,
@@ -829,14 +839,20 @@ export class RelationshipMixin {
       suggestMeetingWindow,
     );
 
+    // Attach city to each suggestion so callers can group by city
+    const suggestionsWithCity = tzEnriched.map((s) => ({
+      ...s,
+      city: cityByRelId.get(s.relationship_id) ?? null,
+    }));
+
     return {
       city: targetCity,
       trip_id: tripId ?? null,
       trip_name: tripName,
       trip_start: tripStart,
       trip_end: tripEnd,
-      suggestions: tzEnriched,
-      total_in_city: cityRelationships.length,
+      suggestions: suggestionsWithCity,
+      total_in_city: filteredRelationships.length,
       total_overdue_in_city: driftReport.total_overdue,
       computed_at: driftReport.computed_at,
     };

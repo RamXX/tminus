@@ -215,17 +215,11 @@ export async function handleGetReconnectionSuggestions(
     const tripId = url.searchParams.get("trip_id") || null;
     const city = url.searchParams.get("city") || null;
 
-    if (!tripId && !city) {
-      return jsonResponse(
-        errorEnvelope(
-          "Either trip_id or city query parameter is required",
-          "VALIDATION_ERROR",
-        ),
-        ErrorCode.VALIDATION_ERROR,
-      );
-    }
-
-    const result = await callDO<unknown>(
+    // Both params are optional -- when neither is provided, all suggestions
+    // are returned (dashboard / Reconnections page use case).
+    const result = await callDO<{
+      suggestions: unknown[];
+    }>(
       env.USER_GRAPH,
       auth.userId,
       "/getReconnectionSuggestions",
@@ -233,7 +227,7 @@ export async function handleGetReconnectionSuggestions(
     );
 
     if (!result.ok) {
-      const errData = result.data as { message?: string };
+      const errData = result.data as unknown as { message?: string };
       return jsonResponse(
         errorEnvelope(
           errData.message ?? "Failed to get reconnection suggestions",
@@ -243,7 +237,8 @@ export async function handleGetReconnectionSuggestions(
       );
     }
 
-    return jsonResponse(successEnvelope(result.data), 200);
+    // Return the flat suggestions array (frontend expects ReconnectionSuggestionFull[])
+    return jsonResponse(successEnvelope(result.data.suggestions), 200);
   } catch (err) {
     console.error("Failed to get reconnection suggestions", err);
     return jsonResponse(
