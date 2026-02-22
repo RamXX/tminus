@@ -568,7 +568,7 @@ export class SchedulingMixin {
       .exec<HoldRow>(
         `SELECT hold_id, session_id, account_id, provider_event_id, expires_at, status
          FROM schedule_holds
-         WHERE status = 'held' AND expires_at <= datetime('now')`,
+         WHERE status = 'held' AND datetime(expires_at) <= datetime('now')`,
       )
       .toArray()
       .map((r) => ({
