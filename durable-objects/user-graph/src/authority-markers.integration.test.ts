@@ -556,4 +556,298 @@ describe("Authority markers integration", () => {
       expect(parseInt(meta.value, 10)).toBe(8);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // TM-teqr AC1: Canonical event API responses include authority_markers
+  // -------------------------------------------------------------------------
+
+  describe("authority_markers in API responses (TM-teqr AC1)", () => {
+    it("getCanonicalEvent includes parsed authority_markers", async () => {
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      // Get the canonical event ID
+      const row = db
+        .prepare("SELECT canonical_event_id FROM canonical_events LIMIT 1")
+        .get() as { canonical_event_id: string };
+
+      const result = ug.getCanonicalEvent(row.canonical_event_id);
+
+      expect(result).not.toBeNull();
+      expect(result!.event.authority_markers).toBeDefined();
+      expect(result!.event.authority_markers!.title).toBe(
+        `provider:${ACCOUNT_A}`,
+      );
+      expect(result!.event.authority_markers!.start_ts).toBe(
+        `provider:${ACCOUNT_A}`,
+      );
+    });
+
+    it("listCanonicalEvents includes authority_markers on each event", async () => {
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      const result = ug.listCanonicalEvents({});
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].authority_markers).toBeDefined();
+      expect(result.items[0].authority_markers!.title).toBe(
+        `provider:${ACCOUNT_A}`,
+      );
+    });
+
+    it("authority_markers reflect updated ownership after provider update", async () => {
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      // Set title as tminus-owned
+      const raw = db
+        .prepare("SELECT authority_markers FROM canonical_events LIMIT 1")
+        .get() as { authority_markers: string };
+      const markers: AuthorityMarkers = JSON.parse(raw.authority_markers);
+      markers.title = "tminus";
+      db.prepare("UPDATE canonical_events SET authority_markers = ?").run(
+        JSON.stringify(markers),
+      );
+
+      // Provider updates (overwrites tminus title)
+      await ug.applyProviderDelta(ACCOUNT_A, [
+        makeUpdatedDelta({
+          event: {
+            ...makeUpdatedDelta().event!,
+            title: "Provider Won",
+          },
+        }),
+      ]);
+
+      const row = db
+        .prepare("SELECT canonical_event_id FROM canonical_events LIMIT 1")
+        .get() as { canonical_event_id: string };
+      const result = ug.getCanonicalEvent(row.canonical_event_id);
+
+      // After provider wins, authority should transfer back to provider
+      expect(result!.event.authority_markers!.title).toBe(
+        `provider:${ACCOUNT_A}`,
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TM-teqr AC2: Conflict journal entries queryable via getEventConflicts
+  // -------------------------------------------------------------------------
+
+  describe("getEventConflicts endpoint (TM-teqr AC2)", () => {
+    it("returns conflict entries for an event with authority conflicts", async () => {
+      // Create event
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      // Set title as tminus-owned
+      const raw = db
+        .prepare(
+          "SELECT canonical_event_id, authority_markers FROM canonical_events LIMIT 1",
+        )
+        .get() as { canonical_event_id: string; authority_markers: string };
+      const markers: AuthorityMarkers = JSON.parse(raw.authority_markers);
+      markers.title = "tminus";
+      db.prepare("UPDATE canonical_events SET authority_markers = ?").run(
+        JSON.stringify(markers),
+      );
+
+      // Provider overrides tminus-owned field
+      await ug.applyProviderDelta(ACCOUNT_A, [
+        makeUpdatedDelta({
+          event: {
+            ...makeUpdatedDelta().event!,
+            title: "Provider Override",
+          },
+        }),
+      ]);
+
+      const result = ug.getEventConflicts({
+        canonical_event_id: raw.canonical_event_id,
+      });
+
+      expect(result.items.length).toBeGreaterThanOrEqual(1);
+      expect(result.items[0].conflict_type).toBe("field_override");
+      expect(result.items[0].resolution).toBeTruthy();
+
+      const resolution = JSON.parse(result.items[0].resolution!);
+      expect(resolution.strategy).toBe("provider_wins");
+      expect(resolution.conflicts).toHaveLength(1);
+      expect(resolution.conflicts[0].field).toBe("title");
+      expect(resolution.conflicts[0].current_authority).toBe("tminus");
+      expect(resolution.conflicts[0].incoming_authority).toBe(
+        `provider:${ACCOUNT_A}`,
+      );
+    });
+
+    it("returns empty array for event with no conflicts", async () => {
+      // Create and update with same provider -- no conflicts
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+      await ug.applyProviderDelta(ACCOUNT_A, [makeUpdatedDelta()]);
+
+      const row = db
+        .prepare("SELECT canonical_event_id FROM canonical_events LIMIT 1")
+        .get() as { canonical_event_id: string };
+
+      const result = ug.getEventConflicts({
+        canonical_event_id: row.canonical_event_id,
+      });
+
+      expect(result.items).toHaveLength(0);
+      expect(result.has_more).toBe(false);
+    });
+
+    it("supports pagination with cursor and limit", async () => {
+      // Create event
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      const row = db
+        .prepare(
+          "SELECT canonical_event_id, authority_markers FROM canonical_events LIMIT 1",
+        )
+        .get() as { canonical_event_id: string; authority_markers: string };
+
+      // Generate multiple conflicts by repeatedly overriding tminus-owned fields
+      for (let i = 0; i < 3; i++) {
+        // Set title as tminus-owned each time
+        const markers: AuthorityMarkers = JSON.parse(
+          (
+            db
+              .prepare("SELECT authority_markers FROM canonical_events LIMIT 1")
+              .get() as { authority_markers: string }
+          ).authority_markers,
+        );
+        markers.title = "tminus";
+        db.prepare("UPDATE canonical_events SET authority_markers = ?").run(
+          JSON.stringify(markers),
+        );
+
+        // Provider overrides
+        await ug.applyProviderDelta(ACCOUNT_A, [
+          makeUpdatedDelta({
+            event: {
+              ...makeUpdatedDelta().event!,
+              title: `Override ${i}`,
+            },
+          }),
+        ]);
+      }
+
+      // Fetch with limit=1
+      const page1 = ug.getEventConflicts({
+        canonical_event_id: row.canonical_event_id,
+        limit: 1,
+      });
+
+      expect(page1.items).toHaveLength(1);
+      expect(page1.has_more).toBe(true);
+      expect(page1.cursor).toBeTruthy();
+
+      // Fetch next page
+      const page2 = ug.getEventConflicts({
+        canonical_event_id: row.canonical_event_id,
+        limit: 1,
+        cursor: page1.cursor!,
+      });
+
+      expect(page2.items).toHaveLength(1);
+      expect(page2.has_more).toBe(true);
+      // Different entry than page 1
+      expect(page2.items[0].journal_id).not.toBe(page1.items[0].journal_id);
+    });
+
+    it("is accessible via handleFetch dispatch", async () => {
+      // Create event with a conflict
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      const row = db
+        .prepare(
+          "SELECT canonical_event_id, authority_markers FROM canonical_events LIMIT 1",
+        )
+        .get() as { canonical_event_id: string; authority_markers: string };
+
+      // Set tminus authority and trigger conflict
+      const markers: AuthorityMarkers = JSON.parse(row.authority_markers);
+      markers.title = "tminus";
+      db.prepare("UPDATE canonical_events SET authority_markers = ?").run(
+        JSON.stringify(markers),
+      );
+      await ug.applyProviderDelta(ACCOUNT_A, [
+        makeUpdatedDelta({
+          event: { ...makeUpdatedDelta().event!, title: "Override" },
+        }),
+      ]);
+
+      // Call via handleFetch (the same path API workers use)
+      const request = new Request("https://do/getEventConflicts", {
+        method: "POST",
+        body: JSON.stringify({
+          canonical_event_id: row.canonical_event_id,
+        }),
+      });
+
+      const response = await ug.handleFetch(request);
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        items: Array<{
+          conflict_type: string;
+          resolution: string;
+        }>;
+        has_more: boolean;
+      };
+
+      expect(data.items.length).toBeGreaterThanOrEqual(1);
+      expect(data.items[0].conflict_type).toBe("field_override");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TM-teqr AC1 continued: queryJournal now includes conflict_type/resolution
+  // -------------------------------------------------------------------------
+
+  describe("queryJournal includes conflict fields (TM-teqr)", () => {
+    it("returns conflict_type and resolution in journal entries", async () => {
+      // Create event, generate conflict
+      await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
+
+      const raw = db
+        .prepare(
+          "SELECT canonical_event_id, authority_markers FROM canonical_events LIMIT 1",
+        )
+        .get() as { canonical_event_id: string; authority_markers: string };
+
+      const markers: AuthorityMarkers = JSON.parse(raw.authority_markers);
+      markers.title = "tminus";
+      db.prepare("UPDATE canonical_events SET authority_markers = ?").run(
+        JSON.stringify(markers),
+      );
+
+      await ug.applyProviderDelta(ACCOUNT_A, [
+        makeUpdatedDelta({
+          event: { ...makeUpdatedDelta().event!, title: "Override" },
+        }),
+      ]);
+
+      const result = ug.queryJournal({
+        canonical_event_id: raw.canonical_event_id,
+      });
+
+      // Should have normal entries (conflict_type = "none") and conflict entries
+      const normalEntries = result.items.filter(
+        (e) => e.conflict_type === "none",
+      );
+      const conflictEntries = result.items.filter(
+        (e) => e.conflict_type !== "none",
+      );
+
+      expect(normalEntries.length).toBeGreaterThan(0);
+      expect(conflictEntries.length).toBeGreaterThan(0);
+
+      // Normal entries have null resolution
+      expect(normalEntries[0].resolution).toBeNull();
+
+      // Conflict entries have resolution JSON
+      expect(conflictEntries[0].conflict_type).toBe("field_override");
+      expect(conflictEntries[0].resolution).toBeTruthy();
+    });
+  });
 });

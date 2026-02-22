@@ -73,6 +73,59 @@ cd workers/<worker-name> && npx wrangler deploy --env production
 
 ---
 
+## Authority Conflict Investigation
+
+**Symptoms:** A canonical event field was unexpectedly overwritten (e.g., a
+rescheduled meeting reverted to its original time, or a title set by T-Minus
+policy was replaced by the provider value).
+
+**Diagnosis:**
+
+1. Query the conflict journal for the affected event via the DO endpoint:
+
+```bash
+# Via API worker -> DO stub
+curl -X POST https://api.tminus.ink/internal/do/user-graph \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "action": "/getEventConflicts",
+    "body": {
+      "canonical_event_id": "evt_01..."
+    }
+  }'
+```
+
+2. Each conflict entry contains:
+   - `conflict_type`: `"field_override"` for authority conflicts
+   - `resolution`: JSON with `strategy` ("provider_wins") and per-field details:
+     - `field`: which field was contested
+     - `current_authority`: who owned the field before
+     - `incoming_authority`: who overwrote it
+     - `old_value` / `new_value`: the actual data change
+
+3. Check structured logs for `authority_conflict` entries. Each conflict emits:
+   ```
+   authority_conflict {
+     canonical_event_id, conflicting_field,
+     old_authority, new_authority, resolution
+   }
+   ```
+
+**Common scenarios:**
+
+| Scenario | Conflict pattern | Resolution |
+|----------|-----------------|------------|
+| Provider sync overwrites T-Minus reschedule | `old_authority: "tminus"`, `new_authority: "provider:acc_..."` | Provider wins. If undesirable, update the provider calendar to match. |
+| Two providers compete for same event | `old_authority: "provider:acc_A"`, `new_authority: "provider:acc_B"` | Last writer wins. Review policy edges to ensure only one provider writes each field. |
+| Legacy event has no authority markers | No conflict entries (backward-compat treats all fields as provider-owned) | Normal. Authority markers will be populated on next update. |
+
+**Prevention:** The current resolution strategy is "provider wins" -- conflicts
+are logged but never block writes. If T-Minus needs to assert ownership of
+specific fields, a future "tminus wins" strategy can be implemented for
+individual fields without changing the conflict detection infrastructure.
+
+---
+
 ## Quick Reference: Make Targets
 
 | Target | Description |

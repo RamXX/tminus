@@ -21,6 +21,8 @@ export interface GraphEventInput {
   title?: string;
   start: { dateTime?: string; date?: string };
   end: { dateTime?: string; date?: string };
+  /** Per-field authority markers (TM-teqr). Maps field names to authority strings. */
+  authority_markers?: Record<string, string>;
   [key: string]: unknown;
 }
 
@@ -32,6 +34,8 @@ export interface GraphEvent {
   end: string;
   category: string | null;
   participants: string[];
+  /** Per-field authority markers (TM-teqr). Maps field names to authority owner. */
+  authority_markers?: Record<string, string>;
 }
 
 /** Input: relationship with reputation from DO. */
@@ -120,6 +124,9 @@ export function formatGraphEvent(
     end: event.end.dateTime ?? event.end.date ?? "",
     category: category ?? null,
     participants,
+    ...(event.authority_markers
+      ? { authority_markers: event.authority_markers }
+      : {}),
   };
 }
 

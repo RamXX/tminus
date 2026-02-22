@@ -162,6 +162,12 @@ export interface CanonicalEvent {
   readonly version: number;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Per-field authority tracking. Maps field names to authority strings
+   * ("provider:<account_id>" or "tminus"). Empty or absent for legacy events.
+   * Added by TM-teqr for authority visibility.
+   */
+  readonly authority_markers?: Record<string, string>;
 }
 
 /**

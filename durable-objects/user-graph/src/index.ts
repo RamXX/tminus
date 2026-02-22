@@ -415,6 +415,24 @@ export interface JournalEntry {
   readonly change_type: string;
   readonly patch_json: string | null;
   readonly reason: string | null;
+  /** Type of authority conflict, if any. "none" for normal entries. */
+  readonly conflict_type: string;
+  /** JSON string with resolution details when conflict_type != "none". */
+  readonly resolution: string | null;
+}
+
+/** Query parameters for conflict journal entries. */
+export interface ConflictQuery {
+  readonly canonical_event_id: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+/** Paginated conflict journal result. */
+export interface ConflictResult {
+  readonly items: JournalEntry[];
+  readonly cursor: string | null;
+  readonly has_more: boolean;
 }
 
 /** Sync health summary. */
@@ -1140,7 +1158,7 @@ export class UserGraphDO {
     }
     this.writeJournal(canonicalId, "updated", `provider:${accountId}`, patch);
 
-    // Record authority conflicts as separate journal entries
+    // Record authority conflicts as separate journal entries and emit telemetry
     if (conflicts.length > 0) {
       const resolution = {
         strategy: "provider_wins",
@@ -1152,6 +1170,17 @@ export class UserGraphDO {
           new_value: c.new_value,
         })),
       };
+
+      // Structured conflict telemetry (TM-teqr)
+      for (const c of conflicts) {
+        console.info("authority_conflict", {
+          canonical_event_id: canonicalId,
+          conflicting_field: c.field,
+          old_authority: c.current_authority,
+          new_authority: c.incoming_authority,
+          resolution: "provider_wins",
+        });
+      }
 
       this.writeJournal(
         canonicalId,
@@ -1973,6 +2002,62 @@ export class UserGraphDO {
       change_type: r.change_type,
       patch_json: r.patch_json,
       reason: r.reason,
+      conflict_type: r.conflict_type,
+      resolution: r.resolution,
+    }));
+
+    let cursor: string | null = null;
+    if (hasMore && items.length > 0) {
+      cursor = items[items.length - 1].journal_id;
+    }
+
+    return { items, cursor, has_more: hasMore };
+  }
+
+  // -------------------------------------------------------------------------
+  // getEventConflicts -- Query conflict journal entries for a canonical event
+  // -------------------------------------------------------------------------
+
+  /**
+   * Returns journal entries with conflict_type != 'none' for a given
+   * canonical_event_id. Provides visibility into authority conflicts
+   * that occurred during provider delta processing.
+   */
+  getEventConflicts(query: ConflictQuery): ConflictResult {
+    this.ensureMigrated();
+
+    const limit = query.limit ?? 50;
+    const conditions: string[] = [
+      "canonical_event_id = ?",
+      "conflict_type != 'none'",
+    ];
+    const params: unknown[] = [query.canonical_event_id];
+
+    if (query.cursor) {
+      conditions.push("journal_id > ?");
+      params.push(query.cursor);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const sql = `SELECT * FROM event_journal ${where}
+                 ORDER BY journal_id ASC LIMIT ?`;
+    params.push(limit + 1);
+
+    const rows = this.sql
+      .exec<JournalRow>(sql, ...params)
+      .toArray();
+
+    const hasMore = rows.length > limit;
+    const items: JournalEntry[] = rows.slice(0, limit).map((r) => ({
+      journal_id: r.journal_id,
+      canonical_event_id: r.canonical_event_id,
+      ts: r.ts,
+      actor: r.actor,
+      change_type: r.change_type,
+      patch_json: r.patch_json,
+      reason: r.reason,
+      conflict_type: r.conflict_type,
+      resolution: r.resolution,
     }));
 
     let cursor: string | null = null;
@@ -4124,6 +4209,11 @@ export class UserGraphDO {
         return Response.json(result);
       },
 
+      "/getEventConflicts": (body) => {
+        const result = this.getEventConflicts(body);
+        return Response.json(result);
+      },
+
       "/getSyncHealth": () => {
         const result = this.getSyncHealth();
         return Response.json(result);
@@ -4928,6 +5018,9 @@ export class UserGraphDO {
       version: row.version,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      authority_markers: row.authority_markers
+        ? JSON.parse(row.authority_markers)
+        : undefined,
     };
   }
 }
