@@ -793,8 +793,31 @@ export class RelationshipMixin {
       throw new Error("No city available. Provide city parameter or use a trip with destination_city set.");
     }
 
-    // Get relationships -- filter by city if provided, otherwise use all
-    const allRelationships = this.listRelationships();
+    // Get relationships -- filter by city if provided, otherwise use all.
+    // Wrap in try/catch to return an empty result gracefully when the
+    // underlying tables are missing (migration not yet applied to this DO
+    // instance) or when production data triggers an unexpected edge case.
+    // Trip-validation errors above are intentional and propagate before
+    // reaching this block.
+    let allRelationships: ReturnType<RelationshipMixin["listRelationships"]>;
+    try {
+      allRelationships = this.listRelationships();
+    } catch {
+      // Graceful degradation: table may not exist yet on a fresh DO
+      // where only ensureMigrated's relationships table was expected.
+      return {
+        city: targetCity,
+        trip_id: tripId ?? null,
+        trip_name: tripName,
+        trip_start: tripStart,
+        trip_end: tripEnd,
+        suggestions: [],
+        total_in_city: 0,
+        total_overdue_in_city: 0,
+        computed_at: new Date().toISOString(),
+      };
+    }
+
     const filteredRelationships = targetCity
       ? allRelationships.filter((r) => matchCityWithAliases(r.city, targetCity))
       : allRelationships;

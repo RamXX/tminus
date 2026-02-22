@@ -4320,7 +4320,10 @@ export class UserGraphDO {
       },
 
       "/getReconnectionSuggestions": (body) => {
-        const suggestions = this.relationships.getReconnectionSuggestions(body.city, body.trip_id);
+        const suggestions = this.relationships.getReconnectionSuggestions(
+          body?.city ?? null,
+          body?.trip_id ?? null,
+        );
         return Response.json(suggestions);
       },
 

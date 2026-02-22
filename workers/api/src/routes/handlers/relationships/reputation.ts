@@ -185,12 +185,12 @@ export async function handleGetTripReconnections(
     );
 
     if (!result.ok) {
-      const errData = result.data as { message?: string };
+      // DO error responses use {error: string}, not {message: string}
+      const errData = result.data as { error?: string; message?: string };
+      const errMsg = errData.error ?? errData.message ?? "Failed to get reconnection suggestions for trip";
+      console.error("DO /getReconnectionSuggestions (trip) error:", errMsg);
       return jsonResponse(
-        errorEnvelope(
-          errData.message ?? "Failed to get reconnection suggestions for trip",
-          "INTERNAL_ERROR",
-        ),
+        errorEnvelope(errMsg, "INTERNAL_ERROR"),
         ErrorCode.INTERNAL_ERROR,
       );
     }
@@ -227,12 +227,12 @@ export async function handleGetReconnectionSuggestions(
     );
 
     if (!result.ok) {
-      const errData = result.data as unknown as { message?: string };
+      // DO error responses use {error: string}, not {message: string}
+      const errData = result.data as unknown as { error?: string; message?: string };
+      const errMsg = errData.error ?? errData.message ?? "Failed to get reconnection suggestions";
+      console.error("DO /getReconnectionSuggestions error:", errMsg);
       return jsonResponse(
-        errorEnvelope(
-          errData.message ?? "Failed to get reconnection suggestions",
-          "INTERNAL_ERROR",
-        ),
+        errorEnvelope(errMsg, "INTERNAL_ERROR"),
         ErrorCode.INTERNAL_ERROR,
       );
     }

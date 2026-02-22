@@ -3453,6 +3453,76 @@ describe("UserGraphDO integration", () => {
       expect(resp.status).toBe(404);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // handleFetch: /getReconnectionSuggestions null-safety (TM-vhjr)
+  // -------------------------------------------------------------------------
+
+  describe("handleFetch: /getReconnectionSuggestions null-safety (TM-vhjr)", () => {
+    it("returns 200 with empty suggestions when called with {city: null, trip_id: null}", async () => {
+      const resp = await ug.handleFetch(
+        new Request("https://user-graph.internal/getReconnectionSuggestions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ city: null, trip_id: null }),
+        }),
+      );
+      expect(resp.status).toBe(200);
+      const data = await resp.json() as {
+        city: string | null;
+        trip_id: string | null;
+        suggestions: unknown[];
+        total_in_city: number;
+        total_overdue_in_city: number;
+        computed_at: string;
+      };
+      expect(data.city).toBeNull();
+      expect(data.trip_id).toBeNull();
+      expect(data.suggestions).toEqual([]);
+      expect(data.total_in_city).toBe(0);
+      expect(data.total_overdue_in_city).toBe(0);
+      expect(data.computed_at).toBeTruthy();
+    });
+
+    it("returns 200 with empty suggestions when called with no body (undefined)", async () => {
+      // Simulates a GET-like call or empty POST -- body parsing fails,
+      // body becomes undefined. The handler must not throw on body.city.
+      const resp = await ug.handleFetch(
+        new Request("https://user-graph.internal/getReconnectionSuggestions", {
+          method: "POST",
+        }),
+      );
+      expect(resp.status).toBe(200);
+      const data = await resp.json() as {
+        city: string | null;
+        trip_id: string | null;
+        suggestions: unknown[];
+      };
+      expect(data.city).toBeNull();
+      expect(data.trip_id).toBeNull();
+      expect(data.suggestions).toEqual([]);
+    });
+
+    it("returns 200 with empty suggestions when called with empty JSON object", async () => {
+      const resp = await ug.handleFetch(
+        new Request("https://user-graph.internal/getReconnectionSuggestions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(resp.status).toBe(200);
+      const data = await resp.json() as {
+        city: string | null;
+        trip_id: string | null;
+        suggestions: unknown[];
+      };
+      // body.city is undefined, body?.city ?? null gives null
+      expect(data.city).toBeNull();
+      expect(data.trip_id).toBeNull();
+      expect(data.suggestions).toEqual([]);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -4721,6 +4791,9 @@ describe("UserGraphDO buffer constraints", () => {
     sql = createSqlStorageAdapter(db);
     queue = new MockQueue();
     ug = new UserGraphDO(sql, queue);
+    // Ensure migrations run before any test body that may use raw SQL helpers
+    // like insertPolicyEdge() directly against the db.
+    ug.listConstraints();
   });
 
   afterEach(() => {
@@ -5855,8 +5928,6 @@ describe("UserGraphDO buffer constraints", () => {
     });
 
     it("applyProviderDelta drains outbox entries to queue", async () => {
-      // Trigger migration so policy table exists
-      ug.listConstraints();
       // Set up a policy edge so projections produce mirror writes
       insertPolicyEdge(db, {
         policyId: "pol_outbox_test",
@@ -5885,8 +5956,6 @@ describe("UserGraphDO buffer constraints", () => {
     });
 
     it("failed drain leaves outbox entries for retry", async () => {
-      // Trigger migration so policy table exists
-      ug.listConstraints();
       // Set up a policy edge so projections produce mirror writes
       insertPolicyEdge(db, {
         policyId: "pol_outbox_fail",
@@ -5935,8 +6004,6 @@ describe("UserGraphDO buffer constraints", () => {
     });
 
     it("requeuePendingMirrors sweeps orphaned outbox entries", async () => {
-      // Trigger migration so policy table exists
-      ug.listConstraints();
       // Set up a policy edge
       insertPolicyEdge(db, {
         policyId: "pol_outbox_sweep",
@@ -5995,8 +6062,6 @@ describe("UserGraphDO buffer constraints", () => {
     });
 
     it("deleteCanonicalEvent uses outbox for DELETE_MIRROR messages", async () => {
-      // Trigger migration so policy table exists
-      ug.listConstraints();
       // Set up policy edge and create an event with mirror
       insertPolicyEdge(db, {
         policyId: "pol_outbox_del",
@@ -6034,8 +6099,6 @@ describe("UserGraphDO buffer constraints", () => {
     });
 
     it("unlinkAccount uses outbox for batch DELETE_MIRROR messages", async () => {
-      // Trigger migration so policy table exists
-      ug.listConstraints();
       // Set up policy edge and create events
       insertPolicyEdge(db, {
         policyId: "pol_outbox_unlink",
