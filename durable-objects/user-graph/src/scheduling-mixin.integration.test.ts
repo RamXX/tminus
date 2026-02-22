@@ -545,9 +545,10 @@ describe("SchedulingMixin integration (via UserGraphDO)", () => {
       };
       await rpc(do_, "/storeSchedulingSession", sessionData);
 
-      // Store holds with past expiry using SQLite-compatible datetime format
-      // (datetime('now') returns 'YYYY-MM-DD HH:MM:SS', not ISO 8601)
-      const pastExpiry = "2020-01-01 00:00:00";
+      // Store holds with past expiry using ISO 8601 format (as produced by
+      // JavaScript's Date.toISOString()). The SQL wraps expires_at in
+      // datetime() so the comparison works regardless of format.
+      const pastExpiry = "2020-01-01T00:00:00.000Z";
       await rpc(do_, "/storeHolds", {
         holds: [
           {
