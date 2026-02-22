@@ -63,13 +63,18 @@ export function Reconnections() {
 
   const loadData = useCallback(async () => {
     try {
-      const [suggestionsData, milestonesData] = await Promise.all([
+      // Fetch independently so one failing doesn't block the other
+      const [suggestionsResult, milestonesResult] = await Promise.allSettled([
         api.fetchReconnectionSuggestions(),
         api.fetchUpcomingMilestones(),
       ]);
       if (!mountedRef.current) return;
-      setSuggestions(suggestionsData);
-      setMilestones(milestonesData);
+      setSuggestions(
+        suggestionsResult.status === "fulfilled" ? suggestionsResult.value : [],
+      );
+      setMilestones(
+        milestonesResult.status === "fulfilled" ? milestonesResult.value : [],
+      );
       setError(null);
     } catch (err) {
       if (!mountedRef.current) return;

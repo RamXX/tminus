@@ -374,18 +374,27 @@ export async function getUserTier(
   db: D1Database,
   userId: string,
 ): Promise<"free" | "premium" | "enterprise"> {
-  const row = await db
-    .prepare(
-      `SELECT tier FROM subscriptions
-       WHERE user_id = ?1 AND status IN ('active', 'trialing')
-       ORDER BY created_at DESC
-       LIMIT 1`,
-    )
-    .bind(userId)
-    .first<{ tier: string }>();
+  try {
+    const row = await db
+      .prepare(
+        `SELECT tier FROM subscriptions
+         WHERE user_id = ?1 AND status IN ('active', 'trialing')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(userId)
+      .first<{ tier: string }>();
 
-  if (!row) return "free";
-  return row.tier as "free" | "premium" | "enterprise";
+    if (!row) return "free";
+    return row.tier as "free" | "premium" | "enterprise";
+  } catch (err) {
+    // Gracefully handle missing subscriptions table (migration not applied)
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("no such table") || msg.includes("D1_ERROR")) {
+      return "free";
+    }
+    throw err;
+  }
 }
 
 /**
