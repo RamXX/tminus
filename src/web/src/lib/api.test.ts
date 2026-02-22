@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createEvent, fetchEvents, listSessions, updateEvent } from "./api";
+import { createEvent, fetchDriftAlerts, fetchEvents, listSessions, updateEvent } from "./api";
 
 function makeEnvelope<T>(data: T) {
   return {
@@ -359,6 +359,100 @@ describe("api listSessions paginated response unwrapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await listSessions("jwt-empty");
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(0);
+  });
+});
+
+describe("api fetchDriftAlerts paginated response unwrapping", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("unwraps { alerts: DriftAlert[] } into a plain array", async () => {
+    const alerts = [
+      {
+        alert_id: "dft_1",
+        relationship_id: "rel_1",
+        name: "Alice",
+        drift_level: "red" as const,
+        days_overdue: 14,
+        message: "14 days overdue",
+        created_at: "2026-02-20T00:00:00Z",
+      },
+      {
+        alert_id: "dft_2",
+        relationship_id: "rel_2",
+        name: "Bob",
+        drift_level: "yellow" as const,
+        days_overdue: 5,
+        message: "5 days overdue",
+        created_at: "2026-02-20T00:00:00Z",
+      },
+    ];
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeEnvelope({ alerts })),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDriftAlerts("jwt-drift");
+
+    // Must be a plain array, not { alerts: [...] }
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(2);
+    expect(result[0].alert_id).toBe("dft_1");
+    expect(result[1].alert_id).toBe("dft_2");
+
+    // Verify .filter works (common array operation on drift alerts)
+    const redDrift = result.filter((a) => a.drift_level === "red");
+    expect(redDrift).toHaveLength(1);
+    expect(redDrift[0].name).toBe("Alice");
+  });
+
+  it("handles backward-compatible plain array response", async () => {
+    const alerts = [
+      {
+        alert_id: "dft_3",
+        relationship_id: "rel_3",
+        name: "Carol",
+        drift_level: "red" as const,
+        days_overdue: 21,
+        message: "21 days overdue",
+        created_at: "2026-02-20T00:00:00Z",
+      },
+    ];
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeEnvelope(alerts)),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDriftAlerts("jwt-drift-compat");
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(1);
+    expect(result[0].alert_id).toBe("dft_3");
+  });
+
+  it("returns empty array when backend returns no alerts", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeEnvelope({ alerts: [] })),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDriftAlerts("jwt-empty-drift");
 
     expect(Array.isArray(result)).toBe(true);
     expect(result).toHaveLength(0);
