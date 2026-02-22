@@ -3424,6 +3424,35 @@ describe("UserGraphDO integration", () => {
       expect(data.free_intervals).toHaveLength(2);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // handleFetch dispatch -- unknown route returns 404
+  // -------------------------------------------------------------------------
+
+  describe("handleFetch: unknown routes", () => {
+    it("returns 404 for unrecognized pathname", async () => {
+      const resp = await ug.handleFetch(
+        new Request("http://fake-host/thisRouteDoesNotExist", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(resp.status).toBe(404);
+      const text = await resp.text();
+      expect(text).toContain("Unknown action");
+      expect(text).toContain("/thisRouteDoesNotExist");
+    });
+
+    it("returns 404 for root path", async () => {
+      const resp = await ug.handleFetch(
+        new Request("http://fake-host/", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(resp.status).toBe(404);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
