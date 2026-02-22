@@ -716,4 +716,37 @@ export class SchedulingMixin {
 
     return true;
   }
+
+  // -----------------------------------------------------------------------
+  // Bulk deletion (used by deleteRelationshipData)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Delete ALL scheduling-domain data from this user's DO SQLite.
+   *
+   * Covers: schedule_holds, schedule_candidates, schedule_sessions
+   * (in FK-safe order, children before parents).
+   *
+   * Returns the total number of rows deleted across all tables.
+   */
+  deleteAll(): number {
+    this.ensureMigrated();
+
+    let total = 0;
+
+    const tables = ["schedule_holds", "schedule_candidates", "schedule_sessions"];
+    for (const table of tables) {
+      const count = this.sql
+        .exec<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${table}`)
+        .toArray()[0].cnt;
+      total += count;
+    }
+
+    // Delete in FK-safe order: children before parents
+    this.sql.exec("DELETE FROM schedule_holds");
+    this.sql.exec("DELETE FROM schedule_candidates");
+    this.sql.exec("DELETE FROM schedule_sessions");
+
+    return total;
+  }
 }

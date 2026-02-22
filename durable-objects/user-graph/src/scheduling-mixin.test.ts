@@ -67,6 +67,9 @@ describe("SchedulingMixin", () => {
       expect(typeof mixin.releaseSessionHolds).toBe("function");
       expect(typeof mixin.extendHolds).toBe("function");
       expect(typeof mixin.expireSessionIfAllHoldsTerminal).toBe("function");
+
+      // Bulk deletion (1)
+      expect(typeof mixin.deleteAll).toBe("function");
     });
   });
 

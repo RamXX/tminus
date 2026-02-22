@@ -68,6 +68,9 @@ describe("ConstraintMixin", () => {
       expect(typeof mixin.updateConstraint).toBe("function");
       expect(typeof mixin.listConstraints).toBe("function");
       expect(typeof mixin.getConstraint).toBe("function");
+
+      // Bulk deletion (1)
+      expect(typeof mixin.deleteAll).toBe("function");
     });
   });
 

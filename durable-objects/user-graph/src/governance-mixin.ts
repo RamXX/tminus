@@ -898,4 +898,43 @@ export class GovernanceMixin {
       .toArray();
     return rows.length > 0 ? rows[0].client_id : null;
   }
+
+  // -----------------------------------------------------------------------
+  // Bulk deletion (used by deleteRelationshipData)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Delete ALL governance-domain data from this user's DO SQLite.
+   *
+   * Covers: commitment_reports, time_commitments, time_allocations, vip_policies
+   * (in FK-safe order, children before parents).
+   *
+   * Returns the total number of rows deleted across all tables.
+   */
+  deleteAll(): number {
+    this.ensureMigrated();
+
+    let total = 0;
+
+    const tables = [
+      "vip_policies",
+      "commitment_reports",
+      "time_commitments",
+      "time_allocations",
+    ];
+    for (const table of tables) {
+      const count = this.sql
+        .exec<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${table}`)
+        .toArray()[0].cnt;
+      total += count;
+    }
+
+    // Delete in FK-safe order: children before parents
+    this.sql.exec("DELETE FROM vip_policies");
+    this.sql.exec("DELETE FROM commitment_reports");
+    this.sql.exec("DELETE FROM time_commitments");
+    this.sql.exec("DELETE FROM time_allocations");
+
+    return total;
+  }
 }

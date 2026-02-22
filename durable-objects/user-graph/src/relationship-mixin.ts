@@ -1472,6 +1472,39 @@ export class RelationshipMixin {
   }
 
   // -----------------------------------------------------------------------
+  // Bulk deletion (used by deleteRelationshipData)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Delete ALL relationship-domain data from this user's DO SQLite.
+   *
+   * Covers: interaction_ledger, milestones, relationships (in FK-safe order,
+   * children before parents).
+   *
+   * Returns the total number of rows deleted across all tables.
+   */
+  deleteAll(): number {
+    this.ensureMigrated();
+
+    let total = 0;
+
+    const tables = ["interaction_ledger", "milestones", "relationships"];
+    for (const table of tables) {
+      const count = this.sql
+        .exec<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${table}`)
+        .toArray()[0].cnt;
+      total += count;
+    }
+
+    // Delete in FK-safe order: children before parents
+    this.sql.exec("DELETE FROM interaction_ledger");
+    this.sql.exec("DELETE FROM milestones");
+    this.sql.exec("DELETE FROM relationships");
+
+    return total;
+  }
+
+  // -----------------------------------------------------------------------
   // Private helpers
   // -----------------------------------------------------------------------
 

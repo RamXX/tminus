@@ -710,6 +710,37 @@ export class ConstraintMixin {
     });
   }
 
+  // -----------------------------------------------------------------------
+  // Bulk deletion (used by deleteRelationshipData)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Delete ALL constraint-domain data from this user's DO SQLite.
+   *
+   * Covers: constraints table.
+   *
+   * Note: this is a simple DELETE without cascade-deleting derived events
+   * or mirrors. The caller (deleteRelationshipData) is responsible for
+   * full GDPR cleanup of events and mirrors separately.
+   *
+   * Returns the total number of rows deleted.
+   */
+  deleteAll(): number {
+    this.ensureMigrated();
+
+    const count = this.sql
+      .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM constraints")
+      .toArray()[0].cnt;
+
+    this.sql.exec("DELETE FROM constraints");
+
+    return count;
+  }
+
+  // -----------------------------------------------------------------------
+  // Private helpers
+  // -----------------------------------------------------------------------
+
   /** Convert a DB row to a Constraint domain object. */
   private rowToConstraint(row: ConstraintRow): Constraint {
     return {

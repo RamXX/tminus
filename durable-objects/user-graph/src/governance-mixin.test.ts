@@ -73,6 +73,9 @@ describe("GovernanceMixin", () => {
 
       // Helper (1)
       expect(typeof mixin.getEventClientId).toBe("function");
+
+      // Bulk deletion (1)
+      expect(typeof mixin.deleteAll).toBe("function");
     });
   });
 

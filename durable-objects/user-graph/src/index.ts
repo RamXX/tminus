@@ -2548,50 +2548,31 @@ export class UserGraphDO {
    * Delete ALL relationship, ledger, milestone, policy, calendar, constraint,
    * and scheduling data from this user's DO SQLite.
    *
-   * Covers Phase 3+ and Phase 4 tables plus core policy/calendar/constraint tables.
+   * Delegates to each domain mixin's deleteAll() method so that each domain
+   * owns its own cleanup logic. Tables not yet covered by a mixin (policies,
+   * policy_edges, calendars) are deleted directly.
+   *
    * Idempotent: returns total rows deleted across all tables.
    */
   deleteRelationshipData(): DeletionCounts {
     this.ensureMigrated();
 
-    // Count all rows across relationship/supporting tables
     let total = 0;
-    const tables = [
-      "relationships",
-      "interaction_ledger",
-      "milestones",
-      "vip_policies",
-      "time_allocations",
-      "time_commitments",
-      "commitment_reports",
-      "schedule_holds",
-      "schedule_candidates",
-      "schedule_sessions",
-      "constraints",
-      "policy_edges",
-      "policies",
-      "calendars",
-    ];
 
-    for (const table of tables) {
+    // Delegate to domain mixins (each handles FK ordering internally)
+    total += this.relationships.deleteAll();
+    total += this.governance.deleteAll();
+    total += this.scheduling.deleteAll();
+    total += this.constraints.deleteAll();
+
+    // Tables not yet owned by a mixin -- delete directly
+    const coreTables = ["policy_edges", "policies", "calendars"];
+    for (const table of coreTables) {
       const count = this.sql
         .exec<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM ${table}`)
         .toArray()[0].cnt;
       total += count;
     }
-
-    // Delete in correct order (children before parents, respecting FK constraints)
-    this.sql.exec("DELETE FROM interaction_ledger");
-    this.sql.exec("DELETE FROM milestones");
-    this.sql.exec("DELETE FROM relationships");
-    this.sql.exec("DELETE FROM vip_policies");
-    this.sql.exec("DELETE FROM commitment_reports");
-    this.sql.exec("DELETE FROM time_commitments");
-    this.sql.exec("DELETE FROM time_allocations");
-    this.sql.exec("DELETE FROM schedule_holds");
-    this.sql.exec("DELETE FROM schedule_candidates");
-    this.sql.exec("DELETE FROM schedule_sessions");
-    this.sql.exec("DELETE FROM constraints");
     this.sql.exec("DELETE FROM policy_edges");
     this.sql.exec("DELETE FROM policies");
     this.sql.exec("DELETE FROM calendars");

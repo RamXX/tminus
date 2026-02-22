@@ -94,6 +94,9 @@ describe("RelationshipMixin", () => {
       // Drift alerts (2)
       expect(typeof mixin.storeDriftAlerts).toBe("function");
       expect(typeof mixin.getDriftAlerts).toBe("function");
+
+      // Bulk deletion (1)
+      expect(typeof mixin.deleteAll).toBe("function");
     });
   });
 

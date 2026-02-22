@@ -6139,4 +6139,155 @@ describe("UserGraphDO buffer constraints", () => {
       expect(drained).toBe(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // deleteRelationshipData -- mixin-delegated cleanup (TM-he6e)
+  // -------------------------------------------------------------------------
+
+  describe("deleteRelationshipData", () => {
+    it("deletes all domain data across mixins and returns correct total count", async () => {
+      // Seed data across ALL domains that deleteRelationshipData covers.
+      // We need to trigger ensureMigrated first via any operation.
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Relationship domain: relationships, interaction_ledger, milestones
+      const rel = ug.relationships.createRelationship(
+        "rel_test_1", "hash_alice", "Alice", "FRIEND", 0.8,
+      );
+      ug.relationships.markOutcome("rel_test_1", "ATTENDED", null, "coffee");
+      ug.relationships.createMilestone(
+        "mst_test_1", "rel_test_1", "birthday", "1990-06-15", true,
+      );
+
+      // Governance domain: vip_policies, time_commitments, commitment_reports, time_allocations
+      ug.createVipPolicy("vip_1", "hash_alice", "Alice", 1.0, {});
+      // time_allocations need a canonical event -- use the one we created
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events LIMIT 1")
+        .all() as Array<{ canonical_event_id: string }>;
+      ug.createAllocation("alloc_1", events[0].canonical_event_id, "BILLABLE", "client_1", 100);
+      ug.createCommitment("cmt_1", "client_1", 10, "WEEKLY");
+
+      // Scheduling domain: schedule_sessions, schedule_candidates, schedule_holds
+      // Insert directly via SQL (scheduling mixin is private on host DO)
+      db.prepare(
+        `INSERT INTO schedule_sessions (session_id, status, objective_json, created_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run("sess_1", "open", JSON.stringify({ duration: 30 }), new Date().toISOString());
+      db.prepare(
+        `INSERT INTO schedule_candidates (candidate_id, session_id, start_ts, end_ts, score, explanation, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run("cand_1", "sess_1", "2026-03-01T10:00:00Z", "2026-03-01T10:30:00Z", 0.9, "Good slot", new Date().toISOString());
+      db.prepare(
+        `INSERT INTO schedule_holds (hold_id, session_id, account_id, provider_event_id, expires_at, status)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run("hold_1", "sess_1", TEST_ACCOUNT_ID, null, "2026-03-02T10:00:00Z", "held");
+
+      // Constraint domain: constraints
+      ug.addConstraint("buffer", {
+        type: "travel",
+        minutes: 15,
+        applies_to: "all",
+      }, null, null);
+
+      // Core tables: policies, policy_edges, calendars
+      insertPolicyEdge(db, {
+        policyId: "pol_1",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+      insertCalendar(db, {
+        calendarId: "cal_1",
+        accountId: TEST_ACCOUNT_ID,
+        providerCalendarId: "primary",
+      });
+
+      // Verify pre-condition: data exists in all tables
+      const countBefore = (table: string): number =>
+        (db.prepare(`SELECT COUNT(*) as cnt FROM ${table}`).get() as { cnt: number }).cnt;
+
+      expect(countBefore("relationships")).toBe(1);
+      expect(countBefore("interaction_ledger")).toBe(1);
+      expect(countBefore("milestones")).toBe(1);
+      expect(countBefore("vip_policies")).toBe(1);
+      expect(countBefore("time_allocations")).toBe(1);
+      expect(countBefore("time_commitments")).toBe(1);
+      expect(countBefore("schedule_sessions")).toBe(1);
+      expect(countBefore("schedule_candidates")).toBe(1);
+      expect(countBefore("schedule_holds")).toBe(1);
+      expect(countBefore("constraints")).toBe(1);
+      expect(countBefore("policy_edges")).toBe(1);
+      expect(countBefore("policies")).toBe(1);
+      expect(countBefore("calendars")).toBe(1);
+
+      // Execute the refactored method
+      const result = ug.deleteRelationshipData();
+
+      // Total should be the sum of all rows across all 13 original tables
+      // (commitment_reports was not explicitly seeded but time_commitments: 1)
+      expect(result.deleted).toBe(13);
+
+      // Verify all tables are empty after deletion
+      expect(countBefore("relationships")).toBe(0);
+      expect(countBefore("interaction_ledger")).toBe(0);
+      expect(countBefore("milestones")).toBe(0);
+      expect(countBefore("vip_policies")).toBe(0);
+      expect(countBefore("time_allocations")).toBe(0);
+      expect(countBefore("time_commitments")).toBe(0);
+      expect(countBefore("commitment_reports")).toBe(0);
+      expect(countBefore("schedule_sessions")).toBe(0);
+      expect(countBefore("schedule_candidates")).toBe(0);
+      expect(countBefore("schedule_holds")).toBe(0);
+      expect(countBefore("constraints")).toBe(0);
+      expect(countBefore("policy_edges")).toBe(0);
+      expect(countBefore("policies")).toBe(0);
+      expect(countBefore("calendars")).toBe(0);
+
+      // canonical_events should NOT be affected
+      expect(countBefore("canonical_events")).toBeGreaterThan(0);
+    });
+
+    it("is idempotent -- returns 0 when called on empty tables", async () => {
+      // Trigger migration
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // First call: should return 0 (no domain data seeded)
+      const result1 = ug.deleteRelationshipData();
+      expect(result1.deleted).toBe(0);
+
+      // Second call: still 0
+      const result2 = ug.deleteRelationshipData();
+      expect(result2.deleted).toBe(0);
+    });
+
+    it("is accessible via /deleteRelationshipData RPC route", async () => {
+      // Trigger migration
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      // Seed one relationship
+      ug.relationships.createRelationship(
+        "rel_rpc", "hash_bob", "Bob", "COLLEAGUE", 0.5,
+      );
+
+      const request = new Request("https://do.internal/deleteRelationshipData", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const response = await ug.handleFetch(request);
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { deleted: number };
+      expect(body.deleted).toBe(1);
+
+      // Verify the relationship was actually deleted
+      const count = (
+        db.prepare("SELECT COUNT(*) as cnt FROM relationships").get() as { cnt: number }
+      ).cnt;
+      expect(count).toBe(0);
+    });
+  });
 });
