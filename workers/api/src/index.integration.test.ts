@@ -4216,3 +4216,92 @@ describe("Integration: CalDAV feed endpoints", () => {
     expect(body.data.instructions).toContain("subscription");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Drift alerts endpoint
+// ---------------------------------------------------------------------------
+
+describe("Integration: Drift alerts endpoint", () => {
+  let db: DatabaseType;
+  let d1: D1Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    db.exec(MIGRATION_0001_INITIAL_SCHEMA);
+    db.exec(MIGRATION_0004_AUTH_FIELDS);
+    db.exec(MIGRATION_0008_SYNC_STATUS_COLUMNS);
+    db.exec(MIGRATION_0012_SUBSCRIPTIONS);
+    db.exec(MIGRATION_0013_SUBSCRIPTION_LIFECYCLE);
+    db.prepare("INSERT INTO orgs (org_id, name) VALUES (?, ?)").run(
+      TEST_ORG.org_id,
+      TEST_ORG.name,
+    );
+    db.prepare(
+      "INSERT INTO users (user_id, org_id, email) VALUES (?, ?, ?)",
+    ).run(TEST_USER.user_id, TEST_USER.org_id, TEST_USER.email);
+    d1 = createRealD1(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it("GET /v1/drift-alerts passes DO { alerts } wrapper through successEnvelope", async () => {
+    const mockAlerts = [
+      { relationship_id: "rel-1", type: "decay", severity: "high", message: "Contact fading" },
+      { relationship_id: "rel-2", type: "silence", severity: "medium", message: "No activity" },
+    ];
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([["/getDriftAlerts", { alerts: mockAlerts }]]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/drift-alerts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { alerts: Array<{ relationship_id: string; type: string; severity: string; message: string }> };
+    };
+    expect(body.ok).toBe(true);
+    // Handler passes DO's { alerts: [...] } through successEnvelope as-is.
+    // Frontend fetchDriftAlerts() unwraps .alerts to produce a flat array.
+    expect(body.data.alerts).toHaveLength(2);
+    expect(body.data.alerts[0].relationship_id).toBe("rel-1");
+    expect(body.data.alerts[1].type).toBe("silence");
+  });
+
+  it("GET /v1/drift-alerts returns empty alerts when DO has none", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([["/getDriftAlerts", { alerts: [] }]]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/drift-alerts", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; data: { alerts: unknown[] } };
+    expect(body.ok).toBe(true);
+    expect(body.data.alerts).toHaveLength(0);
+  });
+});
