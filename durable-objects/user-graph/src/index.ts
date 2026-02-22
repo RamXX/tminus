@@ -3791,9 +3791,689 @@ export class UserGraphDO {
   // fetch() handler -- RPC-style routing for DO stub communication
   // -------------------------------------------------------------------------
 
+  /** Handler function type: receives the parsed JSON body, returns a Response. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private routeMap: Record<string, (body: any) => Response | Promise<Response>> | null = null;
+
+  /**
+   * Build the route dispatch map. Lazily initialized on first request.
+   * Each handler receives the parsed JSON body (or undefined for bodyless
+   * routes) and returns a Response directly, preserving exact response
+   * shapes per route.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildRouteMap(): Record<string, (body: any) => Response | Promise<Response>> {
+    return {
+      // --- Core sync & event store ---
+
+      "/applyProviderDelta": async (body) => {
+        // TM-08pp: Defense-in-depth canonicalization of provider event IDs.
+        // Primary normalization happens at sync-consumer ingestion; this
+        // ensures canonical form even for direct DO callers.
+        const canonicalizedDeltas = body.deltas.map((d: ProviderDelta) => ({
+          ...d,
+          origin_event_id: canonicalizeProviderEventId(d.origin_event_id),
+        }));
+        const result = await this.applyProviderDelta(body.account_id, canonicalizedDeltas);
+        return Response.json(result);
+      },
+
+      "/getMirror": (body) => {
+        const mirror = this.getMirror(body.canonical_event_id, body.target_account_id);
+        return Response.json({ mirror });
+      },
+
+      "/updateMirrorState": (body) => {
+        this.updateMirrorState(body.canonical_event_id, body.target_account_id, body.update);
+        return Response.json({ ok: true });
+      },
+
+      "/getBusyOverlayCalendar": (body) => {
+        const calId = this.getBusyOverlayCalendar(body.account_id);
+        return Response.json({ provider_calendar_id: calId });
+      },
+
+      "/storeBusyOverlayCalendar": (body) => {
+        this.storeBusyOverlayCalendar(body.account_id, body.provider_calendar_id);
+        return Response.json({ ok: true });
+      },
+
+      "/storeCalendars": (body) => {
+        this.storeCalendars(body.calendars);
+        return Response.json({ ok: true, stored: body.calendars.length });
+      },
+
+      "/listCanonicalEvents": (body) => {
+        const result = this.listCanonicalEvents(body);
+        return Response.json(result);
+      },
+
+      "/getCanonicalEvent": (body) => {
+        const result = this.getCanonicalEvent(body.canonical_event_id);
+        return Response.json(result);
+      },
+
+      "/upsertCanonicalEvent": async (body) => {
+        const eventId = await this.upsertCanonicalEvent(body.event, body.source);
+        return Response.json(eventId);
+      },
+
+      "/deleteCanonicalEvent": async (body) => {
+        const deleted = await this.deleteCanonicalEvent(body.canonical_event_id, body.source);
+        return Response.json(deleted);
+      },
+
+      "/queryJournal": (body) => {
+        const result = this.queryJournal(body);
+        return Response.json(result);
+      },
+
+      "/getSyncHealth": () => {
+        const result = this.getSyncHealth();
+        return Response.json(result);
+      },
+
+      "/listErrorMirrors": (body) => {
+        const items = this.listErrorMirrors(body?.limit);
+        return Response.json({ items });
+      },
+
+      "/getMirrorDiagnostics": (body) => {
+        const diagnostics = this.getMirrorDiagnostics(body?.sample_limit ?? 25);
+        return Response.json(diagnostics);
+      },
+
+      "/settleHistoricalPending": (body) => {
+        const result = this.settleHistoricalPending(body?.cutoff_days ?? 30);
+        return Response.json(result);
+      },
+
+      "/settleOutOfWindowPending": (body) => {
+        const result = this.settleOutOfWindowPending(
+          body?.past_days ?? 30,
+          body?.future_days ?? 365,
+        );
+        return Response.json(result);
+      },
+
+      "/settleStuckPending": (body) => {
+        const result = this.settleStuckPending(body?.min_age_minutes ?? 120);
+        return Response.json(result);
+      },
+
+      // --- Policy management ---
+
+      "/createPolicy": async (body) => {
+        const result = await this.createPolicy(body.name);
+        return Response.json(result);
+      },
+
+      "/getPolicy": async (body) => {
+        const result = await this.getPolicy(body.policy_id);
+        return Response.json(result);
+      },
+
+      "/listPolicies": async () => {
+        const result = await this.listPolicies();
+        return Response.json(result);
+      },
+
+      "/setPolicyEdges": async (body) => {
+        await this.setPolicyEdges(body.policy_id, body.edges);
+        return Response.json({ ok: true });
+      },
+
+      "/ensureDefaultPolicy": async (body) => {
+        await this.ensureDefaultPolicy(body.accounts);
+        return Response.json({ ok: true });
+      },
+
+      // --- ReconcileWorkflow RPC endpoints ---
+
+      "/findCanonicalByOrigin": (body) => {
+        const event = this.findCanonicalByOrigin(body.origin_account_id, body.origin_event_id);
+        return Response.json({ event });
+      },
+
+      "/findCanonicalByMirror": (body) => {
+        const canonicalEventId = this.findCanonicalByMirror(
+          body.target_account_id,
+          body.provider_event_id,
+        );
+        return Response.json({ canonical_event_id: canonicalEventId });
+      },
+
+      "/getPolicyEdges": (body) => {
+        const edges = this.getPolicyEdges(body.from_account_id);
+        return Response.json({ edges });
+      },
+
+      "/getActiveMirrors": (body) => {
+        const mirrors = this.getActiveMirrors(body.target_account_id);
+        return Response.json({ mirrors });
+      },
+
+      "/logReconcileDiscrepancy": (body) => {
+        this.logReconcileDiscrepancy(body.canonical_event_id, body.discrepancy_type, body.details);
+        return Response.json({ ok: true });
+      },
+
+      "/recomputeProjections": async (body) => {
+        const enqueued = await this.recomputeProjections(body);
+        return Response.json({ enqueued });
+      },
+
+      "/requeuePendingMirrors": async (body) => {
+        const result = await this.requeuePendingMirrors(body?.limit ?? 200);
+        return Response.json(result);
+      },
+
+      // --- Analytics ---
+
+      "/computeAvailability": (body) => {
+        const result = this.computeAvailability(body);
+        return Response.json(result);
+      },
+
+      "/getCognitiveLoad": (body) => {
+        const result = this.getCognitiveLoad(body.date, body.range);
+        return Response.json(result);
+      },
+
+      "/getContextSwitches": (body) => {
+        const result = this.getContextSwitches(body.date, body.range);
+        return Response.json(result);
+      },
+
+      "/getDeepWork": (body) => {
+        const result = this.getDeepWork(body.date, body.range, body.min_block_minutes);
+        return Response.json(result);
+      },
+
+      "/getRiskScores": (body) => {
+        const result = this.getRiskScores(body.weeks ?? 4);
+        return Response.json(result);
+      },
+
+      "/getProbabilisticAvailability": (body) => {
+        const result = this.getProbabilisticAvailability(
+          body.start,
+          body.end,
+          body.granularity_minutes,
+        );
+        return Response.json(result);
+      },
+
+      // --- Constraint RPC endpoints ---
+
+      "/addConstraint": (body) => {
+        const constraint = this.constraints.addConstraint(
+          body.kind,
+          body.config_json,
+          body.active_from,
+          body.active_to,
+        );
+        return Response.json(constraint);
+      },
+
+      "/deleteConstraint": async (body) => {
+        const deleted = await this.constraints.deleteConstraint(body.constraint_id);
+        return Response.json({ deleted });
+      },
+
+      "/listConstraints": (body) => {
+        const constraintItems = this.constraints.listConstraints(body.kind);
+        return Response.json({ items: constraintItems });
+      },
+
+      "/getConstraint": (body) => {
+        const constraint = this.constraints.getConstraint(body.constraint_id);
+        return Response.json(constraint);
+      },
+
+      "/updateConstraint": async (body) => {
+        const updated = await this.constraints.updateConstraint(
+          body.constraint_id,
+          body.config_json,
+          body.active_from,
+          body.active_to,
+        );
+        return Response.json(updated);
+      },
+
+      "/unlinkAccount": async (body) => {
+        const result = await this.unlinkAccount(body.account_id);
+        return Response.json(result);
+      },
+
+      // --- GDPR Deletion RPC endpoints ---
+
+      "/deleteAllEvents": () => {
+        const result = this.deleteAllEvents();
+        return Response.json(result);
+      },
+
+      "/deleteAllMirrors": () => {
+        const result = this.deleteAllMirrors();
+        return Response.json(result);
+      },
+
+      "/deleteJournal": () => {
+        const result = this.deleteJournal();
+        return Response.json(result);
+      },
+
+      "/deleteRelationshipData": () => {
+        const result = this.deleteRelationshipData();
+        return Response.json(result);
+      },
+
+      // --- Scheduling RPC endpoints (Phase 3) ---
+
+      "/storeSchedulingSession": (body) => {
+        this.scheduling.storeSchedulingSession(body);
+        return Response.json({ ok: true });
+      },
+
+      "/getSchedulingSession": (body) => {
+        const session = this.scheduling.getSchedulingSession(body.session_id);
+        return Response.json(session);
+      },
+
+      "/commitSchedulingSession": (body) => {
+        this.scheduling.commitSchedulingSession(body.session_id, body.candidate_id, body.event_id);
+        return Response.json({ ok: true });
+      },
+
+      "/listSchedulingSessions": (body) => {
+        const sessions = this.scheduling.listSchedulingSessions(body.status, body.limit, body.offset);
+        return Response.json(sessions);
+      },
+
+      "/cancelSchedulingSession": (body) => {
+        this.scheduling.cancelSchedulingSession(body.session_id);
+        return Response.json({ ok: true });
+      },
+
+      "/expireStaleSchedulingSessions": (body) => {
+        const count = this.scheduling.expireStaleSchedulingSessions(body.max_age_hours);
+        return Response.json({ expired_count: count });
+      },
+
+      // --- Hold management RPC endpoints (TM-946.3) ---
+
+      "/storeHolds": (body) => {
+        this.scheduling.storeHolds(body.holds);
+        return Response.json({ ok: true });
+      },
+
+      "/getHoldsBySession": (body) => {
+        const holds = this.scheduling.getHoldsBySession(body.session_id);
+        return Response.json({ holds });
+      },
+
+      "/updateHoldStatus": (body) => {
+        this.scheduling.updateHoldStatus(body.hold_id, body.status, body.provider_event_id);
+        return Response.json({ ok: true });
+      },
+
+      "/getExpiredHolds": () => {
+        const holds = this.scheduling.getExpiredHolds();
+        return Response.json({ holds });
+      },
+
+      "/commitSessionHolds": (body) => {
+        const holds = this.scheduling.commitSessionHolds(body.session_id, body.committed_candidate_id);
+        return Response.json({ holds });
+      },
+
+      "/releaseSessionHolds": (body) => {
+        this.scheduling.releaseSessionHolds(body.session_id);
+        return Response.json({ ok: true });
+      },
+
+      "/extendHolds": (body) => {
+        const extended = this.scheduling.extendHolds(body.session_id, body.holds);
+        return Response.json({ ok: true, extended });
+      },
+
+      "/expireSessionIfAllHoldsTerminal": (body) => {
+        const expired = this.scheduling.expireSessionIfAllHoldsTerminal(body.session_id);
+        return Response.json({ ok: true, expired });
+      },
+
+      // --- Time allocation RPC endpoints ---
+
+      "/createAllocation": (body) => {
+        const alloc = this.governance.createAllocation(
+          body.allocation_id,
+          body.canonical_event_id,
+          body.billing_category,
+          body.client_id,
+          body.rate,
+        );
+        return Response.json(alloc);
+      },
+
+      "/getAllocation": (body) => {
+        const alloc = this.governance.getAllocation(body.canonical_event_id);
+        return Response.json(alloc);
+      },
+
+      "/updateAllocation": (body) => {
+        const alloc = this.governance.updateAllocation(body.canonical_event_id, body.updates);
+        return Response.json(alloc);
+      },
+
+      "/deleteAllocation": (body) => {
+        const deleted = this.governance.deleteAllocation(body.canonical_event_id);
+        return Response.json({ deleted });
+      },
+
+      "/listAllocations": () => {
+        const items = this.governance.listAllocations();
+        return Response.json({ items });
+      },
+
+      // --- VIP policy RPC endpoints ---
+
+      "/createVipPolicy": (body) => {
+        const vip = this.governance.createVipPolicy(
+          body.vip_id,
+          body.participant_hash,
+          body.display_name,
+          body.priority_weight,
+          body.conditions_json,
+        );
+        return Response.json(vip);
+      },
+
+      "/listVipPolicies": () => {
+        const items = this.governance.listVipPolicies();
+        return Response.json({ items });
+      },
+
+      "/getVipPolicy": (body) => {
+        const vip = this.governance.getVipPolicy(body.vip_id);
+        return Response.json(vip);
+      },
+
+      "/deleteVipPolicy": (body) => {
+        const deleted = this.governance.deleteVipPolicy(body.vip_id);
+        return Response.json({ deleted });
+      },
+
+      // --- Commitment tracking RPC endpoints ---
+
+      "/createCommitment": (body) => {
+        const commitment = this.governance.createCommitment(
+          body.commitment_id,
+          body.client_id,
+          body.target_hours,
+          body.window_type ?? "WEEKLY",
+          body.client_name ?? null,
+          body.rolling_window_weeks ?? 4,
+          body.hard_minimum ?? false,
+          body.proof_required ?? false,
+        );
+        return Response.json(commitment);
+      },
+
+      "/getCommitment": (body) => {
+        const commitment = this.governance.getCommitment(body.commitment_id);
+        return Response.json(commitment);
+      },
+
+      "/listCommitments": () => {
+        const items = this.governance.listCommitments();
+        return Response.json({ items });
+      },
+
+      "/deleteCommitment": (body) => {
+        const deleted = this.governance.deleteCommitment(body.commitment_id);
+        return Response.json({ deleted });
+      },
+
+      "/getCommitmentStatus": (body) => {
+        const status = this.governance.getCommitmentStatus(body.commitment_id, body.as_of);
+        return Response.json(status);
+      },
+
+      "/getCommitmentProofData": (body) => {
+        const proofData = this.governance.getCommitmentProofData(body.commitment_id, body.as_of);
+        return Response.json(proofData);
+      },
+
+      // --- What-If Simulation RPC endpoint ---
+
+      "/simulate": (body) => {
+        const snapshot = this.buildSimulationSnapshot();
+        const impact = simulate(snapshot, body.scenario);
+        return Response.json(impact);
+      },
+
+      // --- Relationship tracking RPC endpoints (Phase 4) ---
+
+      "/createRelationship": (body) => {
+        const relationship = this.relationships.createRelationship(
+          body.relationship_id,
+          body.participant_hash,
+          body.display_name,
+          body.category,
+          body.closeness_weight ?? 0.5,
+          body.city ?? null,
+          body.timezone ?? null,
+          body.interaction_frequency_target ?? null,
+        );
+        return Response.json(relationship);
+      },
+
+      "/getRelationship": (body) => {
+        const relationship = this.relationships.getRelationship(body.relationship_id);
+        return Response.json(relationship);
+      },
+
+      "/listRelationships": (body) => {
+        const items = this.relationships.listRelationships(body.category);
+        return Response.json({ items });
+      },
+
+      "/updateRelationship": (body) => {
+        const { relationship_id, ...updates } = body;
+        const updated = this.relationships.updateRelationship(relationship_id, updates);
+        return Response.json(updated);
+      },
+
+      "/deleteRelationship": (body) => {
+        const deleted = this.relationships.deleteRelationship(body.relationship_id);
+        return Response.json({ deleted });
+      },
+
+      "/markOutcome": (body) => {
+        const entry = this.relationships.markOutcome(
+          body.relationship_id,
+          body.outcome,
+          body.canonical_event_id ?? null,
+          body.note ?? null,
+        );
+        return Response.json(entry);
+      },
+
+      "/listOutcomes": (body) => {
+        const entries = this.relationships.listOutcomes(body.relationship_id, body.outcome);
+        return Response.json({ items: entries });
+      },
+
+      "/getReputation": (body) => {
+        const reputation = this.relationships.getReputation(body.relationship_id, body.as_of);
+        return Response.json(reputation);
+      },
+
+      "/listRelationshipsWithReputation": (body) => {
+        const items = this.relationships.listRelationshipsWithReputation(body.as_of);
+        return Response.json({ items });
+      },
+
+      "/getDriftReport": (body) => {
+        const report = this.relationships.getDriftReport(body.as_of);
+        return Response.json(report);
+      },
+
+      "/getReconnectionSuggestions": (body) => {
+        const suggestions = this.relationships.getReconnectionSuggestions(body.city, body.trip_id);
+        return Response.json(suggestions);
+      },
+
+      // --- Milestone CRUD RPC endpoints (Phase 4B) ---
+
+      "/createMilestone": (body) => {
+        const milestone = this.relationships.createMilestone(
+          body.milestone_id,
+          body.relationship_id,
+          body.kind,
+          body.date,
+          body.recurs_annually ?? false,
+          body.note ?? null,
+        );
+        return Response.json(milestone);
+      },
+
+      "/listMilestones": (body) => {
+        const milestones = this.relationships.listMilestones(body.relationship_id);
+        if (milestones === null) {
+          return Response.json({ error: "Relationship not found" }, { status: 404 });
+        }
+        return Response.json({ items: milestones });
+      },
+
+      "/deleteMilestone": (body) => {
+        const deleted = this.relationships.deleteMilestone(body.milestone_id);
+        return Response.json({ deleted });
+      },
+
+      "/listUpcomingMilestones": (body) => {
+        const upcoming = this.relationships.listUpcomingMilestones(body.max_days ?? 30);
+        return Response.json({ items: upcoming });
+      },
+
+      "/updateInteractions": (body) => {
+        const count = this.relationships.updateInteractions(
+          body.participant_hashes,
+          body.interaction_ts,
+        );
+        return Response.json({ updated: count });
+      },
+
+      "/storeDriftAlerts": (body) => {
+        const count = this.relationships.storeDriftAlerts(body.report);
+        return Response.json({ stored: count });
+      },
+
+      "/getDriftAlerts": () => {
+        const alerts = this.relationships.getDriftAlerts();
+        return Response.json({ alerts });
+      },
+
+      "/getEventBriefing": (body) => {
+        const briefing = this.relationships.getEventBriefing(body.canonical_event_id);
+        if (briefing === null) {
+          return Response.json({ error: "Event not found" }, { status: 404 });
+        }
+        return Response.json(briefing);
+      },
+
+      "/storeEventParticipants": (body) => {
+        this.relationships.storeEventParticipants(body.canonical_event_id, body.participant_hashes);
+        return Response.json({ stored: body.participant_hashes.length });
+      },
+
+      "/recordSchedulingHistory": (body) => {
+        this.relationships.recordSchedulingHistory(body.entries);
+        return Response.json({ recorded: body.entries.length });
+      },
+
+      "/getSchedulingHistory": (body) => {
+        const history = this.relationships.getSchedulingHistory(body.participant_hashes);
+        return Response.json({ history });
+      },
+
+      // --- Graph API RPC endpoints (TM-b3i.4) ---
+
+      "/getEventParticipantHashes": (body) => {
+        const hashes = this.relationships.getEventParticipantHashes(body.canonical_event_id);
+        return Response.json({ hashes });
+      },
+
+      "/getTimeline": (body) => {
+        const items = this.relationships.getTimeline(
+          body.participant_hash,
+          body.start_date,
+          body.end_date,
+        );
+        return Response.json({ items });
+      },
+
+      // --- Onboarding session RPC endpoints (Phase 6A) ---
+
+      "/createOnboardingSession": (body) => {
+        const session = this.createOnboardingSession(body.session_id, body.user_id, body.session_token);
+        return Response.json(session);
+      },
+
+      "/getOnboardingSession": (body) => {
+        const session = this.getOnboardingSession(body.user_id);
+        return Response.json(session);
+      },
+
+      "/getOnboardingSessionByToken": (body) => {
+        const session = this.getOnboardingSessionByToken(body.session_token);
+        return Response.json(session);
+      },
+
+      "/addOnboardingAccount": (body) => {
+        const session = this.addOnboardingAccount(body.user_id, body.account);
+        return Response.json(session);
+      },
+
+      "/updateOnboardingAccountStatus": (body) => {
+        const session = this.updateOnboardingAccountStatus(
+          body.user_id,
+          body.account_id,
+          body.status,
+          body.calendar_count,
+        );
+        return Response.json(session);
+      },
+
+      "/completeOnboardingSession": (body) => {
+        const session = this.completeOnboardingSession(body.user_id);
+        return Response.json(session);
+      },
+
+      // --- ICS Upgrade Flow RPC endpoints (TM-1rs / TM-d17.5) ---
+
+      "/getAccountEvents": (body) => {
+        const events = this.getAccountEvents(body.account_id);
+        return Response.json({ events });
+      },
+
+      "/executeUpgrade": async (body) => {
+        await this.executeUpgradePlan(body);
+        return Response.json({ ok: true });
+      },
+
+      // --- TM-08pp: Provider event ID normalization (batch migration) ---
+
+      "/normalizeProviderEventIds": () => {
+        const normalized = this.normalizeProviderEventIds();
+        return Response.json({ normalized });
+      },
+    };
+  }
+
   /**
    * Handle fetch requests from DO stubs. Routes requests by URL pathname
-   * to the appropriate method.
+   * to the appropriate method via the dispatch map.
    *
    * This is the entry point for all inter-worker communication with
    * UserGraphDO. Workers call `stub.fetch(new Request(url, { body }))`.
@@ -3802,1092 +4482,27 @@ export class UserGraphDO {
     const url = new URL(request.url);
     const { pathname } = url;
 
+    // Lazily initialize route map on first request
+    if (!this.routeMap) {
+      this.routeMap = this.buildRouteMap();
+    }
+
+    const handler = this.routeMap[pathname];
+    if (!handler) {
+      return new Response(`Unknown action: ${pathname}`, { status: 404 });
+    }
+
     try {
-      switch (pathname) {
-        case "/applyProviderDelta": {
-          const body = (await request.json()) as {
-            account_id: string;
-            deltas: ProviderDelta[];
-          };
-          // TM-08pp: Defense-in-depth canonicalization of provider event IDs.
-          // Primary normalization happens at sync-consumer ingestion; this
-          // ensures canonical form even for direct DO callers.
-          const canonicalizedDeltas = body.deltas.map((d) => ({
-            ...d,
-            origin_event_id: canonicalizeProviderEventId(d.origin_event_id),
-          }));
-          const result = await this.applyProviderDelta(
-            body.account_id,
-            canonicalizedDeltas,
-          );
-          return Response.json(result);
-        }
-
-        case "/getMirror": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            target_account_id: string;
-          };
-          const mirror = this.getMirror(
-            body.canonical_event_id,
-            body.target_account_id,
-          );
-          return Response.json({ mirror });
-        }
-
-        case "/updateMirrorState": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            target_account_id: string;
-            update: MirrorStateUpdate;
-          };
-          this.updateMirrorState(
-            body.canonical_event_id,
-            body.target_account_id,
-            body.update,
-          );
-          return Response.json({ ok: true });
-        }
-
-        case "/getBusyOverlayCalendar": {
-          const body = (await request.json()) as { account_id: string };
-          const calId = this.getBusyOverlayCalendar(body.account_id);
-          return Response.json({ provider_calendar_id: calId });
-        }
-
-        case "/storeBusyOverlayCalendar": {
-          const body = (await request.json()) as {
-            account_id: string;
-            provider_calendar_id: string;
-          };
-          this.storeBusyOverlayCalendar(
-            body.account_id,
-            body.provider_calendar_id,
-          );
-          return Response.json({ ok: true });
-        }
-
-        case "/storeCalendars": {
-          const body = (await request.json()) as {
-            calendars: Array<{
-              account_id: string;
-              provider_calendar_id: string;
-              role: string;
-              kind: string;
-              display_name: string;
-            }>;
-          };
-          this.storeCalendars(body.calendars);
-          return Response.json({ ok: true, stored: body.calendars.length });
-        }
-
-        case "/listCanonicalEvents": {
-          const body = (await request.json()) as ListEventsQuery;
-          const result = this.listCanonicalEvents(body);
-          return Response.json(result);
-        }
-
-        case "/getCanonicalEvent": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-          };
-          const result = this.getCanonicalEvent(body.canonical_event_id);
-          return Response.json(result);
-        }
-
-        case "/upsertCanonicalEvent": {
-          const body = (await request.json()) as {
-            event: import("@tminus/shared").CanonicalEvent;
-            source: string;
-          };
-          const eventId = await this.upsertCanonicalEvent(body.event, body.source);
-          return Response.json(eventId);
-        }
-
-        case "/deleteCanonicalEvent": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            source: string;
-          };
-          const deleted = await this.deleteCanonicalEvent(
-            body.canonical_event_id,
-            body.source,
-          );
-          return Response.json(deleted);
-        }
-
-        case "/queryJournal": {
-          const body = (await request.json()) as JournalQuery;
-          const result = this.queryJournal(body);
-          return Response.json(result);
-        }
-
-        case "/getSyncHealth": {
-          const result = this.getSyncHealth();
-          return Response.json(result);
-        }
-
-        case "/listErrorMirrors": {
-          const body = (await request.json()) as { limit?: number };
-          const items = this.listErrorMirrors(body?.limit);
-          return Response.json({ items });
-        }
-
-        case "/getMirrorDiagnostics": {
-          const body = (await request.json()) as { sample_limit?: number } | null;
-          const diagnostics = this.getMirrorDiagnostics(body?.sample_limit ?? 25);
-          return Response.json(diagnostics);
-        }
-
-        case "/settleHistoricalPending": {
-          const body = (await request.json()) as { cutoff_days?: number } | null;
-          const result = this.settleHistoricalPending(body?.cutoff_days ?? 30);
-          return Response.json(result);
-        }
-
-        case "/settleOutOfWindowPending": {
-          const body = (await request.json()) as {
-            past_days?: number;
-            future_days?: number;
-          } | null;
-          const result = this.settleOutOfWindowPending(
-            body?.past_days ?? 30,
-            body?.future_days ?? 365,
-          );
-          return Response.json(result);
-        }
-
-        case "/settleStuckPending": {
-          const body = (await request.json()) as { min_age_minutes?: number } | null;
-          const result = this.settleStuckPending(body?.min_age_minutes ?? 120);
-          return Response.json(result);
-        }
-
-        case "/createPolicy": {
-          const body = (await request.json()) as { name: string };
-          const result = await this.createPolicy(body.name);
-          return Response.json(result);
-        }
-
-        case "/getPolicy": {
-          const body = (await request.json()) as { policy_id: string };
-          const result = await this.getPolicy(body.policy_id);
-          return Response.json(result);
-        }
-
-        case "/listPolicies": {
-          const result = await this.listPolicies();
-          return Response.json(result);
-        }
-
-        case "/setPolicyEdges": {
-          const body = (await request.json()) as {
-            policy_id: string;
-            edges: PolicyEdgeInput[];
-          };
-          await this.setPolicyEdges(body.policy_id, body.edges);
-          return Response.json({ ok: true });
-        }
-
-        case "/ensureDefaultPolicy": {
-          const body = (await request.json()) as { accounts: string[] };
-          await this.ensureDefaultPolicy(body.accounts);
-          return Response.json({ ok: true });
-        }
-
-        // ---------------------------------------------------------------
-        // ReconcileWorkflow RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/findCanonicalByOrigin": {
-          const body = (await request.json()) as {
-            origin_account_id: string;
-            origin_event_id: string;
-          };
-          const event = this.findCanonicalByOrigin(
-            body.origin_account_id,
-            body.origin_event_id,
-          );
-          return Response.json({ event });
-        }
-
-        case "/findCanonicalByMirror": {
-          const body = (await request.json()) as {
-            target_account_id: string;
-            provider_event_id: string;
-          };
-          const canonicalEventId = this.findCanonicalByMirror(
-            body.target_account_id,
-            body.provider_event_id,
-          );
-          return Response.json({ canonical_event_id: canonicalEventId });
-        }
-
-        case "/getPolicyEdges": {
-          const body = (await request.json()) as {
-            from_account_id: string;
-          };
-          const edges = this.getPolicyEdges(body.from_account_id);
-          return Response.json({ edges });
-        }
-
-        case "/getActiveMirrors": {
-          const body = (await request.json()) as {
-            target_account_id: string;
-          };
-          const mirrors = this.getActiveMirrors(body.target_account_id);
-          return Response.json({ mirrors });
-        }
-
-        case "/logReconcileDiscrepancy": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            discrepancy_type: string;
-            details: Record<string, unknown>;
-          };
-          this.logReconcileDiscrepancy(
-            body.canonical_event_id,
-            body.discrepancy_type,
-            body.details,
-          );
-          return Response.json({ ok: true });
-        }
-
-        case "/recomputeProjections": {
-          const body = (await request.json()) as RecomputeScope;
-          const enqueued = await this.recomputeProjections(body);
-          return Response.json({ enqueued });
-        }
-
-        case "/requeuePendingMirrors": {
-          const body = (await request.json()) as { limit?: number } | null;
-          const result = await this.requeuePendingMirrors(body?.limit ?? 200);
-          return Response.json(result);
-        }
-
-        case "/computeAvailability": {
-          const body = (await request.json()) as AvailabilityQuery;
-          const result = this.computeAvailability(body);
-          return Response.json(result);
-        }
-
-        case "/getCognitiveLoad": {
-          const body = (await request.json()) as {
-            date: string;
-            range: "day" | "week";
-          };
-          const result = this.getCognitiveLoad(body.date, body.range);
-          return Response.json(result);
-        }
-
-        case "/getContextSwitches": {
-          const body = (await request.json()) as {
-            date: string;
-            range: "day" | "week";
-          };
-          const result = this.getContextSwitches(body.date, body.range);
-          return Response.json(result);
-        }
-
-        case "/getDeepWork": {
-          const body = (await request.json()) as {
-            date: string;
-            range: "day" | "week";
-            min_block_minutes?: number;
-          };
-          const result = this.getDeepWork(body.date, body.range, body.min_block_minutes);
-          return Response.json(result);
-        }
-
-        case "/getRiskScores": {
-          const body = (await request.json()) as {
-            weeks?: number;
-          };
-          const result = this.getRiskScores(body.weeks ?? 4);
-          return Response.json(result);
-        }
-
-        case "/getProbabilisticAvailability": {
-          const body = (await request.json()) as {
-            start: string;
-            end: string;
-            granularity_minutes?: number;
-          };
-          const result = this.getProbabilisticAvailability(
-            body.start,
-            body.end,
-            body.granularity_minutes,
-          );
-          return Response.json(result);
-        }
-
-        // ---------------------------------------------------------------
-        // Constraint RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/addConstraint": {
-          const body = (await request.json()) as {
-            kind: string;
-            config_json: Record<string, unknown>;
-            active_from: string | null;
-            active_to: string | null;
-          };
-          const constraint = this.constraints.addConstraint(
-            body.kind,
-            body.config_json,
-            body.active_from,
-            body.active_to,
-          );
-          return Response.json(constraint);
-        }
-
-        case "/deleteConstraint": {
-          const body = (await request.json()) as { constraint_id: string };
-          const deleted = await this.constraints.deleteConstraint(body.constraint_id);
-          return Response.json({ deleted });
-        }
-
-        case "/listConstraints": {
-          const body = (await request.json()) as { kind?: string };
-          const constraintItems = this.constraints.listConstraints(body.kind);
-          return Response.json({ items: constraintItems });
-        }
-
-        case "/getConstraint": {
-          const body = (await request.json()) as { constraint_id: string };
-          const constraint = this.constraints.getConstraint(body.constraint_id);
-          return Response.json(constraint);
-        }
-
-        case "/updateConstraint": {
-          const body = (await request.json()) as {
-            constraint_id: string;
-            config_json: Record<string, unknown>;
-            active_from: string | null;
-            active_to: string | null;
-          };
-          const updated = await this.constraints.updateConstraint(
-            body.constraint_id,
-            body.config_json,
-            body.active_from,
-            body.active_to,
-          );
-          return Response.json(updated);
-        }
-
-        case "/unlinkAccount": {
-          const body = (await request.json()) as { account_id: string };
-          const result = await this.unlinkAccount(body.account_id);
-          return Response.json(result);
-        }
-
-        // ---------------------------------------------------------------
-        // GDPR Deletion RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/deleteAllEvents": {
-          const result = this.deleteAllEvents();
-          return Response.json(result);
-        }
-
-        case "/deleteAllMirrors": {
-          const result = this.deleteAllMirrors();
-          return Response.json(result);
-        }
-
-        case "/deleteJournal": {
-          const result = this.deleteJournal();
-          return Response.json(result);
-        }
-
-        case "/deleteRelationshipData": {
-          const result = this.deleteRelationshipData();
-          return Response.json(result);
-        }
-
-        // ---------------------------------------------------------------
-        // Scheduling RPC endpoints (Phase 3)
-        // ---------------------------------------------------------------
-
-        case "/storeSchedulingSession": {
-          const body = (await request.json()) as {
-            session_id: string;
-            status: string;
-            objective_json: string;
-            candidates: Array<{
-              candidateId: string;
-              sessionId: string;
-              start: string;
-              end: string;
-              score: number;
-              explanation: string;
-            }>;
-            created_at: string;
-          };
-          this.scheduling.storeSchedulingSession(body);
-          return Response.json({ ok: true });
-        }
-
-        case "/getSchedulingSession": {
-          const body = (await request.json()) as { session_id: string };
-          const session = this.scheduling.getSchedulingSession(body.session_id);
-          return Response.json(session);
-        }
-
-        case "/commitSchedulingSession": {
-          const body = (await request.json()) as {
-            session_id: string;
-            candidate_id: string;
-            event_id: string;
-          };
-          this.scheduling.commitSchedulingSession(body.session_id, body.candidate_id, body.event_id);
-          return Response.json({ ok: true });
-        }
-
-        case "/listSchedulingSessions": {
-          const body = (await request.json()) as {
-            status?: string;
-            limit?: number;
-            offset?: number;
-          };
-          const sessions = this.scheduling.listSchedulingSessions(body.status, body.limit, body.offset);
-          return Response.json(sessions);
-        }
-
-        case "/cancelSchedulingSession": {
-          const body = (await request.json()) as { session_id: string };
-          this.scheduling.cancelSchedulingSession(body.session_id);
-          return Response.json({ ok: true });
-        }
-
-        case "/expireStaleSchedulingSessions": {
-          const body = (await request.json()) as { max_age_hours?: number };
-          const count = this.scheduling.expireStaleSchedulingSessions(body.max_age_hours);
-          return Response.json({ expired_count: count });
-        }
-
-        // ---------------------------------------------------------------
-        // Hold management RPC endpoints (TM-946.3)
-        // ---------------------------------------------------------------
-
-        case "/storeHolds": {
-          const body = (await request.json()) as {
-            holds: Array<{
-              hold_id: string;
-              session_id: string;
-              account_id: string;
-              provider_event_id: string | null;
-              expires_at: string;
-              status: string;
-            }>;
-          };
-          this.scheduling.storeHolds(body.holds);
-          return Response.json({ ok: true });
-        }
-
-        case "/getHoldsBySession": {
-          const body = (await request.json()) as { session_id: string };
-          const holds = this.scheduling.getHoldsBySession(body.session_id);
-          return Response.json({ holds });
-        }
-
-        case "/updateHoldStatus": {
-          const body = (await request.json()) as {
-            hold_id: string;
-            status: string;
-            provider_event_id?: string;
-          };
-          this.scheduling.updateHoldStatus(body.hold_id, body.status, body.provider_event_id);
-          return Response.json({ ok: true });
-        }
-
-        case "/getExpiredHolds": {
-          const holds = this.scheduling.getExpiredHolds();
-          return Response.json({ holds });
-        }
-
-        case "/commitSessionHolds": {
-          const body = (await request.json()) as {
-            session_id: string;
-            committed_candidate_id: string;
-          };
-          const holds = this.scheduling.commitSessionHolds(body.session_id, body.committed_candidate_id);
-          return Response.json({ holds });
-        }
-
-        case "/releaseSessionHolds": {
-          const body = (await request.json()) as { session_id: string };
-          this.scheduling.releaseSessionHolds(body.session_id);
-          return Response.json({ ok: true });
-        }
-
-        case "/extendHolds": {
-          const body = (await request.json()) as {
-            session_id: string;
-            holds: Array<{ hold_id: string; new_expires_at: string }>;
-          };
-          const extended = this.scheduling.extendHolds(body.session_id, body.holds);
-          return Response.json({ ok: true, extended });
-        }
-
-        case "/expireSessionIfAllHoldsTerminal": {
-          const body = (await request.json()) as { session_id: string };
-          const expired = this.scheduling.expireSessionIfAllHoldsTerminal(body.session_id);
-          return Response.json({ ok: true, expired });
-        }
-
-        // ---------------------------------------------------------------
-        // Time allocation RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/createAllocation": {
-          const body = (await request.json()) as {
-            allocation_id: string;
-            canonical_event_id: string;
-            billing_category: string;
-            client_id: string | null;
-            rate: number | null;
-          };
-          const alloc = this.governance.createAllocation(
-            body.allocation_id,
-            body.canonical_event_id,
-            body.billing_category,
-            body.client_id,
-            body.rate,
-          );
-          return Response.json(alloc);
-        }
-
-        case "/getAllocation": {
-          const body = (await request.json()) as { canonical_event_id: string };
-          const alloc = this.governance.getAllocation(body.canonical_event_id);
-          return Response.json(alloc);
-        }
-
-        case "/updateAllocation": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            updates: {
-              billing_category?: string;
-              client_id?: string | null;
-              rate?: number | null;
-            };
-          };
-          const alloc = this.governance.updateAllocation(body.canonical_event_id, body.updates);
-          return Response.json(alloc);
-        }
-
-        case "/deleteAllocation": {
-          const body = (await request.json()) as { canonical_event_id: string };
-          const deleted = this.governance.deleteAllocation(body.canonical_event_id);
-          return Response.json({ deleted });
-        }
-
-        case "/listAllocations": {
-          const items = this.governance.listAllocations();
-          return Response.json({ items });
-        }
-
-        // ---------------------------------------------------------------
-        // VIP policy RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/createVipPolicy": {
-          const body = (await request.json()) as {
-            vip_id: string;
-            participant_hash: string;
-            display_name: string | null;
-            priority_weight: number;
-            conditions_json: Record<string, unknown>;
-          };
-          const vip = this.governance.createVipPolicy(
-            body.vip_id,
-            body.participant_hash,
-            body.display_name,
-            body.priority_weight,
-            body.conditions_json,
-          );
-          return Response.json(vip);
-        }
-
-        case "/listVipPolicies": {
-          const items = this.governance.listVipPolicies();
-          return Response.json({ items });
-        }
-
-        case "/getVipPolicy": {
-          const body = (await request.json()) as { vip_id: string };
-          const vip = this.governance.getVipPolicy(body.vip_id);
-          return Response.json(vip);
-        }
-
-        case "/deleteVipPolicy": {
-          const body = (await request.json()) as { vip_id: string };
-          const deleted = this.governance.deleteVipPolicy(body.vip_id);
-          return Response.json({ deleted });
-        }
-
-        // ---------------------------------------------------------------
-        // Commitment tracking RPC endpoints
-        // ---------------------------------------------------------------
-
-        case "/createCommitment": {
-          const body = (await request.json()) as {
-            commitment_id: string;
-            client_id: string;
-            target_hours: number;
-            window_type?: string;
-            client_name?: string | null;
-            rolling_window_weeks?: number;
-            hard_minimum?: boolean;
-            proof_required?: boolean;
-          };
-          const commitment = this.governance.createCommitment(
-            body.commitment_id,
-            body.client_id,
-            body.target_hours,
-            body.window_type ?? "WEEKLY",
-            body.client_name ?? null,
-            body.rolling_window_weeks ?? 4,
-            body.hard_minimum ?? false,
-            body.proof_required ?? false,
-          );
-          return Response.json(commitment);
-        }
-
-        case "/getCommitment": {
-          const body = (await request.json()) as { commitment_id: string };
-          const commitment = this.governance.getCommitment(body.commitment_id);
-          return Response.json(commitment);
-        }
-
-        case "/listCommitments": {
-          const items = this.governance.listCommitments();
-          return Response.json({ items });
-        }
-
-        case "/deleteCommitment": {
-          const body = (await request.json()) as { commitment_id: string };
-          const deleted = this.governance.deleteCommitment(body.commitment_id);
-          return Response.json({ deleted });
-        }
-
-        case "/getCommitmentStatus": {
-          const body = (await request.json()) as {
-            commitment_id: string;
-            as_of?: string;
-          };
-          const status = this.governance.getCommitmentStatus(
-            body.commitment_id,
-            body.as_of,
-          );
-          return Response.json(status);
-        }
-
-        case "/getCommitmentProofData": {
-          const body = (await request.json()) as {
-            commitment_id: string;
-            as_of?: string;
-          };
-          const proofData = this.governance.getCommitmentProofData(
-            body.commitment_id,
-            body.as_of,
-          );
-          return Response.json(proofData);
-        }
-
-        // ---------------------------------------------------------------
-        // What-If Simulation RPC endpoint
-        // ---------------------------------------------------------------
-
-        case "/simulate": {
-          const body = (await request.json()) as {
-            scenario: SimulationScenario;
-          };
-          const snapshot = this.buildSimulationSnapshot();
-          const impact = simulate(snapshot, body.scenario);
-          return Response.json(impact);
-        }
-
-        // ---------------------------------------------------------------
-        // Relationship tracking RPC endpoints (Phase 4)
-        // ---------------------------------------------------------------
-
-        case "/createRelationship": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-            participant_hash: string;
-            display_name: string | null;
-            category: string;
-            closeness_weight?: number;
-            city?: string | null;
-            timezone?: string | null;
-            interaction_frequency_target?: number | null;
-          };
-          const relationship = this.relationships.createRelationship(
-            body.relationship_id,
-            body.participant_hash,
-            body.display_name,
-            body.category,
-            body.closeness_weight ?? 0.5,
-            body.city ?? null,
-            body.timezone ?? null,
-            body.interaction_frequency_target ?? null,
-          );
-          return Response.json(relationship);
-        }
-
-        case "/getRelationship": {
-          const body = (await request.json()) as { relationship_id: string };
-          const relationship = this.relationships.getRelationship(body.relationship_id);
-          return Response.json(relationship);
-        }
-
-        case "/listRelationships": {
-          const body = (await request.json()) as { category?: string };
-          const items = this.relationships.listRelationships(body.category);
-          return Response.json({ items });
-        }
-
-        case "/updateRelationship": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-            display_name?: string | null;
-            category?: string;
-            closeness_weight?: number;
-            city?: string | null;
-            timezone?: string | null;
-            interaction_frequency_target?: number | null;
-          };
-          const { relationship_id, ...updates } = body;
-          const updated = this.relationships.updateRelationship(relationship_id, updates);
-          return Response.json(updated);
-        }
-
-        case "/deleteRelationship": {
-          const body = (await request.json()) as { relationship_id: string };
-          const deleted = this.relationships.deleteRelationship(body.relationship_id);
-          return Response.json({ deleted });
-        }
-
-        case "/markOutcome": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-            outcome: string;
-            canonical_event_id?: string | null;
-            note?: string | null;
-          };
-          const entry = this.relationships.markOutcome(
-            body.relationship_id,
-            body.outcome,
-            body.canonical_event_id ?? null,
-            body.note ?? null,
-          );
-          return Response.json(entry);
-        }
-
-        case "/listOutcomes": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-            outcome?: string;
-          };
-          const entries = this.relationships.listOutcomes(
-            body.relationship_id,
-            body.outcome,
-          );
-          return Response.json({ items: entries });
-        }
-
-        case "/getReputation": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-            as_of?: string;
-          };
-          const reputation = this.relationships.getReputation(
-            body.relationship_id,
-            body.as_of,
-          );
-          return Response.json(reputation);
-        }
-
-        case "/listRelationshipsWithReputation": {
-          const body = (await request.json()) as { as_of?: string };
-          const items = this.relationships.listRelationshipsWithReputation(body.as_of);
-          return Response.json({ items });
-        }
-
-        case "/getDriftReport": {
-          const body = (await request.json()) as { as_of?: string };
-          const report = this.relationships.getDriftReport(body.as_of);
-          return Response.json(report);
-        }
-
-        case "/getReconnectionSuggestions": {
-          const body = (await request.json()) as {
-            city?: string | null;
-            trip_id?: string | null;
-          };
-          const suggestions = this.relationships.getReconnectionSuggestions(
-            body.city,
-            body.trip_id,
-          );
-          return Response.json(suggestions);
-        }
-
-        // ---------------------------------------------------------------
-        // Milestone CRUD RPC endpoints (Phase 4B)
-        // ---------------------------------------------------------------
-
-        case "/createMilestone": {
-          const body = (await request.json()) as {
-            milestone_id: string;
-            relationship_id: string;
-            kind: string;
-            date: string;
-            recurs_annually?: boolean;
-            note?: string | null;
-          };
-          const milestone = this.relationships.createMilestone(
-            body.milestone_id,
-            body.relationship_id,
-            body.kind,
-            body.date,
-            body.recurs_annually ?? false,
-            body.note ?? null,
-          );
-          return Response.json(milestone);
-        }
-
-        case "/listMilestones": {
-          const body = (await request.json()) as {
-            relationship_id: string;
-          };
-          const milestones = this.relationships.listMilestones(body.relationship_id);
-          if (milestones === null) {
-            return Response.json(
-              { error: "Relationship not found" },
-              { status: 404 },
-            );
-          }
-          return Response.json({ items: milestones });
-        }
-
-        case "/deleteMilestone": {
-          const body = (await request.json()) as { milestone_id: string };
-          const deleted = this.relationships.deleteMilestone(body.milestone_id);
-          return Response.json({ deleted });
-        }
-
-        case "/listUpcomingMilestones": {
-          const body = (await request.json()) as { max_days?: number };
-          const upcoming = this.relationships.listUpcomingMilestones(body.max_days ?? 30);
-          return Response.json({ items: upcoming });
-        }
-
-        case "/updateInteractions": {
-          const body = (await request.json()) as {
-            participant_hashes: string[];
-            interaction_ts: string;
-          };
-          const count = this.relationships.updateInteractions(
-            body.participant_hashes,
-            body.interaction_ts,
-          );
-          return Response.json({ updated: count });
-        }
-
-        case "/storeDriftAlerts": {
-          const body = (await request.json()) as { report: DriftReport };
-          const count = this.relationships.storeDriftAlerts(body.report);
-          return Response.json({ stored: count });
-        }
-
-        case "/getDriftAlerts": {
-          const alerts = this.relationships.getDriftAlerts();
-          return Response.json({ alerts });
-        }
-
-        case "/getEventBriefing": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-          };
-          const briefing = this.relationships.getEventBriefing(body.canonical_event_id);
-          if (briefing === null) {
-            return Response.json(
-              { error: "Event not found" },
-              { status: 404 },
-            );
-          }
-          return Response.json(briefing);
-        }
-
-        case "/storeEventParticipants": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-            participant_hashes: string[];
-          };
-          this.relationships.storeEventParticipants(
-            body.canonical_event_id,
-            body.participant_hashes,
-          );
-          return Response.json({ stored: body.participant_hashes.length });
-        }
-
-        case "/recordSchedulingHistory": {
-          const body = (await request.json()) as {
-            entries: Array<{
-              session_id: string;
-              participant_hash: string;
-              got_preferred: boolean;
-              scheduled_ts: string;
-            }>;
-          };
-          this.relationships.recordSchedulingHistory(body.entries);
-          return Response.json({ recorded: body.entries.length });
-        }
-
-        case "/getSchedulingHistory": {
-          const body = (await request.json()) as {
-            participant_hashes: string[];
-          };
-          const history = this.relationships.getSchedulingHistory(body.participant_hashes);
-          return Response.json({ history });
-        }
-
-        // ---------------------------------------------------------------
-        // Graph API RPC endpoints (TM-b3i.4)
-        // ---------------------------------------------------------------
-
-        case "/getEventParticipantHashes": {
-          const body = (await request.json()) as {
-            canonical_event_id: string;
-          };
-          const hashes = this.relationships.getEventParticipantHashes(body.canonical_event_id);
-          return Response.json({ hashes });
-        }
-
-        case "/getTimeline": {
-          const body = (await request.json()) as {
-            participant_hash?: string | null;
-            start_date?: string | null;
-            end_date?: string | null;
-          };
-          const items = this.relationships.getTimeline(
-            body.participant_hash,
-            body.start_date,
-            body.end_date,
-          );
-          return Response.json({ items });
-        }
-
-        // ---------------------------------------------------------------
-        // Onboarding session RPC endpoints (Phase 6A)
-        // ---------------------------------------------------------------
-
-        case "/createOnboardingSession": {
-          const body = (await request.json()) as {
-            session_id: string;
-            user_id: string;
-            session_token: string;
-          };
-          const session = this.createOnboardingSession(
-            body.session_id,
-            body.user_id,
-            body.session_token,
-          );
-          return Response.json(session);
-        }
-
-        case "/getOnboardingSession": {
-          const body = (await request.json()) as {
-            user_id: string;
-          };
-          const session = this.getOnboardingSession(body.user_id);
-          return Response.json(session);
-        }
-
-        case "/getOnboardingSessionByToken": {
-          const body = (await request.json()) as {
-            session_token: string;
-          };
-          const session = this.getOnboardingSessionByToken(body.session_token);
-          return Response.json(session);
-        }
-
-        case "/addOnboardingAccount": {
-          const body = (await request.json()) as {
-            user_id: string;
-            account: {
-              account_id: string;
-              provider: string;
-              email: string;
-              status: string;
-              calendar_count?: number;
-              connected_at: string;
-            };
-          };
-          const session = this.addOnboardingAccount(body.user_id, body.account);
-          return Response.json(session);
-        }
-
-        case "/updateOnboardingAccountStatus": {
-          const body = (await request.json()) as {
-            user_id: string;
-            account_id: string;
-            status: string;
-            calendar_count?: number;
-          };
-          const session = this.updateOnboardingAccountStatus(
-            body.user_id,
-            body.account_id,
-            body.status,
-            body.calendar_count,
-          );
-          return Response.json(session);
-        }
-
-        case "/completeOnboardingSession": {
-          const body = (await request.json()) as {
-            user_id: string;
-          };
-          const session = this.completeOnboardingSession(body.user_id);
-          return Response.json(session);
-        }
-
-        // ---------------------------------------------------------------
-        // ICS Upgrade Flow RPC endpoints (TM-1rs / TM-d17.5)
-        // ---------------------------------------------------------------
-
-        case "/getAccountEvents": {
-          const body = (await request.json()) as { account_id: string };
-          const events = this.getAccountEvents(body.account_id);
-          return Response.json({ events });
-        }
-
-        case "/executeUpgrade": {
-          const body = (await request.json()) as {
-            ics_account_id: string;
-            oauth_account_id: string;
-            merged_events: MergedEvent[];
-            new_events: UpgradeProviderEvent[];
-            orphaned_events: UpgradeIcsEvent[];
-          };
-          await this.executeUpgradePlan(body);
-          return Response.json({ ok: true });
-        }
-
-        // ---------------------------------------------------------------
-        // TM-08pp: Provider event ID normalization (batch migration)
-        // ---------------------------------------------------------------
-
-        case "/normalizeProviderEventIds": {
-          const normalized = this.normalizeProviderEventIds();
-          return Response.json({ normalized });
-        }
-
-        default:
-          return new Response(`Unknown action: ${pathname}`, { status: 404 });
+      // Parse body once; bodyless routes receive undefined (handlers
+      // that don't use the parameter simply ignore it).
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        // No body or invalid JSON -- pass undefined
+        body = undefined;
       }
+      return await handler(body);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return Response.json({ error: message }, { status: 500 });
