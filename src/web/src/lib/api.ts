@@ -803,10 +803,15 @@ export async function fetchDriftReport(
 export async function fetchDriftAlerts(
   token: string,
 ): Promise<import("./relationships").DriftAlert[]> {
-  return apiFetch<import("./relationships").DriftAlert[]>(
+  // The backend DO returns { alerts: DriftAlert[] } and the handler passes it
+  // through successEnvelope without flattening. Unwrap .alerts so callers
+  // receive a plain array (same pattern as TM-w5wj listSessions fix).
+  const result = await apiFetch<import("./relationships").DriftAlert[]>(
     "/v1/drift-alerts",
     { token },
   );
+  const items = Array.isArray(result) ? result : (result as any).alerts ?? [];
+  return items;
 }
 
 /** GET /api/v1/reconnection-suggestions -- get reconnection suggestions. */
