@@ -1808,6 +1808,7 @@ async function microsoftEventExists(
 const MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT = 0.3;
 const MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE = 20;
 const MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES = HARD_MAX_DELETES_PER_OPERATION;
+const MS_SWEEP_RECONCILE_MAX_PROBE_CANDIDATES = 10;
 const MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS = 45 * 24 * 60 * 60 * 1000;
@@ -1905,8 +1906,50 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
       continue;
     }
 
-    const recentMissingMirrorIdsToDelete = limitAtomicDeleteCandidates(
-      recentMissingMirrorIds,
+    // Safety: snapshot "missing" candidates are advisory only.
+    // Confirm via direct provider GET before deleting.
+    const probeCandidateIds = recentMissingMirrorIds.slice(
+      0,
+      MS_SWEEP_RECONCILE_MAX_PROBE_CANDIDATES,
+    );
+    const confirmedMissingMirrorIds: string[] = [];
+    for (const providerEventId of probeCandidateIds) {
+      try {
+        const exists = await microsoftEventExists(providerEventId, accessToken, deps.fetchFn);
+        if (exists) {
+          continue;
+        }
+        confirmedMissingMirrorIds.push(providerEventId);
+        if (confirmedMissingMirrorIds.length >= MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES) {
+          break;
+        }
+      } catch (probeErr) {
+        console.warn(
+          "sync-consumer: scheduled microsoft mirror reconcile probe failed; skipping candidate",
+          {
+            account_id: accountId,
+            calendar_id: calendarId,
+            provider_event_id: providerEventId,
+            error: probeErr instanceof Error ? probeErr.message : String(probeErr),
+          },
+        );
+      }
+    }
+    if (confirmedMissingMirrorIds.length === 0) {
+      console.log(
+        "sync-consumer: scheduled microsoft mirror reconcile found no confirmed missing events after provider probe",
+        {
+          account_id: accountId,
+          calendar_id: calendarId,
+          recent_missing_candidates: recentMissingMirrorIds.length,
+          probe_candidates: probeCandidateIds.length,
+        },
+      );
+      continue;
+    }
+
+    const confirmedMissingMirrorIdsToDelete = limitAtomicDeleteCandidates(
+      confirmedMissingMirrorIds,
       "scheduled_snapshot_reconcile",
       {
         account_id: accountId,
@@ -1918,7 +1961,7 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     reconciledDeletes += await applyManagedMirrorDeletes(
       accountId,
       userId,
-      recentMissingMirrorIdsToDelete,
+      confirmedMissingMirrorIdsToDelete,
       env,
       deleteGuard,
       {

@@ -3148,6 +3148,128 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
+  it("scheduled microsoft sweep does not delete when provider probe confirms mirror still exists", async () => {
+    const mirrorEventId = "AAMkAG-ms-mirror-still-exists";
+    const canonicalEventId = "evt_01HXYZ000000000000000006544";
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorEventId, target_calendar_id: "primary" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_6544",
+          title: "still exists upstream",
+          start: { dateTime: "2026-02-23T21:00:00.000Z", timeZone: "UTC" },
+          end: { dateTime: "2026-02-23T21:30:00.000Z", timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // Snapshot reconcile says missing...
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-new-exists",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // ...but direct probe confirms event still exists; no delete should occur.
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/events/") &&
+        url.includes("?$select=id")
+      ) {
+        return new Response(
+          JSON.stringify({ id: mirrorEventId }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T05:45:00.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
   it("scheduled microsoft sweep does not reconcile-delete historical missing mirrors", async () => {
     const mirrorEventId = "AAMkAG-ms-mirror-old-1";
     const canonicalEventId = "evt_01HXYZ000000000000000009001";
