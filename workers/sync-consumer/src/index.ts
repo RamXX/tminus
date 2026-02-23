@@ -1811,19 +1811,9 @@ async function microsoftEventExists(
   accessToken: string,
   fetchFn?: FetchFn,
 ): Promise<boolean> {
-  const discardProbeResponse = async (response: Response): Promise<void> => {
-    try {
-      if (response.body) {
-        await response.body.cancel();
-      }
-    } catch {
-      // Best-effort cleanup; probe status handling remains source of truth.
-    }
-  };
-
   const encodedEventId = encodeURIComponent(providerEventId);
   const response = await (fetchFn ?? globalThis.fetch.bind(globalThis))(
-    `https://graph.microsoft.com/v1.0/me/events/${encodedEventId}?$select=id`,
+    `https://graph.microsoft.com/v1.0/me/events/${encodedEventId}?$select=id,isCancelled`,
     {
       method: "GET",
       headers: {
@@ -1834,7 +1824,6 @@ async function microsoftEventExists(
   );
 
   if (response.status === 404 || response.status === 410) {
-    await discardProbeResponse(response);
     return false;
   }
 
@@ -1845,7 +1834,20 @@ async function microsoftEventExists(
     );
   }
 
-  await discardProbeResponse(response);
+  // Deletion/cancellation can still surface as a 200 response for some
+  // Microsoft mailbox states. Treat cancelled/removed payloads as missing.
+  try {
+    const payload = (await response.json()) as {
+      isCancelled?: boolean;
+      "@removed"?: unknown;
+    } | null;
+    if (payload?.isCancelled === true || payload?.["@removed"] !== undefined) {
+      return false;
+    }
+  } catch {
+    // Best-effort parsing only; 200 with non-JSON payload is treated as exists.
+  }
+
   return true;
 }
 

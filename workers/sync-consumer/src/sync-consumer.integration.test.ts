@@ -4925,6 +4925,54 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
+  it("webhook_change_type=updated deletes mirror canonical when provider probe returns cancelled event", async () => {
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-202";
+    const canonicalEventId = "evt_01HXYZ00000000000000000078";
+    const encodedMirrorEventId = encodeURIComponent(mirrorProviderEventId);
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorProviderEventId, target_calendar_id: "cal-target" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+
+    const baseFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+    const msFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes(`/me/events/${encodedMirrorEventId}?$select=id`)) {
+        return new Response(
+          JSON.stringify({ id: mirrorProviderEventId, isCancelled: true }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return baseFetch(input, init);
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-update-cancelled-1",
+      resource_id: `me/events/${mirrorProviderEventId}`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "updated",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
   it("webhook_change_type=deleted with non-event resource path does NOT delete", async () => {
     const msFetch = createMicrosoftApiFetch({
       events: [],
