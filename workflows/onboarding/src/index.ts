@@ -49,6 +49,8 @@ export interface OnboardingEnv {
   DB: D1Database;
   WRITE_QUEUE: Queue;
   WEBHOOK_URL: string;
+  /** Scope bootstrap mode: "primary_only" or "all_non_overlay" (default). */
+  ONBOARDING_SCOPE_MODE?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +192,13 @@ export class OnboardingWorkflow {
       // Step 3: Select scopes for bootstrap (recommended defaults = all
       // non-overlay calendars). Primary is always included.
       const selectedScopes = this.selectBootstrapScopes(calendarSetup);
+
+      // Respect the selected scope set by disabling sync on previously
+      // configured non-selected scopes (important for relink recovery).
+      await this.disableUnselectedScopes(
+        account_id,
+        selectedScopes.map((scope) => scope.calendarId),
+      );
 
       // Step 4: Bootstrap each scope independently (sync + watch + cursor)
       const scopeResults = await this.bootstrapAllScopes(
@@ -373,7 +382,85 @@ export class OnboardingWorkflow {
       return 0;
     });
 
+    if (this.resolveScopeSelectionMode() === "primary_only") {
+      const primary = scopes.find((scope) => scope.calendarRole === "primary");
+      if (primary) {
+        return [primary];
+      }
+      return scopes.length > 0 ? [scopes[0]] : [];
+    }
+
     return scopes;
+  }
+
+  private resolveScopeSelectionMode(): "all_non_overlay" | "primary_only" {
+    const raw = this.env.ONBOARDING_SCOPE_MODE?.trim().toLowerCase();
+    if (raw === "primary_only") {
+      return "primary_only";
+    }
+    return "all_non_overlay";
+  }
+
+  private async disableUnselectedScopes(
+    accountId: AccountId,
+    selectedCalendarIds: readonly string[],
+  ): Promise<void> {
+    const selected = new Set(selectedCalendarIds);
+    const doId = this.env.ACCOUNT.idFromName(accountId);
+    const stub = this.env.ACCOUNT.get(doId);
+
+    try {
+      const response = await stub.fetch(
+        new Request("https://account.internal/listCalendarScopes", {
+          method: "POST",
+        }),
+      );
+
+      if (!response.ok) {
+        return;
+      }
+
+      const body = (await response.json()) as {
+        scopes?: Array<{
+          providerCalendarId?: string;
+          provider_calendar_id?: string;
+          displayName?: string | null;
+          display_name?: string | null;
+          calendarRole?: string;
+          calendar_role?: string;
+          enabled?: boolean;
+          syncEnabled?: boolean;
+          sync_enabled?: boolean;
+        }>;
+      };
+
+      const scopes = body.scopes ?? [];
+      for (const scope of scopes) {
+        const providerCalendarId =
+          scope.providerCalendarId ?? scope.provider_calendar_id;
+        if (!providerCalendarId || selected.has(providerCalendarId)) {
+          continue;
+        }
+
+        const syncEnabled = scope.syncEnabled ?? scope.sync_enabled ?? true;
+        if (!syncEnabled) {
+          continue;
+        }
+
+        await this.upsertCalendarScope(accountId, {
+          providerCalendarId,
+          displayName: scope.displayName ?? scope.display_name ?? providerCalendarId,
+          calendarRole: scope.calendarRole ?? scope.calendar_role ?? "secondary",
+          enabled: scope.enabled ?? true,
+          syncEnabled: false,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `Onboarding: failed to normalize existing scopes for ${accountId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 
   // -------------------------------------------------------------------------

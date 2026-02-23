@@ -81,6 +81,12 @@ export interface HealthInfo {
   readonly fullSyncNeeded: boolean;
 }
 
+export interface TokenInfo {
+  readonly expiresAt: string | null;
+  readonly hasTokens: boolean;
+  readonly provider: ProviderType;
+}
+
 export interface RevokeResult {
   /** Whether the token was successfully revoked server-side at Google. */
   readonly revoked: boolean;
@@ -1753,6 +1759,52 @@ export class AccountDO {
   // Health tracking
   // -------------------------------------------------------------------------
 
+  /**
+   * Return non-sensitive token metadata for diagnostics/UI.
+   *
+   * Never returns token values -- only expiry and presence flags.
+   */
+  async getTokenInfo(): Promise<TokenInfo> {
+    this.ensureMigrated();
+    const provider = this.resolveProvider();
+
+    const rows = this.sql
+      .exec<{ encrypted_tokens: string }>(
+        "SELECT encrypted_tokens FROM auth WHERE account_id = ?",
+        ACCOUNT_ROW_KEY,
+      )
+      .toArray();
+
+    if (rows.length === 0) {
+      return {
+        expiresAt: null,
+        hasTokens: false,
+        provider,
+      };
+    }
+
+    try {
+      const masterKey = await importMasterKey(this.masterKeyHex);
+      const envelope: EncryptedEnvelope = JSON.parse(rows[0].encrypted_tokens);
+      const tokens = await decryptTokens(masterKey, envelope);
+      return {
+        expiresAt: typeof tokens.expiry === "string" ? tokens.expiry : null,
+        hasTokens: true,
+        provider,
+      };
+    } catch (err) {
+      console.error(
+        "AccountDO.getTokenInfo: failed to read token metadata",
+        err instanceof Error ? err.message : String(err),
+      );
+      return {
+        expiresAt: null,
+        hasTokens: false,
+        provider,
+      };
+    }
+  }
+
   /** Get the health status of this account's sync state. */
   async getHealth(): Promise<HealthInfo> {
     this.ensureMigrated();
@@ -2057,6 +2109,11 @@ export class AccountDO {
 
         case "/getHealth": {
           const result = await this.getHealth();
+          return Response.json(result);
+        }
+
+        case "/getTokenInfo": {
+          const result = await this.getTokenInfo();
           return Response.json(result);
         }
 

@@ -521,6 +521,13 @@ export interface RequeueDeletingResult {
   readonly limit: number;
 }
 
+/** Result for retrying a single mirror currently in ERROR/PENDING state. */
+export interface RetryErrorMirrorResult {
+  readonly retried: boolean;
+  readonly enqueued: number;
+  readonly reason?: "not_found" | "not_retryable_state" | "missing_canonical";
+}
+
 /** Result of an account unlink cascade. */
 export interface UnlinkResult {
   readonly events_deleted: number;
@@ -2019,6 +2026,78 @@ export class UserGraphDO {
   }
 
   /**
+   * Retry a specific mirror by canonical + target account pair.
+   *
+   * This transitions the mirror to PENDING and re-runs projection enqueue with
+   * forceRequeueNonActive enabled so ERROR hashes are replayed.
+   */
+  async retryErrorMirror(
+    canonicalEventId: string,
+    targetAccountId: string,
+  ): Promise<RetryErrorMirrorResult> {
+    this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
+
+    const mirrorRows = this.sql
+      .exec<{ state: string }>(
+        `SELECT state
+         FROM event_mirrors
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+        canonicalEventId,
+        targetAccountId,
+      )
+      .toArray();
+
+    if (mirrorRows.length === 0) {
+      return { retried: false, enqueued: 0, reason: "not_found" };
+    }
+
+    const state = mirrorRows[0].state;
+    if (state === "DELETING" || state === "DELETED" || state === "TOMBSTONED") {
+      return { retried: false, enqueued: 0, reason: "not_retryable_state" };
+    }
+
+    const canonicalRows = this.sql
+      .exec<{ origin_account_id: string }>(
+        `SELECT origin_account_id
+         FROM canonical_events
+         WHERE canonical_event_id = ?`,
+        canonicalEventId,
+      )
+      .toArray();
+
+    if (canonicalRows.length === 0) {
+      return { retried: false, enqueued: 0, reason: "missing_canonical" };
+    }
+
+    this.sql.exec(
+      `UPDATE event_mirrors
+       SET state = 'PENDING',
+           error_message = NULL,
+           last_write_ts = ?
+       WHERE canonical_event_id = ? AND target_account_id = ?`,
+      new Date().toISOString(),
+      canonicalEventId,
+      targetAccountId,
+    );
+
+    const enqueued = await this.projectAndEnqueue(
+      canonicalEventId,
+      canonicalRows[0].origin_account_id,
+      {
+        forceRequeueNonActive: true,
+        forceRequeuePending: true,
+      },
+    );
+    const outboxDrained = await this.drainOutbox();
+
+    return {
+      retried: true,
+      enqueued: enqueued + outboxDrained,
+    };
+  }
+
+  /**
    * Remove mirror rows that can no longer be projected:
    * - canonical event no longer exists, or
    * - no active policy edge exists for (origin_account_id -> target_account_id).
@@ -2168,6 +2247,7 @@ export class UserGraphDO {
    */
   getSyncHealth(): SyncHealth {
     this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
 
     const eventCount = this.sql
       .exec<{ cnt: number }>("SELECT COUNT(*) as cnt FROM canonical_events")
@@ -2232,6 +2312,7 @@ export class UserGraphDO {
     end_ts: string | null;
   }> {
     this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.trunc(limit))) : 100;
 
     return this.sql
@@ -2274,6 +2355,7 @@ export class UserGraphDO {
    */
   getMirrorDiagnostics(sampleLimit = 25): MirrorDiagnostics {
     this.ensureMigrated();
+    this.pruneNonProjectableMirrors();
     const safeSampleLimit = Number.isFinite(sampleLimit)
       ? Math.max(1, Math.min(200, Math.trunc(sampleLimit)))
       : 25;
@@ -4466,6 +4548,14 @@ export class UserGraphDO {
 
       "/requeueDeletingMirrors": async (body) => {
         const result = await this.requeueDeletingMirrors(body?.limit ?? 1);
+        return Response.json(result);
+      },
+
+      "/retryErrorMirror": async (body) => {
+        const result = await this.retryErrorMirror(
+          body.canonical_event_id,
+          body.target_account_id,
+        );
         return Response.json(result);
       },
 

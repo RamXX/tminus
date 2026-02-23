@@ -640,7 +640,10 @@ export async function handleFullSync(
       userId,
       allEvents,
       env,
-      skippedCalendarIds,
+      {
+        skippedCalendarIds,
+        syncedCalendarIds: cursorUpdates.map((update) => update.providerCalendarId),
+      },
     );
     if (missingMirrorProviderIds.length > 0) {
       staleManagedMirrorDeletes = await applyManagedMirrorDeletes(
@@ -1094,9 +1097,11 @@ async function listSyncCalendarIds(
       .filter((calendarId) => calendarId.length > 0),
   );
 
-  // Fallback for legacy accounts that predate scoped calendar registration:
-  // derive active target calendars from mirror rows (overlay calendars).
-  if (includeMirrorScopeFallback) {
+  // Legacy fallback:
+  // only derive mirror target calendars when there are no explicitly enabled
+  // sync scopes. This preserves backward compatibility for pre-scope accounts
+  // without overriding explicit single-scope configurations.
+  if (includeMirrorScopeFallback && calendarIds.size === 0) {
     const userId = await lookupUserId(accountId, env);
     if (userId) {
       const mirrorCalendarIds = await loadManagedMirrorCalendarIds(
@@ -1700,13 +1705,19 @@ async function findMissingManagedMirrorProviderEventIds(
   userId: string,
   providerEvents: readonly GoogleCalendarEvent[],
   env: Env,
-  skippedCalendarIds: readonly string[] = [],
+  options: {
+    skippedCalendarIds?: readonly string[];
+    syncedCalendarIds?: readonly string[];
+  } = {},
 ): Promise<string[]> {
   const mirrors = await loadActiveMirrors(accountId, userId, env);
   if (mirrors.length === 0) {
     return [];
   }
-  const skipped = new Set(skippedCalendarIds);
+  const skipped = new Set(options.skippedCalendarIds ?? []);
+  const syncedCalendarIds = options.syncedCalendarIds ?? [];
+  const synced =
+    syncedCalendarIds.length > 0 ? new Set(syncedCalendarIds) : null;
 
   const providerIds = new Set<string>();
   for (const event of providerEvents) {
@@ -1725,10 +1736,16 @@ async function findMissingManagedMirrorProviderEventIds(
 
   const missing = new Set<string>();
   for (const mirror of mirrors) {
-    if (
-      typeof mirror.target_calendar_id === "string" &&
-      skipped.has(mirror.target_calendar_id)
-    ) {
+    const targetCalendarId =
+      typeof mirror.target_calendar_id === "string"
+        ? mirror.target_calendar_id
+        : "";
+    if (synced && (targetCalendarId.length === 0 || !synced.has(targetCalendarId))) {
+      // Safety: only reconcile "missing" mirrors for calendars that were
+      // explicitly synced in this run.
+      continue;
+    }
+    if (targetCalendarId.length > 0 && skipped.has(targetCalendarId)) {
       continue;
     }
     if (

@@ -44,6 +44,7 @@ queue = "tminus-write-queue"
 [vars]
 ENVIRONMENT = "development"
 WEBHOOK_URL = "https://webhooks.tminus.ink/webhook/google"
+ONBOARDING_SCOPE_MODE = "primary_only"
 
 # --- Secrets (set via `wrangler secret put`, listed here for documentation) -
 # GOOGLE_CLIENT_ID
@@ -64,6 +65,7 @@ name = "tminus-oauth-staging"
 [env.staging.vars]
 ENVIRONMENT = "staging"
 WEBHOOK_URL = "https://webhooks-staging.tminus.ink/webhook/google"
+ONBOARDING_SCOPE_MODE = "primary_only"
 
 [[env.staging.queues.producers]]
 binding = "WRITE_QUEUE"
@@ -104,6 +106,7 @@ name = "tminus-oauth-production"
 [env.production.vars]
 ENVIRONMENT = "production"
 WEBHOOK_URL = "https://webhooks.tminus.ink/webhook/google"
+ONBOARDING_SCOPE_MODE = "primary_only"
 
 [[env.production.queues.producers]]
 binding = "WRITE_QUEUE"

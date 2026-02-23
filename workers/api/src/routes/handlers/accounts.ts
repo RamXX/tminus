@@ -419,6 +419,7 @@ async function handleGetAccountsHealth(
         let isSyncing = false;
         let errorMessage: string | null = null;
         let tokenExpiresAt: string | null = null;
+        let hasTokens: boolean | null = null;
 
         try {
           const health = await callDO<AccountDOHealth>(
@@ -487,12 +488,20 @@ async function handleGetAccountsHealth(
         try {
           const tokenResult = await callDO<{
             expiresAt: string | null;
+            hasTokens?: boolean;
           }>(env.ACCOUNT, account.account_id, "/getTokenInfo");
           if (tokenResult.ok && tokenResult.data) {
             tokenExpiresAt = tokenResult.data.expiresAt ?? null;
+            if (typeof tokenResult.data.hasTokens === "boolean") {
+              hasTokens = tokenResult.data.hasTokens;
+            }
           }
         } catch {
           // Token info unavailable -- continue with null
+        }
+
+        if (account.status === "active" && hasTokens === false) {
+          errorMessage = errorMessage ?? "No OAuth tokens found. Reconnect required.";
         }
 
         return {

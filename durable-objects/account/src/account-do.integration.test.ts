@@ -2171,6 +2171,52 @@ describe("AccountDO integration", () => {
       expect(body.failureCount).toBe(0);
       expect(body.lastSuccessTs).toBeDefined();
     });
+
+    it("/getTokenInfo returns token metadata without exposing token values", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      await acct.initialize(TEST_TOKENS, TEST_SCOPES);
+
+      const response = await acct.handleFetch(
+        new Request("https://do/getTokenInfo", {
+          method: "POST",
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        expiresAt: string | null;
+        hasTokens: boolean;
+        provider: string;
+        access_token?: string;
+        refresh_token?: string;
+      };
+      expect(body.hasTokens).toBe(true);
+      expect(body.expiresAt).toBe(TEST_TOKENS.expiry);
+      expect(body.provider).toBe("google");
+      expect(body.access_token).toBeUndefined();
+      expect(body.refresh_token).toBeUndefined();
+    });
+
+    it("/getTokenInfo reports hasTokens=false when account is not initialized", async () => {
+      const mockFetch = createMockFetch();
+      const acct = new AccountDO(sql, TEST_MASTER_KEY_HEX, mockFetch);
+
+      const response = await acct.handleFetch(
+        new Request("https://do/getTokenInfo", {
+          method: "POST",
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        expiresAt: string | null;
+        hasTokens: boolean;
+      };
+      expect(body.hasTokens).toBe(false);
+      expect(body.expiresAt).toBeNull();
+    });
   });
 
   // -------------------------------------------------------------------------

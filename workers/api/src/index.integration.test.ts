@@ -179,6 +179,12 @@ function createMockDONamespace(config?: {
             } catch {
               parsedBody = init.body;
             }
+          } else if (typeof input === "object" && "clone" in input) {
+            try {
+              parsedBody = await (input as Request).clone().json();
+            } catch {
+              parsedBody = undefined;
+            }
           }
 
           calls.push({ name: doName, path: url.pathname, method, body: parsedBody });
@@ -2088,6 +2094,122 @@ describe("Integration: Sync status endpoints", () => {
 
     const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
     expect(doBody.limit).toBe(25);
+  });
+
+  it("GET /v1/sync/journal?change_type=error returns error mirrors for Error Recovery UI", async () => {
+    insertAccount(db, ACCOUNT_A);
+
+    const errorMirrors = [
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000001",
+        target_account_id: ACCOUNT_A.account_id,
+        target_calendar_id: "cal_busy",
+        provider_event_id: "provider_evt_1",
+        error_message: "Forbidden",
+        last_write_ts: "2026-01-01T00:00:00Z",
+        title: "Retry Test Event",
+        start_ts: "2026-01-02T09:00:00Z",
+        end_ts: "2026-01-02T10:00:00Z",
+      },
+    ];
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/listErrorMirrors", { items: errorMirrors }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/journal?change_type=error&limit=10", {
+        method: "GET",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: Array<{
+        mirror_id: string;
+        canonical_event_id: string;
+        target_account_email: string;
+        event_summary: string;
+      }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].canonical_event_id).toBe("evt_01HXYZ00000000000000000001");
+    expect(body.data[0].target_account_email).toBe(ACCOUNT_A.email);
+    expect(body.data[0].event_summary).toBe("Retry Test Event");
+    expect(body.data[0].mirror_id.length).toBeGreaterThan(0);
+    expect(userGraphDO.calls[0].path).toBe("/listErrorMirrors");
+  });
+
+  it("POST /v1/sync/retry/:mirror_id retries a single mirror", async () => {
+    const mirrorId = btoa("evt_01HXYZ00000000000000000001|acc_01HXYZ0000000000000000000A")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/retryErrorMirror", { retried: true, enqueued: 1 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request(`https://api.tminus.dev/v1/sync/retry/${mirrorId}`, {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { mirror_id: string; success: boolean; enqueued: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.success).toBe(true);
+    expect(body.data.enqueued).toBe(1);
+
+    const doBody = userGraphDO.calls[0].body as {
+      canonical_event_id: string;
+      target_account_id: string;
+    };
+    expect(doBody.canonical_event_id).toBe("evt_01HXYZ00000000000000000001");
+    expect(doBody.target_account_id).toBe("acc_01HXYZ0000000000000000000A");
+  });
+
+  it("POST /v1/sync/retry/:mirror_id returns 400 for invalid mirror IDs", async () => {
+    const userGraphDO = createMockDONamespace({ pathResponses: new Map() });
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/retry/not-valid", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(400);
+    expect(userGraphDO.calls).toHaveLength(0);
   });
 
   it("GET /v1/sync/diagnostics returns mirror diagnostics from UserGraphDO", async () => {

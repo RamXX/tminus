@@ -28,6 +28,101 @@ interface AccountStatusRow {
   error_count: number;
 }
 
+interface ErrorMirrorRow {
+  canonical_event_id: string;
+  target_account_id: string;
+  target_calendar_id: string;
+  provider_event_id: string | null;
+  last_write_ts: string | null;
+  error_message: string | null;
+  title: string | null;
+  start_ts: string | null;
+  end_ts: string | null;
+}
+
+interface ErrorMirrorResponseItem extends ErrorMirrorRow {
+  mirror_id: string;
+  target_account_email: string;
+  error_ts: string;
+  event_summary: string;
+}
+
+const MIRROR_ID_DELIMITER = "|";
+
+function encodeMirrorId(canonicalEventId: string, targetAccountId: string): string {
+  return btoa(`${canonicalEventId}${MIRROR_ID_DELIMITER}${targetAccountId}`)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function decodeMirrorId(mirrorId: string): {
+  canonicalEventId: string;
+  targetAccountId: string;
+} | null {
+  try {
+    const padded = mirrorId
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(mirrorId.length / 4) * 4, "=");
+    const decoded = atob(padded);
+    const [canonicalEventId, targetAccountId, ...rest] = decoded.split(MIRROR_ID_DELIMITER);
+    if (!canonicalEventId || !targetAccountId || rest.length > 0) {
+      return null;
+    }
+    return { canonicalEventId, targetAccountId };
+  } catch {
+    return null;
+  }
+}
+
+async function listUiErrorMirrors(
+  auth: AuthContext,
+  env: Env,
+  limit: number,
+): Promise<ErrorMirrorResponseItem[]> {
+  const result = await callDO<{ items: ErrorMirrorRow[] }>(
+    env.USER_GRAPH,
+    auth.userId,
+    "/listErrorMirrors",
+    { limit },
+  );
+
+  if (!result.ok) {
+    throw new Error("Failed to list error mirrors");
+  }
+
+  const rows = result.data.items ?? [];
+  const accountIds = [...new Set(rows.map((row) => row.target_account_id))];
+  const accountEmailById = new Map<string, string>();
+
+  if (accountIds.length > 0) {
+    const placeholders = accountIds.map((_, idx) => `?${idx + 2}`).join(", ");
+    const query = await env.DB
+      .prepare(
+        `SELECT account_id, email
+         FROM accounts
+         WHERE user_id = ?1
+           AND account_id IN (${placeholders})`,
+      )
+      .bind(auth.userId, ...accountIds)
+      .all<{ account_id: string; email: string }>();
+
+    for (const row of query.results ?? []) {
+      accountEmailById.set(row.account_id, row.email);
+    }
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    mirror_id: encodeMirrorId(row.canonical_event_id, row.target_account_id),
+    target_account_email:
+      accountEmailById.get(row.target_account_id) ?? row.target_account_id,
+    error_ts: row.last_write_ts ?? row.start_ts ?? new Date(0).toISOString(),
+    event_summary: row.title ?? row.canonical_event_id,
+  }));
+}
+
 export function computeChannelStatus(
   account: Pick<AccountStatusRow, "provider" | "status" | "channel_expiry_ts">,
 ): string {
@@ -209,15 +304,26 @@ async function handleJournal(
   const eventId = url.searchParams.get("event_id");
   const cursor = url.searchParams.get("cursor");
   const limitStr = url.searchParams.get("limit");
+  const changeType = (url.searchParams.get("change_type") ?? "").toLowerCase();
+  const limit = limitStr ? parseInt(limitStr, 10) : null;
 
   if (eventId) query.canonical_event_id = eventId;
   if (cursor) query.cursor = cursor;
-  if (limitStr) {
-    const limit = parseInt(limitStr, 10);
+  if (limit !== null) {
     if (!isNaN(limit) && limit > 0) query.limit = limit;
   }
 
   try {
+    // Compatibility path for the Error Recovery UI, which queries
+    // /v1/sync/journal?change_type=error.
+    if (changeType === "error") {
+      const safeLimit = Number.isFinite(limit ?? NaN) && (limit ?? 0) > 0
+        ? (limit as number)
+        : 100;
+      const items = await listUiErrorMirrors(auth, env, safeLimit);
+      return jsonResponse(successEnvelope(items), 200);
+    }
+
     const result = await callDO<{
       items: unknown[];
       cursor: string | null;
@@ -256,25 +362,93 @@ async function handleErrorMirrors(
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 100;
 
   try {
-    const result = await callDO<{ items: unknown[] }>(
-      env.USER_GRAPH,
-      auth.userId,
-      "/listErrorMirrors",
-      { limit: Number.isFinite(limit) ? limit : 100 },
+    const items = await listUiErrorMirrors(
+      auth,
+      env,
+      Number.isFinite(limit) ? limit : 100,
     );
-
-    if (!result.ok) {
-      return jsonResponse(
-        errorEnvelope("Failed to list error mirrors", "INTERNAL_ERROR"),
-        ErrorCode.INTERNAL_ERROR,
-      );
-    }
-
-    return jsonResponse(successEnvelope(result.data.items ?? []), 200);
+    return jsonResponse(successEnvelope(items), 200);
   } catch (err) {
     console.error("Failed to list error mirrors", err);
     return jsonResponse(
       errorEnvelope("Failed to list error mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
+async function handleRetryMirror(
+  _request: Request,
+  auth: AuthContext,
+  env: Env,
+  mirrorId: string,
+): Promise<Response> {
+  const decoded = decodeMirrorId(mirrorId);
+  if (!decoded) {
+    return jsonResponse(
+      errorEnvelope("Invalid mirror ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  if (
+    !isValidId(decoded.canonicalEventId, "event") ||
+    !isValidId(decoded.targetAccountId, "account")
+  ) {
+    return jsonResponse(
+      errorEnvelope("Invalid mirror ID format", "VALIDATION_ERROR"),
+      ErrorCode.VALIDATION_ERROR,
+    );
+  }
+
+  try {
+    const result = await callDO<{
+      retried: boolean;
+      enqueued: number;
+      reason?: string;
+    }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/retryErrorMirror",
+      {
+        canonical_event_id: decoded.canonicalEventId,
+        target_account_id: decoded.targetAccountId,
+      },
+    );
+
+    if (!result.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to retry mirror", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    if (!result.data.retried) {
+      return jsonResponse(
+        errorEnvelope(
+          result.data.reason === "not_found"
+            ? "Mirror not found"
+            : "Mirror could not be retried",
+          result.data.reason === "not_found" ? "NOT_FOUND" : "CONFLICT",
+        ),
+        result.data.reason === "not_found"
+          ? ErrorCode.NOT_FOUND
+          : ErrorCode.CONFLICT,
+      );
+    }
+
+    return jsonResponse(
+      successEnvelope({
+        mirror_id: mirrorId,
+        success: true,
+        enqueued: result.data.enqueued,
+      }),
+      200,
+    );
+  } catch (err) {
+    console.error("Failed to retry mirror", err);
+    return jsonResponse(
+      errorEnvelope("Failed to retry mirror", "INTERNAL_ERROR"),
       ErrorCode.INTERNAL_ERROR,
     );
   }
@@ -588,6 +762,11 @@ export const routeSyncRoutes: RouteGroupHandler = async (request, method, pathna
 
   if (method === "GET" && pathname === "/v1/sync/errors") {
     return handleErrorMirrors(request, auth, env);
+  }
+
+  const retryMatch = matchRoute(pathname, "/v1/sync/retry/:id");
+  if (retryMatch && method === "POST") {
+    return handleRetryMirror(request, auth, env, retryMatch.params[0]);
   }
 
   if (method === "GET" && pathname === "/v1/sync/diagnostics") {

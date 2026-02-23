@@ -893,16 +893,15 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     ];
     accountDOState.scopedSyncTokens = {
       primary: TEST_SYNC_TOKEN,
-      "overlay_busy_fullsync@group.calendar.google.com": "overlay-sync-old",
     };
     userGraphDOState.activeMirrors = [
       {
-        provider_event_id: "google_evt_missing_mirror_fullsync",
-        target_calendar_id: "overlay_busy_fullsync@group.calendar.google.com",
+        provider_event_id: "google_evt_missing_mirror_primary_fullsync",
+        target_calendar_id: "primary",
       },
     ];
     userGraphDOState.mirrorLookupByProviderEventId = {
-      google_evt_missing_mirror_fullsync: "evt_01HXYZ00000000000000000008",
+      google_evt_missing_mirror_primary_fullsync: "evt_01HXYZ00000000000000000008",
     };
 
     const googleFetch = async (input: string | URL | Request): Promise<Response> => {
@@ -919,16 +918,6 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
           JSON.stringify({
             items: [makeGoogleEvent({ id: "google_evt_origin_keep" })],
             nextSyncToken: "primary-sync-new",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-
-      if (calendarId === "overlay_busy_fullsync@group.calendar.google.com") {
-        return new Response(
-          JSON.stringify({
-            items: [],
-            nextSyncToken: "overlay-sync-new",
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -956,10 +945,6 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
         {
           provider_calendar_id: "primary",
           sync_token: "primary-sync-new",
-        },
-        {
-          provider_calendar_id: "overlay_busy_fullsync@group.calendar.google.com",
-          sync_token: "overlay-sync-new",
         },
       ]),
     );
@@ -1464,7 +1449,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(accountDOState.setSyncTokenCalls).toContain("sync-token-primary-new");
   });
 
-  it("google incremental sync falls back to mirror target calendars when scopes are missing overlays", async () => {
+  it("google incremental does not fall back to mirror target calendars when explicit scopes exist", async () => {
     accountDOState.calendarScopes = [
       {
         provider_calendar_id: "primary",
@@ -1543,31 +1528,19 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
-    expect(requestedCalendarIds).toEqual([
-      "primary",
-      "overlay_busy_legacy@group.calendar.google.com",
-    ]);
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: "evt_01HXYZ00000000000000000007",
-        source: `provider:${ACCOUNT_A.account_id}`,
-      },
-    ]);
+    expect(requestedCalendarIds).toEqual(["primary"]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
     expect(accountDOState.setScopedSyncTokenCalls).toEqual(
       expect.arrayContaining([
         {
           provider_calendar_id: "primary",
           sync_token: "sync-token-primary-new",
         },
-        {
-          provider_calendar_id: "overlay_busy_legacy@group.calendar.google.com",
-          sync_token: "sync-token-overlay-new",
-        },
       ]),
     );
   });
 
-  it("google incremental enqueues full sync when overlay scope has no cursor", async () => {
+  it("google incremental does not enqueue full sync for unscoped overlay mirrors", async () => {
     accountDOState.calendarScopes = [
       {
         provider_calendar_id: "primary",
@@ -1628,11 +1601,9 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
 
     await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
-    expect(syncQueue.messages).toHaveLength(1);
-    const enqueued = syncQueue.messages[0] as Record<string, unknown>;
-    expect(enqueued.type).toBe("SYNC_FULL");
+    expect(syncQueue.messages).toHaveLength(0);
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
-    expect(accountDOState.setSyncTokenCalls).toHaveLength(0);
+    expect(accountDOState.setSyncTokenCalls).toContain("sync-token-primary-new");
   });
 
   it("google incremental skips unavailable overlay calendars (404) and continues syncing", async () => {
@@ -4133,7 +4104,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("incremental sync: legacy Microsoft mirror scope without cursor enqueues SYNC_FULL bootstrap", async () => {
+  it("incremental sync: does not bootstrap unscoped Microsoft mirror calendars", async () => {
     const mirrorCalendarId = "overlay-ms-cal-1";
     const mirrorEventId = "AAMkAG-ms-overlay-mirror-1";
     const fetchedUrls: string[] = [];
@@ -4247,11 +4218,9 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     expect(
       fetchedUrls.some((url) => url.includes(encodeURIComponent(mirrorCalendarId))),
-    ).toBe(true);
-    expect(syncQueue.messages).toHaveLength(1);
-    expect((syncQueue.messages[0] as { type?: string }).type).toBe("SYNC_FULL");
-    expect((syncQueue.messages[0] as { reason?: string }).reason).toBe("token_410");
-    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+    ).toBe(false);
+    expect(syncQueue.messages).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
   });
 
@@ -4332,7 +4301,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("full sync reconciles stale mirrors from legacy Microsoft overlay scope fallback", async () => {
+  it("full sync does not reconcile stale mirrors from unscoped Microsoft overlay calendars", async () => {
     const mirrorCalendarId = "overlay-ms-cal-legacy";
     const staleMirrorEventId = "AAMkAG-ms-stale-overlay-1";
     const canonicalEventId = "evt_01HXYZ00000000000000000998";
@@ -4443,22 +4412,8 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     expect(
       fetchedUrls.some((url) => url.includes(encodeURIComponent(mirrorCalendarId))),
-    ).toBe(true);
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: canonicalEventId,
-        source: `provider:${MS_ACCOUNT_B.account_id}`,
-      },
-    ]);
-    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
-      expect.arrayContaining([
-        {
-          provider_calendar_id: mirrorCalendarId,
-          sync_token:
-            "https://graph.microsoft.com/v1.0/me/calendars/overlay-ms-cal-legacy/events/delta?$deltatoken=overlay-full-new",
-        },
-      ]),
-    );
+    ).toBe(false);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 

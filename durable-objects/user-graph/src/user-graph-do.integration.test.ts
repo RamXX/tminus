@@ -6095,6 +6095,64 @@ describe("UserGraphDO buffer constraints", () => {
       expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
     });
 
+    it("retryErrorMirror replays a specific ERROR mirror", async () => {
+      insertPolicyEdge(db, {
+        policyId: "pol_retry_error_mirror",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+      expect(events).toHaveLength(1);
+      const canonicalId = events[0].canonical_event_id;
+
+      db.prepare(
+        `UPDATE event_mirrors
+         SET state = 'ERROR', error_message = 'Forbidden'
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+      ).run(canonicalId, OTHER_ACCOUNT_ID);
+      queue.clear();
+
+      const result = await ug.retryErrorMirror(canonicalId, OTHER_ACCOUNT_ID);
+      expect(result.retried).toBe(true);
+      expect(result.enqueued).toBeGreaterThanOrEqual(1);
+
+      const mirror = db
+        .prepare(
+          `SELECT state, error_message
+           FROM event_mirrors
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+        )
+        .get(canonicalId, OTHER_ACCOUNT_ID) as
+        | { state: string; error_message: string | null }
+        | undefined;
+      expect(mirror).toBeDefined();
+      expect(mirror!.state).toBe("PENDING");
+      expect(mirror!.error_message).toBeNull();
+
+      const upsert = queue.messages.find(
+        (m: unknown) => (m as Record<string, unknown>).type === "UPSERT_MIRROR",
+      ) as Record<string, unknown> | undefined;
+      expect(upsert).toBeDefined();
+      expect(upsert!.canonical_event_id).toBe(canonicalId);
+      expect(upsert!.target_account_id).toBe(OTHER_ACCOUNT_ID);
+    });
+
+    it("retryErrorMirror returns not_found for unknown mirror", async () => {
+      const result = await ug.retryErrorMirror(
+        "evt_01HXYZ000000000000000000ZZ",
+        OTHER_ACCOUNT_ID,
+      );
+      expect(result.retried).toBe(false);
+      expect(result.enqueued).toBe(0);
+      expect(result.reason).toBe("not_found");
+    });
+
     it("deleteCanonicalEvent uses outbox for DELETE_MIRROR messages", async () => {
       // Set up policy edge and create an event with mirror
       insertPolicyEdge(db, {

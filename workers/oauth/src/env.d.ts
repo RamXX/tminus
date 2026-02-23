@@ -39,6 +39,9 @@ interface Env {
   /** Google Calendar webhook URL for watch channel registration. */
   WEBHOOK_URL: string;
 
+  /** Scope bootstrap mode for onboarding workflow ("primary_only" or "all_non_overlay"). */
+  ONBOARDING_SCOPE_MODE?: string;
+
   /** Deployment environment: "production", "staging", or "development" (default). */
   ENVIRONMENT?: string;
 }
