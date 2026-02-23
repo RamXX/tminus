@@ -3086,15 +3086,41 @@ export class UserGraphDO {
     message: unknown,
     eventEndMs: number | null,
   ): void {
+    const messageMeta = message && typeof message === "object"
+      ? message as {
+        canonical_event_id?: unknown;
+        target_account_id?: unknown;
+        type?: unknown;
+      }
+      : null;
+    const canonicalEventId =
+      typeof messageMeta?.canonical_event_id === "string"
+        ? messageMeta.canonical_event_id
+        : null;
+    const targetAccountId =
+      typeof messageMeta?.target_account_id === "string"
+        ? messageMeta.target_account_id
+        : null;
+
     if (eventEndMs !== null) {
       const now = Date.now();
       const lookback = now - UPSERT_PRIORITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
       const lookahead = now + UPSERT_PRIORITY_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000;
       if (eventEndMs >= lookback && eventEndMs <= lookahead) {
+        console.log("user-graph: enqueue UPSERT_MIRROR", {
+          canonical_event_id: canonicalEventId,
+          target_account_id: targetAccountId,
+          queue: "delete_priority",
+        });
         this.writeOutbox("delete", message);
         return;
       }
     }
+    console.log("user-graph: enqueue UPSERT_MIRROR", {
+      canonical_event_id: canonicalEventId,
+      target_account_id: targetAccountId,
+      queue: "write",
+    });
     this.writeOutbox("write", message);
   }
 
