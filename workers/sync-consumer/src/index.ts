@@ -1423,7 +1423,31 @@ async function processAndApplyDeltas(
   }
 
   if (deltasToApply.length > 0) {
-    await applyProviderDeltas(accountId, userId!, deltasToApply, env);
+    const applyResult = await applyProviderDeltas(accountId, userId!, deltasToApply, env);
+    console.log("sync-consumer: applyProviderDelta result", {
+      account_id: accountId,
+      provider,
+      stage,
+      deltas_applied: deltasToApply.length,
+      created: applyResult.created,
+      updated: applyResult.updated,
+      deleted: applyResult.deleted,
+      mirrors_enqueued: applyResult.mirrors_enqueued,
+      apply_errors: applyResult.errors.length,
+    });
+    if (
+      applyResult.mirrors_enqueued === 0 &&
+      (applyResult.created > 0 || applyResult.updated > 0)
+    ) {
+      console.warn("sync-consumer: no mirrors enqueued after origin delta apply", {
+        account_id: accountId,
+        provider,
+        stage,
+        created: applyResult.created,
+        updated: applyResult.updated,
+        hint: "projection_policy_or_mirror_target_missing",
+      });
+    }
   }
 
   if (managedMirrorDeletedEventIds.size > 0) {
@@ -2449,12 +2473,20 @@ async function applyDeletedOriginDeltas(
   return originEventIdsToDelete.length;
 }
 
+interface ApplyProviderDeltasResult {
+  created: number;
+  updated: number;
+  deleted: number;
+  mirrors_enqueued: number;
+  errors: Array<{ origin_event_id: string; error: string }>;
+}
+
 async function applyProviderDeltas(
   accountId: AccountId,
   userId: string,
   deltas: ProviderDelta[],
   env: Env,
-): Promise<void> {
+): Promise<ApplyProviderDeltasResult> {
   const userGraphId = env.USER_GRAPH.idFromName(userId);
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
 
@@ -2472,6 +2504,28 @@ async function applyProviderDeltas(
       `UserGraphDO.applyProviderDelta failed (${response.status}): ${body}`,
     );
   }
+
+  let parsed: Partial<ApplyProviderDeltasResult> = {};
+  try {
+    parsed = (await response.json()) as Partial<ApplyProviderDeltasResult>;
+  } catch {
+    // Keep defaults when UserGraphDO returns an empty/non-JSON body.
+  }
+
+  return {
+    created: Number(parsed.created) || 0,
+    updated: Number(parsed.updated) || 0,
+    deleted: Number(parsed.deleted) || 0,
+    mirrors_enqueued: Number(parsed.mirrors_enqueued) || 0,
+    errors: Array.isArray(parsed.errors)
+      ? parsed.errors.filter((row): row is { origin_event_id: string; error: string } =>
+        !!row &&
+        typeof row === "object" &&
+        typeof (row as { origin_event_id?: unknown }).origin_event_id === "string" &&
+        typeof (row as { error?: unknown }).error === "string"
+      )
+      : [],
+  };
 }
 
 async function applyManagedMirrorDeletes(
