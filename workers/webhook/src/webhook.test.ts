@@ -786,6 +786,7 @@ describe("POST /webhook/microsoft", () => {
     const msg = queue.messages[0] as Record<string, unknown>;
     expect(msg.type).toBe("SYNC_INCREMENTAL");
     expect(msg.webhook_change_type).toBe("deleted");
+    expect(msg.webhook_resource_data_id).toBe("evt-1");
   });
 
   it("enqueued message includes webhook_change_type='created' when notification is created", async () => {
@@ -813,6 +814,39 @@ describe("POST /webhook/microsoft", () => {
     expect(queue.messages.length).toBe(1);
     const msg = queue.messages[0] as Record<string, unknown>;
     expect(msg.webhook_change_type).toBe("created");
+    expect(msg.webhook_resource_data_id).toBe("evt-1");
+  });
+
+  it("canonicalizes notification.resourceData.id before enqueue", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: TEST_MS_CALENDAR_ID,
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    body.value[0].resourceData = {
+      "@odata.type": "#microsoft.graph.event",
+      id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+    };
+
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    await handler.fetch(request, env, mockCtx);
+
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.webhook_resource_data_id).toBe("AAMkAGI2TQABAAA/AAABBB==");
   });
 
   // Multiple notifications with per-scope routing

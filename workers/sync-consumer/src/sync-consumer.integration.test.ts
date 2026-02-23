@@ -2520,6 +2520,30 @@ describe("extractMicrosoftEventId", () => {
   it("handles deeply nested resource path", () => {
     expect(extractMicrosoftEventId("users/uid/calendarGroups/grp/calendars/cal/events/evt-789")).toBe("evt-789");
   });
+
+  it("matches event segment case-insensitively", () => {
+    expect(extractMicrosoftEventId("Users/uid/Events/AAMkAG-case-001")).toBe(
+      "AAMkAG-case-001",
+    );
+  });
+
+  it("extracts event ID from events('{id}') resource shape", () => {
+    expect(extractMicrosoftEventId("users/uid/events('AAMkAG-paren-321')")).toBe(
+      "AAMkAG-paren-321",
+    );
+  });
+
+  it("ignores query strings when extracting event ID", () => {
+    expect(extractMicrosoftEventId("me/events/AAMkAG-query-777?$select=id")).toBe(
+      "AAMkAG-query-777",
+    );
+  });
+
+  it("preserves slash-containing IDs from decoded resource paths", () => {
+    expect(extractMicrosoftEventId("me/events/AAMkAGI2TQABAAA/AAABBB==")).toBe(
+      "AAMkAGI2TQABAAA/AAABBB==",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3193,6 +3217,41 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
 
     // Normal sync still completes (sync success marked)
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("webhook delete hint resolves mirror ID from resourceData.id and events('{id}') path variants", async () => {
+    const encodedMirrorEventId = "AAMkAGI2TQABAAA%2FAAABBB%3D%3D";
+    const canonicalEventId = "evt_01HXYZ00000000000000000011";
+
+    // Active mirror index stores legacy encoded ID variant.
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: encodedMirrorEventId, target_calendar_id: "cal-target" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [encodedMirrorEventId]: canonicalEventId,
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-delete-variant-1",
+      resource_id: "Users/user-123/Events('AAMkAGI2TQABAAA%2FAAABBB%3D%3D')?$select=id",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "Deleted",
+      webhook_resource_data_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 

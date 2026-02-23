@@ -236,6 +236,12 @@ export interface SyncIncrementalMessage {
   readonly calendar_id: string | null;
   /** Microsoft Graph change type from the webhook notification (e.g., "deleted", "updated", "created"). */
   readonly webhook_change_type?: string;
+  /**
+   * Microsoft Graph resourceData.id from the webhook notification.
+   * Present when provided by Graph and used as the most reliable event-id
+   * hint for delete notifications (resource path can vary in shape/encoding).
+   */
+  readonly webhook_resource_data_id?: string;
 }
 
 /** Full sync request -- onboarding, reconcile, or 410 recovery (sync-queue). */

@@ -134,47 +134,67 @@ export async function handleIncrementalSync(
 ): Promise<void> {
   const { account_id } = message;
   const targetCalendarId = message.calendar_id ?? null;
+  // Step 1: Look up provider type from D1
+  const provider = await lookupProvider(account_id, env);
 
   // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
   // When a Microsoft webhook notification has changeType "deleted", the
   // incremental sync delta from the provider will NOT contain the deleted
   // event. However, the webhook notification's resource path contains the
-  // specific event ID. If that event ID is a known managed mirror, we can
-  // delete the canonical immediately without waiting for a full sync.
-  if (message.webhook_change_type === "deleted") {
-    const extractedEventId = extractMicrosoftEventId(message.resource_id);
-    if (extractedEventId) {
+  // specific event ID (or resourceData.id). If that ID is a known managed
+  // mirror, we can delete the canonical immediately without waiting for a
+  // full sync.
+  if (provider === "microsoft" && isWebhookDeleteChangeType(message.webhook_change_type)) {
+    const candidateEventIds = getMicrosoftWebhookDeleteEventIds(message);
+    if (candidateEventIds.length > 0) {
       try {
         const userId = await lookupUserId(account_id, env);
         if (userId) {
           const managedMirrorIds = await loadManagedMirrorEventIds(account_id, userId, env);
-          const isManagedMirror = providerEventIdVariants(extractedEventId).some(
-            (candidateId) => managedMirrorIds.has(candidateId),
-          );
+          const userGraphId = env.USER_GRAPH.idFromName(userId);
+          const userGraphStub = env.USER_GRAPH.get(userGraphId);
+          const resolvedMirrorDeleteIds = new Set<string>();
 
-          if (isManagedMirror) {
-            console.log("sync-consumer: webhook-hinted mirror deletion", {
-              account_id,
-              provider_event_id: extractedEventId,
-            });
-            await applyManagedMirrorDeletes(account_id, userId, [extractedEventId], env);
-          } else {
-            // Fallback: mirror state might not be ACTIVE, try direct lookup
-            const userGraphId = env.USER_GRAPH.idFromName(userId);
-            const userGraphStub = env.USER_GRAPH.get(userGraphId);
+          for (const eventId of candidateEventIds) {
+            const isManagedMirror = providerEventIdVariants(eventId).some(
+              (candidateId) => managedMirrorIds.has(candidateId),
+            );
+
+            if (isManagedMirror) {
+              console.log("sync-consumer: webhook-hinted mirror deletion", {
+                account_id,
+                provider_event_id: eventId,
+              });
+              resolvedMirrorDeleteIds.add(eventId);
+              continue;
+            }
+
+            // Fallback: mirror state might not be ACTIVE, try direct lookup.
+            // This remains safe because no delete occurs unless a canonical
+            // mapping exists for this specific mirror event ID.
             const canonicalId = await findCanonicalIdByMirror(
               userGraphStub,
               account_id,
-              extractedEventId,
+              eventId,
             );
-            if (canonicalId) {
-              console.log("sync-consumer: webhook-hinted mirror deletion (fallback lookup)", {
-                account_id,
-                provider_event_id: extractedEventId,
-                canonical_event_id: canonicalId,
-              });
-              await applyManagedMirrorDeletes(account_id, userId, [extractedEventId], env);
+            if (!canonicalId) {
+              continue;
             }
+            console.log("sync-consumer: webhook-hinted mirror deletion (fallback lookup)", {
+              account_id,
+              provider_event_id: eventId,
+              canonical_event_id: canonicalId,
+            });
+            resolvedMirrorDeleteIds.add(eventId);
+          }
+
+          if (resolvedMirrorDeleteIds.size > 0) {
+            await applyManagedMirrorDeletes(
+              account_id,
+              userId,
+              [...resolvedMirrorDeleteIds],
+              env,
+            );
           }
         }
       } catch (err) {
@@ -189,9 +209,6 @@ export async function handleIncrementalSync(
     }
     // Continue with normal incremental sync -- other events may have changed too
   }
-
-  // Step 1: Look up provider type from D1
-  const provider = await lookupProvider(account_id, env);
 
   // Step 2: Get access token from AccountDO
   let accessToken: string;
@@ -1229,17 +1246,63 @@ function decodeProviderEventIdSafe(providerEventId: string): string {
   }
 }
 
+function isWebhookDeleteChangeType(changeType: string | undefined): boolean {
+  return changeType?.trim().toLowerCase() === "deleted";
+}
+
+function getMicrosoftWebhookDeleteEventIds(
+  message: SyncIncrementalMessage,
+): string[] {
+  const candidates = new Set<string>();
+
+  if (
+    typeof message.webhook_resource_data_id === "string" &&
+    message.webhook_resource_data_id.length > 0
+  ) {
+    candidates.add(canonicalizeProviderEventId(message.webhook_resource_data_id));
+  }
+
+  const extractedResourceId = extractMicrosoftEventId(message.resource_id);
+  if (extractedResourceId) {
+    candidates.add(canonicalizeProviderEventId(extractedResourceId));
+  }
+
+  return [...candidates];
+}
+
 /**
  * Extract the event ID from a Microsoft Graph resource path.
  *
- * Microsoft resource paths follow the pattern:
- *   "me/events/{id}" or "users/{uid}/events/{id}"
+ * Handles Graph resource variants including:
+ * - "me/events/{id}"
+ * - "users/{uid}/events/{id}"
+ * - "users/{uid}/events('{id}')"
  *
+ * Path matching is case-insensitive and tolerates query strings.
  * Returns null if the resource path does not contain an event ID.
  */
 export function extractMicrosoftEventId(resource: string): string | null {
-  const match = resource.match(/events\/([^/]+)$/);
-  return match ? match[1] : null;
+  const trimmed = resource.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const withoutQuery = trimmed.split(/[?#]/, 1)[0]?.replace(/\/+$/, "") ?? "";
+  if (withoutQuery.length === 0) {
+    return null;
+  }
+
+  const parenMatch = withoutQuery.match(/(?:^|\/)events\('(.+)'\)$/i);
+  if (parenMatch?.[1]) {
+    return parenMatch[1];
+  }
+
+  const slashMatch = withoutQuery.match(/(?:^|\/)events\/(.+)$/i);
+  if (slashMatch?.[1]) {
+    return slashMatch[1];
+  }
+
+  return null;
 }
 
 /**

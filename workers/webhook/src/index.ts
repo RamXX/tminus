@@ -308,6 +308,12 @@ async function handleMicrosoftWebhook(
     // Enqueue SYNC_INCREMENTAL.
     // TM-08pp: Canonicalize resource path to eliminate URL-encoding variants
     // that Microsoft Graph may include in change notification payloads.
+    const resourceDataId =
+      typeof notification.resourceData?.id === "string" &&
+      notification.resourceData.id.length > 0
+        ? canonicalizeProviderEventId(notification.resourceData.id)
+        : undefined;
+
     const msg: SyncIncrementalMessage = {
       type: "SYNC_INCREMENTAL",
       account_id: accountRow.account_id as AccountId,
@@ -316,6 +322,7 @@ async function handleMicrosoftWebhook(
       ping_ts: new Date().toISOString(),
       calendar_id: accountRow.calendar_id,
       webhook_change_type: notification.changeType,
+      webhook_resource_data_id: resourceDataId,
     };
 
     try {
