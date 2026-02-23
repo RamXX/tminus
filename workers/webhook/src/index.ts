@@ -255,7 +255,7 @@ async function handleMicrosoftWebhook(
       if (!accountRow) {
         const legacyRow = await env.DB
           .prepare(
-            `SELECT a.account_id, a.channel_token, ms.calendar_id
+            `SELECT a.account_id, a.channel_token, NULL as calendar_id
              FROM ms_subscriptions ms
              JOIN accounts a ON a.account_id = ms.account_id
              WHERE ms.subscription_id = ?1
