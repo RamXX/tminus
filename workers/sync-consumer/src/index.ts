@@ -166,6 +166,13 @@ export async function handleIncrementalSync(
   const microsoftWebhookDeleteCandidateCount =
     microsoftWebhookCandidateEventIds.length;
   let microsoftWebhookDeleteResolvedCount = 0;
+  const handledManagedMirrorDeleteEventIds = new Set<string>();
+
+  const rememberHandledManagedMirrorDeleteId = (providerEventId: string): void => {
+    for (const variant of providerEventIdVariants(providerEventId)) {
+      handledManagedMirrorDeleteEventIds.add(variant);
+    }
+  };
 
   // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
   // When a Microsoft webhook notification has changeType "deleted", the
@@ -229,6 +236,9 @@ export async function handleIncrementalSync(
                 provider,
                 stage: "incremental",
                 reason: "webhook_hint",
+              },
+              {
+                onDeletedProviderEventId: rememberHandledManagedMirrorDeleteId,
               },
             );
           }
@@ -337,6 +347,9 @@ export async function handleIncrementalSync(
               stage: "incremental",
               reason: "webhook_missing_probe",
             },
+            {
+              onDeletedProviderEventId: rememberHandledManagedMirrorDeleteId,
+            },
           );
         }
       }
@@ -443,6 +456,9 @@ export async function handleIncrementalSync(
     provider,
     deleteGuard,
     "incremental",
+    {
+      preHandledManagedDeleteEventIds: handledManagedMirrorDeleteEventIds,
+    },
   );
   const deltasApplied = deltaResult.appliedDeltaCount;
 
@@ -1256,6 +1272,10 @@ interface ProcessDeltaResult {
   managedMirrorModifiedCount: number;
 }
 
+interface ProcessDeltaOptions {
+  preHandledManagedDeleteEventIds?: ReadonlySet<string>;
+}
+
 async function processAndApplyDeltas(
   accountId: AccountId,
   events: GoogleCalendarEvent[],
@@ -1263,6 +1283,7 @@ async function processAndApplyDeltas(
   provider: ProviderType = "google",
   deleteGuard?: DeleteSafetyGuard,
   stage: "incremental" | "full" = "incremental",
+  options: ProcessDeltaOptions = {},
 ): Promise<ProcessDeltaResult> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
@@ -1280,6 +1301,8 @@ async function processAndApplyDeltas(
   let userId: string | null = null;
   let userGraphStub: DurableObjectStub | null = null;
   let managedMirrorEventIds: Set<string> | null = null;
+  const preHandledManagedDeleteEventIds =
+    options.preHandledManagedDeleteEventIds;
 
   const ensureUserGraphStub = async (): Promise<DurableObjectStub> => {
     if (userGraphStub) return userGraphStub;
@@ -1344,6 +1367,27 @@ async function processAndApplyDeltas(
       origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
       ...(originCalendarId ? { origin_calendar_id: originCalendarId } : {}),
     };
+
+    if (
+      delta.type === "deleted" &&
+      typeof delta.origin_event_id === "string" &&
+      delta.origin_event_id.length > 0 &&
+      preHandledManagedDeleteEventIds &&
+      providerEventIdVariants(delta.origin_event_id).some((candidateId) =>
+        preHandledManagedDeleteEventIds.has(candidateId)
+      )
+    ) {
+      console.info(
+        "sync-consumer: skipped duplicate provider delete delta after managed mirror delete",
+        {
+          account_id: accountId,
+          provider_event_id: delta.origin_event_id,
+          provider,
+          stage,
+        },
+      );
+      continue;
+    }
 
     if (classification === "managed_mirror") {
       // Managed mirrors are never treated as origins (Invariant E), but if a
@@ -2653,6 +2697,9 @@ async function applyManagedMirrorDeletes(
   env: Env,
   deleteGuard?: DeleteSafetyGuard,
   metadata: DeleteGuardMetadata = {},
+  options: {
+    onDeletedProviderEventId?: (providerEventId: string) => void;
+  } = {},
 ): Promise<number> {
   if (providerEventIds.length === 0) return 0;
 
@@ -2660,6 +2707,7 @@ async function applyManagedMirrorDeletes(
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
   const source = `provider:${accountId}`;
   const canonicalIds = new Set<string>();
+  const canonicalToProviderEventIds = new Map<string, Set<string>>();
 
   for (const providerEventId of providerEventIds) {
     const canonicalEventId = await findCanonicalIdByMirror(
@@ -2679,6 +2727,12 @@ async function applyManagedMirrorDeletes(
       canonical_event_id: canonicalEventId,
     });
     canonicalIds.add(canonicalEventId);
+    let providerIds = canonicalToProviderEventIds.get(canonicalEventId);
+    if (!providerIds) {
+      providerIds = new Set<string>();
+      canonicalToProviderEventIds.set(canonicalEventId, providerIds);
+    }
+    providerIds.add(providerEventId);
   }
 
   const canonicalIdsToDelete = limitAtomicDeleteCandidates(
@@ -2714,6 +2768,12 @@ async function applyManagedMirrorDeletes(
     });
     if (deleted) {
       deletedCount += 1;
+      const providerIds = canonicalToProviderEventIds.get(canonicalEventId);
+      if (providerIds) {
+        for (const providerEventId of providerIds) {
+          options.onDeletedProviderEventId?.(providerEventId);
+        }
+      }
     }
     if (!deleted) {
       console.warn(

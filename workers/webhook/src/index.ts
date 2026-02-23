@@ -300,7 +300,7 @@ async function handleMicrosoftWebhook(
           }
         } catch (legacyErr) {
           const message = legacyErr instanceof Error ? legacyErr.message : String(legacyErr);
-          if (!/no such column:\s*calendar_id/i.test(message)) {
+          if (!/no such column:\s*(?:[a-z_]+\.)?calendar_id\b/i.test(message)) {
             throw legacyErr;
           }
 

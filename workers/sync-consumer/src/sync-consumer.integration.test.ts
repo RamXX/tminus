@@ -5204,6 +5204,112 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
+  it("webhook missing-probe delete does not self-block duplicate provider delete delta", async () => {
+    env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "1";
+
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-dup-203";
+    const canonicalEventId = "evt_01HXYZ00000000000000000079";
+    const encodedMirrorEventId = encodeURIComponent(mirrorProviderEventId);
+
+    // Intentionally omit active mirror index so webhook probe resolves via
+    // fallback findCanonicalByMirror and processAndApplyDeltas sees no active
+    // mirror snapshot entry for this provider_event_id.
+    userGraphDOState.activeMirrors = [];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes(`/me/events/${encodedMirrorEventId}?$select=id`)) {
+        return new Response(
+          JSON.stringify({ error: { code: "ErrorItemNotFound", message: "Not found" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [makeMicrosoftDeletedEvent({ id: mirrorProviderEventId })],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-update-dup-delete-1",
+      resource_id: `me/events/${mirrorProviderEventId}`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "updated",
+    };
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let sawDeleteGuardBlocked = false;
+    try {
+      await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+      sawDeleteGuardBlocked = errorSpy.mock.calls.some(
+        ([messageText]) => messageText === "sync-consumer: delete_guard_blocked",
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(sawDeleteGuardBlocked).toBe(false);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+    expect(accountDOState.syncFailureCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+
+    const duplicateDeletedDeltas = userGraphDOState.applyDeltaCalls
+      .flatMap((call) => call.deltas)
+      .filter((delta) => {
+        const typed = delta as Record<string, unknown>;
+        return (
+          typed.type === "deleted" &&
+          typed.origin_event_id === mirrorProviderEventId
+        );
+      });
+    expect(duplicateDeletedDeltas).toHaveLength(0);
+  });
+
   it("webhook_change_type=updated deletes mirror canonical when provider probe returns cancelled event", async () => {
     const mirrorProviderEventId = "AAMkAG-ms-mirror-202";
     const canonicalEventId = "evt_01HXYZ00000000000000000078";

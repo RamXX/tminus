@@ -57,6 +57,9 @@ function createMockD1(
     account_id: string;
     calendar_id?: string | null;
   }> = [],
+  opts: {
+    throwMissingQualifiedLegacyCalendarColumn?: boolean;
+  } = {},
 ) {
   return {
     prepare(sql: string) {
@@ -84,15 +87,27 @@ function createMockD1(
               }
 
               if (sql.includes("FROM ms_subscriptions ms")) {
+                if (
+                  opts.throwMissingQualifiedLegacyCalendarColumn &&
+                  sql.includes("ms.calendar_id AS calendar_id")
+                ) {
+                  throw new Error(
+                    "D1_ERROR: no such column: ms.calendar_id at offset 38: SQLITE_ERROR",
+                  );
+                }
                 const subId = args[0] as string;
                 const sub = msSubscriptions.find((s) => s.subscription_id === subId);
                 if (!sub) return null;
                 const account = accounts.find((a) => a.account_id === sub.account_id);
                 if (!account) return null;
+                const fallbackCalendarId = account.channel_calendar_id ?? null;
                 return ({
                   account_id: account.account_id,
                   channel_token: account.channel_token,
-                  calendar_id: sub.calendar_id ?? null,
+                  calendar_id:
+                    sql.includes("a.channel_calendar_id AS calendar_id")
+                      ? fallbackCalendarId
+                      : (sub.calendar_id ?? null),
                 } as T);
               }
 
@@ -147,11 +162,19 @@ function createMockEnv(opts?: {
     calendar_id?: string | null;
   }>;
   msClientState?: string;
+  throwMissingQualifiedLegacyCalendarColumn?: boolean;
 }) {
   const queue = createMockQueue();
   return {
     env: {
-      DB: createMockD1(opts?.accounts ?? [], opts?.msSubscriptions ?? []),
+      DB: createMockD1(
+        opts?.accounts ?? [],
+        opts?.msSubscriptions ?? [],
+        {
+          throwMissingQualifiedLegacyCalendarColumn:
+            opts?.throwMissingQualifiedLegacyCalendarColumn ?? false,
+        },
+      ),
       SYNC_QUEUE: queue,
       MS_WEBHOOK_CLIENT_STATE: opts?.msClientState ?? TEST_MS_CLIENT_STATE,
     } as Env,
@@ -557,6 +580,38 @@ describe("POST /webhook/microsoft", () => {
     expect(queue.messages.length).toBe(1);
     const msg = queue.messages[0] as { calendar_id: string | null };
     expect(msg.calendar_id).toBe("legacy-cal-789");
+  });
+
+  it("falls back to accounts.channel_calendar_id when legacy query errors with qualified missing column", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: "fallback-cal-321",
+      }],
+      msSubscriptions: [{
+        subscription_id: TEST_MS_SUBSCRIPTION_ID,
+        account_id: TEST_ACCOUNT_ID,
+      }],
+      throwMissingQualifiedLegacyCalendarColumn: true,
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody();
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as { calendar_id: string | null };
+    expect(msg.calendar_id).toBe("fallback-cal-321");
   });
 
   it("accepts microsoft accounts in status='error' (only revoked is excluded)", async () => {
