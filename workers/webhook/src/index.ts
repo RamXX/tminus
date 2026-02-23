@@ -108,7 +108,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   try {
     accountRow = await env.DB
       .prepare(
-        "SELECT account_id, channel_calendar_id FROM accounts WHERE channel_token = ?1",
+        "SELECT account_id, channel_calendar_id FROM accounts WHERE channel_token = ?1 AND status = 'active'",
       )
       .bind(channelToken)
       .first<{ account_id: string; channel_calendar_id: string | null }>();
@@ -231,7 +231,7 @@ async function handleMicrosoftWebhook(
           `SELECT account_id, channel_token, channel_calendar_id
            FROM accounts
            WHERE provider = 'microsoft'
-             AND status != 'revoked'
+             AND status = 'active'
              AND channel_id = ?1`,
         )
         .bind(notification.subscriptionId)
@@ -256,7 +256,7 @@ async function handleMicrosoftWebhook(
              FROM ms_subscriptions ms
              JOIN accounts a ON a.account_id = ms.account_id
              WHERE ms.subscription_id = ?1
-               AND a.status != 'revoked'`,
+               AND a.status = 'active'`,
           )
           .bind(notification.subscriptionId)
           .first<{

@@ -711,7 +711,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(0);
   });
 
-  it("Microsoft status='error' account still enqueues (not blocked unless revoked)", async () => {
+  it("Microsoft status='error' account does NOT enqueue (only active accounts sync)", async () => {
     db.prepare(
       `INSERT INTO accounts
        (account_id, user_id, provider, provider_subject, email, status, channel_id, channel_token, channel_calendar_id)
@@ -746,8 +746,9 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
 
     const response = await handler.fetch(request, env, mockCtx);
 
+    // Non-active accounts are silently dropped (return 202 but no enqueue)
     expect(response.status).toBe(202);
-    expect(queue.messages).toHaveLength(1);
+    expect(queue.messages).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
