@@ -797,6 +797,11 @@ async function processAndApplyDeltas(
         typeof delta.origin_event_id === "string" &&
         delta.origin_event_id.length > 0
       ) {
+        console.info("sync-consumer: managed_mirror delete detected", {
+          account_id: accountId,
+          provider_event_id: delta.origin_event_id,
+          provider,
+        });
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
       } else if (
         // TM-9eu: Mirror-side modifications write back to the canonical event.
@@ -837,6 +842,20 @@ async function processAndApplyDeltas(
           delta.origin_event_id,
         );
         managedDelete = canonicalId !== null;
+        if (managedDelete) {
+          console.info("sync-consumer: managed_mirror delete detected via fallback lookup", {
+            account_id: accountId,
+            provider_event_id: delta.origin_event_id,
+            canonical_event_id: canonicalId,
+            provider,
+          });
+        }
+      } else {
+        console.info("sync-consumer: managed_mirror delete detected via mirror ID set", {
+          account_id: accountId,
+          provider_event_id: delta.origin_event_id,
+          provider,
+        });
       }
 
       if (managedDelete) {
@@ -1350,11 +1369,21 @@ async function applyManagedMirrorDeletes(
       );
       continue;
     }
+    console.info("sync-consumer: mirror delete resolved canonical", {
+      account_id: accountId,
+      provider_event_id: providerEventId,
+      canonical_event_id: canonicalEventId,
+    });
     canonicalIds.add(canonicalEventId);
   }
 
   for (const canonicalEventId of canonicalIds) {
     const deleted = await deleteCanonicalById(userGraphStub, canonicalEventId, source);
+    console.info("sync-consumer: canonical delete result", {
+      canonical_event_id: canonicalEventId,
+      source,
+      deleted,
+    });
     if (!deleted) {
       console.warn(
         `sync-consumer: managed mirror delete resolved canonical but delete returned false (canonical_event_id=${canonicalEventId})`,
