@@ -38,9 +38,11 @@ import type {
   ApplyResult,
   EventId,
   AccountId,
+  CalendarId,
   DetailLevel,
   CalendarKind,
   MirrorState,
+  UpsertMirrorMessage,
 } from "@tminus/shared";
 import { OnboardingSessionMixin } from "./onboarding-session-mixin";
 export type { OnboardingSessionRow, OnboardingAccount } from "./onboarding-session-mixin";
@@ -120,6 +122,13 @@ const OUT_OF_WINDOW_FUTURE_DAYS = 365;
 const UPSERT_PRIORITY_LOOKAHEAD_DAYS = 30;
 /** Recently-ended upserts within this lookback still use priority queue. */
 const UPSERT_PRIORITY_LOOKBACK_DAYS = 1;
+/** Conservative per-message queue payload cap for UPSERT_MIRROR envelopes. */
+const UPSERT_QUEUE_MAX_BYTES = 64 * 1024;
+/** Defensive caps for projected string fields before queue serialization. */
+const UPSERT_SUMMARY_MAX_CHARS = 512;
+const UPSERT_LOCATION_MAX_CHARS = 1024;
+const UPSERT_DESCRIPTION_MAX_CHARS = 32 * 1024;
+const UTF8_ENCODER = new TextEncoder();
 
 // ---------------------------------------------------------------------------
 // Internal DB row types
@@ -193,6 +202,19 @@ function normalizeOriginCalendarId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function truncateToMaxChars(value: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  return value.length <= maxChars ? value : value.slice(0, maxChars);
+}
+
+function clampOptionalString(
+  value: string | undefined,
+  maxChars: number,
+): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return truncateToMaxChars(value, maxChars);
 }
 
 interface PolicyEdgeRow {
@@ -1389,14 +1411,6 @@ export class UserGraphDO {
       // Compute projection
       const projection = compileProjection(canonicalEvent, policyEdge);
 
-      // Compute projection hash (Invariant C)
-      const projectedHash = await computeProjectionHash(
-        canonicalEventId,
-        edge.detail_level as DetailLevel,
-        edge.calendar_kind as CalendarKind,
-        projection,
-      );
-
       // Look up existing mirror
       const mirrorRows = this.sql
         .exec<EventMirrorRow>(
@@ -1420,6 +1434,16 @@ export class UserGraphDO {
         ) {
           continue;
         }
+
+        const upsertMessage = await this.buildBoundedUpsertMirrorMessage({
+          canonicalEventId,
+          targetAccountId: edge.to_account_id,
+          targetCalendarId: existing.target_calendar_id,
+          detailLevel: edge.detail_level as DetailLevel,
+          calendarKind: edge.calendar_kind as CalendarKind,
+          projection,
+        });
+        const projectedHash = upsertMessage.projected_hash;
 
         // Write-skipping:
         // - ACTIVE + identical hash => skip (already converged)
@@ -1474,27 +1498,22 @@ export class UserGraphDO {
           edge.to_account_id,
         );
 
-        const idempotencyKey = await computeIdempotencyKey(
-          canonicalEventId,
-          edge.to_account_id,
-          projectedHash,
-        );
-
-        this.enqueueUpsertMirror({
-          type: "UPSERT_MIRROR",
-          canonical_event_id: canonicalEventId,
-          target_account_id: edge.to_account_id,
-          target_calendar_id: existing.target_calendar_id,
-          projected_hash: projectedHash,
-          projected_payload: projection,
-          idempotency_key: idempotencyKey,
-        }, canonicalEventEndMs);
+        this.enqueueUpsertMirror(upsertMessage, canonicalEventEndMs);
 
         enqueued++;
       } else {
         // New mirror -- create record and enqueue
         // Use to_account_id as default target_calendar_id (will be resolved by write-consumer)
         const targetCalendarId = edge.to_account_id;
+        const upsertMessage = await this.buildBoundedUpsertMirrorMessage({
+          canonicalEventId,
+          targetAccountId: edge.to_account_id,
+          targetCalendarId,
+          detailLevel: edge.detail_level as DetailLevel,
+          calendarKind: edge.calendar_kind as CalendarKind,
+          projection,
+        });
+        const projectedHash = upsertMessage.projected_hash;
 
         const nowIso = new Date().toISOString();
         this.sql.exec(
@@ -1509,27 +1528,210 @@ export class UserGraphDO {
           nowIso,
         );
 
-        const idempotencyKey = await computeIdempotencyKey(
-          canonicalEventId,
-          edge.to_account_id,
-          projectedHash,
-        );
-
-        this.enqueueUpsertMirror({
-          type: "UPSERT_MIRROR",
-          canonical_event_id: canonicalEventId,
-          target_account_id: edge.to_account_id,
-          target_calendar_id: targetCalendarId,
-          projected_hash: projectedHash,
-          projected_payload: projection,
-          idempotency_key: idempotencyKey,
-        }, canonicalEventEndMs);
+        this.enqueueUpsertMirror(upsertMessage, canonicalEventEndMs);
 
         enqueued++;
       }
     }
 
     return enqueued;
+  }
+
+  private measureSerializedBytes(payload: unknown): number {
+    return UTF8_ENCODER.encode(JSON.stringify(payload)).length;
+  }
+
+  private truncateUtf8ToBytes(value: string, maxBytes: number): string {
+    if (maxBytes <= 0 || value.length === 0) return "";
+    if (UTF8_ENCODER.encode(value).length <= maxBytes) return value;
+
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      const candidate = value.slice(0, mid);
+      if (UTF8_ENCODER.encode(candidate).length <= maxBytes) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return value.slice(0, low);
+  }
+
+  private async buildUpsertMirrorMessage(
+    canonicalEventId: string,
+    targetAccountId: string,
+    targetCalendarId: string,
+    detailLevel: DetailLevel,
+    calendarKind: CalendarKind,
+    projection: ProjectedEvent,
+  ): Promise<UpsertMirrorMessage> {
+    const projectedHash = await computeProjectionHash(
+      canonicalEventId,
+      detailLevel,
+      calendarKind,
+      projection,
+    );
+    const idempotencyKey = await computeIdempotencyKey(
+      canonicalEventId,
+      targetAccountId,
+      projectedHash,
+    );
+    return {
+      type: "UPSERT_MIRROR",
+      canonical_event_id: canonicalEventId as EventId,
+      target_account_id: targetAccountId as AccountId,
+      target_calendar_id: targetCalendarId as CalendarId,
+      projected_hash: projectedHash,
+      projected_payload: projection,
+      idempotency_key: idempotencyKey,
+    };
+  }
+
+  private async buildBoundedUpsertMirrorMessage(args: {
+    canonicalEventId: string;
+    targetAccountId: string;
+    targetCalendarId: string;
+    detailLevel: DetailLevel;
+    calendarKind: CalendarKind;
+    projection: ProjectedEvent;
+  }): Promise<UpsertMirrorMessage> {
+    const normalized: ProjectedEvent = {
+      ...args.projection,
+      summary: truncateToMaxChars(args.projection.summary, UPSERT_SUMMARY_MAX_CHARS),
+      description: clampOptionalString(
+        args.projection.description,
+        UPSERT_DESCRIPTION_MAX_CHARS,
+      ),
+      location: clampOptionalString(
+        args.projection.location,
+        UPSERT_LOCATION_MAX_CHARS,
+      ),
+    };
+
+    const candidates: Array<{ stage: string; projection: ProjectedEvent }> = [
+      { stage: "normalized", projection: normalized },
+    ];
+
+    if (normalized.description) {
+      const withoutDescription: ProjectedEvent = {
+        ...normalized,
+        description: undefined,
+      };
+      const withoutDescriptionMessage = await this.buildUpsertMirrorMessage(
+        args.canonicalEventId,
+        args.targetAccountId,
+        args.targetCalendarId,
+        args.detailLevel,
+        args.calendarKind,
+        withoutDescription,
+      );
+      const withoutDescriptionBytes = this.measureSerializedBytes(
+        withoutDescriptionMessage,
+      );
+      if (withoutDescriptionBytes < UPSERT_QUEUE_MAX_BYTES) {
+        const descriptionBudget = UPSERT_QUEUE_MAX_BYTES - withoutDescriptionBytes;
+        const truncatedDescription = this.truncateUtf8ToBytes(
+          normalized.description,
+          descriptionBudget,
+        );
+        if (
+          truncatedDescription.length > 0 &&
+          truncatedDescription.length < normalized.description.length
+        ) {
+          candidates.push({
+            stage: "description_truncated_to_fit",
+            projection: {
+              ...normalized,
+              description: truncatedDescription,
+            },
+          });
+        }
+      }
+      candidates.push({ stage: "without_description", projection: withoutDescription });
+    }
+
+    if (normalized.location) {
+      candidates.push({
+        stage: "without_description_and_location",
+        projection: {
+          ...normalized,
+          description: undefined,
+          location: undefined,
+        },
+      });
+    }
+
+    candidates.push({
+      stage: "busy_fallback",
+      projection: {
+        summary: "Busy",
+        start: normalized.start,
+        end: normalized.end,
+        transparency: normalized.transparency,
+        visibility: "private",
+        extendedProperties: normalized.extendedProperties,
+      },
+    });
+
+    const seenProjectionJson = new Set<string>();
+    let lastAttempt: { message: UpsertMirrorMessage; bytes: number; stage: string } | null = null;
+
+    for (const candidate of candidates) {
+      const key = JSON.stringify(candidate.projection);
+      if (seenProjectionJson.has(key)) continue;
+      seenProjectionJson.add(key);
+
+      const message = await this.buildUpsertMirrorMessage(
+        args.canonicalEventId,
+        args.targetAccountId,
+        args.targetCalendarId,
+        args.detailLevel,
+        args.calendarKind,
+        candidate.projection,
+      );
+      const bytes = this.measureSerializedBytes(message);
+      lastAttempt = { message, bytes, stage: candidate.stage };
+      if (bytes <= UPSERT_QUEUE_MAX_BYTES) {
+        if (candidate.stage !== "normalized") {
+          console.warn(
+            "user-graph: bounded UPSERT_MIRROR projection to fit queue payload",
+            {
+              canonical_event_id: args.canonicalEventId,
+              target_account_id: args.targetAccountId,
+              stage: candidate.stage,
+              payload_bytes: bytes,
+              limit_bytes: UPSERT_QUEUE_MAX_BYTES,
+            },
+          );
+        }
+        return message;
+      }
+    }
+
+    if (lastAttempt) {
+      console.warn(
+        "user-graph: UPSERT_MIRROR exceeded queue payload cap after fallback",
+        {
+          canonical_event_id: args.canonicalEventId,
+          target_account_id: args.targetAccountId,
+          stage: lastAttempt.stage,
+          payload_bytes: lastAttempt.bytes,
+          limit_bytes: UPSERT_QUEUE_MAX_BYTES,
+        },
+      );
+      return lastAttempt.message;
+    }
+
+    return this.buildUpsertMirrorMessage(
+      args.canonicalEventId,
+      args.targetAccountId,
+      args.targetCalendarId,
+      args.detailLevel,
+      args.calendarKind,
+      normalized,
+    );
   }
 
   // -------------------------------------------------------------------------

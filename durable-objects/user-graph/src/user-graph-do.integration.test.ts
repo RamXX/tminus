@@ -6285,6 +6285,80 @@ describe("UserGraphDO buffer constraints", () => {
       expect(mirror.error_message).toContain("queue size limit");
     });
 
+    it("bounds oversized FULL projections to fit queue payload limits", async () => {
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_bound_projection",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+        detailLevel: "FULL",
+      });
+
+      const maxBytes = 64 * 1024;
+      const delivered: unknown[] = [];
+      const strictSizeQueue: QueueLike = {
+        send: async (message: unknown) => {
+          const bytes = new TextEncoder().encode(JSON.stringify(message)).length;
+          if (bytes > maxBytes) {
+            throw new Error("Queue send failed: Payload Too Large");
+          }
+          delivered.push(message);
+        },
+        sendBatch: async (messages: { body: unknown }[]) => {
+          for (const msg of messages) {
+            const bytes = new TextEncoder().encode(JSON.stringify(msg.body)).length;
+            if (bytes > maxBytes) {
+              throw new Error("Queue sendBatch failed: Payload Too Large");
+            }
+            delivered.push(msg.body);
+          }
+        },
+      };
+      const ugStrict = new UserGraphDO(sql, strictSizeQueue);
+
+      const hugeDescription = "x".repeat(250_000);
+      const delta = makeCreatedDelta({
+        origin_event_id: "google_evt_bound_projection",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "google_evt_bound_projection",
+          description: hugeDescription,
+        },
+      });
+
+      const result = await ugStrict.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+      expect(result.errors).toHaveLength(0);
+      expect(result.mirrors_enqueued).toBe(1);
+      expect(delivered).toHaveLength(1);
+
+      const upsert = delivered[0] as Record<string, unknown>;
+      expect(upsert.type).toBe("UPSERT_MIRROR");
+      const serializedBytes = new TextEncoder().encode(JSON.stringify(upsert))
+        .length;
+      expect(serializedBytes).toBeLessThanOrEqual(maxBytes);
+
+      const projectedPayload = upsert.projected_payload as Record<string, unknown>;
+      if (typeof projectedPayload.description === "string") {
+        expect(projectedPayload.description.length).toBeLessThan(
+          hugeDescription.length,
+        );
+      }
+
+      const mirror = db
+        .prepare(
+          `SELECT state, error_message
+           FROM event_mirrors
+           WHERE target_account_id = ?`,
+        )
+        .get(OTHER_ACCOUNT_ID) as { state: string; error_message: string | null };
+      expect(mirror.state).toBe("PENDING");
+      expect(mirror.error_message).toBeNull();
+
+      const outboxRows = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxRows).toHaveLength(0);
+    });
+
     it("requeuePendingMirrors sweeps orphaned outbox entries", async () => {
       // Set up a policy edge
       insertPolicyEdge(db, {
