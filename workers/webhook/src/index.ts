@@ -20,7 +20,11 @@
  * Microsoft expects 202 Accepted for successful notification processing.
  */
 
-import type { SyncIncrementalMessage, AccountId } from "@tminus/shared";
+import type {
+  SyncIncrementalMessage,
+  SyncFullMessage,
+  AccountId,
+} from "@tminus/shared";
 import { buildHealthResponse, canonicalizeProviderEventId } from "@tminus/shared";
 
 // ---------------------------------------------------------------------------
@@ -157,6 +161,19 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
       calendarId: accountRow.channel_calendar_id,
       resourceState,
     });
+
+    if (resourceState === "not_exists") {
+      await env.SYNC_QUEUE.send({
+        type: "SYNC_FULL",
+        account_id: accountRow.account_id as AccountId,
+        reason: "reconcile",
+      } satisfies SyncFullMessage);
+      console.warn("Enqueued SYNC_FULL reconcile for Google delete notification", {
+        accountId: accountRow.account_id,
+        channelId,
+        calendarId: accountRow.channel_calendar_id,
+      });
+    }
   } catch (err) {
     // Queue send failed -- log but still return 200 to Google.
     // The daily reconciliation will catch any missed updates.
@@ -253,9 +270,15 @@ async function handleMicrosoftWebhook(
       }
 
       if (!accountRow) {
-        const legacyRow = await env.DB
+        const resolveLegacyRow = async (
+          selectCalendarSql: string,
+        ): Promise<{
+          account_id: string;
+          channel_token: string | null;
+          calendar_id: string | null;
+        } | null> => env.DB
           .prepare(
-            `SELECT a.account_id, a.channel_token, NULL as calendar_id
+            `SELECT a.account_id, a.channel_token, ${selectCalendarSql} AS calendar_id
              FROM ms_subscriptions ms
              JOIN accounts a ON a.account_id = ms.account_id
              WHERE ms.subscription_id = ?1
@@ -268,8 +291,25 @@ async function handleMicrosoftWebhook(
             calendar_id: string | null;
           }>();
 
-        if (legacyRow) {
-          accountRow = legacyRow;
+        try {
+          // Newer schema: ms_subscriptions.calendar_id exists and is the
+          // authoritative per-subscription scope.
+          const legacyRow = await resolveLegacyRow("ms.calendar_id");
+          if (legacyRow) {
+            accountRow = legacyRow;
+          }
+        } catch (legacyErr) {
+          const message = legacyErr instanceof Error ? legacyErr.message : String(legacyErr);
+          if (!/no such column:\s*calendar_id/i.test(message)) {
+            throw legacyErr;
+          }
+
+          // Backward-compatible fallback for deployed schemas that do not yet
+          // include ms_subscriptions.calendar_id.
+          const legacyRow = await resolveLegacyRow("a.channel_calendar_id");
+          if (legacyRow) {
+            accountRow = legacyRow;
+          }
         }
       }
     } catch (err) {

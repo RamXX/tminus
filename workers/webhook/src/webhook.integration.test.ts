@@ -368,7 +368,7 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     expect(queue.messages).toHaveLength(0);
   });
 
-  it("not_exists resource_state: full flow with real D1 lookup enqueues correctly", async () => {
+  it("not_exists resource_state: full flow enqueues incremental + reconcile full sync", async () => {
     db.prepare(
       `INSERT INTO accounts (account_id, user_id, provider, provider_subject, email, channel_token, channel_calendar_id)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -392,12 +392,17 @@ describe("Webhook integration tests (real SQLite via better-sqlite3)", () => {
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
-    expect(queue.messages).toHaveLength(1);
+    expect(queue.messages).toHaveLength(2);
 
-    const msg = queue.messages[0] as Record<string, unknown>;
-    expect(msg.type).toBe("SYNC_INCREMENTAL");
-    expect(msg.account_id).toBe(ACCOUNT_A.account_id);
-    expect(msg.calendar_id).toBe("primary");
+    const incrementalMsg = queue.messages[0] as Record<string, unknown>;
+    expect(incrementalMsg.type).toBe("SYNC_INCREMENTAL");
+    expect(incrementalMsg.account_id).toBe(ACCOUNT_A.account_id);
+    expect(incrementalMsg.calendar_id).toBe("primary");
+
+    const fullMsg = queue.messages[1] as Record<string, unknown>;
+    expect(fullMsg.type).toBe("SYNC_FULL");
+    expect(fullMsg.account_id).toBe(ACCOUNT_A.account_id);
+    expect(fullMsg.reason).toBe("reconcile");
   });
 
   // -------------------------------------------------------------------------

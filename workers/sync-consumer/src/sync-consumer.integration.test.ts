@@ -3028,6 +3028,36 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
+  it("full sync reconciles stale Microsoft managed mirrors missing from provider snapshot", async () => {
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: "AAMkAG-ms-stale-mirror-404", target_calendar_id: "primary" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      "AAMkAG-ms-stale-mirror-404": "evt_01HXYZ00000000000000000999",
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-keep" })],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: MS_ACCOUNT_B.account_id,
+      reason: "reconcile",
+    };
+
+    await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000999",
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
   // -------------------------------------------------------------------------
   // 3. Microsoft managed mirror events are filtered (Invariant E)
   // -------------------------------------------------------------------------
@@ -3339,6 +3369,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     // Normal sync still completes (sync success marked)
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
   });
 
   it("webhook delete hint resolves mirror ID from resourceData.id and events('{id}') path variants", async () => {
@@ -3374,9 +3405,10 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
     expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
   });
 
-  it("webhook_change_type=deleted with unknown event ID does NOT delete anything", async () => {
+  it("webhook_change_type=deleted with unknown event ID does NOT delete immediately and enqueues reconcile fallback", async () => {
     // No mirrors registered
     userGraphDOState.activeMirrors = [];
     userGraphDOState.mirrorLookupByProviderEventId = {};
@@ -3401,8 +3433,11 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     // No canonical deletion should occur
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
 
-    // Normal sync still completes
+    // Normal sync still completes and a reconcile fallback is queued.
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(1);
+    expect((syncQueue.messages[0] as { type: string }).type).toBe("SYNC_FULL");
+    expect((syncQueue.messages[0] as { reason: string }).reason).toBe("reconcile");
   });
 
   it("webhook_change_type=updated does NOT trigger mirror deletion", async () => {
@@ -3461,5 +3496,6 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     // No deletion -- resource path didn't contain event ID
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
   });
 });

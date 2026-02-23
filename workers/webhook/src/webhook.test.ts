@@ -362,7 +362,7 @@ describe("POST /webhook/google", () => {
     expect((queue.messages[0] as { type: string }).type).toBe("SYNC_INCREMENTAL");
   });
 
-  it("'not_exists' resource_state enqueues correctly", async () => {
+  it("'not_exists' resource_state enqueues SYNC_INCREMENTAL + SYNC_FULL reconcile", async () => {
     const { env, queue } = createMockEnv({
       accounts: [{
         account_id: TEST_ACCOUNT_ID,
@@ -376,8 +376,10 @@ describe("POST /webhook/google", () => {
     const response = await handler.fetch(request, env, mockCtx);
 
     expect(response.status).toBe(200);
-    expect(queue.messages.length).toBe(1);
+    expect(queue.messages.length).toBe(2);
     expect((queue.messages[0] as { type: string }).type).toBe("SYNC_INCREMENTAL");
+    expect((queue.messages[1] as { type: string }).type).toBe("SYNC_FULL");
+    expect((queue.messages[1] as { reason: string }).reason).toBe("reconcile");
   });
 
   it("enqueued message has correct shape including calendar_id", async () => {

@@ -161,6 +161,8 @@ export async function handleIncrementalSync(
   // Step 1: Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
   const deleteGuard = createDeleteSafetyGuard(account_id, env, deps);
+  let microsoftWebhookDeleteCandidateCount = 0;
+  let microsoftWebhookDeleteResolvedCount = 0;
 
   // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
   // When a Microsoft webhook notification has changeType "deleted", the
@@ -171,6 +173,7 @@ export async function handleIncrementalSync(
   // full sync.
   if (provider === "microsoft" && isWebhookDeleteChangeType(message.webhook_change_type)) {
     const candidateEventIds = getMicrosoftWebhookDeleteEventIds(message);
+    microsoftWebhookDeleteCandidateCount = candidateEventIds.length;
     if (candidateEventIds.length > 0) {
       try {
         const userId = await lookupUserId(account_id, env);
@@ -214,6 +217,7 @@ export async function handleIncrementalSync(
           }
 
           if (resolvedMirrorDeleteIds.size > 0) {
+            microsoftWebhookDeleteResolvedCount = resolvedMirrorDeleteIds.size;
             await applyManagedMirrorDeletes(
               account_id,
               userId,
@@ -353,6 +357,29 @@ export async function handleIncrementalSync(
   // Step 6: Persist sync cursors.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
+  // Fallback convergence path: if Microsoft webhook signaled a deletion but no
+  // canonical mirror delete could be resolved from the hint, enqueue a full
+  // reconcile to catch missing managed mirrors via snapshot diffing.
+  if (
+    provider === "microsoft" &&
+    isWebhookDeleteChangeType(message.webhook_change_type) &&
+    microsoftWebhookDeleteCandidateCount > 0 &&
+    microsoftWebhookDeleteResolvedCount === 0
+  ) {
+    console.warn(
+      "sync-consumer: webhook delete hint unresolved, enqueueing SYNC_FULL reconcile fallback",
+      {
+        account_id,
+        resource_id: message.resource_id,
+      },
+    );
+    await env.SYNC_QUEUE.send({
+      type: "SYNC_FULL",
+      account_id,
+      reason: "reconcile",
+    } satisfies SyncFullMessage);
+  }
+
   if (deleteGuard.hasBlockedDeletes()) {
     const guardError = buildDeleteGuardErrorMessage(deleteGuard.getBlockedEvents());
     await markSyncFailure(account_id, env, guardError);
@@ -484,31 +511,29 @@ export async function handleFullSync(
   );
 
   let staleManagedMirrorDeletes = 0;
-  if (provider === "google") {
-    const userId = await lookupUserId(account_id, env);
-    if (userId) {
-      const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
+  const userId = await lookupUserId(account_id, env);
+  if (userId) {
+    const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
+      account_id,
+      userId,
+      allEvents,
+      env,
+      skippedCalendarIds,
+    );
+    if (missingMirrorProviderIds.length > 0) {
+      await applyManagedMirrorDeletes(
         account_id,
         userId,
-        allEvents,
+        missingMirrorProviderIds,
         env,
-        skippedCalendarIds,
+        deleteGuard,
+        {
+          provider,
+          stage: "full",
+          reason: "stale_managed_mirror_reconcile",
+        },
       );
-      if (missingMirrorProviderIds.length > 0) {
-        await applyManagedMirrorDeletes(
-          account_id,
-          userId,
-          missingMirrorProviderIds,
-          env,
-          deleteGuard,
-          {
-            provider,
-            stage: "full",
-            reason: "stale_managed_mirror_reconcile",
-          },
-        );
-        staleManagedMirrorDeletes = missingMirrorProviderIds.length;
-      }
+      staleManagedMirrorDeletes = missingMirrorProviderIds.length;
     }
   }
 
