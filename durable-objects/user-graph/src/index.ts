@@ -3837,11 +3837,36 @@ export class UserGraphDO {
   }
 
   /**
-   * Get all ACTIVE event mirrors targeting a specific account.
-   * Used by ReconcileWorkflow to detect stale mirrors that no longer exist in the provider.
+   * Get reconcile-eligible mirrors targeting a specific account.
+   *
+   * Default behavior returns ACTIVE rows only.
+   * Optional mode includes PENDING rows that already have a provider_event_id,
+   * which represent mirrors that were written upstream but may not yet have
+   * converged back to ACTIVE state.
    */
-  getActiveMirrors(targetAccountId: string): EventMirrorRow[] {
+  getActiveMirrors(
+    targetAccountId: string,
+    options: { includePendingWithProviderId?: boolean } = {},
+  ): EventMirrorRow[] {
     this.ensureMigrated();
+
+    if (options.includePendingWithProviderId) {
+      return this.sql
+        .exec<EventMirrorRow>(
+          `SELECT * FROM event_mirrors
+           WHERE target_account_id = ?
+             AND (
+               state = 'ACTIVE'
+               OR (
+                 state = 'PENDING'
+                 AND provider_event_id IS NOT NULL
+                 AND provider_event_id != ''
+               )
+             )`,
+          targetAccountId,
+        )
+        .toArray();
+    }
 
     return this.sql
       .exec<EventMirrorRow>(
@@ -4295,7 +4320,10 @@ export class UserGraphDO {
       },
 
       "/getActiveMirrors": (body) => {
-        const mirrors = this.getActiveMirrors(body.target_account_id);
+        const mirrors = this.getActiveMirrors(body.target_account_id, {
+          includePendingWithProviderId:
+            body?.include_pending_with_provider_id === true,
+        });
         return Response.json({ mirrors });
       },
 
@@ -5024,5 +5052,4 @@ export class UserGraphDO {
     };
   }
 }
-
 

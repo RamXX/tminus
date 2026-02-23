@@ -1633,12 +1633,16 @@ async function loadManagedMirrorCalendarIds(
 interface ActiveMirrorRow {
   provider_event_id?: string | null;
   target_calendar_id?: string | null;
+  canonical_event_id?: string | null;
+  last_write_ts?: string | null;
+  state?: string | null;
 }
 
 async function loadActiveMirrors(
   accountId: AccountId,
   userId: string,
   env: Env,
+  options: { includePendingWithProviderId?: boolean } = {},
 ): Promise<ActiveMirrorRow[]> {
   const userGraphId = env.USER_GRAPH.idFromName(userId);
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
@@ -1646,7 +1650,11 @@ async function loadActiveMirrors(
     new Request("https://user-graph.internal/getActiveMirrors", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_account_id: accountId }),
+      body: JSON.stringify({
+        target_account_id: accountId,
+        include_pending_with_provider_id:
+          options.includePendingWithProviderId === true,
+      }),
     }),
   );
 
@@ -1809,6 +1817,7 @@ const MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT = 0.3;
 const MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE = 20;
 const MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES = HARD_MAX_DELETES_PER_OPERATION;
 const MS_SWEEP_RECONCILE_MAX_PROBE_CANDIDATES = 10;
+const MS_SWEEP_RECONCILE_MAX_RECENCY_EVAL_CANDIDATES = 200;
 const MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS = 45 * 24 * 60 * 60 * 1000;
@@ -1826,9 +1835,11 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     return 0;
   }
 
-  const activeMirrors = await loadActiveMirrors(accountId, userId, env);
+  const activeMirrors = await loadActiveMirrors(accountId, userId, env, {
+    includePendingWithProviderId: true,
+  });
   const snapshotsByCalendar = new Map<string, Set<string>>();
-  const mirrorScopes = new Map<string, Set<string>>();
+  const mirrorScopes = new Map<string, ActiveMirrorRow[]>();
 
   for (const mirror of activeMirrors) {
     if (
@@ -1839,9 +1850,9 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     ) {
       continue;
     }
-    const scopeSet = mirrorScopes.get(mirror.target_calendar_id) ?? new Set<string>();
-    scopeSet.add(mirror.provider_event_id);
-    mirrorScopes.set(mirror.target_calendar_id, scopeSet);
+    const scopeRows = mirrorScopes.get(mirror.target_calendar_id) ?? [];
+    scopeRows.push(mirror);
+    mirrorScopes.set(mirror.target_calendar_id, scopeRows);
   }
 
   if (mirrorScopes.size === 0) {
@@ -1851,8 +1862,40 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
   const snapshotClient = createCalendarProvider("microsoft", accessToken, deps.fetchFn);
   let reconciledDeletes = 0;
 
-  for (const [calendarId, mirrorEventIdsSet] of mirrorScopes.entries()) {
-    const mirrorEventIds = [...mirrorEventIdsSet];
+  for (const [calendarId, mirrorRows] of mirrorScopes.entries()) {
+    const mirrorRowsByProviderEventId = new Map<string, ActiveMirrorRow>();
+    for (const mirror of mirrorRows) {
+      if (
+        typeof mirror.provider_event_id !== "string" ||
+        mirror.provider_event_id.length === 0
+      ) {
+        continue;
+      }
+      const existing = mirrorRowsByProviderEventId.get(mirror.provider_event_id);
+      if (!existing) {
+        mirrorRowsByProviderEventId.set(mirror.provider_event_id, mirror);
+        continue;
+      }
+
+      const existingWriteMs =
+        typeof existing.last_write_ts === "string"
+          ? Date.parse(existing.last_write_ts)
+          : Number.NaN;
+      const incomingWriteMs =
+        typeof mirror.last_write_ts === "string"
+          ? Date.parse(mirror.last_write_ts)
+          : Number.NaN;
+      if (Number.isFinite(incomingWriteMs) && incomingWriteMs > existingWriteMs) {
+        mirrorRowsByProviderEventId.set(mirror.provider_event_id, mirror);
+      }
+    }
+
+    const scopedMirrorRows = [...mirrorRowsByProviderEventId.values()];
+    const mirrorEventIds = scopedMirrorRows
+      .map((mirror) => mirror.provider_event_id)
+      .filter((providerEventId): providerEventId is string =>
+        typeof providerEventId === "string" && providerEventId.length > 0
+      );
     if (mirrorEventIds.length === 0) continue;
 
     let snapshotIds = snapshotsByCalendar.get(calendarId);
@@ -1865,20 +1908,26 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
       snapshotsByCalendar.set(calendarId, snapshotIds);
     }
 
-    const missingMirrorEventIds = mirrorEventIds.filter((providerEventId) => {
-      return !providerEventIdVariants(providerEventId).some((candidateId) =>
+    const missingMirrorRows = scopedMirrorRows.filter((mirror) => {
+      if (
+        typeof mirror.provider_event_id !== "string" ||
+        mirror.provider_event_id.length === 0
+      ) {
+        return false;
+      }
+      return !providerEventIdVariants(mirror.provider_event_id).some((candidateId) =>
         snapshotIds?.has(candidateId),
       );
     });
 
-    if (missingMirrorEventIds.length === 0) {
+    if (missingMirrorRows.length === 0) {
       continue;
     }
 
     // Guardrail: if a large fraction of mirrors in this calendar appears
     // missing, skip reconciliation to avoid destructive behavior on partial
     // provider snapshots.
-    const missingRatio = missingMirrorEventIds.length / mirrorEventIds.length;
+    const missingRatio = missingMirrorRows.length / mirrorEventIds.length;
     if (
       mirrorEventIds.length >= MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE &&
       missingRatio > MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT
@@ -1888,7 +1937,7 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
         {
           account_id: accountId,
           calendar_id: calendarId,
-          missing: missingMirrorEventIds.length,
+          missing: missingMirrorRows.length,
           total: mirrorEventIds.length,
           missing_ratio: missingRatio,
         },
@@ -1899,7 +1948,7 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     const recentMissingMirrorIds = await filterRecentMissingMirrorDeleteCandidates(
       accountId,
       userId,
-      missingMirrorEventIds,
+      missingMirrorRows,
       env,
     );
     if (recentMissingMirrorIds.length === 0) {
@@ -2013,82 +2062,154 @@ async function fetchMicrosoftCalendarSnapshotEventIds(
 async function filterRecentMissingMirrorDeleteCandidates(
   accountId: AccountId,
   userId: string,
-  providerEventIds: string[],
+  mirrors: ActiveMirrorRow[],
   env: Env,
 ): Promise<string[]> {
-  if (providerEventIds.length === 0) return [];
+  if (mirrors.length === 0) return [];
 
   const userGraphId = env.USER_GRAPH.idFromName(userId);
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const dedupedMirrors = new Map<string, ActiveMirrorRow>();
+  for (const mirror of mirrors) {
+    if (
+      typeof mirror.provider_event_id !== "string" ||
+      mirror.provider_event_id.length === 0
+    ) {
+      continue;
+    }
+    const existing = dedupedMirrors.get(mirror.provider_event_id);
+    if (!existing) {
+      dedupedMirrors.set(mirror.provider_event_id, mirror);
+      continue;
+    }
+    const existingWriteMs =
+      typeof existing.last_write_ts === "string"
+        ? Date.parse(existing.last_write_ts)
+        : Number.NaN;
+    const incomingWriteMs =
+      typeof mirror.last_write_ts === "string"
+        ? Date.parse(mirror.last_write_ts)
+        : Number.NaN;
+    if (Number.isFinite(incomingWriteMs) && incomingWriteMs > existingWriteMs) {
+      dedupedMirrors.set(mirror.provider_event_id, mirror);
+    }
+  }
+
+  const sortedMirrors = [...dedupedMirrors.values()].sort((a, b) => {
+    const aWriteMs =
+      typeof a.last_write_ts === "string" ? Date.parse(a.last_write_ts) : Number.NaN;
+    const bWriteMs =
+      typeof b.last_write_ts === "string" ? Date.parse(b.last_write_ts) : Number.NaN;
+    const aSafe = Number.isFinite(aWriteMs) ? aWriteMs : 0;
+    const bSafe = Number.isFinite(bWriteMs) ? bWriteMs : 0;
+    return bSafe - aSafe;
+  });
+
+  const mirrorsToEvaluate = sortedMirrors.slice(
+    0,
+    MS_SWEEP_RECONCILE_MAX_RECENCY_EVAL_CANDIDATES,
+  );
   const candidates: Array<{ providerEventId: string; recencyMs: number }> = [];
+  const now = Date.now();
 
-  for (const providerEventId of providerEventIds) {
-    const canonicalEventId = await findCanonicalIdByMirror(
-      userGraphStub,
-      accountId,
-      providerEventId,
-    );
-    if (!canonicalEventId) {
+  for (const mirror of mirrorsToEvaluate) {
+    if (
+      typeof mirror.provider_event_id !== "string" ||
+      mirror.provider_event_id.length === 0
+    ) {
       continue;
     }
+    const providerEventId = mirror.provider_event_id;
+    try {
+      let canonicalEventId =
+        typeof mirror.canonical_event_id === "string" &&
+          mirror.canonical_event_id.length > 0
+          ? mirror.canonical_event_id
+          : null;
+      if (!canonicalEventId) {
+        canonicalEventId = await findCanonicalIdByMirror(
+          userGraphStub,
+          accountId,
+          providerEventId,
+        );
+      }
+      if (!canonicalEventId) {
+        continue;
+      }
 
-    const canonicalResponse = await userGraphStub.fetch(
-      new Request("https://user-graph.internal/getCanonicalEvent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ canonical_event_id: canonicalEventId }),
-      }),
-    );
-    if (!canonicalResponse.ok) {
-      continue;
+      const canonicalResponse = await userGraphStub.fetch(
+        new Request("https://user-graph.internal/getCanonicalEvent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ canonical_event_id: canonicalEventId }),
+        }),
+      );
+      if (!canonicalResponse.ok) {
+        continue;
+      }
+
+      const canonicalPayload = (await canonicalResponse.json()) as {
+        event?: Record<string, unknown>;
+      } | null;
+      const canonicalEvent = canonicalPayload?.event;
+      if (!canonicalEvent) {
+        continue;
+      }
+
+      const startTs = extractStartTimestamp(
+        canonicalEvent.start as
+          | { dateTime?: string; date?: string }
+          | string
+          | null
+          | undefined,
+      );
+
+      // Safety: never reconcile-delete historical tails from scheduled snapshots.
+      if (!isPruneWindowEvent(startTs)) {
+        continue;
+      }
+
+      const startMs = startTs ? Date.parse(startTs) : Number.NaN;
+      const updatedAtRaw = canonicalEvent.updated_at;
+      const updatedMs =
+        typeof updatedAtRaw === "string" ? Date.parse(updatedAtRaw) : Number.NaN;
+      const mirrorWriteMs =
+        typeof mirror.last_write_ts === "string"
+          ? Date.parse(mirror.last_write_ts)
+          : Number.NaN;
+      const updatedIsRecent =
+        Number.isFinite(updatedMs) &&
+        now - updatedMs <= MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS;
+      const mirrorWriteIsRecent =
+        Number.isFinite(mirrorWriteMs) &&
+        now - mirrorWriteMs <= MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS;
+      const startIsNearNow =
+        Number.isFinite(startMs) &&
+        startMs >= now - MS_SWEEP_RECONCILE_START_LOOKBACK_MS &&
+        startMs <= now + MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS;
+
+      // Scheduled fallback should only reconcile events we touched recently
+      // or that occur near now. This avoids broad historical sweeps.
+      if (!updatedIsRecent && !startIsNearNow && !mirrorWriteIsRecent) {
+        continue;
+      }
+
+      const recencyMs = Math.max(
+        Number.isFinite(updatedMs) ? updatedMs : 0,
+        Number.isFinite(startMs) ? startMs : 0,
+        Number.isFinite(mirrorWriteMs) ? mirrorWriteMs : 0,
+      );
+      candidates.push({ providerEventId, recencyMs });
+    } catch (candidateErr) {
+      console.warn(
+        "sync-consumer: scheduled microsoft mirror candidate evaluation failed; skipping candidate",
+        {
+          account_id: accountId,
+          provider_event_id: providerEventId,
+          error: candidateErr instanceof Error ? candidateErr.message : String(candidateErr),
+        },
+      );
     }
-
-    const canonicalPayload = (await canonicalResponse.json()) as {
-      event?: Record<string, unknown>;
-    } | null;
-    const canonicalEvent = canonicalPayload?.event;
-    if (!canonicalEvent) {
-      continue;
-    }
-
-    const startTs = extractStartTimestamp(
-      canonicalEvent.start as
-        | { dateTime?: string; date?: string }
-        | string
-        | null
-        | undefined,
-    );
-
-    // Safety: never reconcile-delete historical tails from scheduled snapshots.
-    if (!isPruneWindowEvent(startTs)) {
-      continue;
-    }
-
-    const startMs = startTs ? Date.parse(startTs) : Number.NaN;
-    const updatedAtRaw = canonicalEvent.updated_at;
-    const updatedMs =
-      typeof updatedAtRaw === "string" ? Date.parse(updatedAtRaw) : Number.NaN;
-    const now = Date.now();
-    const updatedIsRecent =
-      Number.isFinite(updatedMs) &&
-      now - updatedMs <= MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS;
-    const startIsNearNow =
-      Number.isFinite(startMs) &&
-      startMs >= now - MS_SWEEP_RECONCILE_START_LOOKBACK_MS &&
-      startMs <= now + MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS;
-
-    // Scheduled fallback should only reconcile events we touched recently
-    // or that occur near now. This avoids broad historical sweeps.
-    if (!updatedIsRecent && !startIsNearNow) {
-      continue;
-    }
-
-    const recencyMs = Number.isFinite(updatedMs)
-      ? updatedMs
-      : Number.isFinite(startMs)
-        ? startMs
-        : 0;
-    candidates.push({ providerEventId, recencyMs });
   }
 
   candidates.sort((a, b) => b.recencyMs - a.recencyMs);
