@@ -766,6 +766,11 @@ async function processAndApplyDeltas(
 
   if (events.length > 0) {
     managedMirrorEventIds = await ensureManagedMirrorEventIds();
+    console.info("sync-consumer: mirror_id_set_loaded", {
+      account_id: accountId,
+      mirror_id_count: managedMirrorEventIds.size,
+      sample_ids: [...managedMirrorEventIds].slice(0, 3),
+    });
   }
 
   for (const event of events) {
@@ -787,27 +792,6 @@ async function processAndApplyDeltas(
       ...rawDelta,
       origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
     };
-
-    // TM-9fc9 diagnostic: log every event entering the processing loop so we
-    // can trace what delta.type and classification the provider assigned.
-    const rawObj = rawEvent as Record<string, unknown>;
-    const hasManagedMarkers = provider === "google"
-      ? Boolean(
-          (rawObj.extendedProperties as Record<string, unknown> | undefined)
-            ?.private,
-        )
-      : Boolean(
-          (rawObj.extensions as unknown[] | undefined)?.length ||
-          (Array.isArray(rawObj.categories) && rawObj.categories.length > 0),
-        );
-    console.info("sync-consumer: event_loop_entry", {
-      account_id: accountId,
-      provider_event_id: rawObj.id,
-      delta_type: delta.type,
-      classification,
-      has_managed_markers: hasManagedMarkers,
-      provider,
-    });
 
     if (classification === "managed_mirror") {
       // Managed mirrors are never treated as origins (Invariant E), but if a
@@ -838,15 +822,6 @@ async function processAndApplyDeltas(
       }
       continue;
     }
-
-    // TM-9fc9 diagnostic: log every non-mirror event reaching the fallback
-    // check so we can see what delta.type deletions actually carry.
-    console.info("sync-consumer: pre_fallback_check", {
-      account_id: accountId,
-      provider_event_id: delta.origin_event_id,
-      delta_type: delta.type,
-      provider,
-    });
 
     // Fallback for providers (notably Google cancelled payloads) that can omit
     // managed markers on delete deltas. If the deleted provider_event_id is a
@@ -1043,12 +1018,16 @@ function classifyProviderEvent(
   }
 
   const eventId = rawEvent.id;
-  if (
-    typeof eventId === "string" &&
-    eventId.length > 0 &&
-    managedMirrorEventIds?.has(eventId)
-  ) {
-    return "managed_mirror";
+  if (typeof eventId === "string" && eventId.length > 0) {
+    const setHasMatch = managedMirrorEventIds?.has(eventId) ?? false;
+    console.info("sync-consumer: mirror_id_lookup", {
+      event_id: eventId,
+      set_has_match: setHasMatch,
+      set_size: managedMirrorEventIds?.size ?? 0,
+    });
+    if (setHasMatch) {
+      return "managed_mirror";
+    }
   }
 
   return baseClassification;
