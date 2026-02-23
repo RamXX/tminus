@@ -716,8 +716,14 @@ export class UserGraphDO {
       }
     }
 
-    // Drain outbox: deliver queued messages after all state changes committed
-    await this.drainOutbox();
+    // Drain outbox: deliver queued messages after all state changes committed.
+    const drainedOutbox = await this.drainOutbox();
+    if (mirrorsEnqueued > 0 && drainedOutbox === 0) {
+      console.warn("user-graph: applyProviderDelta enqueued mirrors but drained none", {
+        account_id: accountId,
+        mirrors_enqueued: mirrorsEnqueued,
+      });
+    }
 
     return {
       created,
@@ -3024,7 +3030,12 @@ export class UserGraphDO {
             );
           }
           drained += chunk.length;
-        } catch {
+        } catch (err) {
+          console.error("user-graph: drainOutbox queue send failed", {
+            queue_name: queueName,
+            batch_size: chunk.length,
+            error: err instanceof Error ? err.message : String(err),
+          });
           // Queue send failed -- entries remain in outbox for retry.
           // Break out of this queue's batches to avoid repeated failures.
           break;
@@ -5052,4 +5063,3 @@ export class UserGraphDO {
     };
   }
 }
-
