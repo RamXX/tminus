@@ -1916,6 +1916,55 @@ describe("handleFeedRefresh (via scheduled)", () => {
 
     expect(d1RunLog.length).toBe(0);
   });
+
+  it("enqueues periodic Microsoft SYNC_INCREMENTAL sweep on feed cron", async () => {
+    const { env, syncQueue } = createMockEnv({
+      d1Results: {
+        provider_subject: [],
+        "provider = 'microsoft'": [
+          {
+            account_id: TEST_ACCOUNT_ID_1,
+            channel_id: "ms-sub-123",
+            channel_calendar_id: "AAMk-cal-123",
+          },
+        ],
+      },
+    });
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_FEED_REFRESH), env, mockCtx);
+
+    expect(syncQueue.messages.length).toBe(1);
+    const msg = syncQueue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.account_id).toBe(TEST_ACCOUNT_ID_1);
+    expect(msg.channel_id).toBe("ms-sub-123");
+    expect(msg.calendar_id).toBe("AAMk-cal-123");
+    expect(String(msg.resource_id)).toContain(`scheduled-ms:${TEST_ACCOUNT_ID_1}:`);
+  });
+
+  it("uses synthetic channel_id for Microsoft sweep when subscription id is missing", async () => {
+    const { env, syncQueue } = createMockEnv({
+      d1Results: {
+        provider_subject: [],
+        "provider = 'microsoft'": [
+          {
+            account_id: TEST_ACCOUNT_ID_2,
+            channel_id: null,
+            channel_calendar_id: null,
+          },
+        ],
+      },
+    });
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_FEED_REFRESH), env, mockCtx);
+
+    expect(syncQueue.messages.length).toBe(1);
+    const msg = syncQueue.messages[0] as Record<string, unknown>;
+    expect(msg.channel_id).toBe(`scheduled-ms-${TEST_ACCOUNT_ID_2}`);
+    expect(msg.calendar_id).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

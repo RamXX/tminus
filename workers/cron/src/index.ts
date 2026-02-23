@@ -1,13 +1,15 @@
 /**
  * tminus-cron -- Scheduled maintenance worker.
  *
- * Five cron responsibilities:
+ * Six cron responsibilities:
  * 1. Google channel renewal (every 6h): renew Google watch channels expiring within 24h
  * 2. Microsoft subscription renewal (every 6h): renew MS subscriptions at 75% lifetime
  * 3. Token health check (every 12h): verify account tokens, mark errors
  * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT +
  *    SYNC_FULL recovery passes and force projection replay
  * 5. Social drift computation (daily 04:00 UTC): compute drift for all users, store alerts
+ * 6. Microsoft incremental sweep (every 15m): enqueue SYNC_INCREMENTAL to
+ *    converge missed/late MS webhook notifications
  *
  * Design decisions:
  * - Each responsibility is a separate function for testability
@@ -19,6 +21,7 @@
 
 import type {
   ReconcileAccountMessage,
+  SyncIncrementalMessage,
   SyncFullMessage,
   AccountId,
   DeleteMirrorMessage,
@@ -90,6 +93,12 @@ interface AccountRow {
 
 interface MsAccountRow {
   readonly account_id: string;
+}
+
+interface MicrosoftSweepRow {
+  readonly account_id: string;
+  readonly channel_id: string | null;
+  readonly channel_calendar_id: string | null;
 }
 
 async function enqueueFullSyncRecovery(
@@ -369,6 +378,65 @@ async function handleMsSubscriptionRenewal(env: Env): Promise<void> {
     } catch (err) {
       console.error(
         `Microsoft subscription renewal error for account ${row.account_id}:`,
+        err,
+      );
+    }
+  }
+}
+
+/**
+ * Enqueue periodic incremental sync messages for active Microsoft accounts.
+ *
+ * Why this exists:
+ * - Microsoft change notifications can be delayed or occasionally missed.
+ * - Mirror-side delete propagation depends on seeing @removed deltas or
+ *   webhook delete hints.
+ * - A lightweight scheduled incremental sweep provides convergence even when
+ *   webhook delivery is imperfect.
+ *
+ * Safety:
+ * - Uses the normal incremental sync path (no direct deletes here).
+ * - Downstream delete guard still protects destructive paths.
+ */
+async function handleMicrosoftIncrementalSweep(env: Env): Promise<void> {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT account_id, channel_id, channel_calendar_id
+       FROM accounts
+       WHERE status = ?1
+         AND provider = 'microsoft'`,
+    )
+    .bind("active")
+    .all<MicrosoftSweepRow>();
+
+  if (results.length === 0) {
+    console.log("Microsoft incremental sweep: no active microsoft accounts");
+    return;
+  }
+
+  console.log(
+    `Microsoft incremental sweep: enqueuing ${results.length} active microsoft accounts`,
+  );
+
+  const sweepTs = new Date().toISOString();
+
+  for (const row of results) {
+    const msg: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: row.account_id as AccountId,
+      // Synthetic identifiers are safe here: these messages are scheduler-
+      // driven, not provider webhooks, so channel/resource IDs are telemetry.
+      channel_id: row.channel_id ?? `scheduled-ms-${row.account_id}`,
+      resource_id: `scheduled-ms:${row.account_id}:${sweepTs}`,
+      ping_ts: sweepTs,
+      calendar_id: row.channel_calendar_id ?? null,
+    };
+
+    try {
+      await env.SYNC_QUEUE.send(msg);
+    } catch (err) {
+      console.error(
+        `Microsoft incremental sweep: failed to enqueue for account ${row.account_id}:`,
         err,
       );
     }
@@ -1251,6 +1319,7 @@ async function handleScheduled(
 
     case CRON_FEED_REFRESH:
       await handleFeedRefresh(env);
+      await handleMicrosoftIncrementalSweep(env);
       break;
 
     default:
