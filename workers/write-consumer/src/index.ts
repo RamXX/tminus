@@ -321,6 +321,8 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           }
 
           const providerType: ProviderType = accountRow.provider === "microsoft" ? "microsoft" : "google";
+          const isMicrosoftUpsert =
+            providerType === "microsoft" && body.type === "UPSERT_MIRROR";
 
           if (body.type === "DELETE_MIRROR") {
             console.log("write-consumer: processing DELETE_MIRROR", {
@@ -371,6 +373,14 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
                   body.canonical_event_id as string,
                 );
               }
+              if (isMicrosoftUpsert) {
+                console.log("write-consumer: skipping stale microsoft upsert", {
+                  canonical_event_id: body.canonical_event_id,
+                  target_account_id: body.target_account_id,
+                  projected_hash: body.projected_hash ?? null,
+                  mirror_hash: mirrorHash,
+                });
+              }
               msg.ack();
               continue;
             }
@@ -399,6 +409,19 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           // Flush buffered mirror state updates to DO
           await cachedMirrorStore.flush();
+
+          if (isMicrosoftUpsert) {
+            console.log("write-consumer: microsoft upsert outcome", {
+              canonical_event_id: body.canonical_event_id,
+              target_account_id: body.target_account_id,
+              target_calendar_id: body.target_calendar_id,
+              projected_hash: body.projected_hash ?? null,
+              action: result.action,
+              success: result.success,
+              retry: result.retry,
+              error: result.error ?? null,
+            });
+          }
 
           if (result.retry) {
             console.error("write-consumer: retrying message", {
