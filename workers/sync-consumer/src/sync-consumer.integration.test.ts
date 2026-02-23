@@ -2166,6 +2166,107 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(deltas[0].origin_event_id).toBe(canonicalId);
   });
 
+  // -------------------------------------------------------------------------
+  // TM-9fc9: Absence-based mirror deletion in incremental sync (Google)
+  // -------------------------------------------------------------------------
+
+  it("TM-9fc9: incremental sync detects missing managed mirror and triggers canonical deletion (Google)", async () => {
+    // Setup: An active mirror exists in UserGraph, but the provider does NOT
+    // return that event in the incremental delta response (the user deleted
+    // the mirror from the mirror calendar). The absence-based check should
+    // detect this and propagate the deletion.
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "google_evt_mirror_absent",
+        target_calendar_id: "primary",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_absent: "evt_canonical_absent_google",
+    };
+
+    // Provider returns only origin events -- the mirror event is absent.
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent({ id: "google_evt_origin_present" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-absent-g",
+      resource_id: "resource-absent-g",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    // The origin event should be applied as a normal delta.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+
+    // The missing mirror should trigger a canonical delete.
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_canonical_absent_google",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+
+    // Sync should still succeed.
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("TM-9fc9: incremental sync does NOT trigger deletion when all mirrors are present (Google)", async () => {
+    // Setup: An active mirror exists and IS returned in the delta response.
+    const mirrorEventId = "google_evt_mirror_present";
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: mirrorEventId,
+        target_calendar_id: "primary",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: "evt_canonical_keep",
+    };
+
+    // Provider returns both origin and mirror events.
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeGoogleEvent({ id: "google_evt_origin_ok" }),
+        makeManagedMirrorEvent({ id: mirrorEventId }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-present-g",
+      resource_id: "resource-present-g",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    // Only the origin event should be applied -- the mirror is filtered out.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+
+    // No canonical deletes should occur -- the mirror is present.
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
   it("TM-08pp: full sync normalizes provider_event_id values", async () => {
     const encodedId = "full_sync_event%40provider.com";
     const expectedCanonicalId = "full_sync_event@provider.com";
@@ -3092,6 +3193,110 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncFailureCalls[0].error).toContain("403");
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
     expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Provider dispatch is seamless -- no message schema changes
+  // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // TM-9fc9: Absence-based mirror deletion in incremental sync (Microsoft)
+  // -------------------------------------------------------------------------
+
+  it("TM-9fc9: incremental sync detects missing managed mirror and triggers canonical deletion (Microsoft)", async () => {
+    // Setup: An active mirror exists in UserGraph, but the Microsoft Graph
+    // API does not return that event in the delta response (the user deleted
+    // the mirror copy from the mirror calendar).
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "AAMkAG-ms-mirror-absent",
+        target_calendar_id: "primary",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      "AAMkAG-ms-mirror-absent": "evt_canonical_absent_ms",
+    };
+
+    // Provider returns only origin events -- the mirror event is absent.
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-present" })],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-absent-ms",
+      resource_id: "resource-absent-ms",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: msFetch,
+      sleepFn: noopSleep,
+    });
+
+    // The origin event should be applied as a normal delta.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+
+    // The missing mirror should trigger a canonical delete.
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_canonical_absent_ms",
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+
+    // Sync should still succeed.
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("TM-9fc9: incremental sync does NOT trigger deletion when all mirrors are present (Microsoft)", async () => {
+    // Setup: An active mirror exists and IS returned in the delta response.
+    const mirrorEventId = "AAMkAG-ms-mirror-present";
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: mirrorEventId,
+        target_calendar_id: "primary",
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: "evt_canonical_keep_ms",
+    };
+
+    // Provider returns both origin and mirror events.
+    const msFetch = createMicrosoftApiFetch({
+      events: [
+        makeMicrosoftEvent({ id: "AAMkAG-ms-origin-ok" }),
+        makeMicrosoftManagedMirrorEvent({ id: mirrorEventId }),
+      ],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-present-ms",
+      resource_id: "resource-present-ms",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: msFetch,
+      sleepFn: noopSleep,
+    });
+
+    // Only the origin event should be applied -- the mirror is filtered out.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+
+    // No canonical deletes should occur -- the mirror is present.
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
   // -------------------------------------------------------------------------

@@ -165,6 +165,7 @@ export async function handleIncrementalSync(
 
   let events: GoogleCalendarEvent[];
   let cursorUpdates: SyncCursorUpdate[] = [];
+  let skippedCalendarIds: string[] = [];
   const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
 
   try {
@@ -178,6 +179,7 @@ export async function handleIncrementalSync(
     );
     events = result.events;
     cursorUpdates = result.cursorUpdates;
+    skippedCalendarIds = result.skippedCalendarIds;
   } catch (err) {
     // Step 4: Handle 410/delta token expiry -- enqueue SYNC_FULL.
     if (
@@ -207,6 +209,7 @@ export async function handleIncrementalSync(
         );
         events = result.events;
         cursorUpdates = result.cursorUpdates;
+        skippedCalendarIds = result.skippedCalendarIds;
       } catch (retryErr) {
         if (
           retryErr instanceof SyncTokenExpiredError ||
@@ -240,6 +243,35 @@ export async function handleIncrementalSync(
   // Step 5: Process events and apply deltas.
   const deltasApplied = await processAndApplyDeltas(account_id, events, env, provider);
 
+  // Step 5b: Absence-based mirror deletion (TM-9fc9).
+  // Providers often report mirror deletions as updates (or simply omit the
+  // event) rather than sending delta_type: 'deleted'. Detect mirrors that
+  // are active in UserGraph but absent from the fetched event set, and
+  // propagate the deletion to the canonical event.
+  let staleMirrorDeletes = 0;
+  const userId = await lookupUserId(account_id, env);
+  if (userId) {
+    const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
+      account_id,
+      userId,
+      events,
+      env,
+      skippedCalendarIds,
+    );
+    if (missingMirrorProviderIds.length > 0) {
+      console.log(
+        `sync-consumer: SYNC_INCREMENTAL detected ${missingMirrorProviderIds.length} missing managed mirrors for account ${account_id} -- propagating deletions`,
+      );
+      await applyManagedMirrorDeletes(
+        account_id,
+        userId,
+        missingMirrorProviderIds,
+        env,
+      );
+      staleMirrorDeletes = missingMirrorProviderIds.length;
+    }
+  }
+
   // Step 6: Persist sync cursors.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
@@ -253,7 +285,7 @@ export async function handleIncrementalSync(
 
   const scopeLabel = targetCalendarId ? ` (scope: ${targetCalendarId})` : " (all scopes)";
   console.log(
-    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id}${scopeLabel} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated`,
+    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id}${scopeLabel} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${staleMirrorDeletes} stale managed mirrors deleted, ${cursorUpdates.length} cursors updated`,
   );
 }
 
@@ -350,7 +382,7 @@ export async function handleFullSync(
   const deltasApplied = await processAndApplyDeltas(account_id, allEvents, env, provider);
 
   let staleManagedMirrorDeletes = 0;
-  if (provider === "google") {
+  {
     const userId = await lookupUserId(account_id, env);
     if (userId) {
       const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
@@ -788,27 +820,6 @@ async function processAndApplyDeltas(
       origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
     };
 
-    // TM-9fc9 diagnostic: log every event entering the processing loop so we
-    // can trace what delta.type and classification the provider assigned.
-    const rawObj = rawEvent as Record<string, unknown>;
-    const hasManagedMarkers = provider === "google"
-      ? Boolean(
-          (rawObj.extendedProperties as Record<string, unknown> | undefined)
-            ?.private,
-        )
-      : Boolean(
-          (rawObj.extensions as unknown[] | undefined)?.length ||
-          (Array.isArray(rawObj.categories) && rawObj.categories.length > 0),
-        );
-    console.info("sync-consumer: event_loop_entry", {
-      account_id: accountId,
-      provider_event_id: rawObj.id,
-      delta_type: delta.type,
-      classification,
-      has_managed_markers: hasManagedMarkers,
-      provider,
-    });
-
     if (classification === "managed_mirror") {
       // Managed mirrors are never treated as origins (Invariant E), but if a
       // managed mirror was deleted at the provider, that is a user intent to
@@ -818,11 +829,6 @@ async function processAndApplyDeltas(
         typeof delta.origin_event_id === "string" &&
         delta.origin_event_id.length > 0
       ) {
-        console.info("sync-consumer: managed_mirror delete detected", {
-          account_id: accountId,
-          provider_event_id: delta.origin_event_id,
-          provider,
-        });
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
       } else if (
         // TM-9eu: Mirror-side modifications write back to the canonical event.
@@ -838,15 +844,6 @@ async function processAndApplyDeltas(
       }
       continue;
     }
-
-    // TM-9fc9 diagnostic: log every non-mirror event reaching the fallback
-    // check so we can see what delta.type deletions actually carry.
-    console.info("sync-consumer: pre_fallback_check", {
-      account_id: accountId,
-      provider_event_id: delta.origin_event_id,
-      delta_type: delta.type,
-      provider,
-    });
 
     // Fallback for providers (notably Google cancelled payloads) that can omit
     // managed markers on delete deltas. If the deleted provider_event_id is a
@@ -872,20 +869,6 @@ async function processAndApplyDeltas(
           delta.origin_event_id,
         );
         managedDelete = canonicalId !== null;
-        if (managedDelete) {
-          console.info("sync-consumer: managed_mirror delete detected via fallback lookup", {
-            account_id: accountId,
-            provider_event_id: delta.origin_event_id,
-            canonical_event_id: canonicalId,
-            provider,
-          });
-        }
-      } else {
-        console.info("sync-consumer: managed_mirror delete detected via mirror ID set", {
-          account_id: accountId,
-          provider_event_id: delta.origin_event_id,
-          provider,
-        });
       }
 
       if (managedDelete) {
@@ -1399,21 +1382,11 @@ async function applyManagedMirrorDeletes(
       );
       continue;
     }
-    console.info("sync-consumer: mirror delete resolved canonical", {
-      account_id: accountId,
-      provider_event_id: providerEventId,
-      canonical_event_id: canonicalEventId,
-    });
     canonicalIds.add(canonicalEventId);
   }
 
   for (const canonicalEventId of canonicalIds) {
     const deleted = await deleteCanonicalById(userGraphStub, canonicalEventId, source);
-    console.info("sync-consumer: canonical delete result", {
-      canonical_event_id: canonicalEventId,
-      source,
-      deleted,
-    });
     if (!deleted) {
       console.warn(
         `sync-consumer: managed mirror delete resolved canonical but delete returned false (canonical_event_id=${canonicalEventId})`,
