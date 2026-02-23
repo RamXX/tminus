@@ -460,6 +460,19 @@ ALTER TABLE event_journal ADD COLUMN conflict_type TEXT DEFAULT 'none';
 ALTER TABLE event_journal ADD COLUMN resolution TEXT;
 ` as const;
 
+/**
+ * UserGraphDO migration v9: origin calendar tracking.
+ *
+ * Persists the source provider calendar for each canonical event so origin
+ * delete propagation can target the correct upstream calendar instead of
+ * assuming "primary".
+ */
+export const USER_GRAPH_DO_MIGRATION_V9 = `
+ALTER TABLE canonical_events ADD COLUMN origin_calendar_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX idx_events_origin_calendar
+  ON canonical_events(origin_account_id, origin_calendar_id);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -501,6 +514,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 8,
     sql: USER_GRAPH_DO_MIGRATION_V8,
     description: "Add authority_markers to canonical_events, conflict_type and resolution to event_journal",
+  },
+  {
+    version: 9,
+    sql: USER_GRAPH_DO_MIGRATION_V9,
+    description: "Add origin_calendar_id to canonical_events for correct origin-provider deletes",
   },
 ] as const;
 

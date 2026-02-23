@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createWriteQueueHandler } from "./index";
-import type { UpsertMirrorMessage } from "@tminus/shared";
+import type { UpsertMirrorMessage, DeleteMirrorMessage } from "@tminus/shared";
 
 interface StubCall {
   path: string;
@@ -100,7 +100,11 @@ function createUserGraphNamespace(
   } as unknown as DurableObjectNamespace & { calls: StubCall[] };
 }
 
-function createAccountNamespace(): DurableObjectNamespace {
+function createAccountNamespace(scopes?: Array<{
+  providerCalendarId: string;
+  enabled?: boolean;
+  syncEnabled?: boolean;
+}>): DurableObjectNamespace {
   return {
     idFromName(name: string): DurableObjectId {
       return {
@@ -110,7 +114,16 @@ function createAccountNamespace(): DurableObjectNamespace {
     },
     get(_id: DurableObjectId): DurableObjectStub {
       return {
-        async fetch(): Promise<Response> {
+        async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+          const req = input instanceof Request
+            ? input
+            : new Request(typeof input === "string" ? input : input.toString(), init);
+          const url = new URL(req.url);
+          if (url.pathname === "/listCalendarScopes") {
+            return Response.json({
+              scopes: scopes ?? [],
+            });
+          }
           return Response.json({ access_token: "token" });
         },
       } as unknown as DurableObjectStub;
@@ -186,5 +199,67 @@ describe("write-consumer queue stale self-heal", () => {
       canonical_event_id: message.canonical_event_id,
       force_requeue_pending: true,
     });
+  });
+});
+
+describe("write-consumer queue delete calendar remap", () => {
+  it("remaps primary DELETE_MIRROR to single sync scope when mirror row is missing", async () => {
+    const message: DeleteMirrorMessage = {
+      type: "DELETE_MIRROR",
+      canonical_event_id: "evt_01JSKE00M00000000000000009",
+      target_account_id: "acc_01JSKE00MACCPVNTB000000009",
+      target_calendar_id: "primary",
+      provider_event_id: "origin_evt_123",
+      idempotency_key: "idem_delete",
+    };
+
+    const userGraph = createUserGraphNamespace(null);
+    const externalUrls: string[] = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+      const request = input instanceof Request
+        ? input
+        : new Request(typeof input === "string" ? input : input.toString());
+      const url = request.url;
+      externalUrls.push(url);
+      if (url.includes("/calendars/work%40example.com/events/origin_evt_123")) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 404,
+            message: "Not Found",
+            errors: [{ reason: "notFound", message: "Not Found" }],
+          },
+        }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    });
+
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const batch = {
+      messages: [{ body: message, ack, retry }],
+    } as unknown as MessageBatch<DeleteMirrorMessage>;
+
+    const env = {
+      DB: createMockDB("usr_01JSKE00M00000000000000001", "google"),
+      USER_GRAPH: userGraph,
+      ACCOUNT: createAccountNamespace([
+        { providerCalendarId: "work@example.com", enabled: true, syncEnabled: true },
+      ]),
+    } as unknown as Env;
+
+    const handler = createWriteQueueHandler({ fetchFn });
+    await handler.queue(batch, env);
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(externalUrls).toContain(
+      "https://www.googleapis.com/calendar/v3/calendars/work%40example.com/events/origin_evt_123",
+    );
   });
 });

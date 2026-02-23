@@ -132,6 +132,7 @@ interface CanonicalEventRow {
   [key: string]: unknown;
   canonical_event_id: string;
   origin_account_id: string;
+  origin_calendar_id: string;
   origin_event_id: string;
   title: string | null;
   description: string | null;
@@ -186,6 +187,12 @@ function isPayloadTooLargeError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();
   return message.includes(PAYLOAD_TOO_LARGE_HINT) || message.includes("status 413");
+}
+
+function normalizeOriginCalendarId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
 }
 
 interface PolicyEdgeRow {
@@ -886,6 +893,8 @@ export class UserGraphDO {
     }
 
     const evt = delta.event;
+    const originCalendarId =
+      normalizeOriginCalendarId(delta.origin_calendar_id) ?? "primary";
 
     // Extract start/end timestamps from EventDateTime
     const startTs = evt.start.dateTime ?? evt.start.date ?? "";
@@ -918,6 +927,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
+          origin_calendar_id = COALESCE(?, origin_calendar_id),
           version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         evt.title ?? null,
@@ -931,6 +941,7 @@ export class UserGraphDO {
         evt.visibility ?? "default",
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
+        normalizeOriginCalendarId(delta.origin_calendar_id),
         newVersion,
         JSON.stringify(dedupMarkers),
         canonicalId,
@@ -967,6 +978,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
+          origin_calendar_id = COALESCE(?, origin_calendar_id),
           version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         accountId,
@@ -981,6 +993,7 @@ export class UserGraphDO {
         evt.visibility ?? "default",
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
+        normalizeOriginCalendarId(delta.origin_calendar_id),
         newVersion,
         JSON.stringify(rebindMarkers),
         canonicalId,
@@ -1004,14 +1017,15 @@ export class UserGraphDO {
 
     this.sql.exec(
       `INSERT INTO canonical_events (
-        canonical_event_id, origin_account_id, origin_event_id,
+        canonical_event_id, origin_account_id, origin_event_id, origin_calendar_id,
         title, description, location, start_ts, end_ts, timezone,
         all_day, status, visibility, transparency, recurrence_rule,
         source, version, authority_markers, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provider', 1, ?, datetime('now'), datetime('now'))`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provider', 1, ?, datetime('now'), datetime('now'))`,
       canonicalId,
       accountId,
       delta.origin_event_id,
+      originCalendarId,
       evt.title ?? null,
       evt.description ?? null,
       evt.location ?? null,
@@ -1086,6 +1100,7 @@ export class UserGraphDO {
     }
 
     const evt = delta.event;
+    const originCalendarId = normalizeOriginCalendarId(delta.origin_calendar_id);
 
     const startTs = evt.start.dateTime ?? evt.start.date ?? "";
     const endTs = evt.end.dateTime ?? evt.end.date ?? "";
@@ -1132,6 +1147,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
+          origin_calendar_id = COALESCE(?, origin_calendar_id),
           version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         accountId,
@@ -1146,6 +1162,7 @@ export class UserGraphDO {
         evt.visibility ?? "default",
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
+        originCalendarId,
         newVersion,
         JSON.stringify(updatedMarkers),
         canonicalId,
@@ -1157,6 +1174,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
+          origin_calendar_id = COALESCE(?, origin_calendar_id),
           version = ?, authority_markers = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         evt.title ?? null,
@@ -1170,6 +1188,7 @@ export class UserGraphDO {
         evt.visibility ?? "default",
         evt.transparency ?? "opaque",
         evt.recurrence_rule ?? null,
+        originCalendarId,
         newVersion,
         JSON.stringify(updatedMarkers),
         canonicalId,
@@ -1536,6 +1555,8 @@ export class UserGraphDO {
       (event.canonical_event_id as string) || generateId("event");
     const originAccountId =
       (event.origin_account_id as string) || "api";
+    const originCalendarId =
+      normalizeOriginCalendarId(event.origin_calendar_id) ?? "primary";
     const originEventId =
       event.origin_event_id || canonicalId;
 
@@ -1561,6 +1582,7 @@ export class UserGraphDO {
           start_ts = ?, end_ts = ?, timezone = ?,
           all_day = ?, status = ?, visibility = ?,
           transparency = ?, recurrence_rule = ?,
+          origin_calendar_id = COALESCE(?, origin_calendar_id),
           version = ?, updated_at = datetime('now')
          WHERE canonical_event_id = ?`,
         event.title ?? null,
@@ -1574,6 +1596,7 @@ export class UserGraphDO {
         event.visibility ?? "default",
         event.transparency ?? "opaque",
         event.recurrence_rule ?? null,
+        normalizeOriginCalendarId(event.origin_calendar_id),
         newVersion,
         canonicalId,
       );
@@ -1587,14 +1610,15 @@ export class UserGraphDO {
     } else {
       this.sql.exec(
         `INSERT INTO canonical_events (
-          canonical_event_id, origin_account_id, origin_event_id,
+          canonical_event_id, origin_account_id, origin_event_id, origin_calendar_id,
           title, description, location, start_ts, end_ts, timezone,
           all_day, status, visibility, transparency, recurrence_rule,
           source, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
         canonicalId,
         originAccountId,
         originEventId,
+        originCalendarId,
         event.title ?? null,
         event.description ?? null,
         event.location ?? null,
@@ -1648,9 +1672,10 @@ export class UserGraphDO {
       .exec<{
         canonical_event_id: string;
         origin_account_id: string;
+        origin_calendar_id: string | null;
         origin_event_id: string;
       }>(
-        `SELECT canonical_event_id, origin_account_id, origin_event_id
+        `SELECT canonical_event_id, origin_account_id, origin_calendar_id, origin_event_id
          FROM canonical_events
          WHERE canonical_event_id = ?`,
         canonicalEventId,
@@ -1693,16 +1718,18 @@ export class UserGraphDO {
       typeof event.origin_event_id === "string" &&
       event.origin_event_id.length > 0
     ) {
+      const originCalendarId =
+        normalizeOriginCalendarId(event.origin_calendar_id) ?? "primary";
       const originDeleteIdempotencyKey = await computeIdempotencyKey(
         canonicalEventId,
         event.origin_account_id,
-        `delete-origin:${event.origin_event_id}:primary`,
+        `delete-origin:${event.origin_event_id}:${originCalendarId}`,
       );
       this.enqueueDeleteMirror({
         type: "DELETE_MIRROR",
         canonical_event_id: canonicalEventId,
         target_account_id: event.origin_account_id,
-        target_calendar_id: "primary",
+        target_calendar_id: originCalendarId,
         provider_event_id: event.origin_event_id,
         idempotency_key: originDeleteIdempotencyKey,
       });
@@ -1714,6 +1741,7 @@ export class UserGraphDO {
       source,
       mirrors_enqueued: mirrors.length,
       origin_account_id: event.origin_account_id,
+      origin_calendar_id: event.origin_calendar_id ?? null,
       origin_event_id_present: typeof event.origin_event_id === "string" && event.origin_event_id.length > 0,
       origin_delete_enqueued: originDeleteEnqueued,
     });
@@ -5358,6 +5386,8 @@ export class UserGraphDO {
     return {
       canonical_event_id: row.canonical_event_id as EventId,
       origin_account_id: row.origin_account_id as AccountId,
+      origin_calendar_id:
+        normalizeOriginCalendarId(row.origin_calendar_id) ?? undefined,
       origin_event_id: row.origin_event_id,
       title: row.title ?? undefined,
       description: row.description ?? undefined,

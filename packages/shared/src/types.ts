@@ -145,6 +145,8 @@ export interface EventDateTime {
 export interface CanonicalEvent {
   readonly canonical_event_id: EventId;
   readonly origin_account_id: AccountId;
+  /** Provider calendar ID where the origin event currently lives. */
+  readonly origin_calendar_id?: string;
   /** Provider-specific event ID from the origin account. */
   readonly origin_event_id: string;
   readonly title?: string;
@@ -210,6 +212,8 @@ export interface ProviderDelta {
   readonly type: "created" | "updated" | "deleted";
   readonly origin_event_id: string;
   readonly origin_account_id: AccountId;
+  /** Provider calendar ID for the source event when known. */
+  readonly origin_calendar_id?: string;
   /** Full event payload. Present for created/updated, absent for deleted. */
   readonly event?: Omit<
     CanonicalEvent,

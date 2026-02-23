@@ -1875,6 +1875,45 @@ describe("UserGraphDO integration", () => {
       expect(deleteEntries).toHaveLength(1);
     });
 
+    it("uses origin_calendar_id when enqueueing origin provider delete", async () => {
+      ug.getSyncHealth();
+
+      insertPolicyEdge(db, {
+        policyId: "pol_01TEST000000000000000000001",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeCreatedDelta({
+          origin_calendar_id: "work@example.com",
+        }),
+      ]);
+      queue.clear();
+
+      const events = db
+        .prepare("SELECT canonical_event_id, origin_calendar_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string; origin_calendar_id: string }>;
+
+      expect(events[0].origin_calendar_id).toBe("work@example.com");
+
+      const deleted = await ug.deleteCanonicalEvent(
+        events[0].canonical_event_id,
+        "provider:managed_mirror_delete",
+      );
+      expect(deleted).toBe(true);
+
+      const deleteMessages = queue.messages as Array<Record<string, unknown>>;
+      const originDelete = deleteMessages.find(
+        (msg) => msg.target_account_id === TEST_ACCOUNT_ID,
+      );
+
+      expect(originDelete).toBeDefined();
+      expect(originDelete?.type).toBe("DELETE_MIRROR");
+      expect(originDelete?.provider_event_id).toBe("google_evt_001");
+      expect(originDelete?.target_calendar_id).toBe("work@example.com");
+    });
+
     it("returns false for non-existent event", async () => {
       ug.getSyncHealth();
       const deleted = await ug.deleteCanonicalEvent("evt_nonexistent", "user:usr_test");

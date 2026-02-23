@@ -20,6 +20,7 @@ import type {
   ProviderDelta,
   AccountId,
 } from "@tminus/shared";
+import { USER_GRAPH_DO_MIGRATIONS } from "@tminus/shared";
 import { UserGraphDO } from "./index";
 import type { QueueLike, AuthorityMarkers } from "./index";
 
@@ -546,14 +547,16 @@ describe("Authority markers integration", () => {
       expect(resolutionCol).toBeDefined();
     });
 
-    it("schema_meta reports version 8", async () => {
+    it("schema_meta reports latest schema version", async () => {
       // Trigger migration
       await ug.applyProviderDelta(ACCOUNT_A, [makeCreatedDelta()]);
 
       const meta = db
         .prepare("SELECT value FROM _schema_meta WHERE key = 'user_graph_version'")
         .get() as { value: string };
-      expect(parseInt(meta.value, 10)).toBe(8);
+      expect(parseInt(meta.value, 10)).toBe(
+        USER_GRAPH_DO_MIGRATIONS[USER_GRAPH_DO_MIGRATIONS.length - 1].version,
+      );
     });
   });
 

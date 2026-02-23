@@ -23,6 +23,7 @@ import {
   USER_GRAPH_DO_MIGRATION_V6,
   USER_GRAPH_DO_MIGRATION_V7,
   USER_GRAPH_DO_MIGRATION_V8,
+  USER_GRAPH_DO_MIGRATION_V9,
   ACCOUNT_DO_MIGRATION_V1,
   ACCOUNT_DO_MIGRATION_V2,
   ACCOUNT_DO_MIGRATION_V3,
@@ -355,7 +356,7 @@ describe("AccountDO schema SQL", () => {
 
 describe("migration lists", () => {
   it("USER_GRAPH_DO_MIGRATIONS has correct structure", () => {
-    expect(USER_GRAPH_DO_MIGRATIONS).toHaveLength(8);
+    expect(USER_GRAPH_DO_MIGRATIONS).toHaveLength(9);
 
     const m1 = USER_GRAPH_DO_MIGRATIONS[0];
     expect(m1.version).toBe(1);
@@ -404,6 +405,12 @@ describe("migration lists", () => {
     expect(m8.sql).toBe(USER_GRAPH_DO_MIGRATION_V8);
     expect(typeof m8.description).toBe("string");
     expect(m8.description.length).toBeGreaterThan(0);
+
+    const m9 = USER_GRAPH_DO_MIGRATIONS[8];
+    expect(m9.version).toBe(9);
+    expect(m9.sql).toBe(USER_GRAPH_DO_MIGRATION_V9);
+    expect(typeof m9.description).toBe("string");
+    expect(m9.description.length).toBeGreaterThan(0);
   });
 
   it("ACCOUNT_DO_MIGRATIONS has correct structure", () => {

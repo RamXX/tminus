@@ -982,7 +982,19 @@ async function fetchIncrementalProviderEvents(
       needsScopedBootstrapFullSync = true;
     }
 
-    events.push(...response.events);
+    if (calendarId === "primary") {
+      events.push(...response.events);
+    } else {
+      events.push(
+        ...response.events.map(
+          (event) =>
+            ({
+              ...event,
+              _provider_calendar_id: calendarId,
+            }) as GoogleCalendarEvent,
+        ),
+      );
+    }
     if (response.nextSyncToken) {
       cursorUpdates.push({
         providerCalendarId: calendarId,
@@ -1040,7 +1052,19 @@ async function fetchFullProviderEvents(
         }
         throw err;
       }
-      events.push(...response.events);
+      if (calendarId === "primary") {
+        events.push(...response.events);
+      } else {
+        events.push(
+          ...response.events.map(
+            (event) =>
+              ({
+                ...event,
+                _provider_calendar_id: calendarId,
+              }) as GoogleCalendarEvent,
+          ),
+        );
+      }
       pageToken = response.nextPageToken;
       if (response.nextSyncToken) {
         lastSyncToken = response.nextSyncToken;
@@ -1261,6 +1285,12 @@ async function processAndApplyDeltas(
   }
 
   for (const event of events) {
+    const originCalendarId =
+      typeof (event as Record<string, unknown>)._provider_calendar_id === "string" &&
+      ((event as Record<string, unknown>)._provider_calendar_id as string).length > 0 &&
+      (event as Record<string, unknown>)._provider_calendar_id !== "primary"
+        ? ((event as Record<string, unknown>)._provider_calendar_id as string)
+        : undefined;
     // For Microsoft events, the MicrosoftCalendarClient stores raw event data
     // under _msRaw. Use that for classification and normalization when available.
     const rawEvent = (event as Record<string, unknown>)._msRaw ?? event;
@@ -1275,9 +1305,10 @@ async function processAndApplyDeltas(
     // TM-08pp: Canonicalize provider_event_id at ingestion to eliminate
     // encoding variants. All downstream storage and lookups use this
     // canonical (fully-decoded) form.
-    const delta = {
+    const delta: ProviderDelta = {
       ...rawDelta,
       origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
+      ...(originCalendarId ? { origin_calendar_id: originCalendarId } : {}),
     };
 
     if (classification === "managed_mirror") {
@@ -2737,6 +2768,10 @@ async function applyManagedMirrorModifications(
       type: "updated",
       origin_event_id: canonicalEvent.origin_event_id,
       origin_account_id: canonicalEvent.origin_account_id as AccountId,
+      ...(typeof canonicalEvent.origin_calendar_id === "string" &&
+      canonicalEvent.origin_calendar_id.length > 0
+        ? { origin_calendar_id: canonicalEvent.origin_calendar_id }
+        : {}),
       event: originDelta.event,
     };
 

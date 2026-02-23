@@ -64,6 +64,59 @@ async function throttleGoogleAccountWrites(accountId: string): Promise<void> {
   googleLastWriteByAccount.set(accountId, Date.now());
 }
 
+interface CalendarScopeRow {
+  providerCalendarId?: string;
+  provider_calendar_id?: string;
+  enabled?: boolean;
+  syncEnabled?: boolean;
+  sync_enabled?: boolean;
+}
+
+async function resolveSingleSyncEnabledCalendar(
+  accountNamespace: DurableObjectNamespace,
+  accountId: string,
+): Promise<string | null> {
+  const doId = accountNamespace.idFromName(accountId);
+  const stub = accountNamespace.get(doId);
+  const response = await stub.fetch(
+    new Request("https://account.internal/listCalendarScopes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }),
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `AccountDO.listCalendarScopes failed (${response.status}): ${text}`,
+    );
+  }
+
+  const payload = (await response.json()) as { scopes?: CalendarScopeRow[] };
+  const scopedCalendarIds = (payload.scopes ?? [])
+    .map((scope) => ({
+      providerCalendarId:
+        typeof scope.providerCalendarId === "string"
+          ? scope.providerCalendarId
+          : typeof scope.provider_calendar_id === "string"
+            ? scope.provider_calendar_id
+            : null,
+      enabled: scope.enabled ?? true,
+      syncEnabled: scope.syncEnabled ?? scope.sync_enabled ?? true,
+    }))
+    .filter(
+      (scope): scope is { providerCalendarId: string; enabled: boolean; syncEnabled: boolean } =>
+        scope.providerCalendarId !== null &&
+        scope.providerCalendarId.length > 0 &&
+        scope.enabled &&
+        scope.syncEnabled,
+    )
+    .map((scope) => scope.providerCalendarId);
+
+  return scopedCalendarIds.length === 1 ? scopedCalendarIds[0] : null;
+}
+
 // ---------------------------------------------------------------------------
 // DO-backed MirrorStore -- communicates with UserGraphDO via fetch()
 // ---------------------------------------------------------------------------
@@ -303,6 +356,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
       for (const msg of batch.messages) {
         try {
           const body = msg.body;
+          let effectiveBody: UpsertMirrorMessage | DeleteMirrorMessage = body;
 
           // Look up user_id and provider type from D1 registry for the target account.
           // user_id is needed to resolve the correct UserGraphDO instance.
@@ -324,18 +378,6 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           const isMicrosoftUpsert =
             providerType === "microsoft" && body.type === "UPSERT_MIRROR";
 
-          if (body.type === "DELETE_MIRROR") {
-            console.log("write-consumer: processing DELETE_MIRROR", {
-              canonical_event_id: body.canonical_event_id,
-              target_account_id: body.target_account_id,
-              target_calendar_id: body.target_calendar_id ?? null,
-              provider_event_id_present:
-                typeof body.provider_event_id === "string" &&
-                body.provider_event_id.length > 0,
-              provider: providerType,
-            });
-          }
-
           // Keep per-account Google write rate bounded while allowing
           // different accounts to progress without unnecessary serialization.
           if (providerType === "google") {
@@ -355,11 +397,13 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           // mirror is still PENDING, request a targeted recompute replay so the
           // latest projection is guaranteed to be re-enqueued.
           let prefetchedMirror: MirrorRow | null = null;
-          if (body.type === "UPSERT_MIRROR") {
+          if (body.type === "UPSERT_MIRROR" || body.type === "DELETE_MIRROR") {
             prefetchedMirror = await doMirrorStore.getMirrorAsync(
               body.canonical_event_id as string,
               body.target_account_id as string,
             );
+          }
+          if (body.type === "UPSERT_MIRROR") {
             const msgHash = body.projected_hash ?? null;
             const mirrorHash = prefetchedMirror?.last_projected_hash ?? null;
             const isStaleOutOfOrder = Boolean(
@@ -386,12 +430,66 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
             }
           }
 
+          // Legacy origin delete hardening:
+          // If the origin delete carries "primary" but we do not have a mirror row
+          // for this target account, remap to the single sync-enabled scope when
+          // one exists. This prevents false "already deleted" outcomes for events
+          // whose origin calendar is not "primary".
+          if (
+            providerType === "google" &&
+            body.type === "DELETE_MIRROR" &&
+            !prefetchedMirror &&
+            body.target_calendar_id === "primary"
+          ) {
+            try {
+              const scopedCalendarId = await resolveSingleSyncEnabledCalendar(
+                env.ACCOUNT,
+                body.target_account_id as string,
+              );
+              if (scopedCalendarId && scopedCalendarId !== body.target_calendar_id) {
+                effectiveBody = {
+                  ...body,
+                  target_calendar_id:
+                    scopedCalendarId as DeleteMirrorMessage["target_calendar_id"],
+                };
+                console.log("write-consumer: remapped delete calendar from single scope", {
+                  canonical_event_id: body.canonical_event_id,
+                  target_account_id: body.target_account_id,
+                  original_calendar_id: body.target_calendar_id,
+                  remapped_calendar_id: scopedCalendarId,
+                });
+              }
+            } catch (scopeErr) {
+              console.warn("write-consumer: failed to resolve single sync scope for delete remap", {
+                canonical_event_id: body.canonical_event_id,
+                target_account_id: body.target_account_id,
+                error:
+                  scopeErr instanceof Error
+                    ? scopeErr.message
+                    : String(scopeErr),
+              });
+            }
+          }
+
+          if (effectiveBody.type === "DELETE_MIRROR") {
+            console.log("write-consumer: processing DELETE_MIRROR", {
+              canonical_event_id: effectiveBody.canonical_event_id,
+              target_account_id: effectiveBody.target_account_id,
+              target_calendar_id: effectiveBody.target_calendar_id ?? null,
+              provider_event_id_present:
+                typeof effectiveBody.provider_event_id === "string" &&
+                effectiveBody.provider_event_id.length > 0,
+              provider: providerType,
+              mirror_row_present: Boolean(prefetchedMirror),
+            });
+          }
+
           // Pre-fetch mirror state (since WriteConsumer expects sync getMirror)
           // We wrap the DO-backed store in a caching proxy that makes the
           // first getMirror call async, then caches the result for sync access.
           const cachedMirrorStore = await createCachedMirrorStore(
             doMirrorStore,
-            body,
+            effectiveBody,
             prefetchedMirror,
           );
 
@@ -405,17 +503,23 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
               : (token: string) => createCalendarProvider(providerType, token),
           });
 
-          const result = await consumer.processMessage(body);
+          const result = await consumer.processMessage(effectiveBody);
 
           // Flush buffered mirror state updates to DO
           await cachedMirrorStore.flush();
 
           if (isMicrosoftUpsert) {
             console.log("write-consumer: microsoft upsert outcome", {
-              canonical_event_id: body.canonical_event_id,
-              target_account_id: body.target_account_id,
-              target_calendar_id: body.target_calendar_id,
-              projected_hash: body.projected_hash ?? null,
+              canonical_event_id: effectiveBody.canonical_event_id,
+              target_account_id: effectiveBody.target_account_id,
+              target_calendar_id:
+                effectiveBody.type === "UPSERT_MIRROR"
+                  ? effectiveBody.target_calendar_id
+                  : undefined,
+              projected_hash:
+                effectiveBody.type === "UPSERT_MIRROR"
+                  ? effectiveBody.projected_hash ?? null
+                  : null,
               action: result.action,
               success: result.success,
               retry: result.retry,
@@ -425,9 +529,9 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
 
           if (result.retry) {
             console.error("write-consumer: retrying message", {
-              type: body.type,
-              target_account_id: body.target_account_id,
-              canonical_event_id: body.canonical_event_id,
+              type: effectiveBody.type,
+              target_account_id: effectiveBody.target_account_id,
+              canonical_event_id: effectiveBody.canonical_event_id,
               action: result.action,
               error: result.error ?? null,
             });
@@ -435,9 +539,9 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           } else {
             if (!result.success) {
               console.error("write-consumer: permanent message failure", {
-                type: body.type,
-                target_account_id: body.target_account_id,
-                canonical_event_id: body.canonical_event_id,
+                type: effectiveBody.type,
+                target_account_id: effectiveBody.target_account_id,
+                canonical_event_id: effectiveBody.canonical_event_id,
                 action: result.action,
                 error: result.error ?? null,
               });

@@ -191,6 +191,42 @@ describe("UserGraphDO schema via migration runner", () => {
     expect(typeof row.updated_at).toBe("string");
   });
 
+  it("canonical_events tracks origin_calendar_id with safe default", () => {
+    applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
+
+    db.prepare(
+      `INSERT INTO canonical_events
+       (canonical_event_id, origin_account_id, origin_event_id, title, start_ts, end_ts, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "evt_01TEST00000000000000000099",
+      "acc_01TEST00000000000000000001",
+      "google_event_999",
+      "Scoped Event",
+      "2026-02-14T12:00:00Z",
+      "2026-02-14T12:30:00Z",
+      "provider",
+    );
+
+    const defaultRow = db
+      .prepare(
+        "SELECT origin_calendar_id FROM canonical_events WHERE canonical_event_id = ?",
+      )
+      .get("evt_01TEST00000000000000000099") as { origin_calendar_id: string };
+    expect(defaultRow.origin_calendar_id).toBe("primary");
+
+    db.prepare(
+      "UPDATE canonical_events SET origin_calendar_id = ? WHERE canonical_event_id = ?",
+    ).run("work@example.com", "evt_01TEST00000000000000000099");
+
+    const updatedRow = db
+      .prepare(
+        "SELECT origin_calendar_id FROM canonical_events WHERE canonical_event_id = ?",
+      )
+      .get("evt_01TEST00000000000000000099") as { origin_calendar_id: string };
+    expect(updatedRow.origin_calendar_id).toBe("work@example.com");
+  });
+
   it("enforces UNIQUE(origin_account_id, origin_event_id) on canonical_events", () => {
     applyMigrations(sql, USER_GRAPH_DO_MIGRATIONS, "user_graph");
 
