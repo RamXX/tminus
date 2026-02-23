@@ -161,7 +161,10 @@ export async function handleIncrementalSync(
   // Step 1: Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
   const deleteGuard = createDeleteSafetyGuard(account_id, env, deps);
-  let microsoftWebhookDeleteCandidateCount = 0;
+  const microsoftWebhookCandidateEventIds =
+    provider === "microsoft" ? getMicrosoftWebhookDeleteEventIds(message) : [];
+  const microsoftWebhookDeleteCandidateCount =
+    microsoftWebhookCandidateEventIds.length;
   let microsoftWebhookDeleteResolvedCount = 0;
 
   // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
@@ -172,9 +175,7 @@ export async function handleIncrementalSync(
   // mirror, we can delete the canonical immediately without waiting for a
   // full sync.
   if (provider === "microsoft" && isWebhookDeleteChangeType(message.webhook_change_type)) {
-    const candidateEventIds = getMicrosoftWebhookDeleteEventIds(message);
-    microsoftWebhookDeleteCandidateCount = candidateEventIds.length;
-    if (candidateEventIds.length > 0) {
+    if (microsoftWebhookCandidateEventIds.length > 0) {
       try {
         const userId = await lookupUserId(account_id, env);
         if (userId) {
@@ -183,7 +184,7 @@ export async function handleIncrementalSync(
           const userGraphStub = env.USER_GRAPH.get(userGraphId);
           const resolvedMirrorDeleteIds = new Set<string>();
 
-          for (const eventId of candidateEventIds) {
+          for (const eventId of microsoftWebhookCandidateEventIds) {
             const isManagedMirror = providerEventIdVariants(eventId).some(
               (candidateId) => managedMirrorIds.has(candidateId),
             );
@@ -263,6 +264,92 @@ export async function handleIncrementalSync(
       return;
     }
     throw err;
+  }
+
+  // Safety-first fallback: Microsoft webhook payloads can occasionally carry
+  // non-"deleted" change types for events that were actually removed. Probe
+  // the specific event ID; only treat as delete when provider confirms the
+  // mirror event no longer exists.
+  if (
+    provider === "microsoft" &&
+    !isWebhookDeleteChangeType(message.webhook_change_type) &&
+    microsoftWebhookCandidateEventIds.length > 0
+  ) {
+    try {
+      const userId = await lookupUserId(account_id, env);
+      if (userId) {
+        const managedMirrorIds = await loadManagedMirrorEventIds(
+          account_id,
+          userId,
+          env,
+        );
+        const userGraphId = env.USER_GRAPH.idFromName(userId);
+        const userGraphStub = env.USER_GRAPH.get(userGraphId);
+        const resolvedMirrorDeleteIds = new Set<string>();
+
+        for (const eventId of microsoftWebhookCandidateEventIds) {
+          let isManagedMirror = providerEventIdVariants(eventId).some(
+            (candidateId) => managedMirrorIds.has(candidateId),
+          );
+
+          if (!isManagedMirror) {
+            const canonicalId = await findCanonicalIdByMirror(
+              userGraphStub,
+              account_id,
+              eventId,
+            );
+            isManagedMirror = canonicalId !== null;
+          }
+          if (!isManagedMirror) {
+            continue;
+          }
+
+          const exists = await microsoftEventExists(
+            eventId,
+            accessToken,
+            deps.fetchFn,
+          );
+          if (exists) {
+            continue;
+          }
+
+          console.log(
+            "sync-consumer: webhook mirror event missing at provider, treating as delete",
+            {
+              account_id,
+              provider_event_id: eventId,
+              webhook_change_type: message.webhook_change_type,
+            },
+          );
+          resolvedMirrorDeleteIds.add(eventId);
+        }
+
+        if (resolvedMirrorDeleteIds.size > 0) {
+          microsoftWebhookDeleteResolvedCount += resolvedMirrorDeleteIds.size;
+          await applyManagedMirrorDeletes(
+            account_id,
+            userId,
+            [...resolvedMirrorDeleteIds],
+            env,
+            deleteGuard,
+            {
+              provider,
+              stage: "incremental",
+              reason: "webhook_missing_probe",
+            },
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(
+        "sync-consumer: webhook mirror missing probe failed, continuing with normal sync",
+        {
+          account_id,
+          resource_id: message.resource_id,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
 
   // Step 3: Fetch incremental changes via provider-specific client.
@@ -349,7 +436,7 @@ export async function handleIncrementalSync(
   }
 
   // Step 5: Process events and apply deltas.
-  const deltasApplied = await processAndApplyDeltas(
+  const deltaResult = await processAndApplyDeltas(
     account_id,
     events,
     env,
@@ -357,13 +444,14 @@ export async function handleIncrementalSync(
     deleteGuard,
     "incremental",
   );
+  const deltasApplied = deltaResult.appliedDeltaCount;
 
   // Step 6: Persist sync cursors.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
-  // Fallback convergence path: if Microsoft webhook signaled a deletion but no
-  // canonical mirror delete could be resolved from the hint, enqueue a full
-  // reconcile to catch missing managed mirrors via snapshot diffing.
+  // Safety-first behavior: never auto-enqueue SYNC_FULL reconcile for unresolved
+  // mirror delete hints. We keep processing incremental deltas and wait for
+  // subsequent webhook/sweep evidence to avoid broad destructive syncs.
   if (
     provider === "microsoft" &&
     isWebhookDeleteChangeType(message.webhook_change_type) &&
@@ -371,17 +459,46 @@ export async function handleIncrementalSync(
     microsoftWebhookDeleteResolvedCount === 0
   ) {
     console.warn(
-      "sync-consumer: webhook delete hint unresolved, enqueueing SYNC_FULL reconcile fallback",
+      "sync-consumer: webhook delete hint unresolved; skipping SYNC_FULL reconcile for safety",
       {
         account_id,
         resource_id: message.resource_id,
       },
     );
-    await env.SYNC_QUEUE.send({
-      type: "SYNC_FULL",
-      account_id,
-      reason: "reconcile",
-    } satisfies SyncFullMessage);
+  }
+
+  // Scheduled Microsoft sweeps are the webhook safety net. Use a bounded
+  // mirror-only snapshot reconcile (no SYNC_FULL) to recover deletes that
+  // disappear from delta feeds.
+  if (provider === "microsoft" && isScheduledMicrosoftSweepMessage(message.resource_id)) {
+    try {
+      const reconciledDeletes =
+        await reconcileMissingManagedMirrorsFromMicrosoftSweep(
+          account_id,
+          accessToken,
+          env,
+          deps,
+          deleteGuard,
+          retryOpts,
+        );
+      if (reconciledDeletes > 0) {
+        console.log(
+          "sync-consumer: scheduled microsoft sweep reconciled missing managed mirrors",
+          {
+            account_id,
+            reconciled_deletes: reconciledDeletes,
+          },
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "sync-consumer: scheduled microsoft mirror reconcile failed; continuing",
+        {
+          account_id,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
 
   if (deleteGuard.hasBlockedDeletes()) {
@@ -505,7 +622,7 @@ export async function handleFullSync(
   }
 
   // Process all events using provider-specific classification/normalization
-  const deltasApplied = await processAndApplyDeltas(
+  const deltaResult = await processAndApplyDeltas(
     account_id,
     allEvents,
     env,
@@ -513,6 +630,7 @@ export async function handleFullSync(
     deleteGuard,
     "full",
   );
+  const deltasApplied = deltaResult.appliedDeltaCount;
 
   let staleManagedMirrorDeletes = 0;
   const userId = await lookupUserId(account_id, env);
@@ -525,7 +643,7 @@ export async function handleFullSync(
       skippedCalendarIds,
     );
     if (missingMirrorProviderIds.length > 0) {
-      await applyManagedMirrorDeletes(
+      staleManagedMirrorDeletes = await applyManagedMirrorDeletes(
         account_id,
         userId,
         missingMirrorProviderIds,
@@ -537,7 +655,6 @@ export async function handleFullSync(
           reason: "stale_managed_mirror_reconcile",
         },
       );
-      staleManagedMirrorDeletes = missingMirrorProviderIds.length;
     }
   }
 
@@ -635,9 +752,27 @@ interface DeleteGuardBlockEvent {
 }
 
 const DEFAULT_DELETE_GUARD_ENABLED = true;
-const DEFAULT_MAX_DELETES_PER_SYNC_RUN = 25;
-const DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH = 50;
-const DEFAULT_MAX_DELETES_PER_BATCH = 100;
+const HARD_MAX_DELETES_PER_OPERATION = 1;
+const DEFAULT_MAX_DELETES_PER_SYNC_RUN = HARD_MAX_DELETES_PER_OPERATION;
+const DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH = HARD_MAX_DELETES_PER_OPERATION;
+const DEFAULT_MAX_DELETES_PER_BATCH = HARD_MAX_DELETES_PER_OPERATION;
+
+function limitAtomicDeleteCandidates<T>(
+  candidates: readonly T[],
+  operation: string,
+  context: Record<string, unknown> = {},
+): T[] {
+  if (candidates.length <= HARD_MAX_DELETES_PER_OPERATION) {
+    return [...candidates];
+  }
+  console.warn("sync-consumer: delete candidates truncated to atomic limit", {
+    operation,
+    attempted: candidates.length,
+    allowed: HARD_MAX_DELETES_PER_OPERATION,
+    ...context,
+  });
+  return [...candidates.slice(0, HARD_MAX_DELETES_PER_OPERATION)];
+}
 
 class DeleteSafetyGuard {
   private runDeleteCount = 0;
@@ -725,23 +860,36 @@ function parsePositiveIntEnv(raw: string | undefined, fallback: number): number 
 }
 
 function resolveDeleteGuardConfig(env: Env): DeleteGuardConfig {
+  const maxDeletesPerSyncRun = Math.min(
+    parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN,
+      DEFAULT_MAX_DELETES_PER_SYNC_RUN,
+    ),
+    HARD_MAX_DELETES_PER_OPERATION,
+  );
+  const maxDeletesPerAccountBatch = Math.min(
+    parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH,
+      DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH,
+    ),
+    HARD_MAX_DELETES_PER_OPERATION,
+  );
+  const maxDeletesPerBatch = Math.min(
+    parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_BATCH,
+      DEFAULT_MAX_DELETES_PER_BATCH,
+    ),
+    HARD_MAX_DELETES_PER_OPERATION,
+  );
+
   return {
     enabled: parseBooleanEnv(
       env.DELETE_GUARD_ENABLED,
       DEFAULT_DELETE_GUARD_ENABLED,
     ),
-    maxDeletesPerSyncRun: parsePositiveIntEnv(
-      env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN,
-      DEFAULT_MAX_DELETES_PER_SYNC_RUN,
-    ),
-    maxDeletesPerAccountBatch: parsePositiveIntEnv(
-      env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH,
-      DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH,
-    ),
-    maxDeletesPerBatch: parsePositiveIntEnv(
-      env.DELETE_GUARD_MAX_DELETES_PER_BATCH,
-      DEFAULT_MAX_DELETES_PER_BATCH,
-    ),
+    maxDeletesPerSyncRun,
+    maxDeletesPerAccountBatch,
+    maxDeletesPerBatch,
   };
 }
 
@@ -1039,6 +1187,12 @@ async function listCalendarScopes(
  * - Managed mirrors: skip (Invariant E -- never treat as origin)
  * - foreign_managed: treated as origin (per classifyEvent docs)
  */
+interface ProcessDeltaResult {
+  appliedDeltaCount: number;
+  managedMirrorDeletedCount: number;
+  managedMirrorModifiedCount: number;
+}
+
 async function processAndApplyDeltas(
   accountId: AccountId,
   events: GoogleCalendarEvent[],
@@ -1046,7 +1200,7 @@ async function processAndApplyDeltas(
   provider: ProviderType = "google",
   deleteGuard?: DeleteSafetyGuard,
   stage: "incremental" | "full" = "incremental",
-): Promise<number> {
+): Promise<ProcessDeltaResult> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
   // TM-9eu: Collect modified mirror events for writeback to canonical.
@@ -1230,16 +1384,40 @@ async function processAndApplyDeltas(
 
   const originDeleteDeltas = deltas.filter((delta) => delta.type === "deleted");
   const nonDeleteDeltas = deltas.filter((delta) => delta.type !== "deleted");
+  const originDeleteDeltasToApply = limitAtomicDeleteCandidates(
+    originDeleteDeltas,
+    "apply_provider_deleted_deltas",
+    {
+      account_id: accountId,
+      provider,
+      stage,
+    },
+  );
   let deltasToApply = deltas;
+  if (originDeleteDeltasToApply.length !== originDeleteDeltas.length) {
+    let retainedDeleteCount = 0;
+    deltasToApply = deltas.filter((delta) => {
+      if (delta.type !== "deleted") return true;
+      if (retainedDeleteCount < originDeleteDeltasToApply.length) {
+        retainedDeleteCount += 1;
+        return true;
+      }
+      return false;
+    });
+  }
 
   if (
-    originDeleteDeltas.length > 0 &&
+    originDeleteDeltasToApply.length > 0 &&
     deleteGuard &&
-    !deleteGuard.reserve("apply_provider_deleted_deltas", originDeleteDeltas.length, {
+    !deleteGuard.reserve(
+      "apply_provider_deleted_deltas",
+      originDeleteDeltasToApply.length,
+      {
       provider,
       stage,
       reason: "provider_origin_delete_delta",
-    })
+      },
+    )
   ) {
     deltasToApply = nonDeleteDeltas;
   }
@@ -1274,7 +1452,11 @@ async function processAndApplyDeltas(
     );
   }
 
-  return deltasToApply.length;
+  return {
+    appliedDeltaCount: deltasToApply.length,
+    managedMirrorDeletedCount: managedMirrorDeletedEventIds.size,
+    managedMirrorModifiedCount: managedMirrorModifiedEvents.length,
+  };
 }
 
 /**
@@ -1324,9 +1506,31 @@ async function pruneMissingOriginEvents(
     return 0;
   }
 
+  const prunableByRecency = [...prunable].sort((a, b) => {
+    const aStart = a.startTs ? Date.parse(a.startTs) : Number.NaN;
+    const bStart = b.startTs ? Date.parse(b.startTs) : Number.NaN;
+    const aScore = Number.isFinite(aStart) ? aStart : 0;
+    const bScore = Number.isFinite(bStart) ? bStart : 0;
+    return bScore - aScore;
+  });
+  const prunableToDelete = limitAtomicDeleteCandidates(
+    prunableByRecency,
+    "prune_missing_origin_events",
+    {
+      account_id: accountId,
+      provider,
+      stage: metadata.stage,
+      reason: metadata.reason,
+    },
+  );
+
   if (
     deleteGuard &&
-    !deleteGuard.reserve("prune_missing_origin_events", prunable.length, metadata)
+    !deleteGuard.reserve(
+      "prune_missing_origin_events",
+      prunableToDelete.length,
+      metadata,
+    )
   ) {
     return 0;
   }
@@ -1334,7 +1538,7 @@ async function pruneMissingOriginEvents(
   return applyDeletedOriginDeltas(
     accountId,
     userId,
-    prunable.map((origin) => origin.originEventId),
+    prunableToDelete.map((origin) => origin.originEventId),
     env,
   );
 }
@@ -1546,6 +1750,10 @@ function isWebhookDeleteChangeType(changeType: string | undefined): boolean {
   return changeType?.trim().toLowerCase() === "deleted";
 }
 
+function isScheduledMicrosoftSweepMessage(resourceId: string): boolean {
+  return resourceId.startsWith("scheduled-ms:");
+}
+
 function getMicrosoftWebhookDeleteEventIds(
   message: SyncIncrementalMessage,
 ): string[] {
@@ -1564,6 +1772,284 @@ function getMicrosoftWebhookDeleteEventIds(
   }
 
   return [...candidates];
+}
+
+async function microsoftEventExists(
+  providerEventId: string,
+  accessToken: string,
+  fetchFn?: FetchFn,
+): Promise<boolean> {
+  const encodedEventId = encodeURIComponent(providerEventId);
+  const response = await (fetchFn ?? globalThis.fetch.bind(globalThis))(
+    `https://graph.microsoft.com/v1.0/me/events/${encodedEventId}?$select=id`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Prefer: 'IdType="ImmutableId"',
+      },
+    },
+  );
+
+  if (response.status === 404 || response.status === 410) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `Microsoft event probe failed (${response.status}): ${body}`,
+    );
+  }
+
+  return true;
+}
+
+const MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT = 0.3;
+const MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE = 20;
+const MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES = HARD_MAX_DELETES_PER_OPERATION;
+const MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const MS_SWEEP_RECONCILE_START_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS = 45 * 24 * 60 * 60 * 1000;
+
+async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
+  accountId: AccountId,
+  accessToken: string,
+  env: Env,
+  deps: SyncConsumerDeps,
+  deleteGuard: DeleteSafetyGuard | undefined,
+  retryOpts: RetryOptions,
+): Promise<number> {
+  const userId = await lookupUserId(accountId, env);
+  if (!userId) {
+    return 0;
+  }
+
+  const activeMirrors = await loadActiveMirrors(accountId, userId, env);
+  const snapshotsByCalendar = new Map<string, Set<string>>();
+  const mirrorScopes = new Map<string, Set<string>>();
+
+  for (const mirror of activeMirrors) {
+    if (
+      typeof mirror.provider_event_id !== "string" ||
+      mirror.provider_event_id.length === 0 ||
+      typeof mirror.target_calendar_id !== "string" ||
+      mirror.target_calendar_id.length === 0
+    ) {
+      continue;
+    }
+    const scopeSet = mirrorScopes.get(mirror.target_calendar_id) ?? new Set<string>();
+    scopeSet.add(mirror.provider_event_id);
+    mirrorScopes.set(mirror.target_calendar_id, scopeSet);
+  }
+
+  if (mirrorScopes.size === 0) {
+    return 0;
+  }
+
+  const snapshotClient = createCalendarProvider("microsoft", accessToken, deps.fetchFn);
+  let reconciledDeletes = 0;
+
+  for (const [calendarId, mirrorEventIdsSet] of mirrorScopes.entries()) {
+    const mirrorEventIds = [...mirrorEventIdsSet];
+    if (mirrorEventIds.length === 0) continue;
+
+    let snapshotIds = snapshotsByCalendar.get(calendarId);
+    if (!snapshotIds) {
+      snapshotIds = await fetchMicrosoftCalendarSnapshotEventIds(
+        snapshotClient,
+        calendarId,
+        retryOpts,
+      );
+      snapshotsByCalendar.set(calendarId, snapshotIds);
+    }
+
+    const missingMirrorEventIds = mirrorEventIds.filter((providerEventId) => {
+      return !providerEventIdVariants(providerEventId).some((candidateId) =>
+        snapshotIds?.has(candidateId),
+      );
+    });
+
+    if (missingMirrorEventIds.length === 0) {
+      continue;
+    }
+
+    // Guardrail: if a large fraction of mirrors in this calendar appears
+    // missing, skip reconciliation to avoid destructive behavior on partial
+    // provider snapshots.
+    const missingRatio = missingMirrorEventIds.length / mirrorEventIds.length;
+    if (
+      mirrorEventIds.length >= MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE &&
+      missingRatio > MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT
+    ) {
+      console.warn(
+        "sync-consumer: scheduled microsoft mirror reconcile skipped due high missing ratio",
+        {
+          account_id: accountId,
+          calendar_id: calendarId,
+          missing: missingMirrorEventIds.length,
+          total: mirrorEventIds.length,
+          missing_ratio: missingRatio,
+        },
+      );
+      continue;
+    }
+
+    const recentMissingMirrorIds = await filterRecentMissingMirrorDeleteCandidates(
+      accountId,
+      userId,
+      missingMirrorEventIds,
+      env,
+    );
+    if (recentMissingMirrorIds.length === 0) {
+      continue;
+    }
+
+    const recentMissingMirrorIdsToDelete = limitAtomicDeleteCandidates(
+      recentMissingMirrorIds,
+      "scheduled_snapshot_reconcile",
+      {
+        account_id: accountId,
+        calendar_id: calendarId,
+        max_allowed: MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES,
+      },
+    );
+
+    reconciledDeletes += await applyManagedMirrorDeletes(
+      accountId,
+      userId,
+      recentMissingMirrorIdsToDelete,
+      env,
+      deleteGuard,
+      {
+        provider: "microsoft",
+        stage: "incremental",
+        reason: "scheduled_snapshot_reconcile",
+      },
+    );
+  }
+
+  return reconciledDeletes;
+}
+
+async function fetchMicrosoftCalendarSnapshotEventIds(
+  client: ReturnType<typeof createCalendarProvider>,
+  calendarId: string,
+  retryOpts: RetryOptions,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let pageToken: string | undefined;
+
+  do {
+    const response = await retryWithBackoff(
+      () => client.listEvents(calendarId, undefined, pageToken),
+      retryOpts,
+    );
+    for (const event of response.events) {
+      const raw = ((event as Record<string, unknown>)._msRaw ?? event) as Record<
+        string,
+        unknown
+      >;
+      const eventId =
+        typeof raw.id === "string" && raw.id.length > 0
+          ? raw.id
+          : typeof (event as Record<string, unknown>).id === "string"
+            ? (event as Record<string, string>).id
+            : "";
+      if (!eventId) continue;
+      for (const variant of providerEventIdVariants(eventId)) {
+        ids.add(variant);
+      }
+    }
+    pageToken = response.nextPageToken;
+  } while (pageToken);
+
+  return ids;
+}
+
+async function filterRecentMissingMirrorDeleteCandidates(
+  accountId: AccountId,
+  userId: string,
+  providerEventIds: string[],
+  env: Env,
+): Promise<string[]> {
+  if (providerEventIds.length === 0) return [];
+
+  const userGraphId = env.USER_GRAPH.idFromName(userId);
+  const userGraphStub = env.USER_GRAPH.get(userGraphId);
+  const candidates: Array<{ providerEventId: string; recencyMs: number }> = [];
+
+  for (const providerEventId of providerEventIds) {
+    const canonicalEventId = await findCanonicalIdByMirror(
+      userGraphStub,
+      accountId,
+      providerEventId,
+    );
+    if (!canonicalEventId) {
+      continue;
+    }
+
+    const canonicalResponse = await userGraphStub.fetch(
+      new Request("https://user-graph.internal/getCanonicalEvent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ canonical_event_id: canonicalEventId }),
+      }),
+    );
+    if (!canonicalResponse.ok) {
+      continue;
+    }
+
+    const canonicalPayload = (await canonicalResponse.json()) as {
+      event?: Record<string, unknown>;
+    } | null;
+    const canonicalEvent = canonicalPayload?.event;
+    if (!canonicalEvent) {
+      continue;
+    }
+
+    const startTs = extractStartTimestamp(
+      canonicalEvent.start as
+        | { dateTime?: string; date?: string }
+        | string
+        | null
+        | undefined,
+    );
+
+    // Safety: never reconcile-delete historical tails from scheduled snapshots.
+    if (!isPruneWindowEvent(startTs)) {
+      continue;
+    }
+
+    const startMs = startTs ? Date.parse(startTs) : Number.NaN;
+    const updatedAtRaw = canonicalEvent.updated_at;
+    const updatedMs =
+      typeof updatedAtRaw === "string" ? Date.parse(updatedAtRaw) : Number.NaN;
+    const now = Date.now();
+    const updatedIsRecent =
+      Number.isFinite(updatedMs) &&
+      now - updatedMs <= MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS;
+    const startIsNearNow =
+      Number.isFinite(startMs) &&
+      startMs >= now - MS_SWEEP_RECONCILE_START_LOOKBACK_MS &&
+      startMs <= now + MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS;
+
+    // Scheduled fallback should only reconcile events we touched recently
+    // or that occur near now. This avoids broad historical sweeps.
+    if (!updatedIsRecent && !startIsNearNow) {
+      continue;
+    }
+
+    const recencyMs = Number.isFinite(updatedMs)
+      ? updatedMs
+      : Number.isFinite(startMs)
+        ? startMs
+        : 0;
+    candidates.push({ providerEventId, recencyMs });
+  }
+
+  candidates.sort((a, b) => b.recencyMs - a.recencyMs);
+  return candidates.map((candidate) => candidate.providerEventId);
 }
 
 /**
@@ -1709,39 +2195,38 @@ async function applyDeletedOriginDeltas(
   env: Env,
 ): Promise<number> {
   if (originEventIds.length === 0) return 0;
+  const originEventIdsToDelete = limitAtomicDeleteCandidates(
+    originEventIds,
+    "apply_deleted_origin_deltas",
+    {
+      account_id: accountId,
+    },
+  );
 
   const userGraphId = env.USER_GRAPH.idFromName(userId);
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
-  const chunkSize = 200;
-  let deleted = 0;
+  const deltas: ProviderDelta[] = originEventIdsToDelete.map((originEventId) => ({
+    type: "deleted",
+    origin_account_id: accountId,
+    origin_event_id: originEventId,
+  }));
 
-  for (let i = 0; i < originEventIds.length; i += chunkSize) {
-    const chunk = originEventIds.slice(i, i + chunkSize);
-    const deltas: ProviderDelta[] = chunk.map((originEventId) => ({
-      type: "deleted",
-      origin_account_id: accountId,
-      origin_event_id: originEventId,
-    }));
+  const response = await userGraphStub.fetch(
+    new Request("https://user-graph.internal/applyProviderDelta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountId, deltas }),
+    }),
+  );
 
-    const response = await userGraphStub.fetch(
-      new Request("https://user-graph.internal/applyProviderDelta", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account_id: accountId, deltas }),
-      }),
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.applyProviderDelta (prune) failed (${response.status}): ${body}`,
     );
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(
-        `UserGraphDO.applyProviderDelta (prune) failed (${response.status}): ${body}`,
-      );
-    }
-
-    deleted += chunk.length;
   }
 
-  return deleted;
+  return originEventIdsToDelete.length;
 }
 
 async function applyProviderDeltas(
@@ -1776,8 +2261,8 @@ async function applyManagedMirrorDeletes(
   env: Env,
   deleteGuard?: DeleteSafetyGuard,
   metadata: DeleteGuardMetadata = {},
-): Promise<void> {
-  if (providerEventIds.length === 0) return;
+): Promise<number> {
+  if (providerEventIds.length === 0) return 0;
 
   const userGraphId = env.USER_GRAPH.idFromName(userId);
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
@@ -1804,27 +2289,48 @@ async function applyManagedMirrorDeletes(
     canonicalIds.add(canonicalEventId);
   }
 
+  const canonicalIdsToDelete = limitAtomicDeleteCandidates(
+    [...canonicalIds],
+    "delete_managed_mirror_canonicals",
+    {
+      account_id: accountId,
+      provider: metadata.provider,
+      stage: metadata.stage,
+      reason: metadata.reason,
+    },
+  );
+
   if (
-    canonicalIds.size > 0 &&
+    canonicalIdsToDelete.length > 0 &&
     deleteGuard &&
-    !deleteGuard.reserve("delete_managed_mirror_canonicals", canonicalIds.size, metadata)
+    !deleteGuard.reserve(
+      "delete_managed_mirror_canonicals",
+      canonicalIdsToDelete.length,
+      metadata,
+    )
   ) {
-    return;
+    return 0;
   }
 
-  for (const canonicalEventId of canonicalIds) {
+  let deletedCount = 0;
+  for (const canonicalEventId of canonicalIdsToDelete) {
     const deleted = await deleteCanonicalById(userGraphStub, canonicalEventId, source);
     console.info("sync-consumer: canonical delete result", {
       canonical_event_id: canonicalEventId,
       source,
       deleted,
     });
+    if (deleted) {
+      deletedCount += 1;
+    }
     if (!deleted) {
       console.warn(
         `sync-consumer: managed mirror delete resolved canonical but delete returned false (canonical_event_id=${canonicalEventId})`,
       );
     }
   }
+
+  return deletedCount;
 }
 
 /**
@@ -1887,10 +2393,17 @@ async function applyManagedMirrorModifications(
     }
 
     const canonicalResult = (await canonicalResponse.json()) as {
-      event: { origin_account_id: string; origin_event_id: string };
+      event?: Record<string, unknown>;
     } | null;
 
-    if (!canonicalResult?.event) {
+    const canonicalEvent = canonicalResult?.event;
+    if (
+      !canonicalEvent ||
+      typeof canonicalEvent.origin_account_id !== "string" ||
+      canonicalEvent.origin_account_id.length === 0 ||
+      typeof canonicalEvent.origin_event_id !== "string" ||
+      canonicalEvent.origin_event_id.length === 0
+    ) {
       console.warn(
         `sync-consumer: mirror writeback skipped, canonical event not found (canonical_event_id=${canonicalEventId})`,
       );
@@ -1913,12 +2426,24 @@ async function applyManagedMirrorModifications(
       continue;
     }
 
+    if (
+      isNoOpMirrorWriteback(
+        canonicalEvent,
+        originDelta.event as Record<string, unknown>,
+      )
+    ) {
+      console.info(
+        `sync-consumer: mirror writeback skipped, no-op change (account=${accountId}, provider_event_id=${providerEventId}, canonical_event_id=${canonicalEventId})`,
+      );
+      continue;
+    }
+
     // Step 4: Construct writeback delta using canonical's origin keys
     // so the DO's handleUpdated can look up the right canonical event.
     const writebackDelta: ProviderDelta = {
       type: "updated",
-      origin_event_id: canonicalResult.event.origin_event_id,
-      origin_account_id: canonicalResult.event.origin_account_id as AccountId,
+      origin_event_id: canonicalEvent.origin_event_id,
+      origin_account_id: canonicalEvent.origin_account_id as AccountId,
       event: originDelta.event,
     };
 
@@ -1926,7 +2451,7 @@ async function applyManagedMirrorModifications(
 
     // AC4: Audit log for mirror writeback traceability
     console.info(
-      `sync-consumer: mirror_writeback (account=${accountId}, provider_event_id=${providerEventId}, canonical_event_id=${canonicalEventId}, origin_account_id=${canonicalResult.event.origin_account_id})`,
+      `sync-consumer: mirror_writeback (account=${accountId}, provider_event_id=${providerEventId}, canonical_event_id=${canonicalEventId}, origin_account_id=${canonicalEvent.origin_account_id})`,
     );
   }
 
@@ -1961,6 +2486,85 @@ async function applyManagedMirrorModifications(
       );
     }
   }
+}
+
+function isNoOpMirrorWriteback(
+  canonicalEvent: Record<string, unknown>,
+  updatedEvent: Record<string, unknown>,
+): boolean {
+  const comparableScalarFields = [
+    "title",
+    "description",
+    "location",
+    "all_day",
+    "status",
+    "visibility",
+    "transparency",
+    "recurrence_rule",
+  ] as const;
+
+  let comparedField = false;
+
+  for (const field of comparableScalarFields) {
+    if (field in canonicalEvent || field in updatedEvent) {
+      comparedField = true;
+      if ((canonicalEvent[field] ?? null) !== (updatedEvent[field] ?? null)) {
+        return false;
+      }
+    }
+  }
+
+  if ("start" in canonicalEvent || "start" in updatedEvent) {
+    comparedField = true;
+    if (
+      !isDateTimeEnvelopeEqual(
+        canonicalEvent.start,
+        updatedEvent.start,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  if ("end" in canonicalEvent || "end" in updatedEvent) {
+    comparedField = true;
+    if (
+      !isDateTimeEnvelopeEqual(
+        canonicalEvent.end,
+        updatedEvent.end,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return comparedField;
+}
+
+function isDateTimeEnvelopeEqual(left: unknown, right: unknown): boolean {
+  const normalize = (value: unknown): Record<string, string | null> => {
+    if (typeof value !== "object" || value === null) {
+      return {
+        date: null,
+        dateTime: null,
+        timeZone: null,
+      };
+    }
+    const record = value as Record<string, unknown>;
+    return {
+      date: typeof record.date === "string" ? record.date : null,
+      dateTime: typeof record.dateTime === "string" ? record.dateTime : null,
+      timeZone: typeof record.timeZone === "string" ? record.timeZone : null,
+    };
+  };
+
+  const a = normalize(left);
+  const b = normalize(right);
+  return (
+    a.date === b.date &&
+    a.dateTime === b.dateTime &&
+    a.timeZone === b.timeZone
+  );
 }
 
 async function findCanonicalIdByMirror(

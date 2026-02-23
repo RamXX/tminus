@@ -163,7 +163,7 @@ interface DOCallTracker {
 function createMockEnv(options: {
   d1: D1Database;
   mirrorLookup: Record<string, string>;
-  canonicalEvents: Record<string, { event: { origin_account_id: string; origin_event_id: string }; mirrors: unknown[] }>;
+  canonicalEvents: Record<string, { event: Record<string, unknown>; mirrors: unknown[] }>;
   tracker: DOCallTracker;
 }): Env {
   const { mirrorLookup, canonicalEvents, tracker } = options;
@@ -446,6 +446,55 @@ describe("TM-9eu: Mirror-side modification writeback", () => {
     expect(evt.description).toBe("User added notes");
 
     // No deletes should occur
+    expect(tracker.deleteCanonicalCalls).toHaveLength(0);
+  });
+
+  it("skips writeback when mirror update is a no-op against canonical payload", async () => {
+    const env = createMockEnv({
+      d1: createRealD1(db),
+      mirrorLookup: {
+        google_evt_mirror_wb_100: CANONICAL_EVENT_ID,
+      },
+      canonicalEvents: {
+        [CANONICAL_EVENT_ID]: {
+          event: {
+            origin_account_id: ORIGIN_ACCOUNT_ID,
+            origin_event_id: ORIGIN_EVENT_ID,
+            title: "Mirrored Meeting",
+            description: "A mirrored event",
+            location: "Room 101",
+            start: { dateTime: "2026-02-20T10:00:00Z" },
+            end: { dateTime: "2026-02-20T11:00:00Z" },
+            all_day: false,
+            status: "confirmed",
+            visibility: "default",
+            transparency: "opaque",
+          },
+          mirrors: [],
+        },
+      },
+      tracker,
+    });
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeManagedMirrorEvent()],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "ch-noop-1",
+      resource_id: "res-noop-1",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(tracker.findCanonicalByMirrorCalls).toHaveLength(1);
+    expect(tracker.getCanonicalEventCalls).toHaveLength(1);
+    expect(tracker.applyDeltaCalls).toHaveLength(0);
     expect(tracker.deleteCanonicalCalls).toHaveLength(0);
   });
 

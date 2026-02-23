@@ -306,7 +306,7 @@ interface UserGraphDOState {
   // TM-9eu: Canonical events lookup for mirror writeback (getCanonicalEvent)
   canonicalEventsById: Record<
     string,
-    { event: { origin_account_id: string; origin_event_id: string }; mirrors: unknown[] }
+    { event: Record<string, unknown>; mirrors: unknown[] }
   >;
   getCanonicalEventCalls: Array<{ canonical_event_id: string }>;
 }
@@ -773,7 +773,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     ]);
   });
 
-  it("delete guard blocks anomalous full-sync prune spikes and emits sync failure signal", async () => {
+  it("full-sync prune spikes are truncated to one atomic delete", async () => {
     env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
     env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "2";
     env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
@@ -806,12 +806,18 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
 
     await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
-    // Only the upsert delta should be applied. Prune delete batch is blocked.
-    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    // Atomic deletion: upsert call plus exactly one synthetic delete delta.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(2);
     expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
-    expect(accountDOState.syncFailureCalls).toHaveLength(1);
-    expect(accountDOState.syncFailureCalls[0].error).toContain("Delete guard triggered");
+    expect(userGraphDOState.applyDeltaCalls[1].deltas).toEqual([
+      {
+        type: "deleted",
+        origin_account_id: ACCOUNT_A.account_id,
+        origin_event_id: "google_evt_stale_guard_2",
+      },
+    ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls).toHaveLength(0);
   });
 
   it("full sync does not prune historical events outside prune window", async () => {
@@ -1074,7 +1080,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("delete guard blocks anomalous managed-mirror delete spikes and emits sync failure signal", async () => {
+  it("managed-mirror delete spikes are truncated to one atomic delete", async () => {
     env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
     env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "1";
     env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
@@ -1112,11 +1118,15 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       errorSpy.mockRestore();
     }
 
-    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
-    expect(accountDOState.syncFailureCalls).toHaveLength(1);
-    expect(accountDOState.syncFailureCalls[0].error).toContain("Delete guard triggered");
-    expect(sawGuardAuditLog).toBe(true);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000111",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls).toHaveLength(0);
+    expect(sawGuardAuditLog).toBe(false);
   });
 
   it("google deleted mirror without managed metadata still triggers canonical delete via mirror index", async () => {
@@ -2981,6 +2991,379 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
+  it("scheduled microsoft sweep with mirror-only updates does not auto-enqueue SYNC_FULL", async () => {
+    const mirrorEventId = "AAMkAG-ms-mirror-200";
+    const canonicalEventId = "evt_01HXYZ00000000000000000001";
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorEventId, target_calendar_id: "primary" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_200",
+          title: "Busy",
+          start: { dateTime: "2026-02-15T11:00:00.0000000", timeZone: "UTC" },
+          end: { dateTime: "2026-02-15T12:00:00.0000000", timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftManagedMirrorEvent()],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T05:15:37.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
+  it("scheduled microsoft sweep reconciles missing managed mirror via bounded snapshot check", async () => {
+    const mirrorEventId = "AAMkAG-ms-mirror-missing-6543";
+    const canonicalEventId = "evt_01HXYZ000000000000000006543";
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorEventId, target_calendar_id: "primary" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_6543",
+          title: "t6543",
+          start: { dateTime: "2026-02-23T20:55:00.000Z", timeZone: "UTC" },
+          end: { dateTime: "2026-02-23T21:25:00.000Z", timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // Snapshot reconcile call (no deltatoken): mirror is missing upstream.
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T05:45:00.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
+  it("scheduled microsoft sweep does not reconcile-delete historical missing mirrors", async () => {
+    const mirrorEventId = "AAMkAG-ms-mirror-old-1";
+    const canonicalEventId = "evt_01HXYZ000000000000000009001";
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorEventId, target_calendar_id: "primary" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_old_1",
+          title: "Historical event",
+          start: { dateTime: "2024-01-01T10:00:00.000Z", timeZone: "UTC" },
+          end: { dateTime: "2024-01-01T11:00:00.000Z", timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-new-2",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T05:45:00.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
+  it("scheduled microsoft sweep reconciles only one delete when recent missing candidates exceed safety cap", async () => {
+    const missingMirrorCount = 6;
+    const nowIso = new Date().toISOString();
+
+    userGraphDOState.activeMirrors = Array.from({ length: missingMirrorCount }, (_, idx) => ({
+      provider_event_id: `AAMkAG-ms-mirror-cap-${idx + 1}`,
+      target_calendar_id: "primary",
+    }));
+    userGraphDOState.mirrorLookupByProviderEventId = Object.fromEntries(
+      Array.from({ length: missingMirrorCount }, (_, idx) => [
+        `AAMkAG-ms-mirror-cap-${idx + 1}`,
+        `evt_01HXYZ00000000000000000CAP${idx + 1}`,
+      ]),
+    );
+    userGraphDOState.canonicalEventsById = Object.fromEntries(
+      Array.from({ length: missingMirrorCount }, (_, idx) => [
+        `evt_01HXYZ00000000000000000CAP${idx + 1}`,
+        {
+          event: {
+            origin_account_id: "acc_01HXYZ0000000000000000000A",
+            origin_event_id: `google_evt_origin_cap_${idx + 1}`,
+            title: `Cap ${idx + 1}`,
+            start: { dateTime: nowIso, timeZone: "UTC" },
+            end: { dateTime: nowIso, timeZone: "UTC" },
+            updated_at: nowIso,
+            all_day: false,
+            status: "confirmed",
+            visibility: "default",
+            transparency: "opaque",
+          },
+          mirrors: [],
+        },
+      ]),
+    );
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-cap",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T05:45:00.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000CAP1",
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
   it("incremental sync: legacy Microsoft mirror scope without cursor enqueues SYNC_FULL bootstrap", async () => {
     const mirrorCalendarId = "overlay-ms-cal-1";
     const mirrorEventId = "AAMkAG-ms-overlay-mirror-1";
@@ -3660,7 +4043,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
-  it("webhook_change_type=deleted with unknown event ID does NOT delete immediately and enqueues reconcile fallback", async () => {
+  it("webhook_change_type=deleted with unknown event ID does NOT delete and does not enqueue SYNC_FULL", async () => {
     // No mirrors registered
     userGraphDOState.activeMirrors = [];
     userGraphDOState.mirrorLookupByProviderEventId = {};
@@ -3685,11 +4068,9 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     // No canonical deletion should occur
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
 
-    // Normal sync still completes and a reconcile fallback is queued.
+    // Normal sync still completes; no broad reconcile fallback should be queued.
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
-    expect(syncQueue.messages).toHaveLength(1);
-    expect((syncQueue.messages[0] as { type: string }).type).toBe("SYNC_FULL");
-    expect((syncQueue.messages[0] as { reason: string }).reason).toBe("reconcile");
+    expect(syncQueue.messages).toHaveLength(0);
   });
 
   it("webhook_change_type=updated does NOT trigger mirror deletion", async () => {
@@ -3725,6 +4106,54 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     // Normal sync processes the origin event
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("webhook_change_type=updated deletes mirror canonical when provider probe confirms event is missing", async () => {
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-201";
+    const canonicalEventId = "evt_01HXYZ00000000000000000077";
+    const encodedMirrorEventId = encodeURIComponent(mirrorProviderEventId);
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorProviderEventId, target_calendar_id: "cal-target" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+
+    const baseFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+    const msFetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes(`/me/events/${encodedMirrorEventId}?$select=id`)) {
+        return new Response(
+          JSON.stringify({ error: { code: "ErrorItemNotFound", message: "Not found" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return baseFetch(input, init);
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-update-missing-1",
+      resource_id: `me/events/${mirrorProviderEventId}`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "updated",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
   });
 
   it("webhook_change_type=deleted with non-event resource path does NOT delete", async () => {
