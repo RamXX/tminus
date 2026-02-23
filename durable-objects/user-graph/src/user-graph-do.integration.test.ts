@@ -6061,6 +6061,40 @@ describe("UserGraphDO buffer constraints", () => {
       expect(orphanAfter).toHaveLength(0);
     });
 
+    it("requeueDeletingMirrors re-enqueues one DELETING mirror atomically", async () => {
+      insertPolicyEdge(db, {
+        policyId: "pol_requeue_delete_atomic",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      const delta = makeCreatedDelta();
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+      expect(events).toHaveLength(1);
+      const canonicalId = events[0].canonical_event_id;
+
+      // Move mirror into DELETING lifecycle and drop the original queue artifact.
+      await ug.deleteCanonicalEvent(canonicalId, "user:test");
+      queue.clear();
+
+      const result = await ug.requeueDeletingMirrors(999);
+
+      // Hard safety cap: always a single replay candidate per call.
+      expect(result.limit).toBe(1);
+      expect(result.mirrors).toBe(1);
+      expect(result.enqueued).toBe(1);
+
+      expect(queue.messages).toHaveLength(1);
+      const msg = queue.messages[0] as Record<string, unknown>;
+      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.canonical_event_id).toBe(canonicalId);
+      expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
+    });
+
     it("deleteCanonicalEvent uses outbox for DELETE_MIRROR messages", async () => {
       // Set up policy edge and create an event with mirror
       insertPolicyEdge(db, {

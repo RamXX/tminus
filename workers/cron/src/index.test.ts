@@ -1924,6 +1924,7 @@ describe("handleFeedRefresh (via scheduled)", () => {
         "provider = 'microsoft'": [
           {
             account_id: TEST_ACCOUNT_ID_1,
+            user_id: TEST_USER_ID_1,
             channel_id: "ms-sub-123",
             channel_calendar_id: "AAMk-cal-123",
           },
@@ -1950,6 +1951,7 @@ describe("handleFeedRefresh (via scheduled)", () => {
         "provider = 'microsoft'": [
           {
             account_id: TEST_ACCOUNT_ID_2,
+            user_id: TEST_USER_ID_2,
             channel_id: null,
             channel_calendar_id: null,
           },
@@ -1964,6 +1966,52 @@ describe("handleFeedRefresh (via scheduled)", () => {
     const msg = syncQueue.messages[0] as Record<string, unknown>;
     expect(msg.channel_id).toBe(`scheduled-ms-${TEST_ACCOUNT_ID_2}`);
     expect(msg.calendar_id).toBeNull();
+  });
+
+  it("replays at most one deleting mirror per Microsoft-sweep user", async () => {
+    const userGraphCalls: Array<{ url: string; body: string }> = [];
+    const { env, syncQueue } = createMockEnv({
+      d1Results: {
+        provider_subject: [],
+        "provider = 'microsoft'": [
+          {
+            account_id: TEST_ACCOUNT_ID_1,
+            user_id: TEST_USER_ID_1,
+            channel_id: "ms-sub-a",
+            channel_calendar_id: null,
+          },
+          {
+            account_id: TEST_ACCOUNT_ID_2,
+            user_id: TEST_USER_ID_1,
+            channel_id: "ms-sub-b",
+            channel_calendar_id: null,
+          },
+        ],
+      },
+      userGraphDOFetch: async (url, init) => {
+        const body = init?.body ? String(init.body) : "";
+        userGraphCalls.push({ url, body });
+        if (url.includes("requeueDeletingMirrors")) {
+          return new Response(
+            JSON.stringify({ mirrors: 1, enqueued: 1, limit: 1 }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("OK", { status: 200 });
+      },
+    });
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_FEED_REFRESH), env, mockCtx);
+
+    expect(syncQueue.messages.length).toBe(2);
+
+    const replayCalls = userGraphCalls.filter((call) =>
+      call.url.includes("requeueDeletingMirrors")
+    );
+    expect(replayCalls).toHaveLength(1);
+    const replayBody = JSON.parse(replayCalls[0].body) as { limit?: number };
+    expect(replayBody.limit).toBe(1);
   });
 
   it("still runs Microsoft sweep when ICS feed refresh throws", async () => {
@@ -1982,6 +2030,7 @@ describe("handleFeedRefresh (via scheduled)", () => {
                   return {
                     results: [{
                       account_id: TEST_ACCOUNT_ID_1,
+                      user_id: TEST_USER_ID_1,
                       channel_id: "ms-sub-throw-safe",
                       channel_calendar_id: null,
                     } as T],

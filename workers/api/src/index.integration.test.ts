@@ -2241,6 +2241,40 @@ describe("Integration: Sync status endpoints", () => {
     expect(doBody.limit).toBe(50);
   });
 
+  it("POST /v1/sync/requeue-deleting enforces atomic limit and forwards to UserGraphDO", async () => {
+    const userGraphDO = createMockDONamespace({
+      pathResponses: new Map([
+        ["/requeueDeletingMirrors", { mirrors: 1, enqueued: 1, limit: 1 }],
+      ]),
+    });
+
+    const handler = createHandler();
+    const env = buildEnv(d1, userGraphDO);
+    const authHeader = await makeAuthHeader();
+
+    const response = await handler.fetch(
+      new Request("https://api.tminus.dev/v1/sync/requeue-deleting?limit=999", {
+        method: "POST",
+        headers: { Authorization: authHeader },
+      }),
+      env,
+      mockCtx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { mirrors: number; enqueued: number; limit: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ mirrors: 1, enqueued: 1, limit: 1 });
+
+    expect(userGraphDO.calls).toHaveLength(1);
+    expect(userGraphDO.calls[0].path).toBe("/requeueDeletingMirrors");
+    const doBody = userGraphDO.calls[0].body as Record<string, unknown>;
+    expect(doBody.limit).toBe(1);
+  });
+
   it("POST /v1/sync/settle-out-of-window forwards past/future window params", async () => {
     const userGraphDO = createMockDONamespace({
       pathResponses: new Map([
@@ -2374,6 +2408,7 @@ describe("Integration: Auth enforcement full flow", () => {
       { method: "GET", path: "/v1/sync/diagnostics" },
       { method: "POST", path: "/v1/sync/replay-pending" },
       { method: "POST", path: "/v1/sync/requeue-pending" },
+      { method: "POST", path: "/v1/sync/requeue-deleting" },
       { method: "POST", path: "/v1/sync/settle-historical" },
       { method: "POST", path: "/v1/sync/settle-out-of-window" },
       { method: "POST", path: "/v1/sync/settle-stuck-pending" },

@@ -386,6 +386,60 @@ async function handleRequeuePending(
   }
 }
 
+async function handleRequeueDeleting(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const limitRaw = url.searchParams.get("limit");
+  const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : 1;
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.max(1, Math.min(1, parsedLimit))
+    : 1;
+
+  try {
+    const id = env.USER_GRAPH.idFromName(auth.userId);
+    const stub = env.USER_GRAPH.get(id);
+    const response = await stub.fetch(
+      new Request("https://do.internal/requeueDeletingMirrors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit }),
+      }),
+    );
+
+    if (response.status === 404 || response.status === 405) {
+      // During rolling deploys, some hot DO instances may not yet expose
+      // the replay route. Treat as a no-op and let periodic retries converge.
+      return jsonResponse(
+        successEnvelope({ mirrors: 0, enqueued: 0, limit }),
+        200,
+      );
+    }
+
+    if (!response.ok) {
+      return jsonResponse(
+        errorEnvelope("Failed to requeue deleting mirrors", "INTERNAL_ERROR"),
+        ErrorCode.INTERNAL_ERROR,
+      );
+    }
+
+    const data = (await response.json()) as {
+      mirrors: number;
+      enqueued: number;
+      limit: number;
+    };
+    return jsonResponse(successEnvelope(data), 200);
+  } catch (err) {
+    console.error("Failed to requeue deleting mirrors", err);
+    return jsonResponse(
+      errorEnvelope("Failed to requeue deleting mirrors", "INTERNAL_ERROR"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+  }
+}
+
 async function handleSettleHistorical(
   request: Request,
   auth: AuthContext,
@@ -546,6 +600,10 @@ export const routeSyncRoutes: RouteGroupHandler = async (request, method, pathna
 
   if (method === "POST" && pathname === "/v1/sync/requeue-pending") {
     return handleRequeuePending(request, auth, env);
+  }
+
+  if (method === "POST" && pathname === "/v1/sync/requeue-deleting") {
+    return handleRequeueDeleting(request, auth, env);
   }
 
   if (method === "POST" && pathname === "/v1/sync/settle-historical") {

@@ -514,6 +514,13 @@ export interface RequeuePendingResult {
   readonly limit: number;
 }
 
+/** Result for bounded DELETING mirror replay operations. */
+export interface RequeueDeletingResult {
+  readonly mirrors: number;
+  readonly enqueued: number;
+  readonly limit: number;
+}
+
 /** Result of an account unlink cascade. */
 export interface UnlinkResult {
   readonly events_deleted: number;
@@ -1929,6 +1936,84 @@ export class UserGraphDO {
     return {
       canonical_events: candidates.length,
       enqueued: totalEnqueued + outboxDrained,
+      limit: safeLimit,
+    };
+  }
+
+  /**
+   * Re-enqueue a bounded set of mirrors stuck in DELETING state.
+   *
+   * Safety invariant: this path is hard-capped to one deletion replay per call
+   * to preserve event-atomic behavior and avoid bulk destructive operations.
+   */
+  async requeueDeletingMirrors(limit = 1): Promise<RequeueDeletingResult> {
+    this.ensureMigrated();
+
+    const safeLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(1, Math.trunc(limit)))
+      : 1;
+
+    const candidates = this.sql
+      .exec<{
+        canonical_event_id: string;
+        target_account_id: string;
+        target_calendar_id: string;
+        provider_event_id: string | null;
+      }>(
+        `SELECT canonical_event_id, target_account_id, target_calendar_id, provider_event_id
+         FROM event_mirrors
+         WHERE state = 'DELETING'
+         ORDER BY COALESCE(last_write_ts, '1970-01-01T00:00:00Z') ASC
+         LIMIT ?`,
+        safeLimit,
+      )
+      .toArray();
+
+    if (candidates.length === 0) {
+      return { mirrors: 0, enqueued: 0, limit: safeLimit };
+    }
+
+    let enqueued = 0;
+
+    for (const row of candidates) {
+      const idempotencyKey = await computeIdempotencyKey(
+        row.canonical_event_id,
+        row.target_account_id,
+        `delete:replay:${row.provider_event_id ?? ""}:${row.target_calendar_id}`,
+      );
+
+      try {
+        await this.deleteQueue.send({
+          type: "DELETE_MIRROR",
+          canonical_event_id: row.canonical_event_id,
+          target_account_id: row.target_account_id,
+          target_calendar_id: row.target_calendar_id,
+          provider_event_id: row.provider_event_id ?? "",
+          idempotency_key: idempotencyKey,
+        });
+
+        this.sql.exec(
+          `UPDATE event_mirrors
+           SET last_write_ts = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+          new Date().toISOString(),
+          row.canonical_event_id,
+          row.target_account_id,
+        );
+
+        enqueued++;
+      } catch (err) {
+        console.error("user-graph: requeueDeletingMirrors queue send failed", {
+          canonical_event_id: row.canonical_event_id,
+          target_account_id: row.target_account_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return {
+      mirrors: candidates.length,
+      enqueued,
       limit: safeLimit,
     };
   }
@@ -4376,6 +4461,11 @@ export class UserGraphDO {
 
       "/requeuePendingMirrors": async (body) => {
         const result = await this.requeuePendingMirrors(body?.limit ?? 200);
+        return Response.json(result);
+      },
+
+      "/requeueDeletingMirrors": async (body) => {
+        const result = await this.requeueDeletingMirrors(body?.limit ?? 1);
         return Response.json(result);
       },
 

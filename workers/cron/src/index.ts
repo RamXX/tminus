@@ -97,6 +97,7 @@ interface MsAccountRow {
 
 interface MicrosoftSweepRow {
   readonly account_id: string;
+  readonly user_id: string;
   readonly channel_id: string | null;
   readonly channel_calendar_id: string | null;
 }
@@ -132,6 +133,41 @@ async function forceReplayNonActiveMirrors(
     throw new Error(
       `UserGraphDO.recomputeProjections failed (${response.status}): ${body}`,
     );
+  }
+}
+
+async function requeueDeletingMirrorsAtomic(
+  env: Env,
+  userId: string,
+): Promise<number> {
+  const doId = env.USER_GRAPH.idFromName(userId);
+  const stub = env.USER_GRAPH.get(doId);
+  const response = await stub.fetch(
+    new Request("https://user-graph.internal/requeueDeletingMirrors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: 1 }),
+    }),
+  );
+
+  if (response.status === 404 || response.status === 405) {
+    // Endpoint may be unavailable during rolling deploys.
+    return 0;
+  }
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `UserGraphDO.requeueDeletingMirrors failed (${response.status}): ${body}`,
+    );
+  }
+
+  try {
+    const payload = (await response.json()) as { enqueued?: unknown };
+    const enqueued = Number(payload?.enqueued ?? 0);
+    return Number.isFinite(enqueued) ? enqueued : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -401,7 +437,7 @@ async function handleMsSubscriptionRenewal(env: Env): Promise<void> {
 async function handleMicrosoftIncrementalSweep(env: Env): Promise<void> {
   const { results } = await env.DB
     .prepare(
-      `SELECT account_id, channel_id, channel_calendar_id
+      `SELECT account_id, user_id, channel_id, channel_calendar_id
        FROM accounts
        WHERE status = ?1
          AND provider = 'microsoft'`,
@@ -419,8 +455,11 @@ async function handleMicrosoftIncrementalSweep(env: Env): Promise<void> {
   );
 
   const sweepTs = new Date().toISOString();
+  const replayUsers = new Set<string>();
 
   for (const row of results) {
+    replayUsers.add(row.user_id);
+
     const msg: SyncIncrementalMessage = {
       type: "SYNC_INCREMENTAL",
       account_id: row.account_id as AccountId,
@@ -437,6 +476,22 @@ async function handleMicrosoftIncrementalSweep(env: Env): Promise<void> {
     } catch (err) {
       console.error(
         `Microsoft incremental sweep: failed to enqueue for account ${row.account_id}:`,
+        err,
+      );
+    }
+  }
+
+  for (const userId of replayUsers) {
+    try {
+      const enqueued = await requeueDeletingMirrorsAtomic(env, userId);
+      if (enqueued > 0) {
+        console.log(
+          `Microsoft incremental sweep: requeued ${enqueued} deleting mirror(s) for user ${userId}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `Microsoft incremental sweep: failed deleting-mirror replay for user ${userId}:`,
         err,
       );
     }
