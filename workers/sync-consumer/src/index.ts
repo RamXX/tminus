@@ -1816,8 +1816,8 @@ async function microsoftEventExists(
 const MS_SWEEP_RECONCILE_MISSING_RATIO_LIMIT = 0.3;
 const MS_SWEEP_RECONCILE_MIN_SAMPLE_SIZE = 20;
 const MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES = HARD_MAX_DELETES_PER_OPERATION;
-const MS_SWEEP_RECONCILE_MAX_PROBE_CANDIDATES = 10;
 const MS_SWEEP_RECONCILE_MAX_RECENCY_EVAL_CANDIDATES = 200;
+const MS_SWEEP_RECONCILE_MAX_PROBE_CANDIDATES = MS_SWEEP_RECONCILE_MAX_RECENCY_EVAL_CANDIDATES;
 const MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS = 45 * 24 * 60 * 60 * 1000;
@@ -1996,6 +1996,16 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
       );
       continue;
     }
+    console.log(
+      "sync-consumer: scheduled microsoft mirror reconcile confirmed missing events after provider probe",
+      {
+        account_id: accountId,
+        calendar_id: calendarId,
+        recent_missing_candidates: recentMissingMirrorIds.length,
+        probe_candidates: probeCandidateIds.length,
+        confirmed_missing_candidates: confirmedMissingMirrorIds.length,
+      },
+    );
 
     const confirmedMissingMirrorIdsToDelete = limitAtomicDeleteCandidates(
       confirmedMissingMirrorIds,

@@ -3650,8 +3650,8 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
-  it("scheduled microsoft sweep prioritizes most-recent mirror writes under probe cap", async () => {
-    const oldCandidateCount = 11;
+  it("scheduled microsoft sweep prioritizes most-recent mirror writes under probe/eval caps", async () => {
+    const oldCandidateCount = 18;
     const recentMirrorEventId = "AAMkAG-ms-mirror-cap-recent";
     const recentCanonicalEventId = "evt_01HXYZ00000000000000000CAPRECENT";
     const nowIso = new Date().toISOString();
@@ -3811,7 +3811,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
 
-    expect(probedEventIds.length).toBeLessThanOrEqual(10);
+    expect(probedEventIds.length).toBeLessThanOrEqual(200);
     expect(probedEventIds).toContain(recentMirrorEventId);
     expect(userGraphDOState.deleteCanonicalCalls).toEqual([
       {
