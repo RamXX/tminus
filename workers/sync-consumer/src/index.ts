@@ -2956,11 +2956,215 @@ function isDateTimeEnvelopeEqual(left: unknown, right: unknown): boolean {
 
   const a = normalize(left);
   const b = normalize(right);
+
+  if (a.date !== null || b.date !== null) {
+    return a.date === b.date;
+  }
+
+  if (a.dateTime === null || b.dateTime === null) {
+    return a.dateTime === b.dateTime;
+  }
+
+  const aInstant = tryResolveDateTimeInstantMs(a.dateTime, a.timeZone);
+  const bInstant = tryResolveDateTimeInstantMs(b.dateTime, b.timeZone);
+  if (aInstant !== null && bInstant !== null) {
+    return aInstant === bInstant;
+  }
+
   return (
-    a.date === b.date &&
-    a.dateTime === b.dateTime &&
-    a.timeZone === b.timeZone
+    normalizeDateTimeLexical(a.dateTime) === normalizeDateTimeLexical(b.dateTime) &&
+    normalizeTimeZoneForComparison(a.timeZone) ===
+      normalizeTimeZoneForComparison(b.timeZone)
   );
+}
+
+const WINDOWS_TO_IANA_TIME_ZONE_MAP: Record<string, string> = {
+  "a.u.s. central standard time": "America/Chicago",
+  "atlantic standard time": "America/Halifax",
+  "aus eastern standard time": "Australia/Sydney",
+  "central europe standard time": "Europe/Budapest",
+  "central standard time": "America/Chicago",
+  "e. europe standard time": "Europe/Chisinau",
+  "eastern standard time": "America/New_York",
+  "gmt standard time": "Europe/London",
+  "greenwich standard time": "Atlantic/Reykjavik",
+  "india standard time": "Asia/Kolkata",
+  "israel standard time": "Asia/Jerusalem",
+  "japan standard time": "Asia/Tokyo",
+  "mountain standard time": "America/Denver",
+  "new zealand standard time": "Pacific/Auckland",
+  "pacific standard time": "America/Los_Angeles",
+  "romance standard time": "Europe/Paris",
+  "russian standard time": "Europe/Moscow",
+  "sa eastern standard time": "America/Buenos_Aires",
+  "tokyo standard time": "Asia/Tokyo",
+  "utc": "UTC",
+  "w. europe standard time": "Europe/Berlin",
+  "west asia standard time": "Asia/Tashkent",
+};
+
+function normalizeTimeZoneForComparison(timeZone: string | null): string | null {
+  if (!timeZone || timeZone.length === 0) return null;
+  const trimmed = timeZone.trim();
+  if (trimmed.length === 0) return null;
+  const mapped = WINDOWS_TO_IANA_TIME_ZONE_MAP[trimmed.toLowerCase()];
+  return mapped ?? trimmed;
+}
+
+function normalizeDateTimeLexical(dateTime: string): string {
+  const trimmed = dateTime.trim();
+  return trimmed
+    .replace(
+      /\.(\d+)(?=(?:Z|[+-]\d{2}:\d{2})?$)/i,
+      (_full, fraction: string) => {
+        const normalized = fraction.replace(/0+$/g, "");
+        return normalized.length > 0 ? `.${normalized}` : "";
+      },
+    )
+    .replace(/z$/i, "Z");
+}
+
+function tryResolveDateTimeInstantMs(
+  dateTime: string,
+  timeZone: string | null,
+): number | null {
+  const normalizedDateTime = normalizeDateTimeLexical(dateTime);
+  if (hasExplicitUtcOffset(normalizedDateTime)) {
+    const parsed = Date.parse(normalizedDateTime);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const normalizedTimeZone = normalizeTimeZoneForComparison(timeZone);
+  if (!normalizedTimeZone) return null;
+
+  const parsedLocal = parseNaiveDateTime(normalizedDateTime);
+  if (!parsedLocal) return null;
+
+  return resolveLocalDateTimeToEpochMs(parsedLocal, normalizedTimeZone);
+}
+
+function hasExplicitUtcOffset(value: string): boolean {
+  return /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+}
+
+type ParsedNaiveDateTime = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  millisecond: number;
+};
+
+function parseNaiveDateTime(value: string): ParsedNaiveDateTime | null {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?$/,
+  );
+  if (!match) return null;
+
+  const [
+    ,
+    yearRaw,
+    monthRaw,
+    dayRaw,
+    hourRaw,
+    minuteRaw,
+    secondRaw,
+    fractionRaw,
+  ] = match;
+  const millisecond = fractionRaw
+    ? Number(fractionRaw.slice(0, 3).padEnd(3, "0"))
+    : 0;
+
+  return {
+    year: Number(yearRaw),
+    month: Number(monthRaw),
+    day: Number(dayRaw),
+    hour: Number(hourRaw),
+    minute: Number(minuteRaw),
+    second: secondRaw ? Number(secondRaw) : 0,
+    millisecond,
+  };
+}
+
+const TIME_ZONE_FORMATTER_CACHE = new Map<string, Intl.DateTimeFormat>();
+
+function getTimeZoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = TIME_ZONE_FORMATTER_CACHE.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  TIME_ZONE_FORMATTER_CACHE.set(timeZone, formatter);
+  return formatter;
+}
+
+function getTimeZoneOffsetMs(timeZone: string, epochMs: number): number | null {
+  try {
+    const formatter = getTimeZoneFormatter(timeZone);
+    const parts = formatter.formatToParts(new Date(epochMs));
+    const values = new Map<string, number>();
+    for (const part of parts) {
+      if (part.type === "literal") continue;
+      const parsed = Number(part.value);
+      if (!Number.isFinite(parsed)) continue;
+      values.set(part.type, parsed);
+    }
+
+    const year = values.get("year");
+    const month = values.get("month");
+    const day = values.get("day");
+    const hour = values.get("hour");
+    const minute = values.get("minute");
+    const second = values.get("second");
+    if (
+      year === undefined ||
+      month === undefined ||
+      day === undefined ||
+      hour === undefined ||
+      minute === undefined ||
+      second === undefined
+    ) {
+      return null;
+    }
+
+    const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+    return asUtc - epochMs;
+  } catch {
+    return null;
+  }
+}
+
+function resolveLocalDateTimeToEpochMs(
+  local: ParsedNaiveDateTime,
+  timeZone: string,
+): number | null {
+  const utcGuess = Date.UTC(
+    local.year,
+    local.month - 1,
+    local.day,
+    local.hour,
+    local.minute,
+    local.second,
+    local.millisecond,
+  );
+  const initialOffset = getTimeZoneOffsetMs(timeZone, utcGuess);
+  if (initialOffset === null) return null;
+
+  let epochMs = utcGuess - initialOffset;
+  const refinedOffset = getTimeZoneOffsetMs(timeZone, epochMs);
+  if (refinedOffset === null) return null;
+  epochMs = utcGuess - refinedOffset;
+
+  return epochMs;
 }
 
 async function findCanonicalIdByMirror(

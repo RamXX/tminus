@@ -4667,6 +4667,74 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(eventIds).not.toContain("AAMkAG-cat-mirror-300");
   });
 
+  it("skips Microsoft mirror writeback when only equivalent instant formatting differs", async () => {
+    const canonicalEventId = "evt_01HXYZ00000000000000000002";
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-200";
+    const originEventId = "google_evt_origin_equiv_200";
+    const originAccountId = "acc_01HXYZ0000000000000000000A";
+
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: originAccountId,
+          origin_event_id: originEventId,
+          title: "Busy",
+          start: { dateTime: "2026-02-15T19:00:00Z", timeZone: "UTC" },
+          end: { dateTime: "2026-02-15T20:00:00Z", timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [
+        makeMicrosoftManagedMirrorEvent({
+          id: mirrorProviderEventId,
+          subject: "Busy",
+          start: {
+            dateTime: "2026-02-15T11:00:00.0000000",
+            timeZone: "Pacific Standard Time",
+          },
+          end: {
+            dateTime: "2026-02-15T12:00:00.0000000",
+            timeZone: "Pacific Standard Time",
+          },
+        }),
+      ],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-managed-writeback-noop",
+      resource_id: "resource-ms-managed-writeback-noop",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.findCanonicalByMirrorCalls).toEqual([
+      {
+        target_account_id: MS_ACCOUNT_B.account_id,
+        provider_event_id: mirrorProviderEventId,
+      },
+    ]);
+    expect(userGraphDOState.getCanonicalEventCalls).toEqual([
+      { canonical_event_id: canonicalEventId },
+    ]);
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+  });
+
   it("managed Microsoft mirror deletion triggers canonical delete", async () => {
     userGraphDOState.mirrorLookupByProviderEventId = {
       "AAMkAG-ms-mirror-200": "evt_01HXYZ00000000000000000002",
