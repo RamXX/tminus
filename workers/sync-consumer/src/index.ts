@@ -2131,7 +2131,12 @@ async function filterRecentMissingMirrorDeleteCandidates(
     0,
     MS_SWEEP_RECONCILE_MAX_RECENCY_EVAL_CANDIDATES,
   );
-  const candidates: Array<{ providerEventId: string; recencyMs: number }> = [];
+  const candidates: Array<{
+    providerEventId: string;
+    mirrorWriteMs: number;
+    canonicalUpdatedMs: number;
+    startMs: number;
+  }> = [];
   const now = Date.now();
 
   for (const mirror of mirrorsToEvaluate) {
@@ -2216,12 +2221,12 @@ async function filterRecentMissingMirrorDeleteCandidates(
         continue;
       }
 
-      const recencyMs = Math.max(
-        Number.isFinite(updatedMs) ? updatedMs : 0,
-        Number.isFinite(startMs) ? startMs : 0,
-        Number.isFinite(mirrorWriteMs) ? mirrorWriteMs : 0,
-      );
-      candidates.push({ providerEventId, recencyMs });
+      candidates.push({
+        providerEventId,
+        mirrorWriteMs,
+        canonicalUpdatedMs: updatedMs,
+        startMs,
+      });
     } catch (candidateErr) {
       console.warn(
         "sync-consumer: scheduled microsoft mirror candidate evaluation failed; skipping candidate",
@@ -2234,7 +2239,36 @@ async function filterRecentMissingMirrorDeleteCandidates(
     }
   }
 
-  candidates.sort((a, b) => b.recencyMs - a.recencyMs);
+  const finiteDesc = (left: number, right: number): number => {
+    const leftSafe = Number.isFinite(left) ? left : Number.NEGATIVE_INFINITY;
+    const rightSafe = Number.isFinite(right) ? right : Number.NEGATIVE_INFINITY;
+    return rightSafe - leftSafe;
+  };
+
+  // Prioritize likely user-intent deletes first:
+  // 1) Most recent mirror writes (strongest signal of fresh projection activity)
+  // 2) Most recent canonical updates
+  // 3) Start time closest to now (tie-breaker only; far-future start should not outrank fresh writes)
+  // 4) Latest start time as final deterministic tie-breaker
+  candidates.sort((a, b) => {
+    const byMirrorWrite = finiteDesc(a.mirrorWriteMs, b.mirrorWriteMs);
+    if (byMirrorWrite !== 0) return byMirrorWrite;
+
+    const byCanonicalUpdated = finiteDesc(a.canonicalUpdatedMs, b.canonicalUpdatedMs);
+    if (byCanonicalUpdated !== 0) return byCanonicalUpdated;
+
+    const aStartDistanceMs = Number.isFinite(a.startMs)
+      ? Math.abs(a.startMs - now)
+      : Number.POSITIVE_INFINITY;
+    const bStartDistanceMs = Number.isFinite(b.startMs)
+      ? Math.abs(b.startMs - now)
+      : Number.POSITIVE_INFINITY;
+    if (aStartDistanceMs !== bStartDistanceMs) {
+      return aStartDistanceMs - bStartDistanceMs;
+    }
+
+    return finiteDesc(a.startMs, b.startMs);
+  });
   return candidates.map((candidate) => candidate.providerEventId);
 }
 

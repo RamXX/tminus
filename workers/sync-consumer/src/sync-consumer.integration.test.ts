@@ -3962,6 +3962,177 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
+  it("scheduled microsoft sweep prioritizes recent mirror writes over far-future start tie-breakers", async () => {
+    const farFutureMirrorEventId = "AAMkAG-ms-mirror-far-future-start";
+    const recentMirrorEventId = "AAMkAG-ms-mirror-recent-write";
+    const farFutureCanonicalEventId = "evt_01HXYZ00000000000000000FUTURE1";
+    const recentCanonicalEventId = "evt_01HXYZ00000000000000000RECENT1";
+    const recentWriteTs = new Date().toISOString();
+    const oldWriteTs = "2026-01-01T00:00:00.000Z";
+    const farFutureStartIso = new Date(
+      Date.now() + 40 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const nowIso = new Date().toISOString();
+
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: farFutureMirrorEventId,
+        target_calendar_id: "primary",
+        state: "ACTIVE",
+        last_write_ts: oldWriteTs,
+      },
+      {
+        provider_event_id: recentMirrorEventId,
+        target_calendar_id: "primary",
+        state: "ACTIVE",
+        last_write_ts: recentWriteTs,
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [farFutureMirrorEventId]: farFutureCanonicalEventId,
+      [recentMirrorEventId]: recentCanonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [farFutureCanonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_far_future_start",
+          title: "far future candidate",
+          start: { dateTime: farFutureStartIso, timeZone: "UTC" },
+          end: { dateTime: farFutureStartIso, timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+      [recentCanonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_recent_write",
+          title: "recent write candidate",
+          start: { dateTime: nowIso, timeZone: "UTC" },
+          end: { dateTime: nowIso, timeZone: "UTC" },
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const probedEventIds: string[] = [];
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-far-future-priority",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/me/events/")) {
+        const probePath = new URL(url).pathname;
+        const rawEventId = probePath.split("/me/events/")[1] ?? "";
+        const eventId = decodeURIComponent(rawEventId);
+        if (eventId.length > 0) {
+          probedEventIds.push(eventId);
+        }
+
+        if (
+          eventId === farFutureMirrorEventId ||
+          eventId === recentMirrorEventId
+        ) {
+          return new Response("Not found", { status: 404 });
+        }
+
+        return new Response(
+          JSON.stringify({ id: eventId || "known-event" }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T06:40:00.000Z`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(probedEventIds[0]).toBe(recentMirrorEventId);
+    expect(probedEventIds).toContain(recentMirrorEventId);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: recentCanonicalEventId,
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
   it("incremental sync: legacy Microsoft mirror scope without cursor enqueues SYNC_FULL bootstrap", async () => {
     const mirrorCalendarId = "overlay-ms-cal-1";
     const mirrorEventId = "AAMkAG-ms-overlay-mirror-1";
