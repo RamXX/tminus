@@ -465,6 +465,40 @@ export async function handleIncrementalSync(
         resource_id: message.resource_id,
       },
     );
+
+    // Safety-first bounded fallback: run mirror-only snapshot reconcile now.
+    // This keeps delete handling atomic (max 1) while recovering unresolved
+    // webhook delete hints without broad SYNC_FULL behavior.
+    try {
+      const reconciledDeletes =
+        await reconcileMissingManagedMirrorsFromMicrosoftSweep(
+          account_id,
+          accessToken,
+          env,
+          deps,
+          deleteGuard,
+          retryOpts,
+        );
+      if (reconciledDeletes > 0) {
+        console.log(
+          "sync-consumer: webhook delete hint recovered via bounded mirror snapshot reconcile",
+          {
+            account_id,
+            reconciled_deletes: reconciledDeletes,
+            resource_id: message.resource_id,
+          },
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "sync-consumer: webhook delete hint bounded reconcile failed; continuing",
+        {
+          account_id,
+          resource_id: message.resource_id,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
 
   // Scheduled Microsoft sweeps are the webhook safety net. Use a bounded
@@ -1908,6 +1942,19 @@ const MS_SWEEP_RECONCILE_RECENT_UPDATE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const MS_SWEEP_RECONCILE_START_LOOKAHEAD_MS = 45 * 24 * 60 * 60 * 1000;
 
+function normalizeMicrosoftMirrorScopeCalendarId(
+  accountId: AccountId,
+  targetCalendarId: string,
+): string {
+  // Legacy rows can persist placeholder target calendars equal to account_id.
+  // For Microsoft mirrors those events live on the default calendar, so use
+  // "primary" for bounded snapshot reconcile.
+  if (targetCalendarId === accountId) {
+    return "primary";
+  }
+  return targetCalendarId;
+}
+
 async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
   accountId: AccountId,
   accessToken: string,
@@ -1936,9 +1983,13 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     ) {
       continue;
     }
-    const scopeRows = mirrorScopes.get(mirror.target_calendar_id) ?? [];
+    const normalizedCalendarId = normalizeMicrosoftMirrorScopeCalendarId(
+      accountId,
+      mirror.target_calendar_id,
+    );
+    const scopeRows = mirrorScopes.get(normalizedCalendarId) ?? [];
     scopeRows.push(mirror);
-    mirrorScopes.set(mirror.target_calendar_id, scopeRows);
+    mirrorScopes.set(normalizedCalendarId, scopeRows);
   }
 
   if (mirrorScopes.size === 0) {
@@ -1986,12 +2037,29 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
 
     let snapshotIds = snapshotsByCalendar.get(calendarId);
     if (!snapshotIds) {
-      snapshotIds = await fetchMicrosoftCalendarSnapshotEventIds(
-        snapshotClient,
-        calendarId,
-        retryOpts,
-      );
-      snapshotsByCalendar.set(calendarId, snapshotIds);
+      try {
+        snapshotIds = await fetchMicrosoftCalendarSnapshotEventIds(
+          snapshotClient,
+          calendarId,
+          retryOpts,
+        );
+        snapshotsByCalendar.set(calendarId, snapshotIds);
+      } catch (snapshotErr) {
+        if (
+          snapshotErr instanceof MicrosoftApiError &&
+          snapshotErr.statusCode === 404
+        ) {
+          console.warn(
+            "sync-consumer: scheduled microsoft mirror reconcile skipping unavailable calendar scope",
+            {
+              account_id: accountId,
+              calendar_id: calendarId,
+            },
+          );
+          continue;
+        }
+        throw snapshotErr;
+      }
     }
 
     const missingMirrorRows = scopedMirrorRows.filter((mirror) => {

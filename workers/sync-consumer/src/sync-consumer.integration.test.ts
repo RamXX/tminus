@@ -3154,6 +3154,138 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
+  it("scheduled microsoft sweep remaps legacy placeholder mirror scope to primary", async () => {
+    const mirrorEventId = "AAMkAG-ms-mirror-placeholder-7777";
+    const canonicalEventId = "evt_01HXYZ000000000000000007777";
+    const nowIso = new Date().toISOString();
+    const fetchedUrls: string[] = [];
+    const encodedMirrorEventId = encodeURIComponent(mirrorEventId);
+    const encodedPlaceholderCalendarId = encodeURIComponent(MS_ACCOUNT_B.account_id);
+    const encodedPrimaryCalendarId = encodeURIComponent(MS_DEFAULT_CALENDAR_ID);
+
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: mirrorEventId,
+        target_calendar_id: MS_ACCOUNT_B.account_id,
+        canonical_event_id: canonicalEventId,
+        last_write_ts: nowIso,
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_placeholder_7777",
+          title: "placeholder scope event",
+          start: { dateTime: nowIso, timeZone: "UTC" },
+          end: { dateTime: nowIso, timeZone: "UTC" },
+          updated_at: nowIso,
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      fetchedUrls.push(url);
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes(`/me/events/${encodedMirrorEventId}?$select=id`)) {
+        return new Response(
+          JSON.stringify({ error: { code: "ErrorItemNotFound", message: "Not found" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: `scheduled-ms-${MS_ACCOUNT_B.account_id}`,
+      resource_id: `scheduled-ms:${MS_ACCOUNT_B.account_id}:2026-02-23T06:00:00.000Z`,
+      ping_ts: nowIso,
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+    expect(
+      fetchedUrls.some((url) => url.includes(encodedPlaceholderCalendarId)),
+    ).toBe(false);
+    expect(
+      fetchedUrls.some((url) => url.includes(encodedPrimaryCalendarId)),
+    ).toBe(true);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
   it("scheduled microsoft sweep includes pending mirrors with provider_event_id for reconcile", async () => {
     const mirrorEventId = "AAMkAG-ms-mirror-pending-9001";
     const canonicalEventId = "evt_01HXYZ000000000000000009001";
@@ -4793,6 +4925,130 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
 
     // Normal sync still completes; no broad reconcile fallback should be queued.
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+    expect(syncQueue.messages).toHaveLength(0);
+  });
+
+  it("webhook_change_type=deleted unresolved hint runs bounded snapshot reconcile fallback", async () => {
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-fallback-303";
+    const webhookEventId = "AAMkAG-ms-mirror-unknown-303";
+    const canonicalEventId = "evt_01HXYZ00000000000000000303";
+    const nowIso = new Date().toISOString();
+    const encodedMirrorEventId = encodeURIComponent(mirrorProviderEventId);
+
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: mirrorProviderEventId,
+        target_calendar_id: "primary",
+        canonical_event_id: canonicalEventId,
+        last_write_ts: nowIso,
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+    userGraphDOState.canonicalEventsById = {
+      [canonicalEventId]: {
+        event: {
+          origin_account_id: "acc_01HXYZ0000000000000000000A",
+          origin_event_id: "google_evt_origin_fallback_303",
+          title: "fallback reconcile candidate",
+          start: { dateTime: nowIso, timeZone: "UTC" },
+          end: { dateTime: nowIso, timeZone: "UTC" },
+          updated_at: nowIso,
+          all_day: false,
+          status: "confirmed",
+          visibility: "default",
+          transparency: "opaque",
+        },
+        mirrors: [],
+      },
+    };
+
+    const msFetch = async (
+      input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes(`/me/events/${encodedMirrorEventId}?$select=id`)) {
+        return new Response(
+          JSON.stringify({ error: { code: "ErrorItemNotFound", message: "Not found" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("deltatoken=")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink": MS_NEW_DELTA_LINK,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("graph.microsoft.com") && url.includes("/calendarView/delta?")) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=snapshot-fallback",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-delete-fallback-303",
+      resource_id: `me/events/${webhookEventId}`,
+      ping_ts: nowIso,
+      calendar_id: null,
+      webhook_change_type: "deleted",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
     expect(syncQueue.messages).toHaveLength(0);
   });

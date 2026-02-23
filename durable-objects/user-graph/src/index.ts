@@ -3178,13 +3178,17 @@ export class UserGraphDO {
   }
 
   /**
-   * Drop an oversize UPSERT outbox entry when it is definitively stale.
+   * Handle a permanently oversize UPSERT outbox entry.
+   *
+   * Queue payload-too-large failures are deterministic. Retrying the same UPSERT
+   * body will not converge and can poison future drain passes.
    *
    * Safety rule:
    * - Only applies to UPSERT_MIRROR entries.
-   * - Never drops entries whose mirror is still PENDING.
+   * - If mirror is still PENDING, transition it to ERROR (write did not converge).
+   * - Remove the poison outbox entry so subsequent queue work can continue.
    */
-  private dropStaleOversizeUpsertOutboxEntry(
+  private handleOversizeUpsertOutboxEntry(
     item: { outbox_id: string; payload: unknown },
     queueName: string,
   ): boolean {
@@ -3217,19 +3221,29 @@ export class UserGraphDO {
     const mirrorState = mirrorRows[0]?.state ?? null;
 
     if (mirrorState === "PENDING") {
-      return false;
+      this.sql.exec(
+        `UPDATE event_mirrors
+         SET state = 'ERROR',
+             error_message = ?,
+             last_write_ts = datetime('now')
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+        "Projection payload exceeded queue size limit",
+        payload.canonical_event_id,
+        payload.target_account_id,
+      );
     }
 
     this.sql.exec(
       `DELETE FROM outbox WHERE outbox_id = ?`,
       item.outbox_id,
     );
-    console.warn("user-graph: dropped stale oversize outbox entry", {
+    console.warn("user-graph: dropped oversize UPSERT outbox entry", {
       queue_name: queueName,
       outbox_id: item.outbox_id,
       canonical_event_id: payload.canonical_event_id,
       target_account_id: payload.target_account_id,
       mirror_state: mirrorState,
+      pending_transitioned_to_error: mirrorState === "PENDING",
     });
     return true;
   }
@@ -3315,10 +3329,8 @@ export class UserGraphDO {
                   error: singleErr instanceof Error ? singleErr.message : String(singleErr),
                 });
                 if (isPayloadTooLargeError(singleErr)) {
-                  // Oversize UPSERT entries can become stale after newer writes
-                  // converge. Drop only when mirror is not PENDING.
-                  const dropped = this.dropStaleOversizeUpsertOutboxEntry(item, queueName);
-                  if (dropped) {
+                  const handled = this.handleOversizeUpsertOutboxEntry(item, queueName);
+                  if (handled) {
                     continue;
                   }
                   continue;
@@ -3332,11 +3344,11 @@ export class UserGraphDO {
             continue;
           }
           if (payloadTooLarge && chunk.length === 1) {
-            const dropped = this.dropStaleOversizeUpsertOutboxEntry(
+            const handled = this.handleOversizeUpsertOutboxEntry(
               chunk[0],
               queueName,
             );
-            if (dropped) {
+            if (handled) {
               continue;
             }
           }
