@@ -1965,6 +1965,49 @@ describe("handleFeedRefresh (via scheduled)", () => {
     expect(msg.channel_id).toBe(`scheduled-ms-${TEST_ACCOUNT_ID_2}`);
     expect(msg.calendar_id).toBeNull();
   });
+
+  it("still runs Microsoft sweep when ICS feed refresh throws", async () => {
+    const base = createMockEnv();
+
+    const db = {
+      prepare(sql: string) {
+        return {
+          bind() {
+            return {
+              async all<T>(): Promise<{ results: T[] }> {
+                if (sql.includes("feed_etag")) {
+                  throw new Error("D1_ERROR: no such column: feed_etag");
+                }
+                if (sql.includes("provider = 'microsoft'")) {
+                  return {
+                    results: [{
+                      account_id: TEST_ACCOUNT_ID_1,
+                      channel_id: "ms-sub-throw-safe",
+                      channel_calendar_id: null,
+                    } as T],
+                  };
+                }
+                return { results: [] };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    const env = {
+      ...base.env,
+      DB: db,
+    } as Env;
+
+    const handler = createHandler();
+    await handler.scheduled(buildScheduledEvent(CRON_FEED_REFRESH), env, mockCtx);
+
+    expect(base.syncQueue.messages.length).toBe(1);
+    const msg = base.syncQueue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.account_id).toBe(TEST_ACCOUNT_ID_1);
+  });
 });
 
 // ---------------------------------------------------------------------------

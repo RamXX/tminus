@@ -1318,7 +1318,13 @@ async function handleScheduled(
       break;
 
     case CRON_FEED_REFRESH:
-      await handleFeedRefresh(env);
+      try {
+        await handleFeedRefresh(env);
+      } catch (err) {
+        // Feed-refresh schema drift (or other non-critical feed errors) must
+        // not block Microsoft convergence sweeps in the same cron tick.
+        console.error("ICS feed refresh handler failed; continuing to MS sweep", err);
+      }
       await handleMicrosoftIncrementalSweep(env);
       break;
 
