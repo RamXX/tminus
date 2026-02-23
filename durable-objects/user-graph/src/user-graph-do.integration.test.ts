@@ -2882,6 +2882,29 @@ describe("UserGraphDO integration", () => {
         const data = (await resp.json()) as { canonical_event_id: string | null };
         expect(data.canonical_event_id).toBeNull();
       });
+
+      it("returns null for DELETING mirrors to avoid delete-path resurrection", async () => {
+        ug.getSyncHealth();
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [makeCreatedDelta()]);
+        db.prepare(
+          "UPDATE event_mirrors SET state = 'DELETING', provider_event_id = ? WHERE target_account_id = ?",
+        ).run("google_mirror_deleting_1", OTHER_ACCOUNT_ID);
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          provider_event_id: "google_mirror_deleting_1",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBeNull();
+      });
     });
 
     // -----------------------------------------------------------------------

@@ -4079,12 +4079,15 @@ export class UserGraphDO {
         .exec<{ canonical_event_id: string }>(
           `SELECT canonical_event_id
            FROM event_mirrors
-           WHERE target_account_id = ? AND provider_event_id = ?
+           WHERE target_account_id = ?
+             AND provider_event_id = ?
+             AND state IN ('ACTIVE', 'PENDING', 'ERROR')
            ORDER BY
              CASE state
                WHEN 'ACTIVE' THEN 0
                WHEN 'PENDING' THEN 1
-               ELSE 2
+               WHEN 'ERROR' THEN 2
+               ELSE 3
              END,
              COALESCE(last_write_ts, '') DESC
            LIMIT 1`,
