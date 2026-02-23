@@ -2981,6 +2981,128 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
+  it("incremental sync: legacy Microsoft mirror scope without cursor enqueues SYNC_FULL bootstrap", async () => {
+    const mirrorCalendarId = "overlay-ms-cal-1";
+    const mirrorEventId = "AAMkAG-ms-overlay-mirror-1";
+    const fetchedUrls: string[] = [];
+
+    // Legacy shape: AccountDO only knows primary scope, but active mirrors
+    // reference a secondary target calendar that still needs convergence sync.
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: MS_DELTA_LINK,
+    };
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: mirrorEventId,
+        target_calendar_id: mirrorCalendarId,
+      },
+    ];
+    const msFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      fetchedUrls.push(url);
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (!url.includes("graph.microsoft.com")) {
+        return new Response("Not found", { status: 404 });
+      }
+
+      // Primary scope: no deltas.
+      if (url.includes(encodeURIComponent(MS_DEFAULT_CALENDAR_ID))) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=primary-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // Mirror overlay scope has no cursor yet; bootstrap path should escalate
+      // this incremental run to SYNC_FULL reconciliation.
+      if (url.includes(encodeURIComponent(mirrorCalendarId))) {
+        return new Response(
+          JSON.stringify({
+            value: [makeMicrosoftDeletedEvent({ id: mirrorEventId })],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/overlay-ms-cal-1/events/delta?$deltatoken=overlay-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          value: [],
+          "@odata.deltaLink": MS_NEW_DELTA_LINK,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-overlay-sync",
+      resource_id: "resource-ms-overlay-sync",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(
+      fetchedUrls.some((url) => url.includes(encodeURIComponent(mirrorCalendarId))),
+    ).toBe(true);
+    expect(syncQueue.messages).toHaveLength(1);
+    expect((syncQueue.messages[0] as { type?: string }).type).toBe("SYNC_FULL");
+    expect((syncQueue.messages[0] as { reason?: string }).reason).toBe("token_410");
+    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+  });
+
   // -------------------------------------------------------------------------
   // 2. Microsoft full sync paginates via @odata.nextLink
   // -------------------------------------------------------------------------
@@ -3055,6 +3177,136 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
         source: `provider:${MS_ACCOUNT_B.account_id}`,
       },
     ]);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("full sync reconciles stale mirrors from legacy Microsoft overlay scope fallback", async () => {
+    const mirrorCalendarId = "overlay-ms-cal-legacy";
+    const staleMirrorEventId = "AAMkAG-ms-stale-overlay-1";
+    const canonicalEventId = "evt_01HXYZ00000000000000000998";
+    const fetchedUrls: string[] = [];
+
+    // Legacy shape: only primary is registered in AccountDO scope table.
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+    ];
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: staleMirrorEventId,
+        target_calendar_id: mirrorCalendarId,
+      },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [staleMirrorEventId]: canonicalEventId,
+    };
+
+    const msFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      fetchedUrls.push(url);
+
+      if (
+        url.includes("graph.microsoft.com") &&
+        url.includes("/me/calendars?") &&
+        url.includes("isDefaultCalendar")
+      ) {
+        return new Response(
+          JSON.stringify({
+            value: [
+              {
+                id: MS_DEFAULT_CALENDAR_ID,
+                name: "Calendar",
+                isDefaultCalendar: true,
+                canEdit: true,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (!url.includes("graph.microsoft.com")) {
+        return new Response("Not found", { status: 404 });
+      }
+
+      // Primary scope includes one origin event that should be preserved.
+      if (url.includes(encodeURIComponent(MS_DEFAULT_CALENDAR_ID))) {
+        return new Response(
+          JSON.stringify({
+            value: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-keep-legacy" })],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=primary-full-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // Overlay scope snapshot does not include stale mirror anymore.
+      if (url.includes(encodeURIComponent(mirrorCalendarId))) {
+        return new Response(
+          JSON.stringify({
+            value: [],
+            "@odata.deltaLink":
+              "https://graph.microsoft.com/v1.0/me/calendars/overlay-ms-cal-legacy/events/delta?$deltatoken=overlay-full-new",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          value: [],
+          "@odata.deltaLink": MS_NEW_DELTA_LINK,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: MS_ACCOUNT_B.account_id,
+      reason: "reconcile",
+    };
+
+    await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    expect(
+      fetchedUrls.some((url) => url.includes(encodeURIComponent(mirrorCalendarId))),
+    ).toBe(true);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: canonicalEventId,
+        source: `provider:${MS_ACCOUNT_B.account_id}`,
+      },
+    ]);
+    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
+      expect.arrayContaining([
+        {
+          provider_calendar_id: mirrorCalendarId,
+          sync_token:
+            "https://graph.microsoft.com/v1.0/me/calendars/overlay-ms-cal-legacy/events/delta?$deltatoken=overlay-full-new",
+        },
+      ]),
+    );
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 

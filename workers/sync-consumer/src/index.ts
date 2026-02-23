@@ -266,13 +266,15 @@ export async function handleIncrementalSync(
   }
 
   // Step 3: Fetch incremental changes via provider-specific client.
-  // Google reads every enabled sync scope (primary + overlays) using
-  // per-calendar scoped cursors; Microsoft keeps single-cursor behavior.
+  // Both Google and Microsoft read enabled sync scopes (primary + overlays)
+  // using per-calendar scoped cursors.
   const client = createCalendarProvider(provider, accessToken, deps.fetchFn);
 
   let events: GoogleCalendarEvent[];
   let cursorUpdates: SyncCursorUpdate[] = [];
   const retryOpts = deps.sleepFn ? { sleepFn: deps.sleepFn } : {};
+  const includeMirrorScopeFallback =
+    !(provider === "microsoft" && typeof message.webhook_change_type === "string");
 
   try {
     const result = await fetchIncrementalProviderEvents(
@@ -282,6 +284,7 @@ export async function handleIncrementalSync(
       env,
       retryOpts,
       targetCalendarId,
+      includeMirrorScopeFallback,
     );
     events = result.events;
     cursorUpdates = result.cursorUpdates;
@@ -311,6 +314,7 @@ export async function handleIncrementalSync(
           env,
           retryOpts,
           targetCalendarId,
+          includeMirrorScopeFallback,
         );
         events = result.events;
         cursorUpdates = result.cursorUpdates;
@@ -419,8 +423,8 @@ export async function handleIncrementalSync(
  *
  * Same as incremental but:
  * - No syncToken/deltaToken (fetches ALL events)
- * - Paginated: loop through pageTokens (Google) or @odata.nextLink (Microsoft)
- * - Stores final syncToken (Google) or @odata.deltaLink (Microsoft)
+ * - Paginated: loop through page tokens per provider scope
+ * - Stores scoped cursors and legacy-compatible default cursor
  */
 export async function handleFullSync(
   message: SyncFullMessage,
@@ -552,7 +556,8 @@ export async function handleFullSync(
     },
   );
 
-  // Update sync cursor(s): scoped for Google, legacy-compatible for primary.
+  // Update sync cursor(s): scoped for provider scopes and legacy-compatible
+  // default cursor for account-level paths.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
   if (deleteGuard.hasBlockedDeletes()) {
@@ -776,27 +781,14 @@ async function fetchIncrementalProviderEvents(
   env: Env,
   retryOpts: RetryOptions,
   targetCalendarId: string | null = null,
+  includeMirrorScopeFallback = true,
 ): Promise<ProviderFetchResult> {
-  if (provider !== "google") {
-    const syncToken = await getSyncToken(accountId, env);
-    const response = await retryWithBackoff(
-      () => client.listEvents("primary", syncToken ?? undefined),
-      retryOpts,
-    );
-    return {
-      events: response.events,
-      cursorUpdates: response.nextSyncToken
-        ? [{ providerCalendarId: "primary", token: response.nextSyncToken }]
-        : [],
-      skippedCalendarIds: [],
-    };
-  }
-
   // When targetCalendarId is set, only sync that specific scope.
-  // Otherwise, sync all registered Google calendar scopes.
+  // Otherwise, sync all registered calendar scopes (plus legacy mirror
+  // fallback scopes derived from UserGraph active mirrors).
   const calendarIds = targetCalendarId
     ? [targetCalendarId]
-    : await listGoogleSyncCalendarIds(accountId, env);
+    : await listSyncCalendarIds(accountId, env, includeMirrorScopeFallback);
   const events: GoogleCalendarEvent[] = [];
   const cursorUpdates: SyncCursorUpdate[] = [];
   const skippedCalendarIds: string[] = [];
@@ -811,9 +803,16 @@ async function fetchIncrementalProviderEvents(
         retryOpts,
       );
     } catch (err) {
-      if (err instanceof GoogleApiError && err.statusCode === 404) {
+      if (
+        (provider === "google" &&
+          err instanceof GoogleApiError &&
+          err.statusCode === 404) ||
+        (provider === "microsoft" &&
+          err instanceof MicrosoftApiError &&
+          err.statusCode === 404)
+      ) {
         console.warn(
-          `sync-consumer: skipping unavailable google calendar scope ${calendarId} for account ${accountId}`,
+          `sync-consumer: skipping unavailable ${provider} calendar scope ${calendarId} for account ${accountId}`,
         );
         skippedCalendarIds.push(calendarId);
         continue;
@@ -821,7 +820,14 @@ async function fetchIncrementalProviderEvents(
       throw err;
     }
 
-    if (!syncToken && calendarId !== "primary") {
+    // Non-primary scope bootstrap must be promoted to SYNC_FULL so stale
+    // managed mirrors are reconciled from a full snapshot before we trust
+    // incremental deltas on that scope.
+    if (
+      !syncToken &&
+      calendarId !== "primary" &&
+      (provider === "google" || provider === "microsoft")
+    ) {
       needsScopedBootstrapFullSync = true;
     }
 
@@ -836,7 +842,7 @@ async function fetchIncrementalProviderEvents(
 
   if (needsScopedBootstrapFullSync) {
     throw new SyncTokenExpiredError(
-      "google scoped sync bootstrap required for non-primary calendars",
+      `${provider} scoped sync bootstrap required for non-primary calendars`,
     );
   }
 
@@ -850,33 +856,7 @@ async function fetchFullProviderEvents(
   env: Env,
   retryOpts: RetryOptions,
 ): Promise<ProviderFetchResult> {
-  if (provider !== "google") {
-    let pageToken: string | undefined;
-    let lastSyncToken: string | undefined;
-    const events: GoogleCalendarEvent[] = [];
-
-    do {
-      const response = await retryWithBackoff(
-        () => client.listEvents("primary", undefined, pageToken),
-        retryOpts,
-      );
-      events.push(...response.events);
-      pageToken = response.nextPageToken;
-      if (response.nextSyncToken) {
-        lastSyncToken = response.nextSyncToken;
-      }
-    } while (pageToken);
-
-    return {
-      events,
-      cursorUpdates: lastSyncToken
-        ? [{ providerCalendarId: "primary", token: lastSyncToken }]
-        : [],
-      skippedCalendarIds: [],
-    };
-  }
-
-  const calendarIds = await listGoogleSyncCalendarIds(accountId, env);
+  const calendarIds = await listSyncCalendarIds(accountId, env);
   const events: GoogleCalendarEvent[] = [];
   const cursorUpdates: SyncCursorUpdate[] = [];
   const skippedCalendarIds: string[] = [];
@@ -893,9 +873,16 @@ async function fetchFullProviderEvents(
           retryOpts,
         );
       } catch (err) {
-        if (err instanceof GoogleApiError && err.statusCode === 404) {
+        if (
+          (provider === "google" &&
+            err instanceof GoogleApiError &&
+            err.statusCode === 404) ||
+          (provider === "microsoft" &&
+            err instanceof MicrosoftApiError &&
+            err.statusCode === 404)
+        ) {
           console.warn(
-            `sync-consumer: skipping unavailable google calendar scope ${calendarId} for account ${accountId}`,
+            `sync-consumer: skipping unavailable ${provider} calendar scope ${calendarId} for account ${accountId}`,
           );
           skippedCalendarIds.push(calendarId);
           break;
@@ -930,36 +917,27 @@ async function persistSyncCursorUpdates(
     return;
   }
 
-  if (provider === "google") {
-    for (const update of cursorUpdates) {
-      await setScopedSyncToken(
-        accountId,
-        env,
-        update.providerCalendarId,
-        update.token,
-      );
-    }
-
-    const primaryUpdate = cursorUpdates.find(
-      (update) => update.providerCalendarId === "primary",
+  for (const update of cursorUpdates) {
+    await setScopedSyncToken(
+      accountId,
+      env,
+      update.providerCalendarId,
+      update.token,
     );
-    if (primaryUpdate) {
-      await setSyncToken(accountId, env, primaryUpdate.token);
-    }
-    return;
   }
 
   const defaultUpdate = cursorUpdates.find(
     (update) => update.providerCalendarId === "primary",
-  );
+  ) ?? (provider === "microsoft" ? cursorUpdates[0] : undefined);
   if (defaultUpdate) {
     await setSyncToken(accountId, env, defaultUpdate.token);
   }
 }
 
-async function listGoogleSyncCalendarIds(
+async function listSyncCalendarIds(
   accountId: AccountId,
   env: Env,
+  includeMirrorScopeFallback = true,
 ): Promise<string[]> {
   const calendarIds = new Set(
     (await listCalendarScopes(accountId, env))
@@ -970,15 +948,17 @@ async function listGoogleSyncCalendarIds(
 
   // Fallback for legacy accounts that predate scoped calendar registration:
   // derive active target calendars from mirror rows (overlay calendars).
-  const userId = await lookupUserId(accountId, env);
-  if (userId) {
-    const mirrorCalendarIds = await loadManagedMirrorCalendarIds(
-      accountId,
-      userId,
-      env,
-    );
-    for (const calendarId of mirrorCalendarIds) {
-      calendarIds.add(calendarId);
+  if (includeMirrorScopeFallback) {
+    const userId = await lookupUserId(accountId, env);
+    if (userId) {
+      const mirrorCalendarIds = await loadManagedMirrorCalendarIds(
+        accountId,
+        userId,
+        env,
+      );
+      for (const calendarId of mirrorCalendarIds) {
+        calendarIds.add(calendarId);
+      }
     }
   }
 
@@ -1159,6 +1139,10 @@ async function processAndApplyDeltas(
       } else if (
         // TM-9eu: Mirror-side modifications write back to the canonical event.
         // Collect the raw event for re-normalization with full payload.
+        // Safety: only do writeback on true incremental deltas. Full-sync
+        // snapshots can contain large managed-mirror inventories and must not
+        // trigger bulk canonical rewrites.
+        stage === "incremental" &&
         delta.type === "updated" &&
         typeof delta.origin_event_id === "string" &&
         delta.origin_event_id.length > 0
