@@ -26,6 +26,7 @@ import {
   handleIncrementalSync,
   handleFullSync,
   retryWithBackoff,
+  extractMicrosoftEventId,
 } from "./index";
 import type { SyncQueueMessage } from "./index";
 import {
@@ -2491,6 +2492,37 @@ describe("retryWithBackoff", () => {
 });
 
 // ---------------------------------------------------------------------------
+// TM-9fc9: extractMicrosoftEventId unit tests
+// ---------------------------------------------------------------------------
+
+describe("extractMicrosoftEventId", () => {
+  it("extracts event ID from 'me/events/{id}' path", () => {
+    expect(extractMicrosoftEventId("me/events/AAMkAG-abc-123")).toBe("AAMkAG-abc-123");
+  });
+
+  it("extracts event ID from 'users/{uid}/events/{id}' path", () => {
+    expect(extractMicrosoftEventId("users/user-uuid/events/AAMkAG-def-456")).toBe("AAMkAG-def-456");
+  });
+
+  it("returns null for non-event resource paths", () => {
+    expect(extractMicrosoftEventId("me/calendars/some-calendar-id")).toBeNull();
+    expect(extractMicrosoftEventId("me/messages/msg-123")).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(extractMicrosoftEventId("")).toBeNull();
+  });
+
+  it("extracts event ID with special characters", () => {
+    expect(extractMicrosoftEventId("me/events/AAMkAGU0OGRhZmI3=")).toBe("AAMkAGU0OGRhZmI3=");
+  });
+
+  it("handles deeply nested resource path", () => {
+    expect(extractMicrosoftEventId("users/uid/calendarGroups/grp/calendars/cal/events/evt-789")).toBe("evt-789");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Microsoft provider constants
 // ---------------------------------------------------------------------------
 
@@ -3118,6 +3150,136 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
 
     expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // TM-9fc9: Webhook-hinted mirror deletion (Microsoft)
+  // -------------------------------------------------------------------------
+
+  it("webhook_change_type=deleted with known mirror event ID deletes canonical", async () => {
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-200";
+    const canonicalEventId = "evt_01HXYZ00000000000000000001";
+
+    // Set up the DO state: mirror ID in active mirrors + lookup returns canonical
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorProviderEventId, target_calendar_id: "cal-target" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: canonicalEventId,
+    };
+
+    // The delta response returns NO events (the deleted event vanishes from the delta)
+    const msFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-delete-1",
+      resource_id: `me/events/${mirrorProviderEventId}`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "deleted",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // The webhook hint should have triggered canonical deletion via findCanonicalByMirror + deleteCanonicalEvent
+    expect(userGraphDOState.findCanonicalByMirrorCalls.length).toBeGreaterThanOrEqual(1);
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(1);
+    expect(userGraphDOState.deleteCanonicalCalls[0].canonical_event_id).toBe(canonicalEventId);
+
+    // Normal sync still completes (sync success marked)
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("webhook_change_type=deleted with unknown event ID does NOT delete anything", async () => {
+    // No mirrors registered
+    userGraphDOState.activeMirrors = [];
+    userGraphDOState.mirrorLookupByProviderEventId = {};
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-delete-2",
+      resource_id: "me/events/AAMkAG-unknown-event-999",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "deleted",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // No canonical deletion should occur
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+
+    // Normal sync still completes
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("webhook_change_type=updated does NOT trigger mirror deletion", async () => {
+    const mirrorProviderEventId = "AAMkAG-ms-mirror-200";
+
+    userGraphDOState.activeMirrors = [
+      { provider_event_id: mirrorProviderEventId, target_calendar_id: "cal-target" },
+    ];
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      [mirrorProviderEventId]: "evt_01HXYZ00000000000000000001",
+    };
+
+    const msFetch = createMicrosoftApiFetch({
+      events: [makeMicrosoftEvent()],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-update-1",
+      resource_id: `me/events/${mirrorProviderEventId}`,
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "updated",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // No canonical deletion from webhook hint (only "deleted" triggers it)
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+
+    // Normal sync processes the origin event
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("webhook_change_type=deleted with non-event resource path does NOT delete", async () => {
+    const msFetch = createMicrosoftApiFetch({
+      events: [],
+      deltaLink: MS_NEW_DELTA_LINK,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: MS_ACCOUNT_B.account_id,
+      channel_id: "channel-ms-delete-3",
+      resource_id: "me/calendars/some-calendar-id",  // Not an events path
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+      webhook_change_type: "deleted",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+
+    // No deletion -- resource path didn't contain event ID
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 });

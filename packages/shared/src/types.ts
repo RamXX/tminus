@@ -234,6 +234,8 @@ export interface SyncIncrementalMessage {
    * or when the scope could not be resolved (telemetry emitted in that case).
    */
   readonly calendar_id: string | null;
+  /** Microsoft Graph change type from the webhook notification (e.g., "deleted", "updated", "created"). */
+  readonly webhook_change_type?: string;
 }
 
 /** Full sync request -- onboarding, reconcile, or 410 recovery (sync-queue). */

@@ -135,6 +135,61 @@ export async function handleIncrementalSync(
   const { account_id } = message;
   const targetCalendarId = message.calendar_id ?? null;
 
+  // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
+  // When a Microsoft webhook notification has changeType "deleted", the
+  // incremental sync delta from the provider will NOT contain the deleted
+  // event. However, the webhook notification's resource path contains the
+  // specific event ID. If that event ID is a known managed mirror, we can
+  // delete the canonical immediately without waiting for a full sync.
+  if (message.webhook_change_type === "deleted") {
+    const extractedEventId = extractMicrosoftEventId(message.resource_id);
+    if (extractedEventId) {
+      try {
+        const userId = await lookupUserId(account_id, env);
+        if (userId) {
+          const managedMirrorIds = await loadManagedMirrorEventIds(account_id, userId, env);
+          const isManagedMirror = providerEventIdVariants(extractedEventId).some(
+            (candidateId) => managedMirrorIds.has(candidateId),
+          );
+
+          if (isManagedMirror) {
+            console.log("sync-consumer: webhook-hinted mirror deletion", {
+              account_id,
+              provider_event_id: extractedEventId,
+            });
+            await applyManagedMirrorDeletes(account_id, userId, [extractedEventId], env);
+          } else {
+            // Fallback: mirror state might not be ACTIVE, try direct lookup
+            const userGraphId = env.USER_GRAPH.idFromName(userId);
+            const userGraphStub = env.USER_GRAPH.get(userGraphId);
+            const canonicalId = await findCanonicalIdByMirror(
+              userGraphStub,
+              account_id,
+              extractedEventId,
+            );
+            if (canonicalId) {
+              console.log("sync-consumer: webhook-hinted mirror deletion (fallback lookup)", {
+                account_id,
+                provider_event_id: extractedEventId,
+                canonical_event_id: canonicalId,
+              });
+              await applyManagedMirrorDeletes(account_id, userId, [extractedEventId], env);
+            }
+          }
+        }
+      } catch (err) {
+        // Fail safe: log and continue with normal incremental sync.
+        // Never delete based on uncertainty.
+        console.warn("sync-consumer: webhook-hinted mirror deletion failed, continuing with normal sync", {
+          account_id,
+          resource_id: message.resource_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // Continue with normal incremental sync -- other events may have changed too
+  }
+
   // Step 1: Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
 
@@ -766,11 +821,6 @@ async function processAndApplyDeltas(
 
   if (events.length > 0) {
     managedMirrorEventIds = await ensureManagedMirrorEventIds();
-    console.info("sync-consumer: mirror_id_set_loaded", {
-      account_id: accountId,
-      mirror_id_count: managedMirrorEventIds.size,
-      sample_ids: [...managedMirrorEventIds].slice(0, 3),
-    });
   }
 
   for (const event of events) {
@@ -1019,13 +1069,7 @@ function classifyProviderEvent(
 
   const eventId = rawEvent.id;
   if (typeof eventId === "string" && eventId.length > 0) {
-    const setHasMatch = managedMirrorEventIds?.has(eventId) ?? false;
-    console.info("sync-consumer: mirror_id_lookup", {
-      event_id: eventId,
-      set_has_match: setHasMatch,
-      set_size: managedMirrorEventIds?.size ?? 0,
-    });
-    if (setHasMatch) {
+    if (managedMirrorEventIds?.has(eventId)) {
       return "managed_mirror";
     }
   }
@@ -1183,6 +1227,19 @@ function decodeProviderEventIdSafe(providerEventId: string): string {
   } catch {
     return providerEventId;
   }
+}
+
+/**
+ * Extract the event ID from a Microsoft Graph resource path.
+ *
+ * Microsoft resource paths follow the pattern:
+ *   "me/events/{id}" or "users/{uid}/events/{id}"
+ *
+ * Returns null if the resource path does not contain an event ID.
+ */
+export function extractMicrosoftEventId(resource: string): string | null {
+  const match = resource.match(/events\/([^/]+)$/);
+  return match ? match[1] : null;
 }
 
 /**

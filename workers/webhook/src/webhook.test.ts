@@ -757,6 +757,64 @@ describe("POST /webhook/microsoft", () => {
     expect(queue.messages.length).toBe(0);
   });
 
+  // TM-9fc9: webhook_change_type passthrough
+  it("enqueued message includes webhook_change_type from notification.changeType", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: TEST_MS_CALENDAR_ID,
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody({ changeType: "deleted" });
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await handler.fetch(request, env, mockCtx);
+
+    expect(response.status).toBe(202);
+    expect(queue.messages.length).toBe(1);
+
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.type).toBe("SYNC_INCREMENTAL");
+    expect(msg.webhook_change_type).toBe("deleted");
+  });
+
+  it("enqueued message includes webhook_change_type='created' when notification is created", async () => {
+    const { env, queue } = createMockEnv({
+      accounts: [{
+        account_id: TEST_ACCOUNT_ID,
+        provider: "microsoft",
+        status: "active",
+        channel_id: TEST_MS_SUBSCRIPTION_ID,
+        channel_token: TEST_MS_CLIENT_STATE,
+        channel_calendar_id: TEST_MS_CALENDAR_ID,
+      }],
+    });
+    const handler = createHandler();
+
+    const body = buildMsNotificationBody({ changeType: "created" });
+    const request = new Request("https://webhook.tminus.dev/webhook/microsoft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    await handler.fetch(request, env, mockCtx);
+
+    expect(queue.messages.length).toBe(1);
+    const msg = queue.messages[0] as Record<string, unknown>;
+    expect(msg.webhook_change_type).toBe("created");
+  });
+
   // Multiple notifications with per-scope routing
   it("processes multiple notifications with per-scope calendar_ids", async () => {
     const { env, queue } = createMockEnv({

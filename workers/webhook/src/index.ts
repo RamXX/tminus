@@ -137,6 +137,9 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   // Enqueue SYNC_INCREMENTAL for the sync-consumer to process.
   // TM-08pp: Canonicalize resource_id to eliminate URL-encoding variants
   // that Google may include in push notification headers.
+  // TODO(TM-9fc9): Google push notifications don't identify the specific event
+  // that changed. Mirror deletions are detected via incremental sync (showDeleted=true
+  // surfaces cancelled events) or SYNC_FULL reconciliation.
   const msg: SyncIncrementalMessage = {
     type: "SYNC_INCREMENTAL",
     account_id: accountRow.account_id as AccountId,
@@ -312,6 +315,7 @@ async function handleMicrosoftWebhook(
       resource_id: canonicalizeProviderEventId(notification.resource),
       ping_ts: new Date().toISOString(),
       calendar_id: accountRow.calendar_id,
+      webhook_change_type: notification.changeType,
     };
 
     try {
