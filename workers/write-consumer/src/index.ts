@@ -430,6 +430,34 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
             }
           }
 
+          // Single-calendar safety:
+          // New mirrors can arrive with a placeholder target_calendar_id equal to
+          // target_account_id. For new mirror inserts (no provider_event_id yet),
+          // force provider writes to "primary" so inbound provider deletes are
+          // observable through the account's primary webhook subscription.
+          if (body.type === "UPSERT_MIRROR") {
+            const isPlaceholderCalendar =
+              String(body.target_calendar_id) === String(body.target_account_id);
+            if (isPlaceholderCalendar) {
+              const mirrorHasProviderEventId = Boolean(
+                prefetchedMirror?.provider_event_id &&
+                  prefetchedMirror.provider_event_id.length > 0,
+              );
+              if (!mirrorHasProviderEventId) {
+                effectiveBody = {
+                  ...body,
+                  target_calendar_id: "primary" as UpsertMirrorMessage["target_calendar_id"],
+                };
+                console.log("write-consumer: remapped placeholder upsert calendar to primary", {
+                  canonical_event_id: body.canonical_event_id,
+                  target_account_id: body.target_account_id,
+                  original_calendar_id: body.target_calendar_id,
+                  remapped_calendar_id: "primary",
+                });
+              }
+            }
+          }
+
           // Legacy origin delete hardening:
           // If the origin delete carries "primary" but we do not have a mirror row
           // for this target account, remap to the single sync-enabled scope when

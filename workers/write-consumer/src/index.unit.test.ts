@@ -202,6 +202,99 @@ describe("write-consumer queue stale self-heal", () => {
   });
 });
 
+describe("write-consumer queue placeholder upsert remap", () => {
+  it("remaps placeholder UPSERT_MIRROR target calendar to primary for new mirrors", async () => {
+    const message: UpsertMirrorMessage = {
+      type: "UPSERT_MIRROR",
+      canonical_event_id: "evt_01JSKE00M00000000000000055",
+      target_account_id: "acc_01JSKE00MACCPVNTB000000055",
+      target_calendar_id: "acc_01JSKE00MACCPVNTB000000055",
+      projected_hash: "hash_new",
+      projected_payload: {
+        summary: "Mirror event",
+        start: { dateTime: "2026-02-24T10:00:00Z" },
+        end: { dateTime: "2026-02-24T11:00:00Z" },
+      },
+      idempotency_key: "idem_upsert_placeholder",
+    };
+
+    const userGraph = createUserGraphNamespace({
+      canonical_event_id: message.canonical_event_id,
+      target_account_id: message.target_account_id,
+      target_calendar_id: message.target_calendar_id,
+      provider_event_id: null,
+      last_projected_hash: null,
+      last_write_ts: null,
+      state: "PENDING",
+      error_message: null,
+    });
+
+    const externalUrls: string[] = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+      const request = input instanceof Request
+        ? input
+        : new Request(typeof input === "string" ? input : input.toString());
+      const url = request.url;
+      externalUrls.push(url);
+
+      if (url.includes("/calendars/primary/events")) {
+        return new Response(
+          JSON.stringify({ id: "provider_evt_new_1" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 404,
+            message: "Not Found",
+            errors: [{ reason: "notFound", message: "Not Found" }],
+          },
+        }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    });
+
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const batch = {
+      messages: [{ body: message, ack, retry }],
+    } as unknown as MessageBatch<UpsertMirrorMessage>;
+
+    const env = {
+      DB: createMockDB("usr_01JSKE00M00000000000000001", "google"),
+      USER_GRAPH: userGraph,
+      ACCOUNT: createAccountNamespace(),
+    } as unknown as Env;
+
+    const handler = createWriteQueueHandler({ fetchFn });
+    await handler.queue(batch, env);
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(externalUrls).toContain(
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    );
+    expect(
+      externalUrls.some((url) =>
+        url.includes(
+          "/calendars/acc_01JSKE00MACCPVNTB000000055/events",
+        )),
+    ).toBe(false);
+
+    const updateCall = [...userGraph.calls]
+      .reverse()
+      .find((call) => call.path === "/updateMirrorState");
+    expect(updateCall).toBeDefined();
+    expect((updateCall?.body as { update?: { target_calendar_id?: string } }).update?.target_calendar_id)
+      .toBe("primary");
+  });
+});
+
 describe("write-consumer queue delete calendar remap", () => {
   it("remaps primary DELETE_MIRROR to single sync scope when mirror row is missing", async () => {
     const message: DeleteMirrorMessage = {
