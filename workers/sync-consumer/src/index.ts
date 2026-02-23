@@ -788,6 +788,27 @@ async function processAndApplyDeltas(
       origin_event_id: canonicalizeProviderEventId(rawDelta.origin_event_id),
     };
 
+    // TM-9fc9 diagnostic: log every event entering the processing loop so we
+    // can trace what delta.type and classification the provider assigned.
+    const rawObj = rawEvent as Record<string, unknown>;
+    const hasManagedMarkers = provider === "google"
+      ? Boolean(
+          (rawObj.extendedProperties as Record<string, unknown> | undefined)
+            ?.private,
+        )
+      : Boolean(
+          (rawObj.extensions as unknown[] | undefined)?.length ||
+          (Array.isArray(rawObj.categories) && rawObj.categories.length > 0),
+        );
+    console.info("sync-consumer: event_loop_entry", {
+      account_id: accountId,
+      provider_event_id: rawObj.id,
+      delta_type: delta.type,
+      classification,
+      has_managed_markers: hasManagedMarkers,
+      provider,
+    });
+
     if (classification === "managed_mirror") {
       // Managed mirrors are never treated as origins (Invariant E), but if a
       // managed mirror was deleted at the provider, that is a user intent to
@@ -817,6 +838,15 @@ async function processAndApplyDeltas(
       }
       continue;
     }
+
+    // TM-9fc9 diagnostic: log every non-mirror event reaching the fallback
+    // check so we can see what delta.type deletions actually carry.
+    console.info("sync-consumer: pre_fallback_check", {
+      account_id: accountId,
+      provider_event_id: delta.origin_event_id,
+      delta_type: delta.type,
+      provider,
+    });
 
     // Fallback for providers (notably Google cancelled payloads) that can omit
     // managed markers on delete deltas. If the deleted provider_event_id is a
