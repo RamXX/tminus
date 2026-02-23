@@ -54,6 +54,10 @@ dead_letter_queue = "tminus-sync-queue-dlq"
 
 [vars]
 ENVIRONMENT = "development"
+DELETE_GUARD_ENABLED = "true"
+DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "25"
+DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "50"
+DELETE_GUARD_MAX_DELETES_PER_BATCH = "100"
 
 # --- Secrets -------------------------------------------------------------------
 # This worker does NOT need direct secrets. All credential operations are
@@ -70,6 +74,10 @@ name = "tminus-sync-consumer-staging"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
+DELETE_GUARD_ENABLED = "true"
+DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "25"
+DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "50"
+DELETE_GUARD_MAX_DELETES_PER_BATCH = "100"
 
 [env.staging.limits]
 cpu_ms = 300000
@@ -114,6 +122,10 @@ name = "tminus-sync-consumer-production"
 
 [env.production.vars]
 ENVIRONMENT = "production"
+DELETE_GUARD_ENABLED = "true"
+DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "25"
+DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "50"
+DELETE_GUARD_MAX_DELETES_PER_BATCH = "100"
 
 [env.production.limits]
 cpu_ms = 300000

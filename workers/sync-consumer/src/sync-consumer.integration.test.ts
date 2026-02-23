@@ -773,6 +773,47 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     ]);
   });
 
+  it("delete guard blocks anomalous full-sync prune spikes and emits sync failure signal", async () => {
+    env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "2";
+    env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
+
+    userGraphDOState.canonicalOriginEvents = [
+      {
+        origin_event_id: "google_evt_keep_guard",
+        start: { dateTime: "2026-02-20T09:00:00Z" },
+      },
+      {
+        origin_event_id: "google_evt_stale_guard_1",
+        start: { dateTime: "2026-02-21T09:00:00Z" },
+      },
+      {
+        origin_event_id: "google_evt_stale_guard_2",
+        start: { dateTime: "2026-02-22T09:00:00Z" },
+      },
+    ];
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent({ id: "google_evt_keep_guard", summary: "Keep Guard" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncFullMessage = {
+      type: "SYNC_FULL",
+      account_id: ACCOUNT_A.account_id,
+      reason: "reconcile",
+    };
+
+    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    // Only the upsert delta should be applied. Prune delete batch is blocked.
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+    expect(accountDOState.syncFailureCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls[0].error).toContain("Delete guard triggered");
+  });
+
   it("full sync does not prune historical events outside prune window", async () => {
     userGraphDOState.canonicalOriginEvents = [
       {
@@ -996,6 +1037,86 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
         source: `provider:${ACCOUNT_A.account_id}`,
       },
     ]);
+  });
+
+  it("delete guard allows small managed-mirror delete batches under configured threshold", async () => {
+    env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "1";
+
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_safe_1: "evt_01HXYZ00000000000000000101",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [makeManagedMirrorEvent({ id: "google_evt_mirror_safe_1", status: "cancelled" })],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-safe",
+      resource_id: "resource-managed-delete-safe",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
+      {
+        canonical_event_id: "evt_01HXYZ00000000000000000101",
+        source: `provider:${ACCOUNT_A.account_id}`,
+      },
+    ]);
+    expect(accountDOState.syncFailureCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("delete guard blocks anomalous managed-mirror delete spikes and emits sync failure signal", async () => {
+    env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "1";
+    env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
+
+    userGraphDOState.mirrorLookupByProviderEventId = {
+      google_evt_mirror_spike_1: "evt_01HXYZ00000000000000000111",
+      google_evt_mirror_spike_2: "evt_01HXYZ00000000000000000112",
+    };
+
+    const googleFetch = createGoogleApiFetch({
+      events: [
+        makeManagedMirrorEvent({ id: "google_evt_mirror_spike_1", status: "cancelled" }),
+        makeManagedMirrorEvent({ id: "google_evt_mirror_spike_2", status: "cancelled" }),
+      ],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-managed-delete-spike",
+      resource_id: "resource-managed-delete-spike",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let sawGuardAuditLog = false;
+    try {
+      await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+      sawGuardAuditLog = errorSpy.mock.calls.some(
+        ([messageText]) => messageText === "sync-consumer: delete_guard_blocked",
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(0);
+    expect(accountDOState.syncFailureCalls).toHaveLength(1);
+    expect(accountDOState.syncFailureCalls[0].error).toContain("Delete guard triggered");
+    expect(sawGuardAuditLog).toBe(true);
   });
 
   it("google deleted mirror without managed metadata still triggers canonical delete via mirror index", async () => {

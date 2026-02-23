@@ -64,6 +64,23 @@ export interface SyncConsumerDeps {
   fetchFn?: FetchFn;
   /** Sleep function override for testing (avoids real delays in retryWithBackoff). */
   sleepFn?: (ms: number) => Promise<void>;
+  /**
+   * Shared delete guard state across queue messages in the same batch run.
+   * Optional for tests; when omitted, queue handler creates one per batch.
+   */
+  deleteGuardState?: DeleteGuardSharedState;
+}
+
+interface DeleteGuardSharedState {
+  batchDeleteCount: number;
+  accountDeleteCounts: Map<AccountId, number>;
+}
+
+function createDeleteGuardSharedState(): DeleteGuardSharedState {
+  return {
+    batchDeleteCount: 0,
+    accountDeleteCounts: new Map<AccountId, number>(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,14 +96,21 @@ export function createQueueHandler(deps: SyncConsumerDeps = {}) {
       batch: MessageBatch<SyncQueueMessage>,
       env: Env,
     ): Promise<void> {
+      const sharedDeleteGuardState =
+        deps.deleteGuardState ?? createDeleteGuardSharedState();
+      const runtimeDeps: SyncConsumerDeps = {
+        ...deps,
+        deleteGuardState: sharedDeleteGuardState,
+      };
+
       for (const msg of batch.messages) {
         try {
           switch (msg.body.type) {
             case "SYNC_INCREMENTAL":
-              await handleIncrementalSync(msg.body, env, deps);
+              await handleIncrementalSync(msg.body, env, runtimeDeps);
               break;
             case "SYNC_FULL":
-              await handleFullSync(msg.body, env, deps);
+              await handleFullSync(msg.body, env, runtimeDeps);
               break;
             default:
               // Unknown message type -- ack to prevent infinite retry
@@ -136,6 +160,7 @@ export async function handleIncrementalSync(
   const targetCalendarId = message.calendar_id ?? null;
   // Step 1: Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
+  const deleteGuard = createDeleteSafetyGuard(account_id, env, deps);
 
   // TM-9fc9: Webhook-hinted mirror deletion (Microsoft only).
   // When a Microsoft webhook notification has changeType "deleted", the
@@ -194,6 +219,12 @@ export async function handleIncrementalSync(
               userId,
               [...resolvedMirrorDeleteIds],
               env,
+              deleteGuard,
+              {
+                provider,
+                stage: "incremental",
+                reason: "webhook_hint",
+              },
             );
           }
         }
@@ -310,22 +341,45 @@ export async function handleIncrementalSync(
   }
 
   // Step 5: Process events and apply deltas.
-  const deltasApplied = await processAndApplyDeltas(account_id, events, env, provider);
+  const deltasApplied = await processAndApplyDeltas(
+    account_id,
+    events,
+    env,
+    provider,
+    deleteGuard,
+    "incremental",
+  );
 
   // Step 6: Persist sync cursors.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
-  // Step 6b: Mark per-scope sync success for each updated cursor.
-  for (const update of cursorUpdates) {
-    await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
-  }
+  if (deleteGuard.hasBlockedDeletes()) {
+    const guardError = buildDeleteGuardErrorMessage(deleteGuard.getBlockedEvents());
+    await markSyncFailure(account_id, env, guardError);
+    if (targetCalendarId && cursorUpdates.length === 0) {
+      await markScopedSyncFailure(account_id, env, targetCalendarId, guardError);
+    }
+    for (const update of cursorUpdates) {
+      await markScopedSyncFailure(
+        account_id,
+        env,
+        update.providerCalendarId,
+        guardError,
+      );
+    }
+  } else {
+    // Step 6b: Mark per-scope sync success for each updated cursor.
+    for (const update of cursorUpdates) {
+      await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
+    }
 
-  // Step 7: Mark sync success.
-  await markSyncSuccess(account_id, env);
+    // Step 7: Mark sync success.
+    await markSyncSuccess(account_id, env);
+  }
 
   const scopeLabel = targetCalendarId ? ` (scope: ${targetCalendarId})` : " (all scopes)";
   console.log(
-    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id}${scopeLabel} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated`,
+    `sync-consumer: SYNC_INCREMENTAL complete for account ${account_id}${scopeLabel} -- ${events.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated, delete_guard_blocked=${deleteGuard.hasBlockedDeletes()}`,
   );
 }
 
@@ -350,6 +404,7 @@ export async function handleFullSync(
 
   // Look up provider type from D1
   const provider = await lookupProvider(account_id, env);
+  const deleteGuard = createDeleteSafetyGuard(account_id, env, deps);
 
   // Get access token
   let accessToken: string;
@@ -419,7 +474,14 @@ export async function handleFullSync(
   }
 
   // Process all events using provider-specific classification/normalization
-  const deltasApplied = await processAndApplyDeltas(account_id, allEvents, env, provider);
+  const deltasApplied = await processAndApplyDeltas(
+    account_id,
+    allEvents,
+    env,
+    provider,
+    deleteGuard,
+    "full",
+  );
 
   let staleManagedMirrorDeletes = 0;
   if (provider === "google") {
@@ -438,6 +500,12 @@ export async function handleFullSync(
           userId,
           missingMirrorProviderIds,
           env,
+          deleteGuard,
+          {
+            provider,
+            stage: "full",
+            reason: "stale_managed_mirror_reconcile",
+          },
         );
         staleManagedMirrorDeletes = missingMirrorProviderIds.length;
       }
@@ -451,21 +519,40 @@ export async function handleFullSync(
     allEvents,
     env,
     provider,
+    deleteGuard,
+    {
+      provider,
+      stage: "full",
+      reason: "prune_missing_origin",
+    },
   );
 
   // Update sync cursor(s): scoped for Google, legacy-compatible for primary.
   await persistSyncCursorUpdates(account_id, provider, env, cursorUpdates);
 
-  // Mark per-scope sync success for each updated cursor.
-  for (const update of cursorUpdates) {
-    await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
+  if (deleteGuard.hasBlockedDeletes()) {
+    const guardError = buildDeleteGuardErrorMessage(deleteGuard.getBlockedEvents());
+    await markSyncFailure(account_id, env, guardError);
+    for (const update of cursorUpdates) {
+      await markScopedSyncFailure(
+        account_id,
+        env,
+        update.providerCalendarId,
+        guardError,
+      );
+    }
+  } else {
+    // Mark per-scope sync success for each updated cursor.
+    for (const update of cursorUpdates) {
+      await markScopedSyncSuccess(account_id, env, update.providerCalendarId);
+    }
+
+    // Mark sync success
+    await markSyncSuccess(account_id, env);
   }
 
-  // Mark sync success
-  await markSyncSuccess(account_id, env);
-
   console.log(
-    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${staleManagedMirrorDeletes} stale managed mirrors deleted, ${prunedDeleted} stale origin events pruned, ${cursorUpdates.length} cursors updated`,
+    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${staleManagedMirrorDeletes} stale managed mirrors deleted, ${prunedDeleted} stale origin events pruned, ${cursorUpdates.length} cursors updated, delete_guard_blocked=${deleteGuard.hasBlockedDeletes()}`,
   );
 }
 
@@ -488,6 +575,173 @@ interface ProviderFetchResult {
   events: GoogleCalendarEvent[];
   cursorUpdates: SyncCursorUpdate[];
   skippedCalendarIds: string[];
+}
+
+interface DeleteGuardConfig {
+  enabled: boolean;
+  maxDeletesPerSyncRun: number;
+  maxDeletesPerAccountBatch: number;
+  maxDeletesPerBatch: number;
+}
+
+interface DeleteGuardMetadata {
+  readonly provider?: ProviderType;
+  readonly stage?: "incremental" | "full";
+  readonly reason?: string;
+}
+
+interface DeleteGuardBlockEvent {
+  readonly account_id: AccountId;
+  readonly operation: string;
+  readonly attempted_deletes: number;
+  readonly run_count_before: number;
+  readonly run_limit: number;
+  readonly account_batch_count_before: number;
+  readonly account_batch_limit: number;
+  readonly batch_count_before: number;
+  readonly batch_limit: number;
+  readonly ts: string;
+  readonly metadata: DeleteGuardMetadata;
+}
+
+const DEFAULT_DELETE_GUARD_ENABLED = true;
+const DEFAULT_MAX_DELETES_PER_SYNC_RUN = 25;
+const DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH = 50;
+const DEFAULT_MAX_DELETES_PER_BATCH = 100;
+
+class DeleteSafetyGuard {
+  private runDeleteCount = 0;
+  private readonly blockedEvents: DeleteGuardBlockEvent[] = [];
+
+  constructor(
+    private readonly accountId: AccountId,
+    private readonly config: DeleteGuardConfig,
+    private readonly sharedState: DeleteGuardSharedState,
+  ) {}
+
+  reserve(
+    operation: string,
+    attemptedDeletes: number,
+    metadata: DeleteGuardMetadata = {},
+  ): boolean {
+    if (attemptedDeletes <= 0 || !this.config.enabled) {
+      return true;
+    }
+
+    const accountBatchCountBefore =
+      this.sharedState.accountDeleteCounts.get(this.accountId) ?? 0;
+    const batchCountBefore = this.sharedState.batchDeleteCount;
+
+    const wouldExceedRun =
+      this.runDeleteCount + attemptedDeletes > this.config.maxDeletesPerSyncRun;
+    const wouldExceedAccountBatch =
+      accountBatchCountBefore + attemptedDeletes >
+      this.config.maxDeletesPerAccountBatch;
+    const wouldExceedBatch =
+      batchCountBefore + attemptedDeletes > this.config.maxDeletesPerBatch;
+
+    if (wouldExceedRun || wouldExceedAccountBatch || wouldExceedBatch) {
+      const block: DeleteGuardBlockEvent = {
+        account_id: this.accountId,
+        operation,
+        attempted_deletes: attemptedDeletes,
+        run_count_before: this.runDeleteCount,
+        run_limit: this.config.maxDeletesPerSyncRun,
+        account_batch_count_before: accountBatchCountBefore,
+        account_batch_limit: this.config.maxDeletesPerAccountBatch,
+        batch_count_before: batchCountBefore,
+        batch_limit: this.config.maxDeletesPerBatch,
+        ts: new Date().toISOString(),
+        metadata,
+      };
+      this.blockedEvents.push(block);
+      console.error("sync-consumer: delete_guard_blocked", block);
+      return false;
+    }
+
+    this.runDeleteCount += attemptedDeletes;
+    this.sharedState.batchDeleteCount = batchCountBefore + attemptedDeletes;
+    this.sharedState.accountDeleteCounts.set(
+      this.accountId,
+      accountBatchCountBefore + attemptedDeletes,
+    );
+    return true;
+  }
+
+  hasBlockedDeletes(): boolean {
+    return this.blockedEvents.length > 0;
+  }
+
+  getBlockedEvents(): DeleteGuardBlockEvent[] {
+    return [...this.blockedEvents];
+  }
+}
+
+function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
+  if (typeof raw !== "string") return fallback;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return fallback;
+}
+
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (typeof raw !== "string") return fallback;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function resolveDeleteGuardConfig(env: Env): DeleteGuardConfig {
+  return {
+    enabled: parseBooleanEnv(
+      env.DELETE_GUARD_ENABLED,
+      DEFAULT_DELETE_GUARD_ENABLED,
+    ),
+    maxDeletesPerSyncRun: parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN,
+      DEFAULT_MAX_DELETES_PER_SYNC_RUN,
+    ),
+    maxDeletesPerAccountBatch: parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH,
+      DEFAULT_MAX_DELETES_PER_ACCOUNT_BATCH,
+    ),
+    maxDeletesPerBatch: parsePositiveIntEnv(
+      env.DELETE_GUARD_MAX_DELETES_PER_BATCH,
+      DEFAULT_MAX_DELETES_PER_BATCH,
+    ),
+  };
+}
+
+function resolveDeleteGuardState(deps: SyncConsumerDeps): DeleteGuardSharedState {
+  return deps.deleteGuardState ?? createDeleteGuardSharedState();
+}
+
+function createDeleteSafetyGuard(
+  accountId: AccountId,
+  env: Env,
+  deps: SyncConsumerDeps,
+): DeleteSafetyGuard {
+  return new DeleteSafetyGuard(
+    accountId,
+    resolveDeleteGuardConfig(env),
+    resolveDeleteGuardState(deps),
+  );
+}
+
+function buildDeleteGuardErrorMessage(
+  blockedEvents: DeleteGuardBlockEvent[],
+): string {
+  if (blockedEvents.length === 0) {
+    return "Delete guard triggered: destructive delete operation blocked.";
+  }
+
+  const summary = blockedEvents
+    .map((event) => `${event.operation}:${event.attempted_deletes}`)
+    .join(",");
+  return `Delete guard triggered: blocked ${blockedEvents.length} delete operation(s) [${summary}]`;
 }
 
 async function fetchIncrementalProviderEvents(
@@ -785,6 +1039,8 @@ async function processAndApplyDeltas(
   events: GoogleCalendarEvent[],
   env: Env,
   provider: ProviderType = "google",
+  deleteGuard?: DeleteSafetyGuard,
+  stage: "incremental" | "full" = "incremental",
 ): Promise<number> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
@@ -963,8 +1219,24 @@ async function processAndApplyDeltas(
     }
   }
 
-  if (deltas.length > 0) {
-    await applyProviderDeltas(accountId, userId!, deltas, env);
+  const originDeleteDeltas = deltas.filter((delta) => delta.type === "deleted");
+  const nonDeleteDeltas = deltas.filter((delta) => delta.type !== "deleted");
+  let deltasToApply = deltas;
+
+  if (
+    originDeleteDeltas.length > 0 &&
+    deleteGuard &&
+    !deleteGuard.reserve("apply_provider_deleted_deltas", originDeleteDeltas.length, {
+      provider,
+      stage,
+      reason: "provider_origin_delete_delta",
+    })
+  ) {
+    deltasToApply = nonDeleteDeltas;
+  }
+
+  if (deltasToApply.length > 0) {
+    await applyProviderDeltas(accountId, userId!, deltasToApply, env);
   }
 
   if (managedMirrorDeletedEventIds.size > 0) {
@@ -973,6 +1245,12 @@ async function processAndApplyDeltas(
       userId!,
       [...managedMirrorDeletedEventIds],
       env,
+      deleteGuard,
+      {
+        provider,
+        stage,
+        reason: "managed_mirror_delete",
+      },
     );
   }
 
@@ -987,7 +1265,7 @@ async function processAndApplyDeltas(
     );
   }
 
-  return deltas.length;
+  return deltasToApply.length;
 }
 
 /**
@@ -999,6 +1277,8 @@ async function pruneMissingOriginEvents(
   providerEvents: GoogleCalendarEvent[],
   env: Env,
   provider: ProviderType,
+  deleteGuard?: DeleteSafetyGuard,
+  metadata: DeleteGuardMetadata = {},
 ): Promise<number> {
   const userId = await lookupUserId(accountId, env);
   if (!userId) return 0;
@@ -1032,6 +1312,13 @@ async function pruneMissingOriginEvents(
     console.warn(
       `sync-consumer: prune skipped for account ${accountId} -- suspiciously high missing ratio (${prunable.length}/${denominator})`,
     );
+    return 0;
+  }
+
+  if (
+    deleteGuard &&
+    !deleteGuard.reserve("prune_missing_origin_events", prunable.length, metadata)
+  ) {
     return 0;
   }
 
@@ -1478,6 +1765,8 @@ async function applyManagedMirrorDeletes(
   userId: string,
   providerEventIds: string[],
   env: Env,
+  deleteGuard?: DeleteSafetyGuard,
+  metadata: DeleteGuardMetadata = {},
 ): Promise<void> {
   if (providerEventIds.length === 0) return;
 
@@ -1504,6 +1793,14 @@ async function applyManagedMirrorDeletes(
       canonical_event_id: canonicalEventId,
     });
     canonicalIds.add(canonicalEventId);
+  }
+
+  if (
+    canonicalIds.size > 0 &&
+    deleteGuard &&
+    !deleteGuard.reserve("delete_managed_mirror_canonicals", canonicalIds.size, metadata)
+  ) {
+    return;
   }
 
   for (const canonicalEventId of canonicalIds) {
