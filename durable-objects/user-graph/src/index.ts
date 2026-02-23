@@ -110,6 +110,8 @@ export interface QueueLike {
 
 /** Maximum queue messages per sendBatch call. */
 const WRITE_QUEUE_BATCH_SIZE = 100;
+/** Provider error substring used when queue batch payload exceeds limits. */
+const PAYLOAD_TOO_LARGE_HINT = "payload too large";
 /** Older than this many days is treated as low-priority historical churn. */
 const OUT_OF_WINDOW_PAST_DAYS = 30;
 /** Beyond this many days ahead is treated as low-priority far-future churn. */
@@ -178,6 +180,12 @@ interface PolicyRow {
   name: string;
   is_default: number;
   created_at: string;
+}
+
+function isPayloadTooLargeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message.toLowerCase();
+  return message.includes(PAYLOAD_TOO_LARGE_HINT) || message.includes("status 413");
 }
 
 interface PolicyEdgeRow {
@@ -3142,6 +3150,63 @@ export class UserGraphDO {
   }
 
   /**
+   * Drop an oversize UPSERT outbox entry when it is definitively stale.
+   *
+   * Safety rule:
+   * - Only applies to UPSERT_MIRROR entries.
+   * - Never drops entries whose mirror is still PENDING.
+   */
+  private dropStaleOversizeUpsertOutboxEntry(
+    item: { outbox_id: string; payload: unknown },
+    queueName: string,
+  ): boolean {
+    const payload = item.payload && typeof item.payload === "object"
+      ? item.payload as {
+        type?: unknown;
+        canonical_event_id?: unknown;
+        target_account_id?: unknown;
+      }
+      : null;
+
+    if (
+      !payload ||
+      payload.type !== "UPSERT_MIRROR" ||
+      typeof payload.canonical_event_id !== "string" ||
+      typeof payload.target_account_id !== "string"
+    ) {
+      return false;
+    }
+
+    const mirrorRows = this.sql
+      .exec<{ state: string }>(
+        `SELECT state
+         FROM event_mirrors
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+        payload.canonical_event_id,
+        payload.target_account_id,
+      )
+      .toArray();
+    const mirrorState = mirrorRows[0]?.state ?? null;
+
+    if (mirrorState === "PENDING") {
+      return false;
+    }
+
+    this.sql.exec(
+      `DELETE FROM outbox WHERE outbox_id = ?`,
+      item.outbox_id,
+    );
+    console.warn("user-graph: dropped stale oversize outbox entry", {
+      queue_name: queueName,
+      outbox_id: item.outbox_id,
+      canonical_event_id: payload.canonical_event_id,
+      target_account_id: payload.target_account_id,
+      mirror_state: mirrorState,
+    });
+    return true;
+  }
+
+  /**
    * Drain unsent outbox entries by sending them to the appropriate queue,
    * then delete successfully sent entries.
    *
@@ -3179,9 +3244,11 @@ export class UserGraphDO {
 
     for (const [queueName, items] of byQueue) {
       const queue = queueName === "write" ? this.writeQueue : this.deleteQueue;
+      let stopQueue = false;
 
       // Send in batches to respect queue limits
       for (let i = 0; i < items.length; i += WRITE_QUEUE_BATCH_SIZE) {
+        if (stopQueue) break;
         const chunk = items.slice(i, i + WRITE_QUEUE_BATCH_SIZE);
         try {
           if (chunk.length === 1) {
@@ -3198,6 +3265,53 @@ export class UserGraphDO {
           }
           drained += chunk.length;
         } catch (err) {
+          const payloadTooLarge = isPayloadTooLargeError(err);
+          if (payloadTooLarge && chunk.length > 1) {
+            console.warn("user-graph: drainOutbox batch too large, falling back to single sends", {
+              queue_name: queueName,
+              batch_size: chunk.length,
+            });
+
+            for (const item of chunk) {
+              try {
+                await queue.send(item.payload);
+                this.sql.exec(
+                  `DELETE FROM outbox WHERE outbox_id = ?`,
+                  item.outbox_id,
+                );
+                drained += 1;
+              } catch (singleErr) {
+                console.error("user-graph: drainOutbox single queue send failed", {
+                  queue_name: queueName,
+                  outbox_id: item.outbox_id,
+                  error: singleErr instanceof Error ? singleErr.message : String(singleErr),
+                });
+                if (isPayloadTooLargeError(singleErr)) {
+                  // Oversize UPSERT entries can become stale after newer writes
+                  // converge. Drop only when mirror is not PENDING.
+                  const dropped = this.dropStaleOversizeUpsertOutboxEntry(item, queueName);
+                  if (dropped) {
+                    continue;
+                  }
+                  continue;
+                }
+                // For transient queue failures, stop draining this queue so
+                // the remaining entries can retry on a later pass.
+                stopQueue = true;
+                break;
+              }
+            }
+            continue;
+          }
+          if (payloadTooLarge && chunk.length === 1) {
+            const dropped = this.dropStaleOversizeUpsertOutboxEntry(
+              chunk[0],
+              queueName,
+            );
+            if (dropped) {
+              continue;
+            }
+          }
           console.error("user-graph: drainOutbox queue send failed", {
             queue_name: queueName,
             batch_size: chunk.length,
@@ -3205,7 +3319,7 @@ export class UserGraphDO {
           });
           // Queue send failed -- entries remain in outbox for retry.
           // Break out of this queue's batches to avoid repeated failures.
-          break;
+          stopQueue = true;
         }
       }
     }

@@ -6003,6 +6003,141 @@ describe("UserGraphDO buffer constraints", () => {
       expect(outboxAfter).toHaveLength(0);
     });
 
+    it("falls back to single sends when batch drain exceeds queue payload limits", async () => {
+      const delivered: unknown[] = [];
+      const payloadLimitedQueue: QueueLike = {
+        send: async (message: unknown) => {
+          delivered.push(message);
+        },
+        sendBatch: async () => {
+          throw new Error("Queue sendBatch failed: Payload Too Large");
+        },
+      };
+      const ugPayloadLimited = new UserGraphDO(sql, payloadLimitedQueue);
+
+      db.prepare(
+        `INSERT INTO outbox (outbox_id, queue_name, payload_json, created_at)
+         VALUES (?, ?, ?, datetime('now'))`,
+      ).run(
+        "obx_payload_limit_1",
+        "write",
+        JSON.stringify({
+          type: "UPSERT_MIRROR",
+          canonical_event_id: "evt_payload_limit_1",
+          target_account_id: OTHER_ACCOUNT_ID,
+          target_calendar_id: "primary",
+          projected_hash: "hash_payload_limit_1",
+          projected_payload: { title: "payload-limit-1" },
+          idempotency_key: "idemp_payload_limit_1",
+        }),
+      );
+
+      db.prepare(
+        `INSERT INTO outbox (outbox_id, queue_name, payload_json, created_at)
+         VALUES (?, ?, ?, datetime('now'))`,
+      ).run(
+        "obx_payload_limit_2",
+        "write",
+        JSON.stringify({
+          type: "UPSERT_MIRROR",
+          canonical_event_id: "evt_payload_limit_2",
+          target_account_id: OTHER_ACCOUNT_ID,
+          target_calendar_id: "primary",
+          projected_hash: "hash_payload_limit_2",
+          projected_payload: { title: "payload-limit-2" },
+          idempotency_key: "idemp_payload_limit_2",
+        }),
+      );
+
+      const drained = await ugPayloadLimited.drainOutbox();
+
+      expect(drained).toBe(2);
+      expect(delivered).toHaveLength(2);
+
+      const outboxAfter = db
+        .prepare(`SELECT * FROM outbox WHERE sent_at IS NULL`)
+        .all();
+      expect(outboxAfter).toHaveLength(0);
+    });
+
+    it("drops stale oversize UPSERT outbox entries once mirror is no longer pending", async () => {
+      insertPolicyEdge(db, {
+        policyId: "pol_outbox_oversize_stale",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      const delta = makeCreatedDelta({
+        origin_event_id: "google_evt_oversize_stale",
+        event: {
+          ...makeCreatedDelta().event!,
+          origin_event_id: "google_evt_oversize_stale",
+        },
+      });
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [delta]);
+
+      const eventRow = db
+        .prepare("SELECT canonical_event_id FROM canonical_events LIMIT 1")
+        .get() as { canonical_event_id: string };
+      expect(eventRow).toBeDefined();
+
+      db.prepare(
+        `UPDATE event_mirrors
+         SET state = 'ACTIVE'
+         WHERE canonical_event_id = ? AND target_account_id = ?`,
+      ).run(eventRow.canonical_event_id, OTHER_ACCOUNT_ID);
+
+      const payloadTooLargeQueue: QueueLike = {
+        send: async () => {
+          throw new Error("Queue send failed: Payload Too Large");
+        },
+        sendBatch: async () => {
+          throw new Error("Queue sendBatch failed: Payload Too Large");
+        },
+      };
+      const ugOversize = new UserGraphDO(sql, payloadTooLargeQueue);
+
+      db.prepare(
+        `INSERT INTO outbox (outbox_id, queue_name, payload_json, created_at)
+         VALUES (?, ?, ?, datetime('now'))`,
+      ).run(
+        "obx_payload_stale_1",
+        "delete",
+        JSON.stringify({
+          type: "UPSERT_MIRROR",
+          canonical_event_id: eventRow.canonical_event_id,
+          target_account_id: OTHER_ACCOUNT_ID,
+          target_calendar_id: "primary",
+          projected_hash: "hash_payload_stale_1",
+          projected_payload: {
+            summary: "oversize-stale",
+            description: "desc",
+            start: { dateTime: "2026-02-15T09:00:00Z" },
+            end: { dateTime: "2026-02-15T09:30:00Z" },
+            transparency: "opaque",
+            visibility: "default",
+            extendedProperties: {
+              private: {
+                tminus: "true",
+                managed: "true",
+                canonical_event_id: eventRow.canonical_event_id,
+                origin_account_id: TEST_ACCOUNT_ID,
+              },
+            },
+          },
+          idempotency_key: "idemp_payload_stale_1",
+        }),
+      );
+
+      const drained = await ugOversize.drainOutbox();
+      expect(drained).toBe(0);
+
+      const outboxEntry = db
+        .prepare(`SELECT * FROM outbox WHERE outbox_id = 'obx_payload_stale_1'`)
+        .all();
+      expect(outboxEntry).toHaveLength(0);
+    });
+
     it("requeuePendingMirrors sweeps orphaned outbox entries", async () => {
       // Set up a policy edge
       insertPolicyEdge(db, {
