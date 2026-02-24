@@ -21,6 +21,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useApi } from "../lib/api-provider";
+import { useAuth } from "../lib/auth";
 import type { AccountProvider } from "../lib/api";
 import { buildOAuthStartUrl } from "../lib/accounts";
 import {
@@ -46,6 +47,8 @@ import { Card, CardContent } from "../components/ui/card";
 
 export function ProviderHealth() {
   const api = useApi();
+  const { user } = useAuth();
+  const currentUserId = user?.id ?? "";
 
   const [accounts, setAccounts] = useState<AccountHealthData[]>([]);
   const [accountCount, setAccountCount] = useState(0);
@@ -143,10 +146,18 @@ export function ProviderHealth() {
   // Reconnect via OAuth
   const handleReconnect = useCallback(
     (provider: AccountProvider) => {
-      const url = buildOAuthStartUrl(provider);
+      if (!currentUserId) {
+        showStatus("error", "Session expired. Please sign in again.");
+        return;
+      }
+      const url = buildOAuthStartUrl(
+        provider,
+        currentUserId,
+        "https://app.tminus.ink/#/provider-health?linked=true",
+      );
       window.location.assign(url);
     },
-    [],
+    [currentUserId, showStatus],
   );
 
   // Remove flow

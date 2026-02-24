@@ -337,6 +337,9 @@ describe("ProviderHealth Dashboard", () => {
       expect(mockLocationAssign).toHaveBeenCalledWith(
         expect.stringContaining("microsoft"),
       );
+      expect(mockLocationAssign).toHaveBeenCalledWith(
+        expect.stringContaining("user_id=user-1"),
+      );
     });
 
     it("reconnect button is also available on non-error accounts", async () => {

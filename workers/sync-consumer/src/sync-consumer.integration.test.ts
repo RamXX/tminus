@@ -1575,6 +1575,54 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     );
   });
 
+  it("google incremental respects explicit all-disabled scopes and performs no provider fetches", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: false,
+      },
+      {
+        provider_calendar_id: "team@group.calendar.google.com",
+        enabled: true,
+        sync_enabled: false,
+      },
+    ];
+    accountDOState.scopedSyncTokens = {
+      primary: "sync-token-primary-old",
+      "team@group.calendar.google.com": "sync-token-team-old",
+    };
+
+    userGraphDOState.activeMirrors = [
+      {
+        provider_event_id: "google_evt_team_deleted",
+        target_calendar_id: "team@group.calendar.google.com",
+      },
+    ];
+
+    const googleFetch = async (): Promise<Response> =>
+      new Response("Provider fetch should not be called", { status: 500 });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-explicit-all-disabled",
+      resource_id: "resource-explicit-all-disabled",
+      ping_ts: new Date().toISOString(),
+      calendar_id: null,
+    };
+
+    await handleIncrementalSync(message, env, {
+      fetchFn: googleFetch,
+      sleepFn: noopSleep,
+    });
+
+    expect(accountDOState.setScopedSyncTokenCalls).toEqual([]);
+    expect(accountDOState.setSyncTokenCalls).toEqual([]);
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
+    expect(accountDOState.syncFailureCalls).toEqual([]);
+  });
+
   it("google incremental does not enqueue full sync for unscoped overlay mirrors", async () => {
     accountDOState.calendarScopes = [
       {

@@ -1214,12 +1214,23 @@ async function listSyncCalendarIds(
   env: Env,
   includeMirrorScopeFallback = true,
 ): Promise<string[]> {
+  const scopeRows = await listCalendarScopes(accountId, env);
   const calendarIds = new Set(
-    (await listCalendarScopes(accountId, env))
+    scopeRows
       .filter((scope) => scope.enabled && scope.syncEnabled)
       .map((scope) => scope.providerCalendarId)
       .filter((calendarId) => calendarId.length > 0),
   );
+
+  if (calendarIds.size > 0) {
+    return [...calendarIds];
+  }
+
+  // If scope rows exist but none are sync-enabled, respect explicit user
+  // intent and sync no calendars.
+  if (scopeRows.length > 0) {
+    return [];
+  }
 
   // Legacy fallback:
   // only derive mirror target calendars when there are no explicitly enabled
