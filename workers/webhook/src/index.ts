@@ -372,6 +372,12 @@ async function handleMicrosoftWebhook(
         subscriptionId: notification.subscriptionId,
         calendarId: accountRow.calendar_id,
         changeType: notification.changeType,
+        ...(notification.changeType?.toLowerCase() === "deleted"
+          ? {
+              resource: notification.resource,
+              resourceDataId: resourceDataId ?? null,
+            }
+          : {}),
       });
     } catch (err) {
       console.error("Failed to enqueue SYNC_INCREMENTAL for Microsoft notification", err);

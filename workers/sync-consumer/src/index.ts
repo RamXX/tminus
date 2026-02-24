@@ -168,6 +168,19 @@ export async function handleIncrementalSync(
   let microsoftWebhookDeleteResolvedCount = 0;
   const handledManagedMirrorDeleteEventIds = new Set<string>();
 
+  if (
+    provider === "microsoft" &&
+    isWebhookDeleteChangeType(message.webhook_change_type)
+  ) {
+    console.info("sync-consumer: microsoft delete webhook candidates", {
+      account_id,
+      resource_id: message.resource_id,
+      resource_data_id: message.webhook_resource_data_id ?? null,
+      candidate_event_ids: microsoftWebhookCandidateEventIds,
+      candidate_count: microsoftWebhookDeleteCandidateCount,
+    });
+  }
+
   const rememberHandledManagedMirrorDeleteId = (providerEventId: string): void => {
     for (const variant of providerEventIdVariants(providerEventId)) {
       handledManagedMirrorDeleteEventIds.add(variant);
@@ -2480,14 +2493,27 @@ export function extractMicrosoftEventId(resource: string): string | null {
     return null;
   }
 
-  const parenMatch = withoutQuery.match(/(?:^|\/)events\('(.+)'\)$/i);
+  const parenMatch = withoutQuery.match(/(?:^|\/)events\('([^']+)'\)(?:\/.*)?$/i);
   if (parenMatch?.[1]) {
     return parenMatch[1];
   }
 
   const slashMatch = withoutQuery.match(/(?:^|\/)events\/(.+)$/i);
   if (slashMatch?.[1]) {
-    return slashMatch[1];
+    const tail = slashMatch[1];
+
+    // Graph resources can suffix an event identity path with relationship
+    // segments. Strip known suffixes while preserving IDs that may include
+    // encoded/slash characters.
+    const withKnownSuffixRemoved =
+      tail
+        .replace(/\/instances(?:\/.*)?$/i, "")
+        .replace(/\/attachments(?:\/.*)?$/i, "")
+        .replace(/\/extensions(?:\/.*)?$/i, "")
+        .replace(/\/\$value$/i, "")
+        .replace(/\/\$entity$/i, "");
+
+    return withKnownSuffixRemoved;
   }
 
   return null;

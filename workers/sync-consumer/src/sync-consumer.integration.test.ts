@@ -2668,6 +2668,14 @@ describe("extractMicrosoftEventId", () => {
     );
   });
 
+  it("extracts event ID from events('{id}') with relationship suffix", () => {
+    expect(
+      extractMicrosoftEventId(
+        "users/uid/events('AAMkAG-paren-321')/instances('AAMkAG-inst-999')",
+      ),
+    ).toBe("AAMkAG-paren-321");
+  });
+
   it("ignores query strings when extracting event ID", () => {
     expect(extractMicrosoftEventId("me/events/AAMkAG-query-777?$select=id")).toBe(
       "AAMkAG-query-777",
@@ -2678,6 +2686,18 @@ describe("extractMicrosoftEventId", () => {
     expect(extractMicrosoftEventId("me/events/AAMkAGI2TQABAAA/AAABBB==")).toBe(
       "AAMkAGI2TQABAAA/AAABBB==",
     );
+  });
+
+  it("strips known relationship suffixes from slash-based event resources", () => {
+    expect(
+      extractMicrosoftEventId("users/uid/events/AAMkAG-def-456/instances/AAMkAG-inst-1"),
+    ).toBe("AAMkAG-def-456");
+    expect(
+      extractMicrosoftEventId("users/uid/events/AAMkAG-def-456/$entity"),
+    ).toBe("AAMkAG-def-456");
+    expect(
+      extractMicrosoftEventId("users/uid/events/AAMkAG-def-456/$value"),
+    ).toBe("AAMkAG-def-456");
   });
 });
 

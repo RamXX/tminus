@@ -59,6 +59,14 @@ API_ORIGIN = "https://api.tminus.ink"
 pattern = "app.tminus.ink/*"
 zone_name = "tminus.ink"
 
+[[env.production.routes]]
+pattern = "tminus.ink/*"
+zone_name = "tminus.ink"
+
+[[env.production.routes]]
+pattern = "www.tminus.ink/*"
+zone_name = "tminus.ink"
+
 [env.production.assets]
 directory = "../../src/web/dist"
 binding = "ASSETS"
