@@ -239,6 +239,43 @@ export function Accounts() {
     [],
   );
 
+  const handleScopePreset = useCallback(
+    (preset: "primary_only" | "all_writable") => {
+      if (scopes.length === 0) return;
+
+      if (preset === "primary_only") {
+        const writableScopes = scopes.filter((scope) =>
+          scope.capabilities.includes("write"),
+        );
+        const selected =
+          writableScopes.find((scope) => scope.calendar_role === "primary") ??
+          writableScopes.find((scope) => scope.recommended) ??
+          writableScopes[0];
+
+        if (!selected) {
+          showStatus("error", "No writable calendars are available for sync.");
+          return;
+        }
+
+        for (const scope of scopes) {
+          const shouldSync = scope.provider_calendar_id === selected.provider_calendar_id;
+          if (scope.sync_enabled !== shouldSync) {
+            handleScopeToggle(scope.provider_calendar_id, "sync_enabled", shouldSync);
+          }
+        }
+        return;
+      }
+
+      for (const scope of scopes) {
+        const shouldSync = scope.capabilities.includes("write");
+        if (scope.sync_enabled !== shouldSync) {
+          handleScopeToggle(scope.provider_calendar_id, "sync_enabled", shouldSync);
+        }
+      }
+    },
+    [scopes, handleScopeToggle, showStatus],
+  );
+
   const handleScopesSave = useCallback(async () => {
     if (!scopeTarget || pendingScopeChanges.size === 0) return;
     setScopeSaving(true);
@@ -482,8 +519,33 @@ export function Accounts() {
             <CardContent className="space-y-3">
               <p className="text-sm text-foreground">
                 Select which calendars to include in synchronization.
-                Recommended calendars are marked below. Scope tuning is optional
-                -- defaults work for most users.
+                Recommended calendars are marked below. Defaults use one
+                calendar; scope tuning is optional and you can opt into more
+                at any time.
+              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  data-testid="scopes-preset-primary-only"
+                  variant="outline"
+                  size="sm"
+                  disabled={scopeLoading || scopeSaving || scopes.length === 0}
+                  onClick={() => handleScopePreset("primary_only")}
+                >
+                  Recommended Only (1)
+                </Button>
+                <Button
+                  data-testid="scopes-preset-all-writable"
+                  variant="outline"
+                  size="sm"
+                  disabled={scopeLoading || scopeSaving || scopes.length === 0}
+                  onClick={() => handleScopePreset("all_writable")}
+                >
+                  Enable All Writable
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Presets stage changes locally. Click Save Changes to apply.
               </p>
 
               {scopeLoading ? (

@@ -727,6 +727,14 @@ describe("Accounts Page", () => {
         },
       ],
     };
+    const MULTI_SYNC_SCOPES_RESPONSE: AccountScopesResponse = {
+      ...MOCK_SCOPES_RESPONSE,
+      scopes: MOCK_SCOPES_RESPONSE.scopes.map((scope) =>
+        scope.provider_calendar_id === "shared-team@group.calendar.google.com"
+          ? { ...scope, sync_enabled: true }
+          : scope,
+      ),
+    };
 
     it("shows Scopes button for each account", async () => {
       await renderAndWait();
@@ -879,6 +887,89 @@ describe("Accounts Page", () => {
       expect(screen.getByTestId("scopes-save")).toBeInTheDocument();
       // Cancel button should say "Cancel"
       expect(screen.getByTestId("scopes-cancel").textContent).toBe("Cancel");
+    });
+
+    it("applies Recommended Only preset to keep a single writable calendar", async () => {
+      mockFetchScopes.mockResolvedValueOnce(MULTI_SYNC_SCOPES_RESPONSE);
+      mockUpdateScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      await renderAndWait();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-preset-primary-only"));
+      });
+
+      const primarySync = screen.getByTestId("scope-sync-primary") as HTMLInputElement;
+      const teamSync = screen.getByTestId(
+        "scope-sync-shared-team@group.calendar.google.com",
+      ) as HTMLInputElement;
+      const readOnlySync = screen.getByTestId(
+        "scope-sync-holidays@calendar.google.com",
+      ) as HTMLInputElement;
+
+      expect(primarySync.checked).toBe(true);
+      expect(teamSync.checked).toBe(false);
+      expect(readOnlySync.checked).toBe(false);
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-save"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(mockUpdateScopes).toHaveBeenCalledWith("acc-google-work", [
+        {
+          provider_calendar_id: "shared-team@group.calendar.google.com",
+          sync_enabled: false,
+        },
+      ]);
+    });
+
+    it("applies Enable All Writable preset to include writable calendars only", async () => {
+      mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
+      mockUpdateScopes.mockResolvedValueOnce({
+        ...MOCK_SCOPES_RESPONSE,
+        scopes: MOCK_SCOPES_RESPONSE.scopes.map((scope) =>
+          scope.provider_calendar_id === "shared-team@group.calendar.google.com"
+            ? { ...scope, sync_enabled: true }
+            : scope,
+        ),
+      });
+      await renderAndWait();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-preset-all-writable"));
+      });
+
+      const teamSync = screen.getByTestId(
+        "scope-sync-shared-team@group.calendar.google.com",
+      ) as HTMLInputElement;
+      const readOnlySync = screen.getByTestId(
+        "scope-sync-holidays@calendar.google.com",
+      ) as HTMLInputElement;
+
+      expect(teamSync.checked).toBe(true);
+      expect(readOnlySync.checked).toBe(false);
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-save"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(mockUpdateScopes).toHaveBeenCalledWith("acc-google-work", [
+        {
+          provider_calendar_id: "shared-team@group.calendar.google.com",
+          sync_enabled: true,
+        },
+      ]);
     });
 
     it("calls updateScopes and shows success message on save", async () => {
