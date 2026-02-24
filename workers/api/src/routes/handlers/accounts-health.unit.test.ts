@@ -34,7 +34,7 @@ describe("tier_limit derivation from ACCOUNT_LIMITS", () => {
 });
 
 // ---------------------------------------------------------------------------
-// calendar_count derivation from enabled scopes
+// calendar_count derivation from enabled + sync-enabled scopes
 // ---------------------------------------------------------------------------
 
 describe("calendar_count derivation from scopes", () => {
@@ -51,7 +51,7 @@ describe("calendar_count derivation from scopes", () => {
     calendar_count: number;
     calendar_names: string[];
   } {
-    const enabledScopes = scopes.filter((s) => s.enabled);
+    const enabledScopes = scopes.filter((s) => s.enabled && s.syncEnabled);
     return {
       calendar_count: enabledScopes.length,
       calendar_names: enabledScopes
@@ -60,7 +60,7 @@ describe("calendar_count derivation from scopes", () => {
     };
   }
 
-  it("counts only enabled scopes", () => {
+  it("counts only enabled and sync-enabled scopes", () => {
     const scopes: ScopeEntry[] = [
       {
         scopeId: "s1",
@@ -89,8 +89,8 @@ describe("calendar_count derivation from scopes", () => {
     ];
 
     const result = deriveCalendarData(scopes);
-    expect(result.calendar_count).toBe(2);
-    expect(result.calendar_names).toEqual(["Main", "Team"]);
+    expect(result.calendar_count).toBe(1);
+    expect(result.calendar_names).toEqual(["Main"]);
   });
 
   it("returns 0 count and empty names for no scopes", () => {
@@ -123,6 +123,23 @@ describe("calendar_count derivation from scopes", () => {
         displayName: "Main",
         calendarRole: "owner",
         enabled: false,
+        syncEnabled: false,
+      },
+    ];
+
+    const result = deriveCalendarData(scopes);
+    expect(result.calendar_count).toBe(0);
+    expect(result.calendar_names).toEqual([]);
+  });
+
+  it("returns 0 when scopes are enabled but sync is disabled", () => {
+    const scopes: ScopeEntry[] = [
+      {
+        scopeId: "s1",
+        providerCalendarId: "team",
+        displayName: "Team",
+        calendarRole: "editor",
+        enabled: true,
         syncEnabled: false,
       },
     ];

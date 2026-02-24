@@ -725,6 +725,41 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(row.status).toBe("active");
   });
 
+  it("incremental sync skips webhook-targeted calendars that are sync-disabled", async () => {
+    accountDOState.calendarScopes = [
+      {
+        provider_calendar_id: "primary",
+        enabled: true,
+        sync_enabled: true,
+      },
+      {
+        provider_calendar_id: "partner@group.calendar.google.com",
+        enabled: true,
+        sync_enabled: false,
+      },
+    ];
+
+    const googleFetch = vi.fn(async () => {
+      return new Response("unexpected provider fetch", { status: 500 });
+    });
+
+    const message: SyncIncrementalMessage = {
+      type: "SYNC_INCREMENTAL",
+      account_id: ACCOUNT_A.account_id,
+      channel_id: "channel-partner-disabled",
+      resource_id: "resource-partner-disabled",
+      ping_ts: new Date().toISOString(),
+      calendar_id: "partner@group.calendar.google.com",
+    };
+
+    await handleIncrementalSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+
+    expect(googleFetch).not.toHaveBeenCalled();
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(0);
+    expect(accountDOState.setScopedSyncTokenCalls).toHaveLength(0);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
   // -------------------------------------------------------------------------
   // 2. Full sync paginates through all events
   // -------------------------------------------------------------------------

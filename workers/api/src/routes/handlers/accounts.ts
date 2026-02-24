@@ -474,9 +474,11 @@ async function handleGetAccountsHealth(
             "/listCalendarScopes",
           );
           if (scopeResult.ok && scopeResult.data.scopes) {
-            const enabledScopes = scopeResult.data.scopes.filter((s) => s.enabled);
-            calendarCount = enabledScopes.length;
-            calendarNames = enabledScopes
+            const syncableScopes = scopeResult.data.scopes.filter(
+              (s) => s.enabled && s.syncEnabled,
+            );
+            calendarCount = syncableScopes.length;
+            calendarNames = syncableScopes
               .map((s) => s.displayName ?? s.providerCalendarId)
               .filter(Boolean);
           }

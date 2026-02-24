@@ -997,6 +997,43 @@ async function fetchIncrementalProviderEvents(
   targetCalendarId: string | null = null,
   includeMirrorScopeFallback = true,
 ): Promise<ProviderFetchResult> {
+  if (targetCalendarId) {
+    try {
+      const targetScope = (await listCalendarScopes(accountId, env)).find(
+        (scope) => scope.providerCalendarId === targetCalendarId,
+      );
+      if (!targetScope || !targetScope.enabled || !targetScope.syncEnabled) {
+        console.info(
+          "sync-consumer: skipping incremental sync for out-of-scope calendar",
+          {
+            account_id: accountId,
+            provider,
+            calendar_id: targetCalendarId,
+            scope_found: Boolean(targetScope),
+            enabled: targetScope?.enabled ?? false,
+            sync_enabled: targetScope?.syncEnabled ?? false,
+          },
+        );
+        return {
+          events: [],
+          cursorUpdates: [],
+          skippedCalendarIds: [targetCalendarId],
+        };
+      }
+    } catch (err) {
+      // Scope lookup failures should not block valid webhook processing.
+      console.warn(
+        "sync-consumer: failed to verify target scope state; continuing incremental sync",
+        {
+          account_id: accountId,
+          provider,
+          calendar_id: targetCalendarId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }
+
   // When targetCalendarId is set, only sync that specific scope.
   // Otherwise, sync all registered calendar scopes (plus legacy mirror
   // fallback scopes derived from UserGraph active mirrors).

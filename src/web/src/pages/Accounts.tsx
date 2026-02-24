@@ -534,11 +534,13 @@ export function Accounts() {
                             type="checkbox"
                             data-testid={`scope-sync-${scope.provider_calendar_id}`}
                             checked={scope.sync_enabled}
-                            disabled={!scope.capabilities.includes("write")}
+                            disabled={!scope.capabilities.includes("write") && !scope.sync_enabled}
                             title={
                               scope.capabilities.includes("write")
                                 ? "Enable sync for this calendar"
-                                : "Sync requires write capability"
+                                : scope.sync_enabled
+                                  ? "Read-only calendar: you can disable sync, but cannot re-enable it here"
+                                  : "Sync requires write capability"
                             }
                             onChange={(e) =>
                               handleScopeToggle(

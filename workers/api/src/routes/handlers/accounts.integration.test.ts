@@ -1015,9 +1015,9 @@ describe("Integration: Calendar scope endpoints", () => {
       expect(body.data.tier_limit).toBe(10); // enterprise limit
     });
 
-    it("calendar_count and calendar_names derived from enabled scopes", async () => {
+    it("calendar_count and calendar_names derived from sync-enabled scopes", async () => {
       insertAccount(db, ACCOUNT_A);
-      // MOCK_SCOPES has 3 scopes: 2 enabled (Main Calendar, Team Calendar), 1 disabled (Holidays)
+      // MOCK_SCOPES has 3 scopes: only Main Calendar is both enabled+syncEnabled.
       const accountDO = createMockAccountDO();
       const handler = createHandler();
       const env = buildEnv(d1, accountDO);
@@ -1044,11 +1044,11 @@ describe("Integration: Calendar scope endpoints", () => {
 
       expect(body.ok).toBe(true);
       const account = body.data.accounts[0];
-      // Only enabled scopes count: Main Calendar (owner, enabled) and Team Calendar (editor, enabled)
-      expect(account.calendar_count).toBe(2);
+      // Only enabled+sync-enabled scopes count.
+      expect(account.calendar_count).toBe(1);
       expect(account.calendar_names).toContain("Main Calendar");
-      expect(account.calendar_names).toContain("Team Calendar");
-      // Holidays is disabled, should NOT appear
+      // Team is enabled but sync-disabled; holidays is disabled.
+      expect(account.calendar_names).not.toContain("Team Calendar");
       expect(account.calendar_names).not.toContain("Holidays");
     });
 

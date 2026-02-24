@@ -802,6 +802,57 @@ describe("Accounts Page", () => {
       expect(primarySync.disabled).toBe(false);
     });
 
+    it("allows disabling a read-only calendar that is already sync-enabled", async () => {
+      const readOnlySynced: AccountScopesResponse = {
+        ...MOCK_SCOPES_RESPONSE,
+        scopes: MOCK_SCOPES_RESPONSE.scopes.map((scope) =>
+          scope.provider_calendar_id === "holidays@calendar.google.com"
+            ? { ...scope, enabled: true, sync_enabled: true }
+            : scope,
+        ),
+      };
+      mockFetchScopes.mockResolvedValueOnce(readOnlySynced);
+      mockUpdateScopes.mockResolvedValueOnce({
+        ...readOnlySynced,
+        scopes: readOnlySynced.scopes.map((scope) =>
+          scope.provider_calendar_id === "holidays@calendar.google.com"
+            ? { ...scope, sync_enabled: false }
+            : scope,
+        ),
+      });
+      await renderAndWait();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-btn-acc-google-work"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      const readOnlySync = screen.getByTestId(
+        "scope-sync-holidays@calendar.google.com",
+      ) as HTMLInputElement;
+      expect(readOnlySync.checked).toBe(true);
+      expect(readOnlySync.disabled).toBe(false);
+
+      await act(async () => {
+        fireEvent.click(readOnlySync);
+      });
+
+      expect(readOnlySync.checked).toBe(false);
+      expect(readOnlySync.disabled).toBe(true);
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("scopes-save"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(mockUpdateScopes).toHaveBeenCalledWith("acc-google-work", [
+        {
+          provider_calendar_id: "holidays@calendar.google.com",
+          sync_enabled: false,
+        },
+      ]);
+    });
+
     it("shows Save button only when changes are pending", async () => {
       mockFetchScopes.mockResolvedValueOnce(MOCK_SCOPES_RESPONSE);
       await renderAndWait();
