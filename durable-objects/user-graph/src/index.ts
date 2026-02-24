@@ -118,6 +118,14 @@ const PAYLOAD_TOO_LARGE_HINT = "payload too large";
 const OUT_OF_WINDOW_PAST_DAYS = 30;
 /** Beyond this many days ahead is treated as low-priority far-future churn. */
 const OUT_OF_WINDOW_FUTURE_DAYS = 365;
+/**
+ * Provider-sourced mirror deletes must never fan out into historical origin
+ * deletes. This prevents replay/heuristic drift from mutating old organizer
+ * events in real calendars.
+ */
+const PROVIDER_ORIGIN_DELETE_LOOKBACK_DAYS = 90;
+const PROVIDER_ORIGIN_DELETE_LOOKBACK_MS =
+  PROVIDER_ORIGIN_DELETE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
 /** Near-term upserts within this horizon use the priority queue. */
 const UPSERT_PRIORITY_LOOKAHEAD_DAYS = 30;
 /** Recently-ended upserts within this lookback still use priority queue. */
@@ -215,6 +223,13 @@ function clampOptionalString(
 ): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
   return truncateToMaxChars(value, maxChars);
+}
+
+function parseEventTimestampMs(raw: string | null | undefined): number | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 interface PolicyEdgeRow {
@@ -1876,8 +1891,9 @@ export class UserGraphDO {
         origin_account_id: string;
         origin_calendar_id: string | null;
         origin_event_id: string;
+        start_ts: string | null;
       }>(
-        `SELECT canonical_event_id, origin_account_id, origin_calendar_id, origin_event_id
+        `SELECT canonical_event_id, origin_account_id, origin_calendar_id, origin_event_id, start_ts
          FROM canonical_events
          WHERE canonical_event_id = ?`,
         canonicalEventId,
@@ -1913,12 +1929,19 @@ export class UserGraphDO {
     }
 
     let originDeleteEnqueued = false;
+    const providerDeleteCutoffMs = Date.now() - PROVIDER_ORIGIN_DELETE_LOOKBACK_MS;
+    const eventStartMs = parseEventTimestampMs(event.start_ts);
+    const isProviderSourcedDelete = source.startsWith("provider:");
+    const allowProviderOriginDelete =
+      !isProviderSourcedDelete ||
+      (eventStartMs !== null && eventStartMs >= providerDeleteCutoffMs);
     // Also delete the origin provider event so user-initiated deletes from
     // Tminus/API propagate back to the account that originated the canonical.
     if (
       event.origin_account_id.startsWith("acc_") &&
       typeof event.origin_event_id === "string" &&
-      event.origin_event_id.length > 0
+      event.origin_event_id.length > 0 &&
+      allowProviderOriginDelete
     ) {
       const originCalendarId =
         normalizeOriginCalendarId(event.origin_calendar_id) ?? "primary";
@@ -1936,6 +1959,20 @@ export class UserGraphDO {
         idempotency_key: originDeleteIdempotencyKey,
       });
       originDeleteEnqueued = true;
+    } else if (
+      isProviderSourcedDelete &&
+      event.origin_account_id.startsWith("acc_") &&
+      typeof event.origin_event_id === "string" &&
+      event.origin_event_id.length > 0
+    ) {
+      console.warn("user-graph: skipped provider-sourced origin delete outside safety window", {
+        canonical_event_id: canonicalEventId,
+        source,
+        origin_account_id: event.origin_account_id,
+        origin_event_id: event.origin_event_id,
+        start_ts: event.start_ts ?? null,
+        lookback_days: PROVIDER_ORIGIN_DELETE_LOOKBACK_DAYS,
+      });
     }
 
     console.log("user-graph: deleteCanonicalEvent enqueue summary", {
@@ -4255,8 +4292,14 @@ export class UserGraphDO {
   findCanonicalByMirror(
     targetAccountId: string,
     providerEventId: string,
+    targetCalendarId?: string,
   ): string | null {
     this.ensureMigrated();
+
+    const scopedTargetCalendarId =
+      typeof targetCalendarId === "string" && targetCalendarId.trim().length > 0
+        ? targetCalendarId.trim()
+        : null;
 
     const candidates = [providerEventId];
     if (providerEventId.includes("%")) {
@@ -4277,12 +4320,19 @@ export class UserGraphDO {
     }
 
     for (const candidate of candidates) {
+      const calendarFilterSql = scopedTargetCalendarId
+        ? "AND target_calendar_id = ?"
+        : "";
+      const params = scopedTargetCalendarId
+        ? [targetAccountId, candidate, scopedTargetCalendarId]
+        : [targetAccountId, candidate];
       const rows = this.sql
         .exec<{ canonical_event_id: string }>(
           `SELECT canonical_event_id
            FROM event_mirrors
            WHERE target_account_id = ?
              AND provider_event_id = ?
+             ${calendarFilterSql}
              AND state IN ('ACTIVE', 'PENDING', 'ERROR')
            ORDER BY
              CASE state
@@ -4292,14 +4342,22 @@ export class UserGraphDO {
                ELSE 3
              END,
              COALESCE(last_write_ts, '') DESC
-           LIMIT 1`,
-          targetAccountId,
-          candidate,
+           LIMIT 2`,
+          ...params,
         )
         .toArray();
 
-      if (rows.length > 0) {
+      if (rows.length === 1) {
         return rows[0].canonical_event_id;
+      }
+      if (rows.length > 1) {
+        console.warn("user-graph: findCanonicalByMirror ambiguous mapping, refusing lookup", {
+          target_account_id: targetAccountId,
+          provider_event_id: candidate,
+          target_calendar_id: scopedTargetCalendarId,
+          match_count: rows.length,
+        });
+        return null;
       }
     }
 
@@ -4873,6 +4931,7 @@ export class UserGraphDO {
         const canonicalEventId = this.findCanonicalByMirror(
           body.target_account_id,
           body.provider_event_id,
+          body.target_calendar_id,
         );
         return Response.json({ canonical_event_id: canonicalEventId });
       },

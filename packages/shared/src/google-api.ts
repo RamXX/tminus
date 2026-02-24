@@ -241,7 +241,12 @@ export class GoogleCalendarClient implements CalendarProvider {
     calendarId: string,
     event: ProjectedEvent,
   ): Promise<string> {
-    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events`;
+    const writeParams = new URLSearchParams({
+      sendUpdates: "none",
+      // Legacy compatibility flag still honored by parts of Google Calendar API.
+      sendNotifications: "false",
+    });
+    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${writeParams.toString()}`;
     const body = await this.request<{ id: string }>(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -258,7 +263,11 @@ export class GoogleCalendarClient implements CalendarProvider {
     eventId: string,
     patch: Partial<ProjectedEvent>,
   ): Promise<void> {
-    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+    const writeParams = new URLSearchParams({
+      sendUpdates: "none",
+      sendNotifications: "false",
+    });
+    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${writeParams.toString()}`;
     await this.request<unknown>(url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -270,7 +279,11 @@ export class GoogleCalendarClient implements CalendarProvider {
    * Delete an event from a calendar.
    */
   async deleteEvent(calendarId: string, eventId: string): Promise<void> {
-    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+    const writeParams = new URLSearchParams({
+      sendUpdates: "none",
+      sendNotifications: "false",
+    });
+    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${writeParams.toString()}`;
     // DELETE returns 204 No Content on success -- handle in request()
     await this.request<unknown>(url, { method: "DELETE" });
   }

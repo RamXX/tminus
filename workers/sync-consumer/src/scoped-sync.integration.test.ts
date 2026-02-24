@@ -186,6 +186,7 @@ interface UserGraphDOState {
   findCanonicalByMirrorCalls: Array<{
     target_account_id: string;
     provider_event_id: string;
+    target_calendar_id?: string;
   }>;
   canonicalOriginEvents: Array<{
     origin_event_id: string;
@@ -385,6 +386,7 @@ function createMockUserGraphDO(state: UserGraphDOState) {
         const body = (await request.json()) as {
           target_account_id: string;
           provider_event_id: string;
+          target_calendar_id?: string;
         };
         state.findCanonicalByMirrorCalls.push(body);
         return new Response(

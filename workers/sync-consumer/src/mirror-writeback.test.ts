@@ -155,6 +155,7 @@ interface DOCallTracker {
   findCanonicalByMirrorCalls: Array<{
     target_account_id: string;
     provider_event_id: string;
+    target_calendar_id?: string;
   }>;
   getCanonicalEventCalls: Array<{ canonical_event_id: string }>;
   deleteCanonicalCalls: Array<{ canonical_event_id: string; source: string }>;
@@ -250,6 +251,7 @@ function createMockEnv(options: {
         const body = (await request.json()) as {
           target_account_id: string;
           provider_event_id: string;
+          target_calendar_id?: string;
         };
         tracker.findCanonicalByMirrorCalls.push(body);
         return new Response(

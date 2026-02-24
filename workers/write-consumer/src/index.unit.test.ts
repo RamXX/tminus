@@ -276,8 +276,14 @@ describe("write-consumer queue placeholder upsert remap", () => {
 
     expect(ack).toHaveBeenCalledTimes(1);
     expect(retry).not.toHaveBeenCalled();
-    expect(externalUrls).toContain(
-      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    const primaryInsertUrl = externalUrls.find((url) =>
+      url.includes("/calendar/v3/calendars/primary/events")
+    );
+    expect(primaryInsertUrl).toBeDefined();
+    const parsedPrimaryInsertUrl = new URL(primaryInsertUrl!);
+    expect(parsedPrimaryInsertUrl.searchParams.get("sendUpdates")).toBe("none");
+    expect(parsedPrimaryInsertUrl.searchParams.get("sendNotifications")).toBe(
+      "false",
     );
     expect(
       externalUrls.some((url) =>
@@ -351,8 +357,16 @@ describe("write-consumer queue delete calendar remap", () => {
 
     expect(ack).toHaveBeenCalledTimes(1);
     expect(retry).not.toHaveBeenCalled();
-    expect(externalUrls).toContain(
-      "https://www.googleapis.com/calendar/v3/calendars/work%40example.com/events/origin_evt_123",
+    const remappedDeleteUrl = externalUrls.find((url) =>
+      url.includes(
+        "/calendar/v3/calendars/work%40example.com/events/origin_evt_123",
+      )
     );
+    expect(remappedDeleteUrl).toBeDefined();
+    const parsedRemappedDeleteUrl = new URL(remappedDeleteUrl!);
+    expect(parsedRemappedDeleteUrl.searchParams.get("sendUpdates")).toBe("none");
+    expect(
+      parsedRemappedDeleteUrl.searchParams.get("sendNotifications"),
+    ).toBe("false");
   });
 });

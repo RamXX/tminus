@@ -225,6 +225,7 @@ export async function handleIncrementalSync(
               userGraphStub,
               account_id,
               eventId,
+              targetCalendarId ?? undefined,
             );
             if (!canonicalId) {
               continue;
@@ -239,6 +240,14 @@ export async function handleIncrementalSync(
 
           if (resolvedMirrorDeleteIds.size > 0) {
             microsoftWebhookDeleteResolvedCount = resolvedMirrorDeleteIds.size;
+            const calendarHints = targetCalendarId
+              ? new Map(
+                [...resolvedMirrorDeleteIds].map((providerEventId) => [
+                  providerEventId,
+                  targetCalendarId,
+                ]),
+              )
+              : undefined;
             await applyManagedMirrorDeletes(
               account_id,
               userId,
@@ -252,6 +261,7 @@ export async function handleIncrementalSync(
               },
               {
                 onDeletedProviderEventId: rememberHandledManagedMirrorDeleteId,
+                ...(calendarHints ? { calendarHints } : {}),
               },
             );
           }
@@ -320,6 +330,7 @@ export async function handleIncrementalSync(
               userGraphStub,
               account_id,
               eventId,
+              targetCalendarId ?? undefined,
             );
             isManagedMirror = canonicalId !== null;
           }
@@ -349,6 +360,14 @@ export async function handleIncrementalSync(
 
         if (resolvedMirrorDeleteIds.size > 0) {
           microsoftWebhookDeleteResolvedCount += resolvedMirrorDeleteIds.size;
+          const calendarHints = targetCalendarId
+            ? new Map(
+              [...resolvedMirrorDeleteIds].map((providerEventId) => [
+                providerEventId,
+                targetCalendarId,
+              ]),
+            )
+            : undefined;
           await applyManagedMirrorDeletes(
             account_id,
             userId,
@@ -362,6 +381,7 @@ export async function handleIncrementalSync(
             },
             {
               onDeletedProviderEventId: rememberHandledManagedMirrorDeleteId,
+              ...(calendarHints ? { calendarHints } : {}),
             },
           );
         }
@@ -1348,12 +1368,14 @@ async function processAndApplyDeltas(
 ): Promise<ProcessDeltaResult> {
   const deltas: ProviderDelta[] = [];
   const managedMirrorDeletedEventIds = new Set<string>();
+  const managedMirrorDeleteCalendarHints = new Map<string, string>();
   // TM-9eu: Collect modified mirror events for writeback to canonical.
   // Each entry holds the raw provider event (for re-normalization) and the
   // mirror's provider_event_id (for canonical resolution).
   const managedMirrorModifiedEvents: Array<{
     rawEvent: unknown;
     providerEventId: string;
+    targetCalendarId?: string;
   }> = [];
   // Cross-scope dedup: track origin_event_ids already seen so that the same
   // event appearing in multiple calendar views produces only one delta.
@@ -1465,6 +1487,12 @@ async function processAndApplyDeltas(
           provider,
         });
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
+        if (originCalendarId) {
+          managedMirrorDeleteCalendarHints.set(
+            delta.origin_event_id,
+            originCalendarId,
+          );
+        }
       } else if (
         // TM-9eu: Mirror-side modifications write back to the canonical event.
         // Collect the raw event for re-normalization with full payload.
@@ -1479,6 +1507,7 @@ async function processAndApplyDeltas(
         managedMirrorModifiedEvents.push({
           rawEvent,
           providerEventId: delta.origin_event_id,
+          ...(originCalendarId ? { targetCalendarId: originCalendarId } : {}),
         });
       }
       continue;
@@ -1506,6 +1535,7 @@ async function processAndApplyDeltas(
           stub,
           accountId,
           delta.origin_event_id,
+          originCalendarId,
         );
         managedDelete = canonicalId !== null;
         if (managedDelete) {
@@ -1526,6 +1556,12 @@ async function processAndApplyDeltas(
 
       if (managedDelete) {
         managedMirrorDeletedEventIds.add(delta.origin_event_id);
+        if (originCalendarId) {
+          managedMirrorDeleteCalendarHints.set(
+            delta.origin_event_id,
+            originCalendarId,
+          );
+        }
         continue;
       }
     }
@@ -1636,6 +1672,9 @@ async function processAndApplyDeltas(
         provider,
         stage,
         reason: "managed_mirror_delete",
+      },
+      {
+        calendarHints: managedMirrorDeleteCalendarHints,
       },
     );
   }
@@ -2133,6 +2172,20 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
     }
 
     const scopedMirrorRows = [...mirrorRowsByProviderEventId.values()];
+    const scopedMirrorCalendarHints = new Map<string, string>();
+    for (const mirror of scopedMirrorRows) {
+      if (
+        typeof mirror.provider_event_id === "string" &&
+        mirror.provider_event_id.length > 0 &&
+        typeof mirror.target_calendar_id === "string" &&
+        mirror.target_calendar_id.length > 0
+      ) {
+        scopedMirrorCalendarHints.set(
+          mirror.provider_event_id,
+          mirror.target_calendar_id,
+        );
+      }
+    }
     const mirrorEventIds = scopedMirrorRows
       .map((mirror) => mirror.provider_event_id)
       .filter((providerEventId): providerEventId is string =>
@@ -2275,6 +2328,13 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
         max_allowed: MS_SWEEP_RECONCILE_MAX_DELETE_CANDIDATES,
       },
     );
+    const confirmedCalendarHints = new Map<string, string>();
+    for (const providerEventId of confirmedMissingMirrorIdsToDelete) {
+      const hint = scopedMirrorCalendarHints.get(providerEventId);
+      if (typeof hint === "string" && hint.length > 0) {
+        confirmedCalendarHints.set(providerEventId, hint);
+      }
+    }
 
     reconciledDeletes += await applyManagedMirrorDeletes(
       accountId,
@@ -2286,6 +2346,9 @@ async function reconcileMissingManagedMirrorsFromMicrosoftSweep(
         provider: "microsoft",
         stage: "incremental",
         reason: "scheduled_snapshot_reconcile",
+      },
+      {
+        calendarHints: confirmedCalendarHints,
       },
     );
   }
@@ -2405,6 +2468,9 @@ async function filterRecentMissingMirrorDeleteCandidates(
           userGraphStub,
           accountId,
           providerEventId,
+          typeof mirror.target_calendar_id === "string"
+            ? mirror.target_calendar_id
+            : undefined,
         );
       }
       if (!canonicalEventId) {
@@ -2773,6 +2839,7 @@ async function applyManagedMirrorDeletes(
   metadata: DeleteGuardMetadata = {},
   options: {
     onDeletedProviderEventId?: (providerEventId: string) => void;
+    calendarHints?: Map<string, string>;
   } = {},
 ): Promise<number> {
   if (providerEventIds.length === 0) return 0;
@@ -2784,10 +2851,12 @@ async function applyManagedMirrorDeletes(
   const canonicalToProviderEventIds = new Map<string, Set<string>>();
 
   for (const providerEventId of providerEventIds) {
+    const hintedCalendarId = options.calendarHints?.get(providerEventId);
     const canonicalEventId = await findCanonicalIdByMirror(
       userGraphStub,
       accountId,
       providerEventId,
+      hintedCalendarId,
     );
     if (!canonicalEventId) {
       console.warn(
@@ -2876,7 +2945,11 @@ async function applyManagedMirrorDeletes(
 async function applyManagedMirrorModifications(
   accountId: AccountId,
   userId: string,
-  modifiedEvents: Array<{ rawEvent: unknown; providerEventId: string }>,
+  modifiedEvents: Array<{
+    rawEvent: unknown;
+    providerEventId: string;
+    targetCalendarId?: string;
+  }>,
   env: Env,
   provider: ProviderType,
 ): Promise<void> {
@@ -2886,12 +2959,13 @@ async function applyManagedMirrorModifications(
   const userGraphStub = env.USER_GRAPH.get(userGraphId);
   const writebackDeltas: ProviderDelta[] = [];
 
-  for (const { rawEvent, providerEventId } of modifiedEvents) {
+  for (const { rawEvent, providerEventId, targetCalendarId } of modifiedEvents) {
     // Step 1: Resolve mirror -> canonical
     const canonicalEventId = await findCanonicalIdByMirror(
       userGraphStub,
       accountId,
       providerEventId,
+      targetCalendarId,
     );
     if (!canonicalEventId) {
       // AC5: Orphaned mirror -- graceful degradation with warning log
@@ -3305,7 +3379,12 @@ async function findCanonicalIdByMirror(
   userGraphStub: DurableObjectStub,
   accountId: AccountId,
   providerEventId: string,
+  targetCalendarId?: string,
 ): Promise<string | null> {
+  const scopedTargetCalendarId =
+    typeof targetCalendarId === "string" && targetCalendarId.trim().length > 0
+      ? targetCalendarId.trim()
+      : null;
   for (const candidateId of providerEventIdVariants(providerEventId)) {
     const response = await userGraphStub.fetch(
       new Request("https://user-graph.internal/findCanonicalByMirror", {
@@ -3314,6 +3393,9 @@ async function findCanonicalIdByMirror(
         body: JSON.stringify({
           target_account_id: accountId,
           provider_event_id: candidateId,
+          ...(scopedTargetCalendarId
+            ? { target_calendar_id: scopedTargetCalendarId }
+            : {}),
         }),
       }),
     );

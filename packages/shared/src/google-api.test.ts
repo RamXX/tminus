@@ -367,7 +367,10 @@ describe("GoogleCalendarClient.insertEvent", () => {
     expect(eventId).toBe("google_evt_new_123");
 
     const [url, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe(`${BASE_URL}/calendars/primary/events`);
+    const parsedUrl = new URL(url as string);
+    expect(parsedUrl.pathname).toBe("/calendar/v3/calendars/primary/events");
+    expect(parsedUrl.searchParams.get("sendUpdates")).toBe("none");
+    expect(parsedUrl.searchParams.get("sendNotifications")).toBe("false");
     expect(init.method).toBe("POST");
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
 
@@ -415,7 +418,10 @@ describe("GoogleCalendarClient.patchEvent", () => {
     await client.patchEvent("primary", "evt_123", patch);
 
     const [url, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe(`${BASE_URL}/calendars/primary/events/evt_123`);
+    const parsedUrl = new URL(url as string);
+    expect(parsedUrl.pathname).toBe("/calendar/v3/calendars/primary/events/evt_123");
+    expect(parsedUrl.searchParams.get("sendUpdates")).toBe("none");
+    expect(parsedUrl.searchParams.get("sendNotifications")).toBe("false");
     expect(init.method).toBe("PATCH");
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
 
@@ -446,7 +452,10 @@ describe("GoogleCalendarClient.deleteEvent", () => {
     await client.deleteEvent("primary", "evt_to_delete");
 
     const [url, init] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe(`${BASE_URL}/calendars/primary/events/evt_to_delete`);
+    const parsedUrl = new URL(url as string);
+    expect(parsedUrl.pathname).toBe("/calendar/v3/calendars/primary/events/evt_to_delete");
+    expect(parsedUrl.searchParams.get("sendUpdates")).toBe("none");
+    expect(parsedUrl.searchParams.get("sendNotifications")).toBe("false");
     expect(init.method).toBe("DELETE");
   });
 

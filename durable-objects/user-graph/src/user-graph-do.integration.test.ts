@@ -1914,6 +1914,49 @@ describe("UserGraphDO integration", () => {
       expect(originDelete?.target_calendar_id).toBe("work@example.com");
     });
 
+    it("skips provider-sourced origin delete for historical events", async () => {
+      ug.getSyncHealth();
+
+      insertPolicyEdge(db, {
+        policyId: "pol_01TEST000000000000000000001",
+        fromAccountId: TEST_ACCOUNT_ID,
+        toAccountId: OTHER_ACCOUNT_ID,
+      });
+
+      await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+        makeCreatedDelta({
+          event: {
+            ...makeCreatedDelta().event!,
+            start: { dateTime: "2024-01-10T09:00:00Z" },
+            end: { dateTime: "2024-01-10T09:30:00Z" },
+          },
+        }),
+      ]);
+      queue.clear();
+
+      const events = db
+        .prepare("SELECT canonical_event_id FROM canonical_events")
+        .all() as Array<{ canonical_event_id: string }>;
+
+      const deleted = await ug.deleteCanonicalEvent(
+        events[0].canonical_event_id,
+        "provider:acc_01MIRRORTEST000000000000001",
+      );
+      expect(deleted).toBe(true);
+
+      const deleteMessages = queue.messages as Array<Record<string, unknown>>;
+      const originDelete = deleteMessages.find(
+        (msg) => msg.target_account_id === TEST_ACCOUNT_ID,
+      );
+      const mirrorDelete = deleteMessages.find(
+        (msg) => msg.target_account_id === OTHER_ACCOUNT_ID,
+      );
+
+      expect(originDelete).toBeUndefined();
+      expect(mirrorDelete).toBeDefined();
+      expect(mirrorDelete?.type).toBe("DELETE_MIRROR");
+    });
+
     it("returns false for non-existent event", async () => {
       ug.getSyncHealth();
       const deleted = await ug.deleteCanonicalEvent("evt_nonexistent", "user:usr_test");
@@ -2868,6 +2911,141 @@ describe("UserGraphDO integration", () => {
         const data = (await resp.json()) as { canonical_event_id: string | null };
         expect(data.canonical_event_id).toBeDefined();
         expect(data.canonical_event_id).not.toBeNull();
+      });
+
+      it("returns null when provider_event_id maps to multiple mirrors without calendar scope", async () => {
+        ug.getSyncHealth();
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+          makeCreatedDelta({ origin_event_id: "google_evt_dupe_a" }),
+          makeCreatedDelta({
+            origin_event_id: "google_evt_dupe_b",
+            event: {
+              ...makeCreatedDelta().event!,
+              summary: "Duplicate mirror B",
+              start: { dateTime: "2025-06-16T09:00:00Z" },
+              end: { dateTime: "2025-06-16T10:00:00Z" },
+            },
+          }),
+        ]);
+
+        const mirrorRows = db
+          .prepare(
+            `SELECT canonical_event_id
+             FROM event_mirrors
+             WHERE target_account_id = ?
+             ORDER BY canonical_event_id ASC`,
+          )
+          .all(OTHER_ACCOUNT_ID) as Array<{ canonical_event_id: string }>;
+        expect(mirrorRows).toHaveLength(2);
+
+        db.prepare(
+          `UPDATE event_mirrors
+           SET state = 'ACTIVE',
+               provider_event_id = ?,
+               target_calendar_id = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+        ).run(
+          "google_mirror_duplicate",
+          "primary",
+          mirrorRows[0].canonical_event_id,
+          OTHER_ACCOUNT_ID,
+        );
+        db.prepare(
+          `UPDATE event_mirrors
+           SET state = 'ACTIVE',
+               provider_event_id = ?,
+               target_calendar_id = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+        ).run(
+          "google_mirror_duplicate",
+          "secondary-cal",
+          mirrorRows[1].canonical_event_id,
+          OTHER_ACCOUNT_ID,
+        );
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          provider_event_id: "google_mirror_duplicate",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBeNull();
+      });
+
+      it("uses target_calendar_id to disambiguate duplicate provider_event_id mappings", async () => {
+        ug.getSyncHealth();
+        insertPolicyEdge(db, {
+          policyId: "pol_01TEST000000000000000000001",
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAccountId: OTHER_ACCOUNT_ID,
+        });
+
+        await ug.applyProviderDelta(TEST_ACCOUNT_ID, [
+          makeCreatedDelta({ origin_event_id: "google_evt_scope_a" }),
+          makeCreatedDelta({
+            origin_event_id: "google_evt_scope_b",
+            event: {
+              ...makeCreatedDelta().event!,
+              summary: "Scoped mirror B",
+              start: { dateTime: "2025-06-17T09:00:00Z" },
+              end: { dateTime: "2025-06-17T10:00:00Z" },
+            },
+          }),
+        ]);
+
+        const mirrorRows = db
+          .prepare(
+            `SELECT canonical_event_id
+             FROM event_mirrors
+             WHERE target_account_id = ?
+             ORDER BY canonical_event_id ASC`,
+          )
+          .all(OTHER_ACCOUNT_ID) as Array<{ canonical_event_id: string }>;
+        expect(mirrorRows).toHaveLength(2);
+
+        const expectedScopedCanonical = mirrorRows[1].canonical_event_id;
+
+        db.prepare(
+          `UPDATE event_mirrors
+           SET state = 'ACTIVE',
+               provider_event_id = ?,
+               target_calendar_id = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+        ).run(
+          "google_mirror_scoped",
+          "primary",
+          mirrorRows[0].canonical_event_id,
+          OTHER_ACCOUNT_ID,
+        );
+        db.prepare(
+          `UPDATE event_mirrors
+           SET state = 'ACTIVE',
+               provider_event_id = ?,
+               target_calendar_id = ?
+           WHERE canonical_event_id = ? AND target_account_id = ?`,
+        ).run(
+          "google_mirror_scoped",
+          "secondary-cal",
+          mirrorRows[1].canonical_event_id,
+          OTHER_ACCOUNT_ID,
+        );
+
+        const resp = await rpc("/findCanonicalByMirror", {
+          target_account_id: OTHER_ACCOUNT_ID,
+          target_calendar_id: "secondary-cal",
+          provider_event_id: "google_mirror_scoped",
+        });
+
+        expect(resp.status).toBe(200);
+        const data = (await resp.json()) as { canonical_event_id: string | null };
+        expect(data.canonical_event_id).toBe(expectedScopedCanonical);
       });
 
       it("returns null when mirror mapping does not exist", async () => {
