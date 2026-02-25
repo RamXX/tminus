@@ -16,10 +16,8 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
-  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
-  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "30 * * * *",    # ICS feed refresh + MS incremental sweep: hourly at :30
   "0 * * * *",     # Deletion check: every hour
-  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 # --- Durable Object references (hosted on tminus-api) ----------------------
@@ -90,10 +88,8 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
-  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
-  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "30 * * * *",    # ICS feed refresh + MS incremental sweep: hourly at :30
   "0 * * * *",     # Deletion check: every hour
-  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 [[env.staging.d1_databases]]
@@ -149,10 +145,8 @@ crons = [
   "0 */6 * * *",   # Channel renewal: every 6 hours
   "0 */12 * * *",  # Token health check: every 12 hours
   "0 3 * * *",     # Drift reconciliation: daily at 03:00 UTC
-  "0 4 * * *",     # Social drift computation: daily at 04:00 UTC
-  "*/15 * * * *",  # ICS feed refresh: every 15 minutes
+  "30 * * * *",    # ICS feed refresh + MS incremental sweep: hourly at :30
   "0 * * * *",     # Deletion check: every hour
-  "30 * * * *",    # Hold expiry cleanup: every hour at :30
 ]
 
 [[env.production.d1_databases]]

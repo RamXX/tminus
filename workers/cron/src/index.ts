@@ -1,15 +1,18 @@
 /**
  * tminus-cron -- Scheduled maintenance worker.
  *
- * Six cron responsibilities:
+ * Five cron responsibilities (Phase 1):
  * 1. Google channel renewal (every 6h): renew Google watch channels expiring within 24h
  * 2. Microsoft subscription renewal (every 6h): renew MS subscriptions at 75% lifetime
  * 3. Token health check (every 12h): verify account tokens, mark errors
  * 4. Drift reconciliation (daily 03:00 UTC): enqueue RECONCILE_ACCOUNT +
  *    SYNC_FULL recovery passes and force projection replay
- * 5. Social drift computation (daily 04:00 UTC): compute drift for all users, store alerts
- * 6. Microsoft incremental sweep (every 15m): enqueue SYNC_INCREMENTAL to
- *    converge missed/late MS webhook notifications
+ * 5. ICS feed refresh + MS incremental sweep (hourly at :30): refresh ICS feeds
+ *    and enqueue SYNC_INCREMENTAL for MS convergence
+ *
+ * Removed (Phase 3+/4, restorable from git):
+ * - Hold expiry cleanup (Phase 3+ scheduling holds)
+ * - Social drift computation (Phase 4 relationship intelligence)
  *
  * Design decisions:
  * - Each responsibility is a separate function for testability
@@ -24,8 +27,6 @@ import type {
   SyncIncrementalMessage,
   SyncFullMessage,
   AccountId,
-  DeleteManagedMirrorMessage,
-  EventId,
 } from "@tminus/shared";
 import {
   GoogleCalendarClient,
@@ -44,8 +45,6 @@ import {
   CRON_TOKEN_HEALTH,
   CRON_RECONCILIATION,
   CRON_DELETION_CHECK,
-  CRON_HOLD_EXPIRY,
-  CRON_DRIFT_COMPUTATION,
   CRON_FEED_REFRESH,
   CHANNEL_RENEWAL_THRESHOLD_MS,
   CHANNEL_LIVENESS_THRESHOLD_MS,
@@ -748,249 +747,11 @@ async function handleDeletionCheck(env: Env): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Hold Expiry Cleanup (every hour at :30)
-// ---------------------------------------------------------------------------
-
-interface ExpiredHoldRow {
-  readonly hold_id: string;
-  readonly session_id: string;
-  readonly account_id: string;
-  readonly provider_event_id: string | null;
-}
-
-/**
- * Query UserGraphDO for expired tentative holds and clean them up.
- *
- * For each active user, calls UserGraphDO.getExpiredHolds(). For each
- * expired hold with a provider_event_id, enqueues a DELETE_MANAGED_MIRROR message
- * to remove the tentative event from the calendar. Then transitions the
- * hold status to 'expired'.
- *
- * TM-82s.4: After expiring all holds for a session, also updates the
- * session status to 'expired' if all holds for that session are now
- * in terminal states (expired/released/committed).
- *
- * This implements AC-4/AC-6: "Automatic release on expiry / Cron-based expiry cleanup".
- */
-async function handleHoldExpiry(env: Env): Promise<void> {
-  // Get all active users (they each have a UserGraphDO with schedule_holds)
-  const { results } = await env.DB
-    .prepare(
-      `SELECT DISTINCT user_id FROM accounts WHERE status = ?1`,
-    )
-    .bind("active")
-    .all<{ user_id: string }>();
-
-  console.log(`Hold expiry cleanup: checking ${results.length} active users`);
-
-  let totalExpired = 0;
-  let totalDeleted = 0;
-  // Track session_ids that had holds expired to check if session should also expire
-  const sessionIdsToCheck = new Set<string>();
-
-  for (const row of results) {
-    try {
-      const doId = env.USER_GRAPH.idFromName(row.user_id);
-      const stub = env.USER_GRAPH.get(doId);
-
-      // Query for expired holds
-      const response = await stub.fetch(
-        new Request("https://user-graph.internal/getExpiredHolds", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        }),
-      );
-
-      if (!response.ok) {
-        console.error(
-          `Failed to get expired holds for user ${row.user_id}: ${response.status}`,
-        );
-        continue;
-      }
-
-      const { holds } = (await response.json()) as {
-        holds: ExpiredHoldRow[];
-      };
-
-      if (holds.length === 0) continue;
-
-      totalExpired += holds.length;
-
-      // Enqueue DELETE_MANAGED_MIRROR messages for holds with provider events
-      for (const hold of holds) {
-        if (hold.provider_event_id) {
-          try {
-            const deleteMsg: DeleteManagedMirrorMessage = {
-              type: "DELETE_MANAGED_MIRROR",
-              canonical_event_id: `hold_${hold.hold_id}` as EventId,
-              target_account_id: hold.account_id as AccountId,
-              provider_event_id: hold.provider_event_id,
-              idempotency_key: `hold_expire_${hold.hold_id}`,
-            };
-            await env.WRITE_QUEUE.send(deleteMsg);
-            totalDeleted++;
-          } catch (err) {
-            console.error(
-              `Failed to enqueue delete for hold ${hold.hold_id}:`,
-              err,
-            );
-          }
-        }
-
-        // Transition hold to 'expired' status
-        try {
-          await stub.fetch(
-            new Request("https://user-graph.internal/updateHoldStatus", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                hold_id: hold.hold_id,
-                status: "expired",
-              }),
-            }),
-          );
-          // Track session for potential session-level expiry
-          sessionIdsToCheck.add(hold.session_id);
-        } catch (err) {
-          console.error(
-            `Failed to expire hold ${hold.hold_id}:`,
-            err,
-          );
-        }
-      }
-
-      // TM-82s.4: For each session that had holds expired, check if ALL
-      // holds for that session are now in terminal states. If so, expire
-      // the session itself.
-      for (const sessionId of sessionIdsToCheck) {
-        try {
-          await stub.fetch(
-            new Request("https://user-graph.internal/expireSessionIfAllHoldsTerminal", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ session_id: sessionId }),
-            }),
-          );
-        } catch (err) {
-          console.error(
-            `Failed to check/expire session ${sessionId}:`,
-            err,
-          );
-        }
-      }
-      sessionIdsToCheck.clear();
-    } catch (err) {
-      console.error(
-        `Hold expiry error for user ${row.user_id}:`,
-        err,
-      );
-    }
-  }
-
-  console.log(
-    `Hold expiry cleanup: expired ${totalExpired} holds, enqueued ${totalDeleted} deletes`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Social Drift Computation (daily 04:00 UTC)
-// ---------------------------------------------------------------------------
-
-/**
- * For each active user, compute drift report via UserGraphDO.getDriftReport(),
- * then store the resulting alerts via UserGraphDO.storeDriftAlerts().
- *
- * Runs after reconciliation (03:00 UTC) so that event data is fresh.
- * Errors in one user do not block processing of others.
- */
-async function handleDriftComputation(env: Env): Promise<void> {
-  // Get all distinct active users
-  const { results } = await env.DB
-    .prepare(
-      `SELECT DISTINCT user_id FROM accounts WHERE status = ?1`,
-    )
-    .bind("active")
-    .all<{ user_id: string }>();
-
-  console.log(
-    `Social drift computation: processing ${results.length} active users`,
-  );
-
-  let totalAlerts = 0;
-
-  for (const row of results) {
-    try {
-      const doId = env.USER_GRAPH.idFromName(row.user_id);
-      const stub = env.USER_GRAPH.get(doId);
-
-      // Step 1: Get drift report
-      const reportResponse = await stub.fetch(
-        new Request("https://user-graph.internal/getDriftReport", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        }),
-      );
-
-      if (!reportResponse.ok) {
-        console.error(
-          `Drift computation: failed to get drift report for user ${row.user_id}: ${reportResponse.status}`,
-        );
-        continue;
-      }
-
-      const report = (await reportResponse.json()) as {
-        overdue: Array<{
-          relationship_id: string;
-          display_name: string | null;
-          category: string;
-          drift_ratio: number;
-          days_overdue: number;
-          urgency: number;
-        }>;
-        total_tracked: number;
-        total_overdue: number;
-        computed_at: string;
-      };
-
-      // Step 2: Store alerts
-      const storeResponse = await stub.fetch(
-        new Request("https://user-graph.internal/storeDriftAlerts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ report }),
-        }),
-      );
-
-      if (!storeResponse.ok) {
-        console.error(
-          `Drift computation: failed to store alerts for user ${row.user_id}: ${storeResponse.status}`,
-        );
-        continue;
-      }
-
-      const storeResult = (await storeResponse.json()) as { stored: number };
-      totalAlerts += storeResult.stored;
-
-      console.log(
-        `Drift computation: user ${row.user_id}: ${report.total_overdue} overdue out of ${report.total_tracked} tracked`,
-      );
-    } catch (err) {
-      console.error(
-        `Drift computation error for user ${row.user_id}:`,
-        err,
-      );
-    }
-  }
-
-  console.log(
-    `Social drift computation: stored ${totalAlerts} total alerts across ${results.length} users`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ICS Feed Refresh (every 15 minutes) -- TM-d17.3
+// ICS Feed Refresh + MS Incremental Sweep (hourly at :30) -- TM-d17.3
+// Reduced from */15 to hourly (TM-77a2).
+// REMOVED: handleHoldExpiry (Phase 3+ scheduling holds -- not built yet).
+// REMOVED: handleDriftComputation (Phase 4 relationship intelligence -- not built yet).
+// Both restorable from git when those phases are implemented.
 // ---------------------------------------------------------------------------
 
 interface IcsFeedAccountRow {
@@ -1362,14 +1123,6 @@ async function handleScheduled(
 
     case CRON_DELETION_CHECK:
       await handleDeletionCheck(env);
-      break;
-
-    case CRON_HOLD_EXPIRY:
-      await handleHoldExpiry(env);
-      break;
-
-    case CRON_DRIFT_COMPUTATION:
-      await handleDriftComputation(env);
       break;
 
     case CRON_FEED_REFRESH:

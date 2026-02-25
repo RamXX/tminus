@@ -22,14 +22,8 @@ export const CRON_RECONCILIATION = "0 3 * * *";
 /** Deletion check: every hour, checks for pending deletions past grace period. */
 export const CRON_DELETION_CHECK = "0 * * * *";
 
-/** Hold expiry cleanup: every hour, checks for expired tentative holds. */
-export const CRON_HOLD_EXPIRY = "30 * * * *";
-
-/** Social drift computation: daily at 04:00 UTC (after reconciliation at 03:00). */
-export const CRON_DRIFT_COMPUTATION = "0 4 * * *";
-
-/** ICS feed refresh: every 15 minutes. */
-export const CRON_FEED_REFRESH = "*/15 * * * *";
+/** ICS feed refresh + MS incremental sweep: hourly at :30 (was every 15min, reduced for cost). */
+export const CRON_FEED_REFRESH = "30 * * * *";
 
 // ---------------------------------------------------------------------------
 // Renewal thresholds
