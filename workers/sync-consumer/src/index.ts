@@ -13,8 +13,8 @@
  * 6. Updates AccountDO sync cursor (syncToken for Google, deltaLink for Microsoft)
  *
  * Error handling (both Google and Microsoft):
- * - 429: retry with exponential backoff (1s, 2s, 4s, 8s, 16s, max 5)
- * - 500/503: retry with backoff (2s, 4s, 8s, max 3)
+ * - 429: retry with jittered exponential backoff (1s, 2s, max 2)
+ * - 500/503: retry with jittered backoff (2s, 4s, max 2)
  * - 401: refresh token via AccountDO, retry once
  * - 410 (Google): enqueue SYNC_FULL, discard current message
  * - 403 (insufficient scope/privileges): mark sync failure, no retry
@@ -50,6 +50,16 @@ import type {
 // ---------------------------------------------------------------------------
 
 export type SyncQueueMessage = SyncIncrementalMessage | SyncFullMessage;
+
+// ---------------------------------------------------------------------------
+// Reconcile queue message type (produced by cron worker)
+// ---------------------------------------------------------------------------
+
+export interface ReconcileQueueMessage {
+  readonly type: "RECONCILE_ACCOUNT";
+  readonly account_id: AccountId;
+  readonly reason: string;
+}
 
 // ---------------------------------------------------------------------------
 // Injectable dependencies (for testability)
@@ -89,13 +99,28 @@ function createDeleteGuardSharedState(): DeleteGuardSharedState {
 
 /**
  * Create the queue consumer handler. Accepts optional dependencies for testing.
+ *
+ * Handles two queues:
+ * - sync-queue: SYNC_INCREMENTAL, SYNC_FULL messages
+ * - reconcile-queue: RECONCILE_ACCOUNT messages (converted to SYNC_FULL)
  */
 export function createQueueHandler(deps: SyncConsumerDeps = {}) {
   return {
     async queue(
-      batch: MessageBatch<SyncQueueMessage>,
+      batch: MessageBatch<SyncQueueMessage | ReconcileQueueMessage>,
       env: Env,
     ): Promise<void> {
+      // Dispatch based on queue name
+      if (batch.queue.includes("reconcile")) {
+        await handleReconcileBatch(
+          batch as MessageBatch<ReconcileQueueMessage>,
+          env,
+          deps,
+        );
+        return;
+      }
+
+      // Default: sync-queue messages
       const sharedDeleteGuardState =
         deps.deleteGuardState ?? createDeleteGuardSharedState();
       const runtimeDeps: SyncConsumerDeps = {
@@ -105,18 +130,19 @@ export function createQueueHandler(deps: SyncConsumerDeps = {}) {
 
       for (const msg of batch.messages) {
         try {
-          switch (msg.body.type) {
+          const body = msg.body as SyncQueueMessage;
+          switch (body.type) {
             case "SYNC_INCREMENTAL":
-              await handleIncrementalSync(msg.body, env, runtimeDeps);
+              await handleIncrementalSync(body, env, runtimeDeps);
               break;
             case "SYNC_FULL":
-              await handleFullSync(msg.body, env, runtimeDeps);
+              await handleFullSync(body, env, runtimeDeps);
               break;
             default:
               // Unknown message type -- ack to prevent infinite retry
               console.error(
                 "sync-consumer: unknown message type",
-                (msg.body as Record<string, unknown>).type,
+                (body as Record<string, unknown>).type,
               );
               break;
           }
@@ -128,6 +154,54 @@ export function createQueueHandler(deps: SyncConsumerDeps = {}) {
       }
     },
   };
+}
+
+/**
+ * Handle a batch of reconcile-queue messages.
+ * Converts each RECONCILE_ACCOUNT into a SYNC_FULL (full sync with deletes disabled).
+ */
+async function handleReconcileBatch(
+  batch: MessageBatch<ReconcileQueueMessage>,
+  env: Env,
+  deps: SyncConsumerDeps,
+): Promise<void> {
+  const sharedDeleteGuardState =
+    deps.deleteGuardState ?? createDeleteGuardSharedState();
+  const runtimeDeps: SyncConsumerDeps = {
+    ...deps,
+    deleteGuardState: sharedDeleteGuardState,
+  };
+
+  for (const msg of batch.messages) {
+    try {
+      if (msg.body.type !== "RECONCILE_ACCOUNT") {
+        console.error(
+          "sync-consumer: unknown reconcile message type",
+          (msg.body as unknown as Record<string, unknown>).type,
+        );
+        msg.ack();
+        continue;
+      }
+
+      console.info("sync-consumer: reconcile -> full sync", {
+        account_id: msg.body.account_id,
+        reason: msg.body.reason,
+      });
+
+      // Convert to a full sync message and reuse existing handler
+      const fullSyncMessage: SyncFullMessage = {
+        type: "SYNC_FULL",
+        account_id: msg.body.account_id as AccountId,
+        reason: "reconcile",
+      };
+
+      await handleFullSync(fullSyncMessage, env, runtimeDeps);
+      msg.ack();
+    } catch (err) {
+      console.error("sync-consumer: reconcile message failed", err);
+      msg.retry();
+    }
+  }
 }
 
 // Default export for Cloudflare Workers runtime
@@ -3607,24 +3681,30 @@ export interface RetryOptions {
   maxRetries5xx?: number;
   /** Injectable sleep function for testing. Defaults to real setTimeout. */
   sleepFn?: (ms: number) => Promise<void>;
+  /** Add random jitter to delays (default true). Set false for deterministic tests. */
+  jitter?: boolean;
 }
 
 /**
  * Retry a function with exponential backoff for retryable errors.
  *
  * Handles both Google and Microsoft provider errors:
- * - 429 (rate limit): backoff 1s, 2s, 4s, 8s, 16s (max 5 retries)
- * - 500/503 (server error): backoff 2s, 4s, 8s (max 3 retries)
+ * - 429 (rate limit): backoff 1s, 2s (max 2 retries)
+ * - 500/503 (server error): backoff 2s, 4s (max 2 retries)
  * - Other errors: thrown immediately
+ *
+ * Worst-case sleep per message: 1+2 = 3s (429) or 2+4 = 6s (5xx).
+ * With batch_size=5: max 5*3s = 15s, well within 300s CPU limit.
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {},
 ): Promise<T> {
   const {
-    maxRetries429 = 5,
-    maxRetries5xx = 3,
+    maxRetries429 = 2,
+    maxRetries5xx = 2,
     sleepFn = sleep,
+    jitter = true,
   } = options;
 
   let attempt429 = 0;
@@ -3640,7 +3720,10 @@ export async function retryWithBackoff<T>(
         if (attempt429 > maxRetries429) {
           throw err;
         }
-        const delayMs = 1000 * Math.pow(2, attempt429 - 1); // 1s, 2s, 4s, 8s, 16s
+        const baseDelayMs = 1000 * Math.pow(2, attempt429 - 1); // 1s, 2s
+        const delayMs = jitter
+          ? Math.floor(baseDelayMs * (0.5 + Math.random() * 0.5))
+          : baseDelayMs;
         await sleepFn(delayMs);
         continue;
       }
@@ -3656,7 +3739,10 @@ export async function retryWithBackoff<T>(
         if (attempt5xx > maxRetries5xx) {
           throw err;
         }
-        const delayMs = 2000 * Math.pow(2, attempt5xx - 1); // 2s, 4s, 8s
+        const baseDelayMs = 2000 * Math.pow(2, attempt5xx - 1); // 2s, 4s
+        const delayMs = jitter
+          ? Math.floor(baseDelayMs * (0.5 + Math.random() * 0.5))
+          : baseDelayMs;
         await sleepFn(delayMs);
         continue;
       }

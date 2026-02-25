@@ -28,7 +28,7 @@ import {
   retryWithBackoff,
   extractMicrosoftEventId,
 } from "./index";
-import type { SyncQueueMessage } from "./index";
+import type { SyncQueueMessage, ReconcileQueueMessage } from "./index";
 import {
   RateLimitError,
   GoogleApiError,
@@ -2325,6 +2325,129 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(deltas).toHaveLength(1);
     expect(deltas[0].origin_event_id).toBe(expectedCanonicalId);
   });
+
+  // -------------------------------------------------------------------------
+  // Reconcile-queue consumer tests
+  // -------------------------------------------------------------------------
+
+  it("reconcile queue: converts RECONCILE_ACCOUNT into a full sync", async () => {
+    const googleFetch = createGoogleApiFetch({
+      events: [makeGoogleEvent()],
+      nextSyncToken: NEW_SYNC_TOKEN,
+    });
+
+    const handler = createQueueHandler({ fetchFn: googleFetch, sleepFn: noopSleep });
+
+    const ackedIds: string[] = [];
+    const retriedIds: string[] = [];
+
+    const mockBatch = {
+      queue: "tminus-reconcile-queue",
+      messages: [
+        {
+          id: "reconcile-msg-1",
+          timestamp: new Date(),
+          attempts: 1,
+          body: {
+            type: "RECONCILE_ACCOUNT",
+            account_id: ACCOUNT_A.account_id,
+            reason: "scheduled",
+          } as ReconcileQueueMessage,
+          ack() {
+            ackedIds.push("reconcile-msg-1");
+          },
+          retry() {
+            retriedIds.push("reconcile-msg-1");
+          },
+        },
+      ],
+      ackAll() {},
+      retryAll() {},
+    } as unknown as MessageBatch<ReconcileQueueMessage>;
+
+    await handler.queue(mockBatch, env);
+
+    expect(ackedIds).toContain("reconcile-msg-1");
+    expect(retriedIds).toHaveLength(0);
+    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+  });
+
+  it("reconcile queue: retries message on handler failure", async () => {
+    const failingFetch = createGoogleApiFetch({
+      statusCode: 500,
+      events: [],
+    });
+
+    const handler = createQueueHandler({ fetchFn: failingFetch, sleepFn: noopSleep });
+
+    const ackedIds: string[] = [];
+    const retriedIds: string[] = [];
+
+    const mockBatch = {
+      queue: "tminus-reconcile-queue",
+      messages: [
+        {
+          id: "reconcile-msg-2",
+          timestamp: new Date(),
+          attempts: 1,
+          body: {
+            type: "RECONCILE_ACCOUNT",
+            account_id: ACCOUNT_A.account_id,
+            reason: "scheduled",
+          } as ReconcileQueueMessage,
+          ack() {
+            ackedIds.push("reconcile-msg-2");
+          },
+          retry() {
+            retriedIds.push("reconcile-msg-2");
+          },
+        },
+      ],
+      ackAll() {},
+      retryAll() {},
+    } as unknown as MessageBatch<ReconcileQueueMessage>;
+
+    await handler.queue(mockBatch, env);
+
+    expect(ackedIds).toHaveLength(0);
+    expect(retriedIds).toContain("reconcile-msg-2");
+  });
+
+  it("reconcile queue: acks unknown message types to prevent infinite retry", async () => {
+    const handler = createQueueHandler({ sleepFn: noopSleep });
+
+    const ackedIds: string[] = [];
+    const retriedIds: string[] = [];
+
+    const mockBatch = {
+      queue: "tminus-reconcile-queue",
+      messages: [
+        {
+          id: "reconcile-msg-3",
+          timestamp: new Date(),
+          attempts: 1,
+          body: {
+            type: "UNKNOWN_TYPE",
+            account_id: ACCOUNT_A.account_id,
+          },
+          ack() {
+            ackedIds.push("reconcile-msg-3");
+          },
+          retry() {
+            retriedIds.push("reconcile-msg-3");
+          },
+        },
+      ],
+      ackAll() {},
+      retryAll() {},
+    } as unknown as MessageBatch<ReconcileQueueMessage>;
+
+    await handler.queue(mockBatch, env);
+
+    expect(ackedIds).toContain("reconcile-msg-3");
+    expect(retriedIds).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2487,8 +2610,53 @@ describe("DLQ integration: messages retried and sent to DLQ after max_retries", 
 
 describe("retryWithBackoff", () => {
   it("succeeds on first attempt without retries", async () => {
-    const result = await retryWithBackoff(async () => "success", { sleepFn: noopSleep });
+    const result = await retryWithBackoff(async () => "success", { sleepFn: noopSleep, jitter: false });
     expect(result).toBe("success");
+  });
+
+  it("defaults to maxRetries429=2 and maxRetries5xx=2", async () => {
+    // 429: should fail after 2 retries (3 total attempts)
+    let attempts429 = 0;
+    const fn429 = async () => {
+      attempts429++;
+      throw new RateLimitError("Rate limited");
+    };
+    await expect(retryWithBackoff(fn429, { sleepFn: noopSleep, jitter: false })).rejects.toThrow(RateLimitError);
+    expect(attempts429).toBe(3); // 1 initial + 2 retries
+
+    // 5xx: should fail after 2 retries (3 total attempts)
+    let attempts5xx = 0;
+    const fn5xx = async () => {
+      attempts5xx++;
+      throw new GoogleApiError("Server error", 500);
+    };
+    await expect(retryWithBackoff(fn5xx, { sleepFn: noopSleep, jitter: false })).rejects.toThrow(GoogleApiError);
+    expect(attempts5xx).toBe(3); // 1 initial + 2 retries
+  });
+
+  it("applies jitter within expected range when jitter=true", async () => {
+    const delays: number[] = [];
+    const trackingSleep = async (ms: number): Promise<void> => {
+      delays.push(ms);
+    };
+
+    let attempts = 0;
+    const fn = async () => {
+      attempts++;
+      if (attempts <= 2) {
+        throw new RateLimitError("Rate limited");
+      }
+      return "ok";
+    };
+
+    await retryWithBackoff(fn, { maxRetries429: 2, sleepFn: trackingSleep, jitter: true });
+    expect(delays).toHaveLength(2);
+    // First retry: base=1000ms, jittered range [500, 1000)
+    expect(delays[0]).toBeGreaterThanOrEqual(500);
+    expect(delays[0]).toBeLessThan(1000);
+    // Second retry: base=2000ms, jittered range [1000, 2000)
+    expect(delays[1]).toBeGreaterThanOrEqual(1000);
+    expect(delays[1]).toBeLessThan(2000);
   });
 
   it("retries on 429 RateLimitError up to maxRetries429", async () => {
@@ -2501,7 +2669,7 @@ describe("retryWithBackoff", () => {
       return "success after retries";
     };
 
-    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false });
     expect(result).toBe("success after retries");
     expect(attempts).toBe(4); // 3 failures + 1 success
   });
@@ -2511,7 +2679,7 @@ describe("retryWithBackoff", () => {
       throw new RateLimitError("Rate limited forever");
     };
 
-    await expect(retryWithBackoff(fn, { maxRetries429: 2, maxRetries5xx: 3, sleepFn: noopSleep })).rejects.toThrow(RateLimitError);
+    await expect(retryWithBackoff(fn, { maxRetries429: 2, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false })).rejects.toThrow(RateLimitError);
   });
 
   it("retries on 500/503 GoogleApiError up to maxRetries5xx", async () => {
@@ -2524,7 +2692,7 @@ describe("retryWithBackoff", () => {
       return "recovered";
     };
 
-    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false });
     expect(result).toBe("recovered");
     expect(attempts).toBe(3);
   });
@@ -2534,7 +2702,7 @@ describe("retryWithBackoff", () => {
       throw new GoogleApiError("Server error", 500);
     };
 
-    await expect(retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 2, sleepFn: noopSleep })).rejects.toThrow(GoogleApiError);
+    await expect(retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 2, sleepFn: noopSleep, jitter: false })).rejects.toThrow(GoogleApiError);
   });
 
   it("does not retry non-retryable errors (e.g., 404)", async () => {
@@ -2544,7 +2712,7 @@ describe("retryWithBackoff", () => {
       throw new GoogleApiError("Not found", 404);
     };
 
-    await expect(retryWithBackoff(fn, { sleepFn: noopSleep })).rejects.toThrow(GoogleApiError);
+    await expect(retryWithBackoff(fn, { sleepFn: noopSleep, jitter: false })).rejects.toThrow(GoogleApiError);
     expect(attempts).toBe(1); // No retries
   });
 
@@ -2558,7 +2726,7 @@ describe("retryWithBackoff", () => {
       return "back up";
     };
 
-    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false });
     expect(result).toBe("back up");
     expect(attempts).toBe(2);
   });
@@ -2577,7 +2745,7 @@ describe("retryWithBackoff", () => {
       return "success after microsoft retries";
     };
 
-    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false });
     expect(result).toBe("success after microsoft retries");
     expect(attempts).toBe(3);
   });
@@ -2592,7 +2760,7 @@ describe("retryWithBackoff", () => {
       return "recovered from microsoft error";
     };
 
-    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep });
+    const result = await retryWithBackoff(fn, { maxRetries429: 5, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false });
     expect(result).toBe("recovered from microsoft error");
     expect(attempts).toBe(2);
   });
@@ -2602,7 +2770,7 @@ describe("retryWithBackoff", () => {
       throw new MicrosoftRateLimitError("Rate limited forever");
     };
 
-    await expect(retryWithBackoff(fn, { maxRetries429: 2, maxRetries5xx: 3, sleepFn: noopSleep })).rejects.toThrow(MicrosoftRateLimitError);
+    await expect(retryWithBackoff(fn, { maxRetries429: 2, maxRetries5xx: 3, sleepFn: noopSleep, jitter: false })).rejects.toThrow(MicrosoftRateLimitError);
   });
 
   it("does not retry non-retryable MicrosoftApiError (e.g., 403)", async () => {
@@ -2612,7 +2780,7 @@ describe("retryWithBackoff", () => {
       throw new MicrosoftApiError("Forbidden", 403);
     };
 
-    await expect(retryWithBackoff(fn, { sleepFn: noopSleep })).rejects.toThrow(MicrosoftApiError);
+    await expect(retryWithBackoff(fn, { sleepFn: noopSleep, jitter: false })).rejects.toThrow(MicrosoftApiError);
     expect(attempts).toBe(1);
   });
 });

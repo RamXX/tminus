@@ -43,14 +43,21 @@ queue = "tminus-write-queue"
 binding = "SYNC_QUEUE"
 queue = "tminus-sync-queue"
 
-# --- Queue consumer ---------------------------------------------------------
+# --- Queue consumers --------------------------------------------------------
 
 [[queues.consumers]]
 queue = "tminus-sync-queue"
-max_batch_size = 10
+max_batch_size = 5
 max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-sync-queue-dlq"
+
+[[queues.consumers]]
+queue = "tminus-reconcile-queue"
+max_batch_size = 5
+max_batch_timeout = 10
+max_retries = 3
+dead_letter_queue = "tminus-reconcile-queue-dlq"
 
 [vars]
 ENVIRONMENT = "development"
@@ -107,10 +114,17 @@ queue = "tminus-sync-queue-staging"
 
 [[env.staging.queues.consumers]]
 queue = "tminus-sync-queue-staging"
-max_batch_size = 10
+max_batch_size = 5
 max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-sync-queue-staging-dlq"
+
+[[env.staging.queues.consumers]]
+queue = "tminus-reconcile-queue-staging"
+max_batch_size = 5
+max_batch_timeout = 10
+max_retries = 3
+dead_letter_queue = "tminus-reconcile-queue-staging-dlq"
 
 # ===========================================================================
 # Production environment: tminus-sync-consumer-production
@@ -155,7 +169,14 @@ queue = "tminus-sync-queue"
 
 [[env.production.queues.consumers]]
 queue = "tminus-sync-queue"
-max_batch_size = 10
+max_batch_size = 5
 max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "tminus-sync-queue-dlq"
+
+[[env.production.queues.consumers]]
+queue = "tminus-reconcile-queue"
+max_batch_size = 5
+max_batch_timeout = 10
+max_retries = 3
+dead_letter_queue = "tminus-reconcile-queue-dlq"
