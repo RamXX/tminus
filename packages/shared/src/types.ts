@@ -282,6 +282,16 @@ export interface DeleteManagedMirrorMessage {
   readonly target_calendar_id?: CalendarId;
   readonly provider_event_id: string;
   readonly idempotency_key: string;
+  /**
+   * When true, the target event is an origin event (user-created, not a
+   * T-Minus managed mirror). Origin events lack tminus/managed markers.
+   * The write-consumer skips ownership marker verification for these
+   * because the UserGraphDO already verified the canonical exists.
+   *
+   * This flag is opt-in (default false) and only set when the user has
+   * enabled cascade_to_origin in their federation preferences.
+   */
+  readonly origin_cascade?: boolean;
 }
 
 /** Reason codes for reconciliation triggers. */

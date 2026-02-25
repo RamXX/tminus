@@ -1869,13 +1869,23 @@ export class UserGraphDO {
   /**
    * Delete a canonical event by ID. Hard delete per BR-7.
    * Enqueues DELETE_MANAGED_MIRROR for all existing mirrors.
-   * Origin events are never deleted by T-Minus (TM-w8di).
+   *
+   * When cascade_to_origin is true, also enqueues a delete for the origin
+   * event itself (the user-created event in the source calendar). This is
+   * the federation use case: deleting from any federated account cascades
+   * everywhere including the origin. Defaults to false (safe default).
+   *
+   * SAFETY: cascade_to_origin only affects events WITHIN the federation
+   * graph (events tracked in canonical_events). Events outside the graph
+   * are never touched. See: debug/T-Minus Delete Incident Root Cause.
    */
   async deleteCanonicalEvent(
     canonicalEventId: string,
     source: string,
+    options?: { cascade_to_origin?: boolean },
   ): Promise<boolean> {
     this.ensureMigrated();
+    const cascadeToOrigin = options?.cascade_to_origin ?? false;
 
     // Check event exists
     const rows = this.sql
@@ -1921,22 +1931,47 @@ export class UserGraphDO {
       });
     }
 
-    // SAFETY: T-Minus must NEVER delete origin events (events it did not
-    // create). Origin events live in the user's real calendar and may have
-    // external attendees. Only mirrors (tagged with tminus=true, managed=true)
-    // are within T-Minus's authority to delete. If the user wants to delete
-    // the origin event, they do so directly in their calendar provider.
+    // Origin cascade: when the user has opted in, also delete the origin
+    // event from the source calendar. This is a federation feature -- the
+    // user deletes from any account and it cascades everywhere.
     //
-    // See: debug/T-Minus Delete Incident Root Cause (2026-02-24)
+    // Default is OFF. Only set when the user explicitly enables it.
+    // The origin_cascade flag tells the write-consumer to skip the
+    // tminus/managed marker check (origin events are user-created and
+    // don't carry those markers).
+    let originDeleteEnqueued = false;
+    if (
+      cascadeToOrigin &&
+      event.origin_event_id &&
+      event.origin_account_id &&
+      event.origin_calendar_id
+    ) {
+      const originIdempotencyKey = await computeIdempotencyKey(
+        canonicalEventId,
+        event.origin_account_id,
+        `delete-origin:${event.origin_event_id}:${event.origin_calendar_id}`,
+      );
+      this.enqueueDeleteMirror({
+        type: "DELETE_MANAGED_MIRROR",
+        canonical_event_id: canonicalEventId,
+        target_account_id: event.origin_account_id,
+        target_calendar_id: event.origin_calendar_id,
+        provider_event_id: event.origin_event_id,
+        idempotency_key: originIdempotencyKey,
+        origin_cascade: true,
+      });
+      originDeleteEnqueued = true;
+    }
 
     console.log("user-graph: deleteCanonicalEvent enqueue summary", {
       canonical_event_id: canonicalEventId,
       source,
+      cascade_to_origin: cascadeToOrigin,
       mirrors_enqueued: mirrors.length,
       origin_account_id: event.origin_account_id,
       origin_calendar_id: event.origin_calendar_id ?? null,
       origin_event_id_present: typeof event.origin_event_id === "string" && event.origin_event_id.length > 0,
-      origin_delete_enqueued: false,
+      origin_delete_enqueued: originDeleteEnqueued,
     });
 
     // Soft-delete mirrors: transition to DELETING so write-consumer
@@ -4811,7 +4846,11 @@ export class UserGraphDO {
       },
 
       "/deleteCanonicalEvent": async (body) => {
-        const deleted = await this.deleteCanonicalEvent(body.canonical_event_id, body.source);
+        const deleted = await this.deleteCanonicalEvent(
+          body.canonical_event_id,
+          body.source,
+          { cascade_to_origin: body.cascade_to_origin ?? false },
+        );
         return Response.json(deleted);
       },
 
