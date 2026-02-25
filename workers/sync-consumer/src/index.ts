@@ -704,7 +704,9 @@ export async function handleFullSync(
     }
   }
 
-  // Process all events using provider-specific classification/normalization
+  // Process all events using provider-specific classification/normalization.
+  // Full sync NEVER deletes -- see TM-firh. Deletes flow only through
+  // incremental sync (webhook-driven deltas) or explicit user action.
   const deltaResult = await processAndApplyDeltas(
     account_id,
     allEvents,
@@ -712,45 +714,15 @@ export async function handleFullSync(
     provider,
     deleteGuard,
     "full",
+    { allowDeletes: false },
   );
   const deltasApplied = deltaResult.appliedDeltaCount;
 
-  let staleManagedMirrorDeletes = 0;
-  const userId = await lookupUserId(account_id, env);
-  if (userId) {
-    const missingMirrorProviderIds = await findMissingManagedMirrorProviderEventIds(
-      account_id,
-      userId,
-      allEvents,
-      env,
-      {
-        skippedCalendarIds,
-        syncedCalendarIds: cursorUpdates.map((update) => update.providerCalendarId),
-      },
-    );
-    if (missingMirrorProviderIds.length > 0) {
-      staleManagedMirrorDeletes = await applyManagedMirrorDeletes(
-        account_id,
-        userId,
-        missingMirrorProviderIds,
-        env,
-        deleteGuard,
-        {
-          provider,
-          stage: "full",
-          reason: "stale_managed_mirror_reconcile",
-        },
-      );
-    }
-  }
-
-  // REMOVED (TM-1ler): pruneMissingOriginEvents was the primary cause of the
-  // 2026-02-24 delete incident. Google full-sync responses can omit events
-  // (pagination edge cases, API incompleteness), causing this function to
-  // treat absent-but-valid events as deleted. Origin events are not ours to
-  // delete -- the provider's incremental sync (via syncToken) already delivers
-  // real deletion deltas. Prune logic is no longer needed or safe.
-  const prunedDeleted = 0;
+  // REMOVED (TM-firh): Full sync has NO delete capability. Both the stale
+  // managed mirror reconcile (findMissingManagedMirrorProviderEventIds) and
+  // the origin prune (pruneMissingOriginEvents) were removed after the
+  // 2026-02-24 delete incident. Deletes flow only through incremental sync
+  // (webhook-driven deltas) or explicit user action.
 
   // Update sync cursor(s): scoped for provider scopes and legacy-compatible
   // default cursor for account-level paths.
@@ -778,7 +750,7 @@ export async function handleFullSync(
   }
 
   console.log(
-    `sync-consumer: SYNC_FULL complete for account ${account_id} -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${staleManagedMirrorDeletes} stale managed mirrors deleted, ${prunedDeleted} stale origin events pruned, ${cursorUpdates.length} cursors updated, delete_guard_blocked=${deleteGuard.hasBlockedDeletes()}`,
+    `sync-consumer: SYNC_FULL complete for account ${account_id} (deletes disabled) -- ${allEvents.length} events fetched, ${deltasApplied} deltas applied, ${cursorUpdates.length} cursors updated, delete_guard_blocked=${deleteGuard.hasBlockedDeletes()}`,
   );
 }
 
@@ -1348,6 +1320,7 @@ interface ProcessDeltaResult {
 
 interface ProcessDeltaOptions {
   preHandledManagedDeleteEventIds?: ReadonlySet<string>;
+  allowDeletes?: boolean; // false = drop all delete deltas (full sync safety)
 }
 
 async function processAndApplyDeltas(
@@ -1474,6 +1447,15 @@ async function processAndApplyDeltas(
         typeof delta.origin_event_id === "string" &&
         delta.origin_event_id.length > 0
       ) {
+        if (options.allowDeletes === false) {
+          console.info("sync-consumer: managed_mirror delete skipped (deletes disabled)", {
+            account_id: accountId,
+            provider_event_id: delta.origin_event_id,
+            provider,
+            stage,
+          });
+          continue;
+        }
         console.info("sync-consumer: managed_mirror delete detected", {
           account_id: accountId,
           provider_event_id: delta.origin_event_id,
@@ -1571,6 +1553,15 @@ async function processAndApplyDeltas(
     }
 
     // Origin or foreign_managed: include in ProviderDelta batch
+    if (delta.type === "deleted" && options.allowDeletes === false) {
+      console.info("sync-consumer: origin delete delta skipped (deletes disabled)", {
+        account_id: accountId,
+        provider_event_id: delta.origin_event_id,
+        provider,
+        stage,
+      });
+      continue;
+    }
     deltas.push(delta);
   }
 
@@ -1654,7 +1645,7 @@ async function processAndApplyDeltas(
     }
   }
 
-  if (managedMirrorDeletedEventIds.size > 0) {
+  if (managedMirrorDeletedEventIds.size > 0 && options.allowDeletes !== false) {
     await applyManagedMirrorDeletes(
       accountId,
       userId!,
@@ -1688,120 +1679,6 @@ async function processAndApplyDeltas(
     managedMirrorDeletedCount: managedMirrorDeletedEventIds.size,
     managedMirrorModifiedCount: managedMirrorModifiedEvents.length,
   };
-}
-
-/**
- * During full sync, remove stale canonical origin events that no longer exist
- * in the upstream provider.
- */
-async function pruneMissingOriginEvents(
-  accountId: AccountId,
-  providerEvents: GoogleCalendarEvent[],
-  env: Env,
-  provider: ProviderType,
-  deleteGuard?: DeleteSafetyGuard,
-  metadata: DeleteGuardMetadata = {},
-): Promise<number> {
-  const userId = await lookupUserId(accountId, env);
-  if (!userId) return 0;
-  const managedMirrorEventIds = provider === "microsoft"
-    ? await loadManagedMirrorEventIds(accountId, userId, env)
-    : null;
-  const providerOriginIds = collectOriginEventIds(
-    providerEvents,
-    provider,
-    managedMirrorEventIds,
-  );
-
-  const canonicalOrigins = await listCanonicalOriginEvents(accountId, userId, env);
-  if (canonicalOrigins.length === 0) return 0;
-
-  const missing = canonicalOrigins.filter((origin) => !providerOriginIds.has(origin.originEventId));
-  if (missing.length === 0) return 0;
-
-  // Google full list responses can omit some historical/special entries even
-  // though direct GET by event ID still succeeds. Restrict pruning to events
-  // that are recent or in the future to avoid deleting valid long-tail history.
-  const pruneBase = canonicalOrigins.filter((origin) => isPruneWindowEvent(origin.startTs));
-  const prunable = missing.filter((origin) => isPruneWindowEvent(origin.startTs));
-  if (prunable.length === 0) return 0;
-
-  // Guardrail: if a large fraction appears missing, skip pruning to avoid
-  // accidental mass-deletes on partial provider responses.
-  const denominator = pruneBase.length;
-  const missingRatio = denominator > 0 ? prunable.length / denominator : 0;
-  if (denominator >= 50 && missingRatio > 0.3) {
-    console.warn(
-      `sync-consumer: prune skipped for account ${accountId} -- suspiciously high missing ratio (${prunable.length}/${denominator})`,
-    );
-    return 0;
-  }
-
-  const prunableByRecency = [...prunable].sort((a, b) => {
-    const aStart = a.startTs ? Date.parse(a.startTs) : Number.NaN;
-    const bStart = b.startTs ? Date.parse(b.startTs) : Number.NaN;
-    const aScore = Number.isFinite(aStart) ? aStart : 0;
-    const bScore = Number.isFinite(bStart) ? bStart : 0;
-    return bScore - aScore;
-  });
-  const prunableToDelete = limitAtomicDeleteCandidates(
-    prunableByRecency,
-    "prune_missing_origin_events",
-    {
-      account_id: accountId,
-      provider,
-      stage: metadata.stage,
-      reason: metadata.reason,
-    },
-  );
-
-  if (
-    deleteGuard &&
-    !deleteGuard.reserve(
-      "prune_missing_origin_events",
-      prunableToDelete.length,
-      metadata,
-    )
-  ) {
-    return 0;
-  }
-
-  return applyDeletedOriginDeltas(
-    accountId,
-    userId,
-    prunableToDelete.map((origin) => origin.originEventId),
-    env,
-  );
-}
-
-/**
- * Collect origin event IDs from provider payloads (managed mirrors excluded).
- */
-function collectOriginEventIds(
-  providerEvents: readonly GoogleCalendarEvent[],
-  provider: ProviderType,
-  managedMirrorEventIds: Set<string> | null = null,
-): Set<string> {
-  const ids = new Set<string>();
-  const classificationStrategy = getClassificationStrategy(provider);
-
-  for (const event of providerEvents) {
-    const rawEvent = ((event as Record<string, unknown>)._msRaw ?? event) as Record<string, unknown>;
-    const classification = classifyProviderEvent(
-      provider,
-      rawEvent,
-      classificationStrategy,
-      managedMirrorEventIds,
-    );
-    if (classification === "managed_mirror") continue;
-
-    const originEventId = rawEvent.id;
-    if (typeof originEventId === "string" && originEventId.length > 0) {
-      ids.add(originEventId);
-    }
-  }
-
-  return ids;
 }
 
 function classifyProviderEvent(
@@ -1900,71 +1777,6 @@ async function loadActiveMirrors(
     mirrors?: ActiveMirrorRow[];
   };
   return payload.mirrors ?? [];
-}
-
-async function findMissingManagedMirrorProviderEventIds(
-  accountId: AccountId,
-  userId: string,
-  providerEvents: readonly GoogleCalendarEvent[],
-  env: Env,
-  options: {
-    skippedCalendarIds?: readonly string[];
-    syncedCalendarIds?: readonly string[];
-  } = {},
-): Promise<string[]> {
-  const mirrors = await loadActiveMirrors(accountId, userId, env);
-  if (mirrors.length === 0) {
-    return [];
-  }
-  const skipped = new Set(options.skippedCalendarIds ?? []);
-  const syncedCalendarIds = options.syncedCalendarIds ?? [];
-  const synced =
-    syncedCalendarIds.length > 0 ? new Set(syncedCalendarIds) : null;
-
-  const providerIds = new Set<string>();
-  for (const event of providerEvents) {
-    const rawEvent = ((event as Record<string, unknown>)._msRaw ?? event) as Record<
-      string,
-      unknown
-    >;
-    const providerEventId = rawEvent.id;
-    if (typeof providerEventId !== "string" || providerEventId.length === 0) {
-      continue;
-    }
-    for (const variant of providerEventIdVariants(providerEventId)) {
-      providerIds.add(variant);
-    }
-  }
-
-  const missing = new Set<string>();
-  for (const mirror of mirrors) {
-    const targetCalendarId =
-      typeof mirror.target_calendar_id === "string"
-        ? mirror.target_calendar_id
-        : "";
-    if (synced && (targetCalendarId.length === 0 || !synced.has(targetCalendarId))) {
-      // Safety: only reconcile "missing" mirrors for calendars that were
-      // explicitly synced in this run.
-      continue;
-    }
-    if (targetCalendarId.length > 0 && skipped.has(targetCalendarId)) {
-      continue;
-    }
-    if (
-      typeof mirror.provider_event_id !== "string" ||
-      mirror.provider_event_id.length === 0
-    ) {
-      continue;
-    }
-    const exists = providerEventIdVariants(mirror.provider_event_id).some(
-      (variant) => providerIds.has(variant),
-    );
-    if (!exists) {
-      missing.add(mirror.provider_event_id);
-    }
-  }
-
-  return [...missing];
 }
 
 // TODO(Phase 3, TM-08pp): Remove providerEventIdVariants and decodeProviderEventIdSafe
@@ -2655,117 +2467,6 @@ function extractStartTimestamp(
   if (typeof start.dateTime === "string") return start.dateTime;
   if (typeof start.date === "string") return start.date;
   return null;
-}
-
-interface CanonicalOriginEvent {
-  originEventId: string;
-  startTs: string | null;
-}
-
-/**
- * List canonical provider-origin events for an account from UserGraphDO.
- */
-async function listCanonicalOriginEvents(
-  accountId: AccountId,
-  userId: string,
-  env: Env,
-): Promise<CanonicalOriginEvent[]> {
-  const userGraphId = env.USER_GRAPH.idFromName(userId);
-  const userGraphStub = env.USER_GRAPH.get(userGraphId);
-
-  const events: CanonicalOriginEvent[] = [];
-  let cursor: string | null = null;
-
-  do {
-    const response = await userGraphStub.fetch(
-      new Request("https://user-graph.internal/listCanonicalEvents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          origin_account_id: accountId,
-          source: "provider",
-          limit: 500,
-          ...(cursor ? { cursor } : {}),
-        }),
-      }),
-    );
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(
-        `UserGraphDO.listCanonicalEvents failed (${response.status}): ${body}`,
-      );
-    }
-
-    const data = (await response.json()) as {
-      items: Array<{
-        origin_event_id?: string;
-        start?: {
-          dateTime?: string;
-          date?: string;
-        } | string | null;
-      }>;
-      cursor: string | null;
-      has_more: boolean;
-    };
-
-    for (const item of data.items ?? []) {
-      if (typeof item.origin_event_id === "string" && item.origin_event_id.length > 0) {
-        events.push({
-          originEventId: item.origin_event_id,
-          startTs: extractStartTimestamp(item.start),
-        });
-      }
-    }
-
-    cursor = data.cursor ?? null;
-  } while (cursor);
-
-  return events;
-}
-
-/**
- * Apply synthetic delete deltas for stale origin events, in chunks.
- */
-async function applyDeletedOriginDeltas(
-  accountId: AccountId,
-  userId: string,
-  originEventIds: string[],
-  env: Env,
-): Promise<number> {
-  if (originEventIds.length === 0) return 0;
-  const originEventIdsToDelete = limitAtomicDeleteCandidates(
-    originEventIds,
-    "apply_deleted_origin_deltas",
-    {
-      account_id: accountId,
-    },
-  );
-
-  const userGraphId = env.USER_GRAPH.idFromName(userId);
-  const userGraphStub = env.USER_GRAPH.get(userGraphId);
-  const deltas: ProviderDelta[] = originEventIdsToDelete.map((originEventId) => ({
-    type: "deleted",
-    origin_account_id: accountId,
-    origin_event_id: originEventId,
-  }));
-
-  const response = await userGraphStub.fetch(
-    new Request("https://user-graph.internal/applyProviderDelta", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account_id: accountId, deltas }),
-    }),
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `UserGraphDO.applyProviderDelta (prune) failed (${response.status}): ${body}`,
-    );
-  }
-
-  return originEventIdsToDelete.length;
 }
 
 interface ApplyProviderDeltasResult {

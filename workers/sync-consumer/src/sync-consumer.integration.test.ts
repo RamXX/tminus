@@ -805,187 +805,95 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("full sync prunes stale canonical origin events missing upstream", async () => {
-    userGraphDOState.canonicalOriginEvents = [
-      {
-        origin_event_id: "google_evt_keep",
-        start: { dateTime: "2026-02-20T09:00:00Z" },
-      },
-      {
-        origin_event_id: "google_evt_stale",
-        start: { dateTime: "2026-02-21T09:00:00Z" },
-      },
-    ];
 
-    const googleFetch = createGoogleApiFetch({
-      events: [makeGoogleEvent({ id: "google_evt_keep", summary: "Keep" })],
-      nextSyncToken: NEW_SYNC_TOKEN,
-    });
+	it("full sync does NOT prune stale canonical origin events (TM-firh)", async () => {
+		userGraphDOState.canonicalOriginEvents = [
+			{
+				origin_event_id: "google_evt_keep",
+				start: { dateTime: "2026-02-20T09:00:00Z" },
+			},
+			{
+				origin_event_id: "google_evt_stale",
+				start: { dateTime: "2026-02-21T09:00:00Z" },
+			},
+		];
 
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: ACCOUNT_A.account_id,
-      reason: "onboarding",
-    };
+		const googleFetch = createGoogleApiFetch({
+			events: [makeGoogleEvent({ id: "google_evt_keep", summary: "Keep" })],
+			nextSyncToken: NEW_SYNC_TOKEN,
+		});
 
-    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+		const message: SyncFullMessage = {
+			type: "SYNC_FULL",
+			account_id: ACCOUNT_A.account_id,
+			reason: "onboarding",
+		};
 
-    // First call: upsert current provider events
-    // Second call: synthetic delete for stale canonical origin IDs
-    expect(userGraphDOState.applyDeltaCalls).toHaveLength(2);
-    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
-    expect(userGraphDOState.applyDeltaCalls[1].deltas).toEqual([
-      {
-        type: "deleted",
-        origin_account_id: ACCOUNT_A.account_id,
-        origin_event_id: "google_evt_stale",
-      },
-    ]);
-  });
+		await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
-  it("full-sync prune spikes are truncated to one atomic delete", async () => {
-    env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
-    env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "2";
-    env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
+		// Only the upsert call -- NO synthetic delete deltas for missing events.
+		expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
+		expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
+		const allDeltas = userGraphDOState.applyDeltaCalls.flatMap((c: { deltas: unknown[] }) => c.deltas);
+		expect(allDeltas.every((d: { type: string }) => d.type !== "deleted")).toBe(true);
+	});
 
-    userGraphDOState.canonicalOriginEvents = [
-      {
-        origin_event_id: "google_evt_keep_guard",
-        start: { dateTime: "2026-02-20T09:00:00Z" },
-      },
-      {
-        origin_event_id: "google_evt_stale_guard_1",
-        start: { dateTime: "2026-02-21T09:00:00Z" },
-      },
-      {
-        origin_event_id: "google_evt_stale_guard_2",
-        start: { dateTime: "2026-02-22T09:00:00Z" },
-      },
-    ];
+	it("full sync does NOT delete stale managed mirrors (TM-firh)", async () => {
+		accountDOState.calendarScopes = [
+			{
+				provider_calendar_id: "primary",
+				enabled: true,
+				sync_enabled: true,
+			},
+		];
+		accountDOState.scopedSyncTokens = {
+			primary: TEST_SYNC_TOKEN,
+		};
+		userGraphDOState.activeMirrors = [
+			{
+				provider_event_id: "google_evt_missing_mirror_primary_fullsync",
+				target_calendar_id: "primary",
+			},
+		];
+		userGraphDOState.mirrorLookupByProviderEventId = {
+			google_evt_missing_mirror_primary_fullsync: "evt_01HXYZ00000000000000000008",
+		};
 
-    const googleFetch = createGoogleApiFetch({
-      events: [makeGoogleEvent({ id: "google_evt_keep_guard", summary: "Keep Guard" })],
-      nextSyncToken: NEW_SYNC_TOKEN,
-    });
+		const googleFetch = async (input: string | URL | Request): Promise<Response> => {
+			const url = typeof input === "string"
+				? new URL(input)
+				: input instanceof URL
+				? input
+				: new URL(input.url);
 
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: ACCOUNT_A.account_id,
-      reason: "reconcile",
-    };
+			const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
+			const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
 
-    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
+			if (calendarId === "primary") {
+				return new Response(
+					JSON.stringify({
+						items: [makeGoogleEvent({ id: "google_evt_origin_keep" })],
+						nextSyncToken: "primary-sync-new",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 
-    // Atomic deletion: upsert call plus exactly one synthetic delete delta.
-    expect(userGraphDOState.applyDeltaCalls).toHaveLength(2);
-    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
-    expect(userGraphDOState.applyDeltaCalls[1].deltas).toEqual([
-      {
-        type: "deleted",
-        origin_account_id: ACCOUNT_A.account_id,
-        origin_event_id: "google_evt_stale_guard_2",
-      },
-    ]);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
-    expect(accountDOState.syncFailureCalls).toHaveLength(0);
-  });
+			return new Response("Unexpected calendar", { status: 500 });
+		};
 
-  it("full sync does not prune historical events outside prune window", async () => {
-    userGraphDOState.canonicalOriginEvents = [
-      {
-        origin_event_id: "google_evt_keep",
-        start: { dateTime: "2026-02-20T09:00:00Z" },
-      },
-      {
-        origin_event_id: "google_evt_old",
-        start: { dateTime: "2020-02-20T09:00:00Z" },
-      },
-    ];
+		const message: SyncFullMessage = {
+			type: "SYNC_FULL",
+			account_id: ACCOUNT_A.account_id,
+			reason: "token_410",
+		};
 
-    const googleFetch = createGoogleApiFetch({
-      events: [makeGoogleEvent({ id: "google_evt_keep", summary: "Keep" })],
-      nextSyncToken: NEW_SYNC_TOKEN,
-    });
+		await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
 
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: ACCOUNT_A.account_id,
-      reason: "onboarding",
-    };
-
-    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
-
-    // Only upsert call should run; historical missing event is skipped for prune.
-    expect(userGraphDOState.applyDeltaCalls).toHaveLength(1);
-    expect(userGraphDOState.applyDeltaCalls[0].deltas).toHaveLength(1);
-  });
-
-  it("full sync deletes stale managed mirrors missing from provider snapshot", async () => {
-    accountDOState.calendarScopes = [
-      {
-        provider_calendar_id: "primary",
-        enabled: true,
-        sync_enabled: true,
-      },
-    ];
-    accountDOState.scopedSyncTokens = {
-      primary: TEST_SYNC_TOKEN,
-    };
-    userGraphDOState.activeMirrors = [
-      {
-        provider_event_id: "google_evt_missing_mirror_primary_fullsync",
-        target_calendar_id: "primary",
-      },
-    ];
-    userGraphDOState.mirrorLookupByProviderEventId = {
-      google_evt_missing_mirror_primary_fullsync: "evt_01HXYZ00000000000000000008",
-    };
-
-    const googleFetch = async (input: string | URL | Request): Promise<Response> => {
-      const url = typeof input === "string"
-        ? new URL(input)
-        : input instanceof URL
-        ? input
-        : new URL(input.url);
-      const match = url.pathname.match(/\/calendars\/([^/]+)\/events/);
-      const calendarId = match ? decodeURIComponent(match[1]) : "unknown";
-
-      if (calendarId === "primary") {
-        return new Response(
-          JSON.stringify({
-            items: [makeGoogleEvent({ id: "google_evt_origin_keep" })],
-            nextSyncToken: "primary-sync-new",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-
-      return new Response("Unexpected calendar", { status: 500 });
-    };
-
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: ACCOUNT_A.account_id,
-      reason: "token_410",
-    };
-
-    await handleFullSync(message, env, { fetchFn: googleFetch, sleepFn: noopSleep });
-
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: "evt_01HXYZ00000000000000000008",
-        source: `provider:${ACCOUNT_A.account_id}`,
-      },
-    ]);
-    expect(accountDOState.setScopedSyncTokenCalls).toEqual(
-      expect.arrayContaining([
-        {
-          provider_calendar_id: "primary",
-          sync_token: "primary-sync-new",
-        },
-      ]),
-    );
-  });
+		// No canonical events should be deleted during full sync.
+		expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
+		expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+	});
 
   // -------------------------------------------------------------------------
   // 3. Event classification filters managed mirrors
@@ -4508,151 +4416,32 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("full sync reconciles stale Microsoft managed mirrors missing from provider snapshot", async () => {
-    userGraphDOState.activeMirrors = [
-      { provider_event_id: "AAMkAG-ms-stale-mirror-404", target_calendar_id: "primary" },
-    ];
-    userGraphDOState.mirrorLookupByProviderEventId = {
-      "AAMkAG-ms-stale-mirror-404": "evt_01HXYZ00000000000000000999",
-    };
+	it("full sync does NOT reconcile stale Microsoft managed mirrors (TM-firh)", async () => {
+		userGraphDOState.activeMirrors = [
+			{ provider_event_id: "AAMkAG-ms-stale-mirror-404", target_calendar_id: "primary" },
+		];
+		userGraphDOState.mirrorLookupByProviderEventId = {
+			"AAMkAG-ms-stale-mirror-404": "evt_01HXYZ00000000000000000999",
+		};
 
-    const msFetch = createMicrosoftApiFetch({
-      events: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-keep" })],
-      deltaLink: MS_NEW_DELTA_LINK,
-    });
+		const msFetch = createMicrosoftApiFetch({
+			events: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-keep" })],
+			deltaLink: MS_NEW_DELTA_LINK,
+		});
 
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: MS_ACCOUNT_B.account_id,
-      reason: "reconcile",
-    };
+		const message: SyncFullMessage = {
+			type: "SYNC_FULL",
+			account_id: MS_ACCOUNT_B.account_id,
+			reason: "reconcile",
+		};
 
-    await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
+		await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
 
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: "evt_01HXYZ00000000000000000999",
-        source: `provider:${MS_ACCOUNT_B.account_id}`,
-      },
-    ]);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
-  });
+		// No canonical events should be deleted during full sync.
+		expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
+		expect(accountDOState.syncSuccessCalls).toHaveLength(1);
+	});
 
-  it("full sync does not reconcile stale mirrors from unscoped Microsoft overlay calendars", async () => {
-    const mirrorCalendarId = "overlay-ms-cal-legacy";
-    const staleMirrorEventId = "AAMkAG-ms-stale-overlay-1";
-    const canonicalEventId = "evt_01HXYZ00000000000000000998";
-    const fetchedUrls: string[] = [];
-
-    // Legacy shape: only primary is registered in AccountDO scope table.
-    accountDOState.calendarScopes = [
-      {
-        provider_calendar_id: "primary",
-        enabled: true,
-        sync_enabled: true,
-      },
-    ];
-    userGraphDOState.activeMirrors = [
-      {
-        provider_event_id: staleMirrorEventId,
-        target_calendar_id: mirrorCalendarId,
-      },
-    ];
-    userGraphDOState.mirrorLookupByProviderEventId = {
-      [staleMirrorEventId]: canonicalEventId,
-    };
-
-    const msFetch = async (input: string | URL | Request): Promise<Response> => {
-      const url = typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-      fetchedUrls.push(url);
-
-      if (
-        url.includes("graph.microsoft.com") &&
-        url.includes("/me/calendars?") &&
-        url.includes("isDefaultCalendar")
-      ) {
-        return new Response(
-          JSON.stringify({
-            value: [
-              {
-                id: MS_DEFAULT_CALENDAR_ID,
-                name: "Calendar",
-                isDefaultCalendar: true,
-                canEdit: true,
-              },
-            ],
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }
-
-      if (!url.includes("graph.microsoft.com")) {
-        return new Response("Not found", { status: 404 });
-      }
-
-      // Primary scope includes one origin event that should be preserved.
-      if (url.includes(encodeURIComponent(MS_DEFAULT_CALENDAR_ID))) {
-        return new Response(
-          JSON.stringify({
-            value: [makeMicrosoftEvent({ id: "AAMkAG-ms-origin-keep-legacy" })],
-            "@odata.deltaLink":
-              "https://graph.microsoft.com/v1.0/me/calendars/cal_ms_default/events/delta?$deltatoken=primary-full-new",
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }
-
-      // Overlay scope snapshot does not include stale mirror anymore.
-      if (url.includes(encodeURIComponent(mirrorCalendarId))) {
-        return new Response(
-          JSON.stringify({
-            value: [],
-            "@odata.deltaLink":
-              "https://graph.microsoft.com/v1.0/me/calendars/overlay-ms-cal-legacy/events/delta?$deltatoken=overlay-full-new",
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }
-
-      return new Response(
-        JSON.stringify({
-          value: [],
-          "@odata.deltaLink": MS_NEW_DELTA_LINK,
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-    };
-
-    const message: SyncFullMessage = {
-      type: "SYNC_FULL",
-      account_id: MS_ACCOUNT_B.account_id,
-      reason: "reconcile",
-    };
-
-    await handleFullSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
-
-    expect(
-      fetchedUrls.some((url) => url.includes(encodeURIComponent(mirrorCalendarId))),
-    ).toBe(false);
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
-  });
 
   // -------------------------------------------------------------------------
   // 3. Microsoft managed mirror events are filtered (Invariant E)
