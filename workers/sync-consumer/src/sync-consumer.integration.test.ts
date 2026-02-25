@@ -1043,7 +1043,7 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
-  it("managed-mirror delete spikes are truncated to one atomic delete", async () => {
+  it("managed-mirror delete spikes are blocked by delete guard when batch exceeds run limit", async () => {
     env.DELETE_GUARD_MAX_DELETES_PER_SYNC_RUN = "1";
     env.DELETE_GUARD_MAX_DELETES_PER_ACCOUNT_BATCH = "1";
     env.DELETE_GUARD_MAX_DELETES_PER_BATCH = "2";
@@ -1081,15 +1081,13 @@ describe("Sync consumer integration tests (real SQLite, mocked Google API + DOs)
       errorSpy.mockRestore();
     }
 
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: "evt_01HXYZ00000000000000000111",
-        source: `provider:${ACCOUNT_A.account_id}`,
-      },
-    ]);
-    expect(accountDOState.syncSuccessCalls).toHaveLength(1);
-    expect(accountDOState.syncFailureCalls).toHaveLength(0);
-    expect(sawGuardAuditLog).toBe(false);
+    // With HARD_MAX_DELETES_PER_OPERATION=50, both candidates pass
+    // limitAtomicDeleteCandidates. Then deleteGuard.reserve(2) exceeds the
+    // per-run limit of 1, so the entire batch is blocked (all-or-nothing).
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual([]);
+    expect(sawGuardAuditLog).toBe(true);
+    // Guard block marks sync as failure so the next run retries.
+    expect(accountDOState.syncFailureCalls).toHaveLength(1);
   });
 
   it("google deleted mirror without managed metadata still triggers canonical delete via mirror index", async () => {
@@ -3656,7 +3654,7 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
     expect(syncQueue.messages).toHaveLength(0);
   });
 
-  it("scheduled microsoft sweep reconciles only one delete when recent missing candidates exceed safety cap", async () => {
+  it("scheduled microsoft sweep reconciles all confirmed-missing deletes within safety cap", async () => {
     const missingMirrorCount = 6;
     const nowIso = new Date().toISOString();
 
@@ -3756,12 +3754,14 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     await handleIncrementalSync(message, env, { fetchFn: msFetch, sleepFn: noopSleep });
 
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: "evt_01HXYZ00000000000000000CAP1",
+    // With HARD_MAX_DELETES_PER_OPERATION=50, all 6 confirmed-missing mirrors
+    // are within the safety cap and get deleted.
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual(
+      Array.from({ length: missingMirrorCount }, (_, idx) => ({
+        canonical_event_id: `evt_01HXYZ00000000000000000CAP${idx + 1}`,
         source: `provider:${MS_ACCOUNT_B.account_id}`,
-      },
-    ]);
+      })),
+    );
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
     expect(syncQueue.messages).toHaveLength(0);
   });
@@ -4240,12 +4240,22 @@ describe("Sync consumer Microsoft provider dispatch (real SQLite, mocked Microso
 
     expect(probedEventIds[0]).toBe(recentMirrorEventId);
     expect(probedEventIds).toContain(recentMirrorEventId);
-    expect(userGraphDOState.deleteCanonicalCalls).toEqual([
-      {
-        canonical_event_id: recentCanonicalEventId,
-        source: `provider:${MS_ACCOUNT_B.account_id}`,
-      },
-    ]);
+    // With HARD_MAX_DELETES_PER_OPERATION=50, both confirmed-missing mirrors
+    // are within the safety cap and get deleted. Priority ordering ensures the
+    // recent-write candidate is probed first.
+    expect(userGraphDOState.deleteCanonicalCalls).toEqual(
+      expect.arrayContaining([
+        {
+          canonical_event_id: recentCanonicalEventId,
+          source: `provider:${MS_ACCOUNT_B.account_id}`,
+        },
+        {
+          canonical_event_id: farFutureCanonicalEventId,
+          source: `provider:${MS_ACCOUNT_B.account_id}`,
+        },
+      ]),
+    );
+    expect(userGraphDOState.deleteCanonicalCalls).toHaveLength(2);
     expect(accountDOState.syncSuccessCalls).toHaveLength(1);
   });
 
