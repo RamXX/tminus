@@ -1339,7 +1339,7 @@ describe("handleDeletionCheck (via scheduled)", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleHoldExpiry (via scheduled)", () => {
-  it("expires holds and enqueues DELETE_MIRROR for holds with provider events", async () => {
+  it("expires holds and enqueues DELETE_MANAGED_MIRROR for holds with provider events", async () => {
     const doFetchCalls: Array<{ url: string; body: string }> = [];
     const { env, writeQueue } = createMockEnv({
       d1Results: {
@@ -1378,10 +1378,10 @@ describe("handleHoldExpiry (via scheduled)", () => {
     const handler = createHandler();
     await handler.scheduled(buildScheduledEvent(CRON_HOLD_EXPIRY), env, mockCtx);
 
-    // Should enqueue DELETE_MIRROR only for hold with provider_event_id
+    // Should enqueue DELETE_MANAGED_MIRROR only for hold with provider_event_id
     expect(writeQueue.messages.length).toBe(1);
     const deleteMsg = writeQueue.messages[0] as { type: string; provider_event_id: string };
-    expect(deleteMsg.type).toBe("DELETE_MIRROR");
+    expect(deleteMsg.type).toBe("DELETE_MANAGED_MIRROR");
     expect(deleteMsg.provider_event_id).toBe("prov-evt-1");
 
     // Should call updateHoldStatus for both holds

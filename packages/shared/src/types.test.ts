@@ -17,7 +17,7 @@ import type {
   SyncIncrementalMessage,
   SyncFullMessage,
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   ReconcileAccountMessage,
   ApplyResult,
   AccountHealth,
@@ -273,15 +273,15 @@ describe("types.ts -- queue message types", () => {
     expect(msg.projected_payload.extendedProperties.private.canonical_event_id).toBe("evt_01");
   });
 
-  it("DeleteMirrorMessage has provider_event_id", () => {
-    const msg: DeleteMirrorMessage = {
-      type: "DELETE_MIRROR",
+  it("DeleteManagedMirrorMessage has provider_event_id", () => {
+    const msg: DeleteManagedMirrorMessage = {
+      type: "DELETE_MANAGED_MIRROR",
       canonical_event_id: "evt_01" as EventId,
       target_account_id: "acc_02" as AccountId,
       provider_event_id: "google_evt_mirror",
       idempotency_key: "idem_del_abc",
     };
-    expect(msg.type).toBe("DELETE_MIRROR");
+    expect(msg.type).toBe("DELETE_MANAGED_MIRROR");
     expect(msg.provider_event_id).toBe("google_evt_mirror");
   });
 

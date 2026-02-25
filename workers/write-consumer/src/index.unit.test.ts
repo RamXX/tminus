@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createWriteQueueHandler } from "./index";
-import type { UpsertMirrorMessage, DeleteMirrorMessage } from "@tminus/shared";
+import type { UpsertMirrorMessage, DeleteManagedMirrorMessage } from "@tminus/shared";
 
 interface StubCall {
   path: string;
@@ -302,9 +302,9 @@ describe("write-consumer queue placeholder upsert remap", () => {
 });
 
 describe("write-consumer queue delete calendar remap", () => {
-  it("remaps primary DELETE_MIRROR to single sync scope when mirror row is missing", async () => {
-    const message: DeleteMirrorMessage = {
-      type: "DELETE_MIRROR",
+  it("remaps primary DELETE_MANAGED_MIRROR to single sync scope when mirror row is missing", async () => {
+    const message: DeleteManagedMirrorMessage = {
+      type: "DELETE_MANAGED_MIRROR",
       canonical_event_id: "evt_01JSKE00M00000000000000009",
       target_account_id: "acc_01JSKE00MACCPVNTB000000009",
       target_calendar_id: "primary",
@@ -342,7 +342,7 @@ describe("write-consumer queue delete calendar remap", () => {
     const retry = vi.fn();
     const batch = {
       messages: [{ body: message, ack, retry }],
-    } as unknown as MessageBatch<DeleteMirrorMessage>;
+    } as unknown as MessageBatch<DeleteManagedMirrorMessage>;
 
     const env = {
       DB: createMockDB("usr_01JSKE00M00000000000000001", "google"),

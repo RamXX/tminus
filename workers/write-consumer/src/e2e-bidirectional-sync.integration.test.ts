@@ -50,7 +50,7 @@ import {
 } from "@tminus/shared";
 import type {
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   AccountId,
   GoogleCalendarEvent,
   ProjectedEvent,
@@ -473,7 +473,7 @@ async function runSyncPipeline(opts: {
   const writeResults: Array<{ success: boolean; action: string }> = [];
 
   for (const msg of newMessages) {
-    const typedMsg = msg as UpsertMirrorMessage | DeleteMirrorMessage;
+    const typedMsg = msg as UpsertMirrorMessage | DeleteManagedMirrorMessage;
     const result = await writeConsumer.processMessage(typedMsg);
     writeResults.push({ success: result.success, action: result.action });
   }
@@ -832,7 +832,7 @@ describe("E2E validation: bidirectional sync with loop prevention", () => {
     // UserGraphDO hard-deleted the canonical event (BR-7) and enqueued mirror deletion
     expect(applyResult.deleted).toBe(1);
 
-    // WriteConsumer processed the DELETE_MIRROR
+    // WriteConsumer processed the DELETE_MANAGED_MIRROR
     expect(writeResults).toHaveLength(1);
     expect(writeResults[0].success).toBe(true);
     expect(writeResults[0].action).toBe("deleted");

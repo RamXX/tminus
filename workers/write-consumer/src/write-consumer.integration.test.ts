@@ -25,7 +25,7 @@ import {
 } from "@tminus/shared";
 import type {
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   EventId,
   AccountId,
   CalendarId,
@@ -532,10 +532,10 @@ describe("WriteConsumer integration", () => {
   });
 
   // -------------------------------------------------------------------------
-  // DELETE_MIRROR -- removes event from target calendar
+  // DELETE_MANAGED_MIRROR -- removes event from target calendar
   // -------------------------------------------------------------------------
 
-  describe("DELETE_MIRROR removes event from target calendar", () => {
+  describe("DELETE_MANAGED_MIRROR removes event from target calendar", () => {
     it("deletes event via Google API and sets mirror state to DELETED", async () => {
       // Setup: ACTIVE mirror with provider_event_id
       mirrorStore.insertMirror({
@@ -546,8 +546,8 @@ describe("WriteConsumer integration", () => {
         state: "ACTIVE",
       });
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -581,8 +581,8 @@ describe("WriteConsumer integration", () => {
         state: "PENDING",
       });
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: "",
@@ -606,8 +606,8 @@ describe("WriteConsumer integration", () => {
     });
 
     it("uses target_calendar_id from delete message when mirror row is already gone", async () => {
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         target_calendar_id: TARGET_CALENDAR_ID,
@@ -635,8 +635,8 @@ describe("WriteConsumer integration", () => {
 
       calendarProvider.deleteEventError = new ResourceNotFoundError();
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -671,8 +671,8 @@ describe("WriteConsumer integration", () => {
         "Resource has been deleted",
       );
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -708,8 +708,8 @@ describe("WriteConsumer integration", () => {
         404,
       );
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -742,8 +742,8 @@ describe("WriteConsumer integration", () => {
         410,
       );
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -776,8 +776,8 @@ describe("WriteConsumer integration", () => {
         404,
       );
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -814,8 +814,8 @@ describe("WriteConsumer integration", () => {
         }
       };
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: "AAMkAGI2TQABAAA%2FAAABBB%3D%3D",
@@ -858,8 +858,8 @@ describe("WriteConsumer integration", () => {
         403,
       );
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1095,7 +1095,7 @@ describe("WriteConsumer integration", () => {
       });
 
       await consumer.processMessage({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1596,7 +1596,7 @@ describe("WriteConsumer integration", () => {
       calendarProvider.deleteEventError = new MicrosoftResourceNotFoundError();
 
       const result = await consumer.processMessage({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1699,7 +1699,7 @@ describe("WriteConsumer integration", () => {
   // -------------------------------------------------------------------------
 
   describe("mirror lifecycle state machine", () => {
-    it("DELETE_MIRROR transitions ACTIVE -> DELETING -> DELETED", async () => {
+    it("DELETE_MANAGED_MIRROR transitions ACTIVE -> DELETING -> DELETED", async () => {
       // Setup: ACTIVE mirror with provider_event_id
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
@@ -1709,8 +1709,8 @@ describe("WriteConsumer integration", () => {
         state: "ACTIVE",
       });
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1733,7 +1733,7 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.error_message).toBeNull();
     });
 
-    it("DELETE_MIRROR with no provider_event_id skips DELETING, goes directly to DELETED", async () => {
+    it("DELETE_MANAGED_MIRROR with no provider_event_id skips DELETING, goes directly to DELETED", async () => {
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
@@ -1741,8 +1741,8 @@ describe("WriteConsumer integration", () => {
         state: "PENDING",
       });
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: "",
@@ -1860,7 +1860,7 @@ describe("WriteConsumer integration", () => {
       expect(calendarProvider.insertedEvents).toHaveLength(0);
     });
 
-    it("DELETE_MIRROR transitions DELETING mirror to DELETED on provider error (already gone)", async () => {
+    it("DELETE_MANAGED_MIRROR transitions DELETING mirror to DELETED on provider error (already gone)", async () => {
       // Mirror already in DELETING state (set by UserGraphDO)
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
@@ -1873,8 +1873,8 @@ describe("WriteConsumer integration", () => {
       // Provider says event is already gone (404)
       calendarProvider.deleteEventError = new ResourceNotFoundError();
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1893,7 +1893,7 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.state).toBe("DELETED");
     });
 
-    it("DELETE_MIRROR sets ERROR state on permanent provider failure", async () => {
+    it("DELETE_MANAGED_MIRROR sets ERROR state on permanent provider failure", async () => {
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
@@ -1905,8 +1905,8 @@ describe("WriteConsumer integration", () => {
       // Permanent failure: 403 Forbidden
       calendarProvider.deleteEventError = new GoogleApiError("Forbidden", 403);
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,
@@ -1928,7 +1928,7 @@ describe("WriteConsumer integration", () => {
       expect(mirror!.error_message).toContain("Forbidden");
     });
 
-    it("DELETE_MIRROR preserves DELETING state on transient failure (retry signaled)", async () => {
+    it("DELETE_MANAGED_MIRROR preserves DELETING state on transient failure (retry signaled)", async () => {
       mirrorStore.insertMirror({
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
@@ -1940,8 +1940,8 @@ describe("WriteConsumer integration", () => {
       // Transient failure: rate limit
       calendarProvider.deleteEventError = new RateLimitError();
 
-      const msg: DeleteMirrorMessage = {
-        type: "DELETE_MIRROR",
+      const msg: DeleteManagedMirrorMessage = {
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: MOCK_PROVIDER_EVENT_ID,

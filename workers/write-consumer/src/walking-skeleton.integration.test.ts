@@ -58,7 +58,7 @@ import {
 import type {
   SyncIncrementalMessage,
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   AccountId,
   GoogleCalendarEvent,
   ProjectedEvent,

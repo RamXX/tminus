@@ -1796,11 +1796,11 @@ describe("Phase 2D E2E Validation: Constraint Pipeline", () => {
   // Delete cascade: mirrors enqueued for cleanup
   //
   // Proves that deleting a constraint with mirrored derived events
-  // properly enqueues DELETE_MIRROR messages.
+  // properly enqueues DELETE_MANAGED_MIRROR messages.
   // =========================================================================
 
   describe("Delete cascade: mirror cleanup", () => {
-    it("deleting a trip with mirrored event enqueues DELETE_MIRROR", async () => {
+    it("deleting a trip with mirrored event enqueues DELETE_MANAGED_MIRROR", async () => {
       const trip = ug.addConstraint(
         "trip",
         { name: "Mirrored Trip", timezone: "UTC", block_policy: "BUSY" },
@@ -1824,10 +1824,10 @@ describe("Phase 2D E2E Validation: Constraint Pipeline", () => {
 
       await ug.deleteConstraint(trip.constraint_id);
 
-      // Should have enqueued a DELETE_MIRROR message
+      // Should have enqueued a DELETE_MANAGED_MIRROR message
       expect(queue.messages).toHaveLength(1);
       const msg = queue.messages[0] as Record<string, unknown>;
-      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.type).toBe("DELETE_MANAGED_MIRROR");
       expect(msg.canonical_event_id).toBe(eventId);
     });
   });

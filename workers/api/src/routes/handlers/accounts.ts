@@ -186,9 +186,12 @@ async function handleDeleteAccount(
       .bind(accountId)
       .run();
 
-    // Step 2+: Best-effort cleanup (parallel, bounded latency).
-    // Each sub-step is independently timeboxed and non-fatal.
-    const cleanupTasks = [
+    // Step 2: Disconnect the account from providers BEFORE unlinking.
+    // SAFETY (TM-2di5): Webhooks and tokens must be stopped before mirror
+    // deletes are enqueued. This prevents inflight syncs from racing with
+    // the unlink and re-creating mirrors that were just deleted.
+    // Token revocation and channel stop run in parallel (both target AccountDO).
+    await Promise.all([
       withTimeout(
         callDO(env.ACCOUNT, accountId, "/revokeTokens", {}),
         ACCOUNT_DO_STEP_TIMEOUT_MS,
@@ -199,22 +202,23 @@ async function handleDeleteAccount(
         ACCOUNT_DO_STEP_TIMEOUT_MS,
         "AccountDO.stopWatchChannels",
       ).catch(() => undefined),
-      withTimeout(
-        callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
-          account_id: accountId,
-        }),
-        USER_GRAPH_UNLINK_TIMEOUT_MS,
-        "UserGraphDO.unlinkAccount",
-      ).catch((err) => {
-        console.warn("Account unlink cleanup did not complete within timeout", {
-          account_id: accountId,
-          user_id: auth.userId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }),
-    ];
+    ]);
 
-    await Promise.all(cleanupTasks);
+    // Step 3: Now that the account is disconnected (status=revoked, webhooks
+    // stopped, tokens revoked), it is safe to enqueue mirror cleanup deletes.
+    await withTimeout(
+      callDO(env.USER_GRAPH, auth.userId, "/unlinkAccount", {
+        account_id: accountId,
+      }),
+      USER_GRAPH_UNLINK_TIMEOUT_MS,
+      "UserGraphDO.unlinkAccount",
+    ).catch((err) => {
+      console.warn("Account unlink cleanup did not complete within timeout", {
+        account_id: accountId,
+        user_id: auth.userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     return jsonResponse(successEnvelope({ deleted: true }), 200);
   } catch (err) {

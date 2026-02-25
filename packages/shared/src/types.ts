@@ -45,7 +45,7 @@ export type CalendarKind = "BUSY_OVERLAY" | "TRUE_MIRROR";
  *
  * Lifecycle state machine:
  *   PENDING -> ACTIVE      (write-consumer confirms provider-side creation)
- *   ACTIVE  -> DELETING    (UserGraphDO marks mirror for deletion, enqueues DELETE_MIRROR)
+ *   ACTIVE  -> DELETING    (UserGraphDO marks mirror for deletion, enqueues DELETE_MANAGED_MIRROR)
  *   DELETING -> DELETED    (write-consumer confirms provider-side deletion)
  *   DELETED -> TOMBSTONED  (GC/cleanup process marks for eventual hard-delete)
  *   *       -> ERROR       (any unrecoverable provider error)
@@ -271,8 +271,8 @@ export interface UpsertMirrorMessage {
 }
 
 /** Request to delete a mirror event (write-queue). */
-export interface DeleteMirrorMessage {
-  readonly type: "DELETE_MIRROR";
+export interface DeleteManagedMirrorMessage {
+  readonly type: "DELETE_MANAGED_MIRROR";
   readonly canonical_event_id: EventId;
   readonly target_account_id: AccountId;
   /**

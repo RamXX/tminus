@@ -8,7 +8,7 @@
  *
  * Handles two message types:
  * - UPSERT_MIRROR: Create or update mirror events in target calendars
- * - DELETE_MIRROR: Remove mirror events from target calendars
+ * - DELETE_MANAGED_MIRROR: Remove mirror events from target calendars
  *
  * Key behaviors:
  * - Idempotency via projection hash comparison (Invariant D)
@@ -33,7 +33,7 @@ import {
 } from "@tminus/shared";
 import type {
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   MirrorState,
   CalendarProvider,
   FetchFn,
@@ -334,12 +334,12 @@ export class WriteConsumer {
    * Returns a ProcessResult indicating what action was taken.
    */
   async processMessage(
-    message: UpsertMirrorMessage | DeleteMirrorMessage,
+    message: UpsertMirrorMessage | DeleteManagedMirrorMessage,
   ): Promise<ProcessResult> {
     switch (message.type) {
       case "UPSERT_MIRROR":
         return this.handleUpsert(message);
-      case "DELETE_MIRROR":
+      case "DELETE_MANAGED_MIRROR":
         return this.handleDelete(message);
       default:
         return {
@@ -576,10 +576,10 @@ export class WriteConsumer {
   }
 
   // -------------------------------------------------------------------------
-  // handleDelete -- DELETE_MIRROR processing
+  // handleDelete -- DELETE_MANAGED_MIRROR processing
   // -------------------------------------------------------------------------
 
-  private async handleDelete(msg: DeleteMirrorMessage): Promise<ProcessResult> {
+  private async handleDelete(msg: DeleteManagedMirrorMessage): Promise<ProcessResult> {
     // If no provider_event_id, there is nothing to delete at the provider.
     // Transition directly to DELETED (no provider-side work needed).
     if (!msg.provider_event_id) {

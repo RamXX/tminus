@@ -8,7 +8,7 @@
  * - Hold expiry detection
  * - Finding expired holds for cleanup
  * - Building UPSERT_MIRROR messages for tentative events
- * - Building DELETE_MIRROR messages for hold cleanup
+ * - Building DELETE_MANAGED_MIRROR messages for hold cleanup
  * - Terminal states cannot transition
  * - Configurable hold duration (1h-72h) (TM-82s.4)
  * - Expiry notification: approaching_expiry flag (TM-82s.4)
@@ -265,12 +265,12 @@ describe("buildHoldUpsertMessage", () => {
 });
 
 describe("buildHoldDeleteMessage", () => {
-  it("builds DELETE_MIRROR message when provider_event_id exists", () => {
+  it("builds DELETE_MANAGED_MIRROR message when provider_event_id exists", () => {
     const hold = makeHold({ provider_event_id: "goog_event_123" });
     const msg = buildHoldDeleteMessage(hold);
 
     expect(msg).not.toBeNull();
-    expect(msg!.type).toBe("DELETE_MIRROR");
+    expect(msg!.type).toBe("DELETE_MANAGED_MIRROR");
     expect(msg!.canonical_event_id).toBe(`hold_${hold.hold_id}`);
     expect(msg!.target_account_id).toBe(hold.account_id);
     expect(msg!.provider_event_id).toBe("goog_event_123");

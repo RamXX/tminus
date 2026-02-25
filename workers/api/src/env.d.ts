@@ -20,7 +20,7 @@ interface Env {
   ACCOUNT: DurableObjectNamespace;
   SYNC_QUEUE: Queue;
   WRITE_QUEUE: Queue;
-  /** Priority write queue (DELETE_MIRROR fast path). Falls back to WRITE_QUEUE if absent. */
+  /** Priority write queue (DELETE_MANAGED_MIRROR fast path). Falls back to WRITE_QUEUE if absent. */
   WRITE_PRIORITY_QUEUE?: Queue;
   SESSIONS: KVNamespace;
   RATE_LIMITS: KVNamespace;

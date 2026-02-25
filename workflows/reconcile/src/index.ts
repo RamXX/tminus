@@ -299,7 +299,7 @@ export class ReconcileWorkflow {
 
       if (mirrorRow === null) {
         // Orphaned mirror in provider (no matching event_mirrors row)
-        // Enqueue DELETE_MIRROR to clean it up
+        // Enqueue DELETE_MANAGED_MIRROR to clean it up
         const providerEventId = mirror.event.id ?? "";
         await this.enqueueDeleteMirror(
           canonicalEventId,
@@ -872,7 +872,7 @@ export class ReconcileWorkflow {
   }
 
   /**
-   * Enqueue a DELETE_MIRROR message for an orphaned mirror.
+   * Enqueue a DELETE_MANAGED_MIRROR message for an orphaned mirror.
    */
   private async enqueueDeleteMirror(
     canonicalEventId: string,
@@ -886,7 +886,7 @@ export class ReconcileWorkflow {
     );
 
     await this.env.WRITE_QUEUE.send({
-      type: "DELETE_MIRROR",
+      type: "DELETE_MANAGED_MIRROR",
       canonical_event_id: canonicalEventId,
       target_account_id: targetAccountId,
       provider_event_id: providerEventId,

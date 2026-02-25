@@ -19,7 +19,7 @@
  * Architecture:
  * 1. GoogleTestClient refreshes an access token via real OAuth
  * 2. GoogleCalendarClient (the same one used in production) makes real API calls
- * 3. WriteConsumer processes UPSERT_MIRROR and DELETE_MIRROR messages
+ * 3. WriteConsumer processes UPSERT_MIRROR and DELETE_MANAGED_MIRROR messages
  *    using the real GoogleCalendarClient against real Google Calendar
  * 4. Events are created/deleted in the real Google Calendar, then cleaned up
  *
@@ -56,7 +56,7 @@ import type {
 } from "./write-consumer.js";
 import type {
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   EventId,
   AccountId,
   CalendarId,
@@ -570,7 +570,7 @@ describe("Write-consumer real integration tests", () => {
   );
 
   it.skipIf(!hasCredentials)(
-    "DELETE_MIRROR deletes a real event from Google Calendar",
+    "DELETE_MANAGED_MIRROR deletes a real event from Google Calendar",
     async () => {
       // Step 1: Create an event first
       mirrorStore.insertMirror({
@@ -624,7 +624,7 @@ describe("Write-consumer real integration tests", () => {
 
       // Step 2: Delete the mirror event
       const deleteResult = await consumer.processMessage({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: CANONICAL_EVENT_ID_2,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: providerEventId,
@@ -775,7 +775,7 @@ describe("Write-consumer real integration tests", () => {
   );
 
   it.skipIf(!hasCredentials)(
-    "WriteConsumer handles DELETE_MIRROR of already-deleted event gracefully",
+    "WriteConsumer handles DELETE_MANAGED_MIRROR of already-deleted event gracefully",
     async () => {
       // Create and immediately delete an event via raw Google API
       const client = new GoogleCalendarClient(realAccessToken);
@@ -804,7 +804,7 @@ describe("Write-consumer real integration tests", () => {
       });
 
       const result = await consumer.processMessage({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: deleteEventId,
         target_account_id: TARGET_ACCOUNT_ID,
         provider_event_id: eventId,

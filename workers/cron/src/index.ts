@@ -24,7 +24,7 @@ import type {
   SyncIncrementalMessage,
   SyncFullMessage,
   AccountId,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   EventId,
 } from "@tminus/shared";
 import {
@@ -762,7 +762,7 @@ interface ExpiredHoldRow {
  * Query UserGraphDO for expired tentative holds and clean them up.
  *
  * For each active user, calls UserGraphDO.getExpiredHolds(). For each
- * expired hold with a provider_event_id, enqueues a DELETE_MIRROR message
+ * expired hold with a provider_event_id, enqueues a DELETE_MANAGED_MIRROR message
  * to remove the tentative event from the calendar. Then transitions the
  * hold status to 'expired'.
  *
@@ -817,12 +817,12 @@ async function handleHoldExpiry(env: Env): Promise<void> {
 
       totalExpired += holds.length;
 
-      // Enqueue DELETE_MIRROR messages for holds with provider events
+      // Enqueue DELETE_MANAGED_MIRROR messages for holds with provider events
       for (const hold of holds) {
         if (hold.provider_event_id) {
           try {
-            const deleteMsg: DeleteMirrorMessage = {
-              type: "DELETE_MIRROR",
+            const deleteMsg: DeleteManagedMirrorMessage = {
+              type: "DELETE_MANAGED_MIRROR",
               canonical_event_id: `hold_${hold.hold_id}` as EventId,
               target_account_id: hold.account_id as AccountId,
               provider_event_id: hold.provider_event_id,

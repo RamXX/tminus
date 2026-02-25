@@ -484,7 +484,7 @@ export class SchedulingWorkflow {
   /**
    * Cancel a session and release all tentative holds.
    *
-   * Transitions session to 'cancelled' status and enqueues DELETE_MIRROR
+   * Transitions session to 'cancelled' status and enqueues DELETE_MANAGED_MIRROR
    * messages for all held provider events.
    */
   async cancelSession(
@@ -919,7 +919,7 @@ export class SchedulingWorkflow {
 
   /**
    * Release all held holds for a session.
-   * Enqueues DELETE_MIRROR messages for holds with provider events.
+   * Enqueues DELETE_MANAGED_MIRROR messages for holds with provider events.
    */
   private async releaseSessionHolds(
     userId: string,

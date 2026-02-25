@@ -852,7 +852,7 @@ describe("UserGraphDO integration", () => {
   // -------------------------------------------------------------------------
 
   describe("delete with existing mirrors", () => {
-    it("enqueues DELETE_MIRROR for each mirror", async () => {
+    it("enqueues DELETE_MANAGED_MIRROR for each mirror", async () => {
       ug.getSyncHealth();
 
       insertPolicyEdge(db, {
@@ -877,7 +877,7 @@ describe("UserGraphDO integration", () => {
       expect(queue.messages).toHaveLength(1);
 
       const msg = queue.messages[0] as Record<string, unknown>;
-      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.type).toBe("DELETE_MANAGED_MIRROR");
       expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
       expect(msg.target_calendar_id).toBe(OTHER_ACCOUNT_ID);
       expect(typeof msg.idempotency_key).toBe("string");
@@ -1816,7 +1816,7 @@ describe("UserGraphDO integration", () => {
   // -------------------------------------------------------------------------
 
   describe("deleteCanonicalEvent", () => {
-    it("deletes event and enqueues DELETE_MIRROR for mirrors and origin", async () => {
+    it("deletes event and enqueues DELETE_MANAGED_MIRROR for mirrors and origin", async () => {
       ug.getSyncHealth();
 
       insertPolicyEdge(db, {
@@ -1848,7 +1848,7 @@ describe("UserGraphDO integration", () => {
       expect(mirrors).toHaveLength(1);
       expect(mirrors[0].state).toBe("DELETING");
 
-      // DELETE_MIRROR should be enqueued for both mirror target and origin account
+      // DELETE_MANAGED_MIRROR should be enqueued for both mirror target and origin account
       expect(queue.messages).toHaveLength(2);
       const deleteMessages = queue.messages as Array<Record<string, unknown>>;
       const originDelete = deleteMessages.find(
@@ -1859,12 +1859,12 @@ describe("UserGraphDO integration", () => {
       );
 
       expect(originDelete).toBeDefined();
-      expect(originDelete?.type).toBe("DELETE_MIRROR");
+      expect(originDelete?.type).toBe("DELETE_MANAGED_MIRROR");
       expect(originDelete?.provider_event_id).toBe("google_evt_001");
       expect(originDelete?.target_calendar_id).toBe("primary");
 
       expect(mirrorDelete).toBeDefined();
-      expect(mirrorDelete?.type).toBe("DELETE_MIRROR");
+      expect(mirrorDelete?.type).toBe("DELETE_MANAGED_MIRROR");
       expect(mirrorDelete?.target_calendar_id).toBe(OTHER_ACCOUNT_ID);
 
       // Journal should have delete entry
@@ -1909,7 +1909,7 @@ describe("UserGraphDO integration", () => {
       );
 
       expect(originDelete).toBeDefined();
-      expect(originDelete?.type).toBe("DELETE_MIRROR");
+      expect(originDelete?.type).toBe("DELETE_MANAGED_MIRROR");
       expect(originDelete?.provider_event_id).toBe("google_evt_001");
       expect(originDelete?.target_calendar_id).toBe("work@example.com");
     });
@@ -1954,7 +1954,7 @@ describe("UserGraphDO integration", () => {
 
       expect(originDelete).toBeUndefined();
       expect(mirrorDelete).toBeDefined();
-      expect(mirrorDelete?.type).toBe("DELETE_MIRROR");
+      expect(mirrorDelete?.type).toBe("DELETE_MANAGED_MIRROR");
     });
 
     it("returns false for non-existent event", async () => {
@@ -2613,7 +2613,7 @@ describe("UserGraphDO integration", () => {
       expect(postCnt.cnt).toBe(0);
     });
 
-    it("enqueues DELETE_MIRROR for mirrors FROM the unlinked account", async () => {
+    it("enqueues DELETE_MANAGED_MIRROR for mirrors FROM the unlinked account", async () => {
       // Setup policy edge so mirrors are created
       await ug.ensureDefaultPolicy([TEST_ACCOUNT_ID, OTHER_ACCOUNT_ID]);
 
@@ -2622,9 +2622,9 @@ describe("UserGraphDO integration", () => {
 
       await ug.unlinkAccount(TEST_ACCOUNT_ID);
 
-      // Should have enqueued DELETE_MIRROR messages
+      // Should have enqueued DELETE_MANAGED_MIRROR messages
       const deleteMsgs = queue.messages.filter(
-        (m) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+        (m) => (m as Record<string, unknown>).type === "DELETE_MANAGED_MIRROR",
       );
       expect(deleteMsgs.length).toBeGreaterThanOrEqual(1);
 
@@ -4226,7 +4226,7 @@ describe("UserGraphDO constraint CRUD", () => {
       expect(deleted).toBe(false);
     });
 
-    it("enqueues DELETE_MIRROR for mirrors on derived events", async () => {
+    it("enqueues DELETE_MANAGED_MIRROR for mirrors on derived events", async () => {
       const constraint = ug.addConstraint(
         "trip",
         { name: "Mirrored Trip", timezone: "UTC", block_policy: "BUSY" },
@@ -4250,10 +4250,10 @@ describe("UserGraphDO constraint CRUD", () => {
 
       await ug.deleteConstraint(constraint.constraint_id);
 
-      // Should have enqueued a DELETE_MIRROR message
+      // Should have enqueued a DELETE_MANAGED_MIRROR message
       expect(queue.messages).toHaveLength(1);
       const msg = queue.messages[0] as Record<string, unknown>;
-      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.type).toBe("DELETE_MANAGED_MIRROR");
       expect(msg.canonical_event_id).toBe(eventId);
     });
   });
@@ -6624,7 +6624,7 @@ describe("UserGraphDO buffer constraints", () => {
 
       expect(queue.messages).toHaveLength(1);
       const msg = queue.messages[0] as Record<string, unknown>;
-      expect(msg.type).toBe("DELETE_MIRROR");
+      expect(msg.type).toBe("DELETE_MANAGED_MIRROR");
       expect(msg.canonical_event_id).toBe(canonicalId);
       expect(msg.target_account_id).toBe(OTHER_ACCOUNT_ID);
     });
@@ -6687,7 +6687,7 @@ describe("UserGraphDO buffer constraints", () => {
       expect(result.reason).toBe("not_found");
     });
 
-    it("deleteCanonicalEvent uses outbox for DELETE_MIRROR messages", async () => {
+    it("deleteCanonicalEvent uses outbox for DELETE_MANAGED_MIRROR messages", async () => {
       // Set up policy edge and create an event with mirror
       insertPolicyEdge(db, {
         policyId: "pol_outbox_del",
@@ -6711,9 +6711,9 @@ describe("UserGraphDO buffer constraints", () => {
       const deleted = await ug.deleteCanonicalEvent(canonicalId, "user:test");
       expect(deleted).toBe(true);
 
-      // Queue should have DELETE_MIRROR messages (drained from outbox)
+      // Queue should have DELETE_MANAGED_MIRROR messages (drained from outbox)
       const deleteMessages = queue.messages.filter(
-        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MANAGED_MIRROR",
       );
       expect(deleteMessages.length).toBeGreaterThanOrEqual(1);
 
@@ -6724,7 +6724,7 @@ describe("UserGraphDO buffer constraints", () => {
       expect(outboxRows).toHaveLength(0);
     });
 
-    it("unlinkAccount uses outbox for batch DELETE_MIRROR messages", async () => {
+    it("unlinkAccount uses outbox for batch DELETE_MANAGED_MIRROR messages", async () => {
       // Set up policy edge and create events
       insertPolicyEdge(db, {
         policyId: "pol_outbox_unlink",
@@ -6747,9 +6747,9 @@ describe("UserGraphDO buffer constraints", () => {
       const result = await ug.unlinkAccount(TEST_ACCOUNT_ID);
       expect(result.mirrors_deleted).toBeGreaterThanOrEqual(1);
 
-      // Queue should have received DELETE_MIRROR messages from outbox
+      // Queue should have received DELETE_MANAGED_MIRROR messages from outbox
       const deleteMessages = queue.messages.filter(
-        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MIRROR",
+        (m: unknown) => (m as Record<string, unknown>).type === "DELETE_MANAGED_MIRROR",
       );
       expect(deleteMessages.length).toBeGreaterThanOrEqual(1);
 

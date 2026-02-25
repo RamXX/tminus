@@ -1295,22 +1295,18 @@ export class UserGraphDO {
       .toArray();
 
     let canonicalId: string;
-    let legacyRebindFrom: string | null = null;
     if (rows.length > 0) {
       canonicalId = rows[0].canonical_event_id;
     } else {
-      const legacy = this.findLegacyRebindCandidate(
-        accountId,
-        delta.origin_event_id,
-      );
-      if (!legacy) {
-        return null; // Nothing to delete
-      }
-      canonicalId = legacy.canonical_event_id;
-      legacyRebindFrom = legacy.origin_account_id;
+      // SAFETY (TM-7kdw): Do NOT fall back to findLegacyRebindCandidate.
+      // Cross-account origin_event_id matching can collide (Google recurring
+      // instance IDs reuse the same base ID). If the primary lookup fails,
+      // there is nothing to delete -- the event either belongs to a different
+      // account or was already cleaned up.
+      return null;
     }
 
-    // Enqueue DELETE_MIRROR for all existing mirrors BEFORE deleting the event
+    // Enqueue DELETE_MANAGED_MIRROR for all existing mirrors BEFORE deleting the event
     const mirrors = this.sql
       .exec<EventMirrorRow>(
         `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
@@ -1327,7 +1323,7 @@ export class UserGraphDO {
       );
 
       this.enqueueDeleteMirror({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: canonicalId,
         target_account_id: mirror.target_account_id,
         target_calendar_id: mirror.target_calendar_id,
@@ -1367,13 +1363,9 @@ export class UserGraphDO {
     );
 
     // Journal entry records the deletion
-    const patch: Record<string, unknown> = {
+    this.writeJournal(canonicalId, "deleted", `provider:${accountId}`, {
       origin_event_id: delta.origin_event_id,
-    };
-    if (legacyRebindFrom) {
-      patch.legacy_rebind_from = legacyRebindFrom;
-    }
-    this.writeJournal(canonicalId, "deleted", `provider:${accountId}`, patch);
+    });
 
     return { mirrorsDeleted };
   }
@@ -1876,7 +1868,8 @@ export class UserGraphDO {
 
   /**
    * Delete a canonical event by ID. Hard delete per BR-7.
-   * Enqueues DELETE_MIRROR for all existing mirrors and for the origin event.
+   * Enqueues DELETE_MANAGED_MIRROR for all existing mirrors.
+   * Origin events are never deleted by T-Minus (TM-w8di).
    */
   async deleteCanonicalEvent(
     canonicalEventId: string,
@@ -1903,7 +1896,7 @@ export class UserGraphDO {
     if (rows.length === 0) return false;
     const event = rows[0];
 
-    // Enqueue DELETE_MIRROR for all existing mirrors
+    // Enqueue DELETE_MANAGED_MIRROR for all existing mirrors
     const mirrors = this.sql
       .exec<EventMirrorRow>(
         `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
@@ -1919,7 +1912,7 @@ export class UserGraphDO {
       );
 
       this.enqueueDeleteMirror({
-        type: "DELETE_MIRROR",
+        type: "DELETE_MANAGED_MIRROR",
         canonical_event_id: canonicalEventId,
         target_account_id: mirror.target_account_id,
         target_calendar_id: mirror.target_calendar_id,
@@ -2227,7 +2220,7 @@ export class UserGraphDO {
 
       try {
         await this.deleteQueue.send({
-          type: "DELETE_MIRROR",
+          type: "DELETE_MANAGED_MIRROR",
           canonical_event_id: row.canonical_event_id,
           target_account_id: row.target_account_id,
           target_calendar_id: row.target_calendar_id,
@@ -3228,7 +3221,7 @@ export class UserGraphDO {
 
   async deleteConstraint(constraintId: string): Promise<boolean> {
     const result = await this.constraints.deleteConstraint(constraintId);
-    // Drain outbox: constraint deletion may enqueue DELETE_MIRROR messages
+    // Drain outbox: constraint deletion may enqueue DELETE_MANAGED_MIRROR messages
     await this.drainOutbox();
     return result;
   }
@@ -3248,7 +3241,7 @@ export class UserGraphDO {
     activeTo: string | null,
   ): Promise<Constraint | null> {
     const result = await this.constraints.updateConstraint(constraintId, configJson, activeFrom, activeTo);
-    // Drain outbox: constraint update may enqueue DELETE_MIRROR messages
+    // Drain outbox: constraint update may enqueue DELETE_MANAGED_MIRROR messages
     await this.drainOutbox();
     return result;
   }
@@ -3570,7 +3563,7 @@ export class UserGraphDO {
   /**
    * Enqueue write-queue messages in bounded batches via the outbox.
    *
-   * Durable Object account unlink can emit many DELETE_MIRROR messages.
+   * Durable Object account unlink can emit many DELETE_MANAGED_MIRROR messages.
    * Each message is written to the outbox synchronously in the current
    * transaction; drainOutbox() sends them after commit.
    */
@@ -3667,7 +3660,7 @@ export class UserGraphDO {
    * Remove all data associated with an account from the UserGraphDO.
    *
    * Cascade order:
-   * 1. Delete mirrors FROM this account (enqueue DELETE_MIRROR for each)
+   * 1. Delete mirrors FROM this account (enqueue DELETE_MANAGED_MIRROR for each)
    * 2. Delete mirrors TO this account (remove mirror rows)
    * 3. Hard delete canonical events from this account (BR-7)
    * 4. Remove policy edges referencing this account
@@ -3684,6 +3677,17 @@ export class UserGraphDO {
    */
   async unlinkAccount(accountId: string): Promise<UnlinkResult> {
     this.ensureMigrated();
+
+    // SAFETY CONTRACT (TM-2di5): The caller MUST have already:
+    //   1. Set account status to 'revoked' in D1
+    //   2. Stopped all webhook channels (AccountDO.stopWatchChannels)
+    //   3. Revoked OAuth tokens (AccountDO.revokeTokens)
+    // This ensures no inflight syncs will race with the mirror cleanup
+    // deletes enqueued below. The API handler enforces this sequencing.
+    console.log("user-graph: unlinkAccount starting", {
+      account_id: accountId,
+      contract: "caller must have disconnected account before calling",
+    });
 
     let eventsDeleted = 0;
     let mirrorsDeleted = 0;
@@ -3703,7 +3707,7 @@ export class UserGraphDO {
       .toArray();
 
     const outboundDeletes = outboundMirrors.map((mirror) => ({
-      type: "DELETE_MIRROR",
+      type: "DELETE_MANAGED_MIRROR",
       canonical_event_id: mirror.canonical_event_id,
       target_account_id: mirror.target_account_id,
       target_calendar_id: mirror.target_calendar_id,

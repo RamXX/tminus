@@ -30,7 +30,7 @@ export type {
   SyncIncrementalMessage,
   SyncFullMessage,
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   ReconcileAccountMessage,
   ReconcileReasonCode,
   ApplyResult,

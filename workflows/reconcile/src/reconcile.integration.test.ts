@@ -861,7 +861,7 @@ describe("ReconcileWorkflow integration tests (real SQLite, mocked Google API + 
   // AC 6: Orphaned mirrors enqueued for deletion
   // -------------------------------------------------------------------------
 
-  it("AC6: detects orphaned mirror in provider and enqueues DELETE_MIRROR", async () => {
+  it("AC6: detects orphaned mirror in provider and enqueues DELETE_MANAGED_MIRROR", async () => {
     const orphanedMirror = makeManagedMirrorEvent(
       "evt_01HXYZ000000000000ORPHAN",
       ACCOUNT_B.account_id,
@@ -886,10 +886,10 @@ describe("ReconcileWorkflow integration tests (real SQLite, mocked Google API + 
       reason: "scheduled",
     });
 
-    // DELETE_MIRROR should have been enqueued to write queue
+    // DELETE_MANAGED_MIRROR should have been enqueued to write queue
     expect(writeQueue.messages).toHaveLength(1);
     const deleteMsg = writeQueue.messages[0] as Record<string, unknown>;
-    expect(deleteMsg.type).toBe("DELETE_MIRROR");
+    expect(deleteMsg.type).toBe("DELETE_MANAGED_MIRROR");
     expect(deleteMsg.canonical_event_id).toBe(
       "evt_01HXYZ000000000000ORPHAN",
     );

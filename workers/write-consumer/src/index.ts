@@ -4,7 +4,7 @@
  * Provider-aware: dispatches to Google or Microsoft Calendar APIs based on
  * the target account's provider type (looked up from D1 registry).
  *
- * Processes UPSERT_MIRROR and DELETE_MIRROR messages to create, update,
+ * Processes UPSERT_MIRROR and DELETE_MANAGED_MIRROR messages to create, update,
  * and delete mirror events in target calendar accounts (Google or Microsoft).
  *
  * Queue configuration (from wrangler.toml):
@@ -24,7 +24,7 @@ import {
 } from "@tminus/shared";
 import type {
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   MirrorState,
   AccountId,
   ProviderType,
@@ -350,13 +350,13 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
      * 4. Handle retry/ack based on ProcessResult
      */
     async queue(
-      batch: MessageBatch<UpsertMirrorMessage | DeleteMirrorMessage>,
+      batch: MessageBatch<UpsertMirrorMessage | DeleteManagedMirrorMessage>,
       env: Env,
     ): Promise<void> {
       for (const msg of batch.messages) {
         try {
           const body = msg.body;
-          let effectiveBody: UpsertMirrorMessage | DeleteMirrorMessage = body;
+          let effectiveBody: UpsertMirrorMessage | DeleteManagedMirrorMessage = body;
 
           // Look up user_id and provider type from D1 registry for the target account.
           // user_id is needed to resolve the correct UserGraphDO instance.
@@ -397,7 +397,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           // mirror is still PENDING, request a targeted recompute replay so the
           // latest projection is guaranteed to be re-enqueued.
           let prefetchedMirror: MirrorRow | null = null;
-          if (body.type === "UPSERT_MIRROR" || body.type === "DELETE_MIRROR") {
+          if (body.type === "UPSERT_MIRROR" || body.type === "DELETE_MANAGED_MIRROR") {
             prefetchedMirror = await doMirrorStore.getMirrorAsync(
               body.canonical_event_id as string,
               body.target_account_id as string,
@@ -465,7 +465,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
           // whose origin calendar is not "primary".
           if (
             providerType === "google" &&
-            body.type === "DELETE_MIRROR" &&
+            body.type === "DELETE_MANAGED_MIRROR" &&
             !prefetchedMirror &&
             body.target_calendar_id === "primary"
           ) {
@@ -478,7 +478,7 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
                 effectiveBody = {
                   ...body,
                   target_calendar_id:
-                    scopedCalendarId as DeleteMirrorMessage["target_calendar_id"],
+                    scopedCalendarId as DeleteManagedMirrorMessage["target_calendar_id"],
                 };
                 console.log("write-consumer: remapped delete calendar from single scope", {
                   canonical_event_id: body.canonical_event_id,
@@ -499,8 +499,8 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
             }
           }
 
-          if (effectiveBody.type === "DELETE_MIRROR") {
-            console.log("write-consumer: processing DELETE_MIRROR", {
+          if (effectiveBody.type === "DELETE_MANAGED_MIRROR") {
+            console.log("write-consumer: processing DELETE_MANAGED_MIRROR", {
               canonical_event_id: effectiveBody.canonical_event_id,
               target_account_id: effectiveBody.target_account_id,
               target_calendar_id: effectiveBody.target_calendar_id ?? null,
@@ -601,12 +601,12 @@ export function createWriteQueueHandler(deps: WriteConsumerDeps = {}) {
  */
 async function createCachedMirrorStore(
   doStore: DOBackedMirrorStore,
-  msg: UpsertMirrorMessage | DeleteMirrorMessage,
+  msg: UpsertMirrorMessage | DeleteManagedMirrorMessage,
   prefetchedMirror?: MirrorRow | null,
 ): Promise<MirrorStore & { flush(): Promise<void> }> {
   // Pre-fetch the mirror for this message
   const targetAccountId =
-    msg.type === "UPSERT_MIRROR" || msg.type === "DELETE_MIRROR"
+    msg.type === "UPSERT_MIRROR" || msg.type === "DELETE_MANAGED_MIRROR"
       ? msg.target_account_id
       : "";
   const canonicalEventId = msg.canonical_event_id;

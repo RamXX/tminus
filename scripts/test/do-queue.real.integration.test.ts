@@ -41,7 +41,7 @@ import type {
   SyncIncrementalMessage,
   SyncFullMessage,
   UpsertMirrorMessage,
-  DeleteMirrorMessage,
+  DeleteManagedMirrorMessage,
   AccountId,
   EventId,
   CalendarId,
@@ -721,7 +721,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
             retry() { retried.push(this.id); },
           },
         ],
-      } as unknown as MessageBatch<UpsertMirrorMessage | DeleteMirrorMessage>;
+      } as unknown as MessageBatch<UpsertMirrorMessage | DeleteManagedMirrorMessage>;
 
       // Step 7: Process the queue batch
       await writeHandler.queue(mockBatch, env);
@@ -896,7 +896,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
             ack() { acked.push(this.id); },
             retry() {},
           }],
-        } as unknown as MessageBatch<UpsertMirrorMessage | DeleteMirrorMessage>;
+        } as unknown as MessageBatch<UpsertMirrorMessage | DeleteManagedMirrorMessage>;
 
         await writeHandler.queue(writeBatch, writeEnv);
         expect(acked.length).toBe(1);
@@ -1077,7 +1077,7 @@ describe("DO+queue real integration (wrangler dev)", () => {
           ack() { acked.push(this.id); },
           retry() { retried.push(this.id); },
         }],
-      } as unknown as MessageBatch<UpsertMirrorMessage | DeleteMirrorMessage>;
+      } as unknown as MessageBatch<UpsertMirrorMessage | DeleteManagedMirrorMessage>;
 
       await writeHandler.queue(mockBatch, env);
 

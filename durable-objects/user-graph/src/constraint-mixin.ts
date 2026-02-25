@@ -446,7 +446,7 @@ export class ConstraintMixin {
       .toArray();
 
     for (const evt of derivedEvents) {
-      // Delete mirrors for this event (enqueue DELETE_MIRROR for each)
+      // Delete mirrors for this event (enqueue DELETE_MANAGED_MIRROR for each)
       const mirrors = this.sql
         .exec<EventMirrorRow>(
           `SELECT * FROM event_mirrors WHERE canonical_event_id = ?`,
@@ -456,7 +456,7 @@ export class ConstraintMixin {
 
       for (const mirror of mirrors) {
         this.deps.enqueueDeleteMirror({
-          type: "DELETE_MIRROR",
+          type: "DELETE_MANAGED_MIRROR",
           canonical_event_id: evt.canonical_event_id,
           target_account_id: mirror.target_account_id,
           target_calendar_id: mirror.target_calendar_id,
@@ -614,7 +614,7 @@ export class ConstraintMixin {
 
         for (const mirror of mirrors) {
           this.deps.enqueueDeleteMirror({
-            type: "DELETE_MIRROR",
+            type: "DELETE_MANAGED_MIRROR",
             canonical_event_id: evt.canonical_event_id,
             target_account_id: mirror.target_account_id,
             target_calendar_id: mirror.target_calendar_id,

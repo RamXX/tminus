@@ -69,7 +69,7 @@ export interface HoldWriteMessage {
 
 /** Write-queue message for deleting a hold event. */
 export interface HoldDeleteMessage {
-  readonly type: "DELETE_MIRROR";
+  readonly type: "DELETE_MANAGED_MIRROR";
   readonly canonical_event_id: EventId;
   readonly target_account_id: AccountId;
   readonly provider_event_id: string;
@@ -215,7 +215,7 @@ export function buildHoldUpsertMessage(
 }
 
 /**
- * Build a write-queue DELETE_MIRROR message that removes a hold event.
+ * Build a write-queue DELETE_MANAGED_MIRROR message that removes a hold event.
  *
  * Used when a hold is cancelled, expired, or being replaced by a
  * committed event.
@@ -231,7 +231,7 @@ export function buildHoldDeleteMessage(
   }
 
   return {
-    type: "DELETE_MIRROR",
+    type: "DELETE_MANAGED_MIRROR",
     canonical_event_id: `hold_${hold.hold_id}` as EventId,
     target_account_id: hold.account_id as AccountId,
     provider_event_id: hold.provider_event_id,
