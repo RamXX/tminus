@@ -1928,52 +1928,13 @@ export class UserGraphDO {
       });
     }
 
-    let originDeleteEnqueued = false;
-    const providerDeleteCutoffMs = Date.now() - PROVIDER_ORIGIN_DELETE_LOOKBACK_MS;
-    const eventStartMs = parseEventTimestampMs(event.start_ts);
-    const isProviderSourcedDelete = source.startsWith("provider:");
-    const allowProviderOriginDelete =
-      !isProviderSourcedDelete ||
-      (eventStartMs !== null && eventStartMs >= providerDeleteCutoffMs);
-    // Also delete the origin provider event so user-initiated deletes from
-    // Tminus/API propagate back to the account that originated the canonical.
-    if (
-      event.origin_account_id.startsWith("acc_") &&
-      typeof event.origin_event_id === "string" &&
-      event.origin_event_id.length > 0 &&
-      allowProviderOriginDelete
-    ) {
-      const originCalendarId =
-        normalizeOriginCalendarId(event.origin_calendar_id) ?? "primary";
-      const originDeleteIdempotencyKey = await computeIdempotencyKey(
-        canonicalEventId,
-        event.origin_account_id,
-        `delete-origin:${event.origin_event_id}:${originCalendarId}`,
-      );
-      this.enqueueDeleteMirror({
-        type: "DELETE_MIRROR",
-        canonical_event_id: canonicalEventId,
-        target_account_id: event.origin_account_id,
-        target_calendar_id: originCalendarId,
-        provider_event_id: event.origin_event_id,
-        idempotency_key: originDeleteIdempotencyKey,
-      });
-      originDeleteEnqueued = true;
-    } else if (
-      isProviderSourcedDelete &&
-      event.origin_account_id.startsWith("acc_") &&
-      typeof event.origin_event_id === "string" &&
-      event.origin_event_id.length > 0
-    ) {
-      console.warn("user-graph: skipped provider-sourced origin delete outside safety window", {
-        canonical_event_id: canonicalEventId,
-        source,
-        origin_account_id: event.origin_account_id,
-        origin_event_id: event.origin_event_id,
-        start_ts: event.start_ts ?? null,
-        lookback_days: PROVIDER_ORIGIN_DELETE_LOOKBACK_DAYS,
-      });
-    }
+    // SAFETY: T-Minus must NEVER delete origin events (events it did not
+    // create). Origin events live in the user's real calendar and may have
+    // external attendees. Only mirrors (tagged with tminus=true, managed=true)
+    // are within T-Minus's authority to delete. If the user wants to delete
+    // the origin event, they do so directly in their calendar provider.
+    //
+    // See: debug/T-Minus Delete Incident Root Cause (2026-02-24)
 
     console.log("user-graph: deleteCanonicalEvent enqueue summary", {
       canonical_event_id: canonicalEventId,
@@ -1982,7 +1943,7 @@ export class UserGraphDO {
       origin_account_id: event.origin_account_id,
       origin_calendar_id: event.origin_calendar_id ?? null,
       origin_event_id_present: typeof event.origin_event_id === "string" && event.origin_event_id.length > 0,
-      origin_delete_enqueued: originDeleteEnqueued,
+      origin_delete_enqueued: false,
     });
 
     // Soft-delete mirrors: transition to DELETING so write-consumer

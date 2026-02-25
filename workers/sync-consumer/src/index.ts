@@ -744,20 +744,13 @@ export async function handleFullSync(
     }
   }
 
-  // Full sync convergence: prune stale provider-origin canonicals that no longer
-  // exist upstream. Without this, explicit full resyncs can still leave deletes behind.
-  const prunedDeleted = await pruneMissingOriginEvents(
-    account_id,
-    allEvents,
-    env,
-    provider,
-    deleteGuard,
-    {
-      provider,
-      stage: "full",
-      reason: "prune_missing_origin",
-    },
-  );
+  // REMOVED (TM-1ler): pruneMissingOriginEvents was the primary cause of the
+  // 2026-02-24 delete incident. Google full-sync responses can omit events
+  // (pagination edge cases, API incompleteness), causing this function to
+  // treat absent-but-valid events as deleted. Origin events are not ours to
+  // delete -- the provider's incremental sync (via syncToken) already delivers
+  // real deletion deltas. Prune logic is no longer needed or safe.
+  const prunedDeleted = 0;
 
   // Update sync cursor(s): scoped for provider scopes and legacy-compatible
   // default cursor for account-level paths.

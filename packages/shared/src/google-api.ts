@@ -128,6 +128,12 @@ export interface CalendarProvider {
 
   deleteEvent(calendarId: string, eventId: string): Promise<void>;
 
+  /**
+   * Fetch a single event by ID. Returns null if the event does not exist (404/410).
+   * Used for pre-flight ownership verification before destructive operations.
+   */
+  getEvent(calendarId: string, eventId: string): Promise<GoogleCalendarEvent | null>;
+
   listCalendars(): Promise<CalendarListEntry[]>;
 
   insertCalendar(summary: string): Promise<string>; // returns calendarId
@@ -286,6 +292,29 @@ export class GoogleCalendarClient implements CalendarProvider {
     const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${writeParams.toString()}`;
     // DELETE returns 204 No Content on success -- handle in request()
     await this.request<unknown>(url, { method: "DELETE" });
+  }
+
+  /**
+   * Fetch a single event by ID. Returns null if 404/410 (not found/gone).
+   */
+  async getEvent(
+    calendarId: string,
+    eventId: string,
+  ): Promise<GoogleCalendarEvent | null> {
+    const url = `${GOOGLE_CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+    try {
+      return await this.request<GoogleCalendarEvent>(url, { method: "GET" });
+    } catch (err) {
+      if (
+        err instanceof ResourceNotFoundError ||
+        err instanceof SyncTokenExpiredError ||
+        (err instanceof GoogleApiError &&
+          (err.statusCode === 404 || err.statusCode === 410))
+      ) {
+        return null;
+      }
+      throw err;
+    }
   }
 
   // -----------------------------------------------------------------------

@@ -625,6 +625,74 @@ export class WriteConsumer {
       );
       let deletedAtProvider = false;
 
+      // SAFETY: Pre-flight ownership verification (TM-h9ih).
+      // Before deleting, fetch the event and verify T-Minus owns it.
+      // This prevents deleting events outside the federation graph.
+      const eventIdToVerify = msg.provider_event_id;
+      try {
+        const existing = await client.getEvent(calendarId, eventIdToVerify);
+        if (existing) {
+          // Check Google markers (extendedProperties.private)
+          const gProps = existing.extendedProperties?.private;
+          const isGoogleManaged =
+            gProps?.["tminus"] === "true" && gProps?.["managed"] === "true";
+          // Check Microsoft markers (extensions array or categories)
+          const msExt = (existing as Record<string, unknown>)["extensions"] as
+            | Array<{ extensionName?: string; tminus?: string; managed?: string }>
+            | undefined;
+          const tminusExt = msExt?.find(
+            (e) => e.extensionName === "com.tminus.metadata",
+          );
+          const isMsManaged =
+            (tminusExt?.tminus === "true" && tminusExt?.managed === "true") ||
+            (
+              Array.isArray(
+                (existing as Record<string, unknown>)["categories"],
+              ) &&
+              (
+                (existing as Record<string, unknown>)["categories"] as string[]
+              ).includes("T-Minus Managed")
+            );
+          if (!isGoogleManaged && !isMsManaged) {
+            console.error(
+              "write-consumer: BLOCKED delete -- event is NOT a T-Minus managed mirror",
+              {
+                canonical_event_id: msg.canonical_event_id,
+                target_account_id: msg.target_account_id,
+                provider_event_id: msg.provider_event_id,
+                calendar_id: calendarId,
+                has_ext_props: !!gProps,
+                has_ms_extensions: !!msExt,
+              },
+            );
+            // Do NOT delete. Mark mirror as DELETED to prevent retry loops.
+            this.mirrorStore.updateMirrorState(
+              msg.canonical_event_id,
+              msg.target_account_id,
+              {
+                state: "DELETED",
+                error_message: "blocked: event not owned by tminus",
+              },
+            );
+            return { success: true, action: "deleted", retry: false };
+          }
+        }
+        // If existing is null, the event is already gone -- proceed to delete
+        // attempt which will naturally 404 and be handled below.
+      } catch (verifyErr) {
+        // If pre-flight fetch fails (rate limit, auth, etc.), do NOT proceed
+        // with a blind delete. Let the message retry later.
+        console.error(
+          "write-consumer: pre-flight ownership check failed, will retry",
+          {
+            canonical_event_id: msg.canonical_event_id,
+            provider_event_id: msg.provider_event_id,
+            error: verifyErr instanceof Error ? verifyErr.message : String(verifyErr),
+          },
+        );
+        throw verifyErr;
+      }
+
       try {
         await client.deleteEvent(calendarId, msg.provider_event_id);
         deletedAtProvider = true;

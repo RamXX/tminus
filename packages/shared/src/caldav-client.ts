@@ -17,7 +17,7 @@
 
 import type { FetchFn, ListEventsResponse, CalendarListEntry, WatchResponse } from "./google-api";
 import type { CalendarProvider } from "./google-api";
-import type { ProjectedEvent } from "./types";
+import type { ProjectedEvent, GoogleCalendarEvent } from "./types";
 import type {
   CalDavCalendar,
   CalDavEvent,
@@ -408,6 +408,19 @@ export class CalDavClient implements CalendarProvider {
         500,
       );
     }
+  }
+
+  /**
+   * Fetch a single event by ID. Returns null if not found.
+   * CalDAV implementation: not yet implemented (returns null).
+   */
+  async getEvent(
+    _calendarId: string,
+    _eventId: string,
+  ): Promise<GoogleCalendarEvent | null> {
+    // CalDAV getEvent is not yet needed for pre-flight ownership checks
+    // because CalDAV is Phase 5 and not yet live.
+    return null;
   }
 
   // -----------------------------------------------------------------------

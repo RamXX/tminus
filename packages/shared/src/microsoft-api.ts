@@ -17,7 +17,7 @@
 // declared when tsconfig has types: []. Declare it here for portability.
 declare function setTimeout(callback: () => void, ms: number): unknown;
 
-import type { ProjectedEvent } from "./types";
+import type { ProjectedEvent, GoogleCalendarEvent } from "./types";
 import type {
   CalendarProvider,
   FetchFn,
@@ -341,6 +341,28 @@ export class MicrosoftCalendarClient implements CalendarProvider {
     const encodedEventId = encodeURIComponent(eventId);
     const url = `${MS_GRAPH_BASE}/me/events/${encodedEventId}`;
     await this.request<unknown>(url, { method: "DELETE" });
+  }
+
+  /**
+   * Fetch a single event by ID. Returns null if not found (404).
+   */
+  async getEvent(
+    calendarId: string,
+    eventId: string,
+  ): Promise<GoogleCalendarEvent | null> {
+    const encodedEventId = encodeURIComponent(eventId);
+    const url = `${MS_GRAPH_BASE}/me/events/${encodedEventId}`;
+    try {
+      return await this.request<GoogleCalendarEvent>(url, { method: "GET" });
+    } catch (err) {
+      if (
+        err instanceof MicrosoftResourceNotFoundError ||
+        (err instanceof MicrosoftApiError && err.statusCode === 404)
+      ) {
+        return null;
+      }
+      throw err;
+    }
   }
 
   // -----------------------------------------------------------------------
