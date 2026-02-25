@@ -26,6 +26,7 @@ import { routeBillingRoutes } from "./billing-routes";
 import { routeCalDavRoutes } from "./caldav";
 import { routeIntelligenceRoutes } from "./intelligence";
 import { routeGraphRoutes } from "./graph";
+import { routeSettingsRoutes } from "./settings";
 import { routeDelegationRoutes } from "./delegation-routes";
 import { routeOrgRoutes } from "./org-routes";
 
@@ -47,6 +48,7 @@ export const routeGroups: RouteGroupHandler[] = [
   routeCommitmentRoutes,
   routeBillingRoutes,
   routeCalDavRoutes,
+  routeSettingsRoutes,
   routeIntelligenceRoutes,
   routeGraphRoutes,
   routeDelegationRoutes, // Must come before routeOrgRoutes (both match /v1/orgs/*)

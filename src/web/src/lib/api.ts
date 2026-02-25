@@ -1018,3 +1018,36 @@ export async function updateAccountScopes(
     { method: "PUT", body: { scopes }, token },
   );
 }
+
+// ---------------------------------------------------------------------------
+// User settings
+// ---------------------------------------------------------------------------
+
+/** Response shape for user settings. */
+export interface UserSettingResponse {
+  key: string;
+  value: string | null;
+}
+
+/** GET /api/v1/settings/:key -- read a user preference. */
+export async function fetchUserSetting(
+  token: string,
+  key: string,
+): Promise<UserSettingResponse> {
+  return apiFetch<UserSettingResponse>(
+    `/v1/settings/${encodeURIComponent(key)}`,
+    { token },
+  );
+}
+
+/** PUT /api/v1/settings/:key -- write a user preference. */
+export async function updateUserSetting(
+  token: string,
+  key: string,
+  value: string,
+): Promise<UserSettingResponse> {
+  return apiFetch<UserSettingResponse>(
+    `/v1/settings/${encodeURIComponent(key)}`,
+    { method: "PUT", body: { value }, token },
+  );
+}

@@ -284,11 +284,20 @@ export async function handleDeleteEvent(
   }
 
   try {
+    // Read the user's cascade_to_origin preference
+    const settingResult = await callDO<{ key: string; value: string | null }>(
+      env.USER_GRAPH,
+      auth.userId,
+      "/getUserSetting",
+      { key: "cascade_to_origin" },
+    );
+    const cascadeToOrigin = settingResult.ok && settingResult.data?.value === "true";
+
     const result = await callDO<boolean>(
       env.USER_GRAPH,
       auth.userId,
       "/deleteCanonicalEvent",
-      { canonical_event_id: eventId, source: "api" },
+      { canonical_event_id: eventId, source: "api", cascade_to_origin: cascadeToOrigin },
     );
 
     if (!result.ok) {

@@ -76,6 +76,8 @@ import {
   completeOnboardingSession,
   fetchAccountScopes,
   updateAccountScopes,
+  fetchUserSetting,
+  updateUserSetting,
 } from "./api";
 import { fetchPolicies, updatePolicyEdge } from "./policies";
 import {
@@ -103,7 +105,7 @@ import type {
 import type { OrgRole, CreatePolicyPayload, UpdatePolicyPayload } from "./admin";
 import type { DetailLevel } from "./policies";
 import type { ExcuseTone, TruthLevel } from "./briefing";
-import type { CreateEventPayload, UpdateEventPayload, AccountScopesResponse, ScopeUpdateItem } from "./api";
+import type { CreateEventPayload, UpdateEventPayload, AccountScopesResponse, ScopeUpdateItem, UserSettingResponse } from "./api";
 
 // ---------------------------------------------------------------------------
 // Context value type
@@ -221,6 +223,10 @@ export interface ApiContextValue {
     calendar_count?: number;
   }) => Promise<void>;
   completeOnboardingSession: () => Promise<void>;
+
+  // User settings
+  fetchSetting: (key: string) => Promise<UserSettingResponse>;
+  updateSetting: (key: string, value: string) => Promise<UserSettingResponse>;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +355,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     getOnboardingStatus: () => getOnboardingStatus(requireToken()),
     addOnboardingAccount: (payload) => addOnboardingAccount(requireToken(), payload),
     completeOnboardingSession: () => completeOnboardingSession(requireToken()),
+
+    // User settings
+    fetchSetting: (key) => fetchUserSetting(requireToken(), key),
+    updateSetting: (key, value) => updateUserSetting(requireToken(), key, value),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [token]);
 

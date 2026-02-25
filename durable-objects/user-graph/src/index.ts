@@ -5484,6 +5484,30 @@ export class UserGraphDO {
         const normalized = this.normalizeProviderEventIds();
         return Response.json({ normalized });
       },
+
+      // --- User settings ---
+
+      "/getUserSetting": (body) => {
+        this.ensureMigrated();
+        const row = this.sql
+          .exec<{ value: string }>(
+            "SELECT value FROM user_settings WHERE key = ?",
+            body.key,
+          )
+          .toArray();
+        return Response.json({ key: body.key, value: row[0]?.value ?? null });
+      },
+
+      "/setUserSetting": (body) => {
+        this.ensureMigrated();
+        this.sql.exec(
+          `INSERT INTO user_settings (key, value) VALUES (?, ?)
+           ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+          body.key,
+          body.value,
+        );
+        return Response.json({ key: body.key, value: body.value });
+      },
     };
   }
 

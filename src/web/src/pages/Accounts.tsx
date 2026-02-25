@@ -66,6 +66,11 @@ export function Accounts() {
     new Map(),
   );
 
+  // Federation settings state
+  const [cascadeToOrigin, setCascadeToOrigin] = useState(false);
+  const [cascadeLoading, setCascadeLoading] = useState(true);
+  const [cascadeSaving, setCascadeSaving] = useState(false);
+
   const mountedRef = useRef(true);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -100,6 +105,38 @@ export function Accounts() {
       setLoading(false);
     }
   }, [api]);
+
+  // Load cascade_to_origin setting
+  useEffect(() => {
+    let cancelled = false;
+    api.fetchSetting("cascade_to_origin").then((res) => {
+      if (!cancelled) {
+        setCascadeToOrigin(res.value === "true");
+        setCascadeLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) setCascadeLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [api]);
+
+  const handleCascadeToggle = useCallback(async () => {
+    const newValue = !cascadeToOrigin;
+    setCascadeSaving(true);
+    try {
+      await api.updateSetting("cascade_to_origin", newValue ? "true" : "false");
+      if (!mountedRef.current) return;
+      setCascadeToOrigin(newValue);
+      showStatus("success", newValue
+        ? "Origin cascade enabled -- deletes will propagate to source events."
+        : "Origin cascade disabled -- only managed mirrors will be deleted.");
+    } catch (err) {
+      if (!mountedRef.current) return;
+      showStatus("error", `Failed to save setting: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      if (mountedRef.current) setCascadeSaving(false);
+    }
+  }, [cascadeToOrigin, api, showStatus]);
 
   // Initial load + check for OAuth callback
   useEffect(() => {
@@ -452,6 +489,38 @@ export function Accounts() {
           </table>
         </div>
       )}
+
+      {/* Federation settings */}
+      <Card className="mt-6" data-testid="federation-settings">
+        <CardHeader>
+          <CardTitle className="text-lg">Federation Settings</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <label
+            className="flex items-center gap-3 cursor-pointer"
+            data-testid="cascade-to-origin-toggle"
+          >
+            <input
+              type="checkbox"
+              checked={cascadeToOrigin}
+              disabled={cascadeLoading || cascadeSaving}
+              onChange={handleCascadeToggle}
+              className="h-4 w-4 rounded border-border accent-blue-500"
+            />
+            <div className="flex flex-col">
+              <span className="text-sm font-medium text-foreground">
+                Cascade deletes to origin events
+                {cascadeSaving && <span className="ml-2 text-xs text-muted-foreground">(saving...)</span>}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                When enabled, deleting an event in T-Minus also deletes the original
+                event in the source calendar. When disabled, only managed mirror copies
+                are removed.
+              </span>
+            </div>
+          </label>
+        </CardContent>
+      </Card>
 
       {/* Unlink confirmation dialog */}
       {unlinkTarget && (

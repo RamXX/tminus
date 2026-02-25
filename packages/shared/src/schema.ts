@@ -473,6 +473,13 @@ CREATE INDEX idx_events_origin_calendar
   ON canonical_events(origin_account_id, origin_calendar_id);
 ` as const;
 
+export const USER_GRAPH_DO_MIGRATION_V10 = `
+CREATE TABLE IF NOT EXISTS user_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+` as const;
+
 /** Ordered migrations for UserGraphDO. Apply sequentially. */
 export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
   {
@@ -519,6 +526,11 @@ export const USER_GRAPH_DO_MIGRATIONS: readonly Migration[] = [
     version: 9,
     sql: USER_GRAPH_DO_MIGRATION_V9,
     description: "Add origin_calendar_id to canonical_events for correct origin-provider deletes",
+  },
+  {
+    version: 10,
+    sql: USER_GRAPH_DO_MIGRATION_V10,
+    description: "Add user_settings KV table for per-user preferences",
   },
 ] as const;
 
