@@ -62,7 +62,7 @@ import {
 } from "../lib/onboarding-errors";
 import type { AccountProvider } from "../lib/api";
 import { Button } from "../components/ui/button";
-import { Card, CardContent } from "../components/ui/card";
+
 
 // ---------------------------------------------------------------------------
 // Types
@@ -556,14 +556,19 @@ function OnboardingInner({
 
   return (
     <div
-      className="max-w-[600px] w-full mx-auto px-4 py-6 font-sans box-border"
+      className="min-h-screen bg-background"
       data-testid="onboarding-container"
     >
+      {/* Header bar */}
+      <div className="border-b border-border px-6 py-4">
+        <span className="text-sm font-semibold tracking-wider uppercase text-foreground">T-Minus</span>
+      </div>
+
+      <div className="max-w-[600px] w-full mx-auto px-4 py-6 font-sans box-border">
       {/* Branding */}
       <div className="text-center mb-8">
-        <div className="text-2xl font-bold tracking-tight text-[#1a1a2e]">T-Minus</div>
-        <h1 className="text-3xl font-semibold text-[#1a1a2e] my-2">Connect Your Calendar</h1>
-        <p className="text-slate-500 text-base m-0">
+        <h1 className="text-3xl font-semibold text-foreground my-2">Connect Your Calendar</h1>
+        <p className="text-muted-foreground text-base m-0">
           Link your calendar accounts to get started with intelligent scheduling
         </p>
       </div>
@@ -574,7 +579,7 @@ function OnboardingInner({
           {connectedAccounts.map((account) => (
             <div
               key={account.account_id}
-              className="flex items-center gap-3 p-4 border border-slate-200 rounded-xl bg-white mb-3"
+              className="flex items-center gap-3 p-4 bg-card border border-border rounded-md mb-3"
               style={{ borderLeft: `4px solid ${PROVIDER_COLORS[account.provider]}` }}
               data-testid={`connected-account-${account.account_id}`}
             >
@@ -588,20 +593,20 @@ function OnboardingInner({
                 {PROVIDER_ICONS[account.provider]}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="font-semibold">
-                  {"\u2713"} {account.email}
+                <div className="text-foreground text-sm font-semibold">
+                  {"\u2713"} <span className="font-mono text-xs text-muted-foreground">{account.email}</span>
                 </div>
-                <div className="text-sm text-slate-500">
+                <div className="font-mono text-xs text-muted-foreground">
                   {account.calendar_count}{" "}
                   {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
                   {"\u00B7"}{" "}
                   <span
                     className={
                       account.sync_state === "synced"
-                        ? "text-green-600"
+                        ? "text-success"
                         : account.sync_state === "error"
-                          ? "text-red-600"
-                          : "text-yellow-600"
+                          ? "text-destructive"
+                          : "text-warning"
                     }
                   >
                     {account.sync_state === "synced"
@@ -615,7 +620,7 @@ function OnboardingInner({
             </div>
           ))}
           {viewState === "idle" && (
-            <div className="text-center text-slate-500 text-sm mb-4">
+            <div className="text-center text-muted-foreground text-sm mb-4">
               {connectedAccounts.length}{" "}
               {connectedAccounts.length === 1 ? "account" : "accounts"}{" "}
               connected
@@ -635,6 +640,7 @@ function OnboardingInner({
 
       {/* Spinner keyframes */}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
     </div>
   );
 
@@ -652,7 +658,7 @@ function OnboardingInner({
           <button
             key={provider.id}
             onClick={() => handleProviderClick(provider.id)}
-            className="flex items-center gap-3 px-6 py-4 border border-slate-200 rounded-xl bg-white cursor-pointer text-base w-full text-left transition-colors hover:border-slate-300"
+            className="flex items-center gap-3 px-6 py-4 bg-card border border-border rounded-md cursor-pointer text-base w-full text-left transition-colors hover:bg-surface-elevated"
             style={{ borderLeft: `4px solid ${PROVIDER_COLORS[provider.id]}` }}
             aria-label={`Connect ${provider.label}`}
             data-testid={`provider-card-${provider.id}`}
@@ -668,8 +674,8 @@ function OnboardingInner({
               {PROVIDER_ICONS[provider.id]}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-semibold">Connect {provider.label}</div>
-              <div className="text-sm text-slate-500">
+              <div className="text-foreground text-sm font-semibold">Connect {provider.label}</div>
+              <div className="text-sm text-muted-foreground">
                 {provider.description}
               </div>
             </div>
@@ -682,14 +688,14 @@ function OnboardingInner({
   function renderConnecting() {
     return (
       <div className="text-center p-8">
-        <div className="text-xl mb-4">
+        <div className="text-xl mb-4 text-foreground">
           Redirecting to your calendar provider...
         </div>
-        <div className="text-slate-500">
+        <div className="text-muted-foreground">
           You will be asked to grant calendar access
         </div>
         <div
-          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto mt-6 animate-spin"
+          className="w-10 h-10 border-[3px] border-border border-t-primary rounded-full mx-auto mt-6 animate-spin"
         />
       </div>
     );
@@ -698,16 +704,16 @@ function OnboardingInner({
   function renderSyncing() {
     return (
       <div className="text-center p-8">
-        <div className="text-xl mb-4 text-blue-600">
+        <div className="text-xl mb-4 text-warning">
           Syncing your calendar...
         </div>
         {syncStatus && (
-          <div className="text-slate-500 mb-4">
+          <div className="text-muted-foreground mb-4">
             Connected as {syncStatus.email}
           </div>
         )}
         <div
-          className="w-10 h-10 border-[3px] border-slate-200 border-t-blue-600 rounded-full mx-auto animate-spin"
+          className="w-10 h-10 border-[3px] border-border border-t-primary rounded-full mx-auto animate-spin"
         />
       </div>
     );
@@ -717,22 +723,22 @@ function OnboardingInner({
     return (
       <div>
         {/* Success banner */}
-        <div className="text-center p-6 bg-green-50 rounded-xl mb-6">
-          <div className="text-2xl text-green-600 mb-2">
+        <div className="text-center p-6 bg-card border border-border rounded-md mb-6">
+          <div className="text-2xl text-success mb-2">
             {"\u2713"} Connected
           </div>
           {syncStatus && (
             <>
-              <div className="text-gray-700 font-medium">
+              <div className="text-foreground font-medium">
                 {syncStatus.email}
               </div>
-              <div className="text-slate-500 text-sm mt-1">
+              <div className="text-muted-foreground text-sm mt-1">
                 {syncStatus.calendar_count ?? 0}{" "}
                 {(syncStatus.calendar_count ?? 0) === 1
                   ? "calendar"
                   : "calendars"}{" "}
                 found {"\u00B7"}{" "}
-                <span className="text-green-600">Synced</span>
+                <span className="text-success">Synced</span>
               </div>
             </>
           )}
@@ -741,19 +747,19 @@ function OnboardingInner({
         {/* Events list */}
         {events.length > 0 && (
           <div className="mb-6">
-            <h2 className="text-lg font-semibold mb-3">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
               Your upcoming events
             </h2>
             <div className="flex flex-col gap-2">
               {events.map((evt) => (
                 <div
                   key={evt.canonical_event_id}
-                  className="px-4 py-3 border border-slate-200 rounded-md bg-white"
+                  className="px-4 py-3 bg-card border border-border rounded-md"
                 >
-                  <div className="font-medium">
+                  <div className="text-foreground font-medium">
                     {evt.summary ?? "(No title)"}
                   </div>
-                  <div className="text-sm text-slate-500">
+                  <div className="text-sm text-muted-foreground">
                     {formatEventTime(evt.start)} -- {formatEventTime(evt.end)}
                   </div>
                 </div>
@@ -763,20 +769,20 @@ function OnboardingInner({
         )}
 
         {/* Progress + actions */}
-        <div className="text-center text-slate-500 text-sm mb-4">
+        <div className="text-center text-muted-foreground text-sm mb-4">
           {connectedAccounts.length}{" "}
           {connectedAccounts.length === 1 ? "account" : "accounts"} connected
         </div>
 
         <div className="flex flex-col gap-3 items-center">
           <Button
+            variant="outline"
             onClick={handleAddAnother}
             aria-label="Add another account"
           >
             Add Another Account
           </Button>
           <Button
-            variant="outline"
             onClick={handleDone}
             aria-label="Finish onboarding"
           >
@@ -797,12 +803,12 @@ function OnboardingInner({
       : "Try Again";
 
     return (
-      <div className="text-center p-8 bg-red-50 rounded-xl">
-        <div className="text-xl text-red-600 mb-2">
+      <div className="text-center p-8 bg-card border border-border rounded-md">
+        <div className="text-xl text-destructive mb-2">
           {classifiedError ? displayMessage : "Something went wrong"}
         </div>
         {!classifiedError && error && (
-          <div className="text-slate-500 mb-4">{error}</div>
+          <div className="text-muted-foreground mb-4">{error}</div>
         )}
         <Button
           variant="outline"
@@ -818,7 +824,7 @@ function OnboardingInner({
   function renderAppleModal() {
     return (
       <div
-        className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100] p-4"
+        className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             setViewState("idle");
@@ -828,20 +834,20 @@ function OnboardingInner({
         <div
           role="dialog"
           aria-label="Connect Apple Calendar"
-          className="bg-white rounded-2xl p-8 max-w-[480px] w-full max-h-[90vh] overflow-auto"
+          className="bg-card border border-border rounded-lg p-8 max-w-[480px] w-full max-h-[90vh] overflow-auto text-foreground"
         >
-          <h2 className="text-xl font-semibold mb-4 mt-0">
+          <h2 className="text-lg font-semibold leading-none tracking-tight mb-4 mt-0">
             Connect Apple Calendar
           </h2>
 
-          <p className="text-slate-500 mb-6">
+          <p className="text-sm text-muted-foreground mb-6">
             Apple Calendar uses an app-specific password instead of a
             sign-in button. Follow these steps:
           </p>
 
           {/* Instructions */}
-          <div className="bg-slate-50 rounded-lg p-4 mb-6 text-sm">
-            <ol className="m-0 pl-5 text-gray-700">
+          <div className="bg-background border border-border rounded-md p-4 mb-6 text-sm">
+            <ol className="m-0 pl-5 text-muted-foreground">
               <li className="mb-2">
                 Go to your{" "}
                 <a
@@ -849,7 +855,7 @@ function OnboardingInner({
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Apple ID settings"
-                  className="text-blue-600 hover:underline"
+                  className="text-primary hover:underline"
                 >
                   Apple ID settings
                 </a>
@@ -867,7 +873,7 @@ function OnboardingInner({
           <div className="mb-4">
             <label
               htmlFor="apple-email"
-              className="block text-sm font-medium text-gray-700 mb-2"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 block"
             >
               Apple ID Email
             </label>
@@ -877,7 +883,7 @@ function OnboardingInner({
               value={appleEmail}
               onChange={(e) => setAppleEmail(e.target.value)}
               placeholder="your@icloud.com"
-              className="w-full px-3 py-3 border border-slate-200 rounded-lg text-base box-border mt-1"
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring box-border mt-1"
               autoComplete="email"
             />
           </div>
@@ -885,7 +891,7 @@ function OnboardingInner({
           <div className="mb-4">
             <label
               htmlFor="apple-password"
-              className="block text-sm font-medium text-gray-700 mb-2"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 block"
             >
               App-Specific Password
             </label>
@@ -895,14 +901,14 @@ function OnboardingInner({
               value={applePassword}
               onChange={(e) => setApplePassword(e.target.value)}
               placeholder="xxxx-xxxx-xxxx-xxxx"
-              className="w-full px-3 py-3 border border-slate-200 rounded-lg text-base box-border mt-1"
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring box-border mt-1"
               autoComplete="off"
             />
           </div>
 
           {/* Validation/submission errors */}
           {appleError && (
-            <div className="text-red-600 text-sm mt-1">
+            <div className="text-destructive text-sm mt-1">
               {appleError}
             </div>
           )}
@@ -933,13 +939,13 @@ function OnboardingInner({
   function renderFinished() {
     return (
       <div className="text-center py-8">
-        <div className="text-4xl mb-2 text-green-600">
+        <div className="text-4xl mb-2 text-success">
           {"\u2713"}
         </div>
-        <h2 className="text-2xl font-semibold text-[#1a1a2e] mb-2">
+        <h2 className="text-2xl font-semibold text-foreground mb-2">
           You{"'"}re All Set!
         </h2>
-        <p className="text-slate-500 mb-8">
+        <p className="text-muted-foreground mb-8">
           Your calendars are connected and syncing. Here{"'"}s a summary:
         </p>
 
@@ -948,7 +954,7 @@ function OnboardingInner({
           {connectedAccounts.map((account) => (
             <div
               key={account.account_id}
-              className="flex items-center gap-3 p-4 border border-slate-200 rounded-xl bg-white mb-3"
+              className="flex items-center gap-3 p-4 bg-card border border-border rounded-md mb-3"
               style={{ borderLeft: `4px solid ${PROVIDER_COLORS[account.provider]}` }}
             >
               <div
@@ -961,11 +967,11 @@ function OnboardingInner({
                 {PROVIDER_ICONS[account.provider]}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="font-semibold">{account.email}</div>
-                <div className="text-sm text-slate-500">
+                <div className="text-foreground text-sm font-semibold"><span className="font-mono text-xs text-muted-foreground">{account.email}</span></div>
+                <div className="font-mono text-xs text-muted-foreground">
                   {account.calendar_count}{" "}
                   {account.calendar_count === 1 ? "calendar" : "calendars"}{" "}
-                  {"\u00B7"} Synced
+                  {"\u00B7"} <span className="text-success">Synced</span>
                 </div>
               </div>
             </div>

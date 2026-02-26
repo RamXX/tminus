@@ -206,8 +206,10 @@ describe("Sidebar", () => {
     );
 
     const calendarLink = screen.getByText("Calendar").closest("a");
-    expect(calendarLink).toHaveClass("bg-accent/15");
-    expect(calendarLink).toHaveClass("text-accent-foreground");
+    expect(calendarLink).toHaveClass("bg-primary/10");
+    expect(calendarLink).toHaveClass("text-primary");
+    expect(calendarLink).toHaveClass("border-l-2");
+    expect(calendarLink).toHaveClass("border-primary");
   });
 
   it("does NOT highlight inactive routes", () => {
@@ -218,7 +220,7 @@ describe("Sidebar", () => {
     );
 
     const accountsLink = screen.getByText("Accounts").closest("a");
-    expect(accountsLink).not.toHaveClass("bg-accent/15");
+    expect(accountsLink).not.toHaveClass("bg-primary/10");
     expect(accountsLink).toHaveClass("text-muted-foreground");
   });
 
@@ -386,6 +388,64 @@ describe("AppShell", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Page transition tests (AnimatePresence wrapping)
+// ---------------------------------------------------------------------------
+
+describe("AppShell page transitions", () => {
+  it("wraps children in a motion.main element with AnimatePresence", () => {
+    renderAppShell();
+    // motion.main renders as a <main> element in the DOM
+    const mainEl = screen.getByTestId("test-content").closest("main");
+    expect(mainEl).toBeInTheDocument();
+    expect(mainEl).toHaveClass("flex-1");
+    expect(mainEl).toHaveClass("overflow-y-auto");
+  });
+
+  it("preserves content area layout classes on the animated wrapper", () => {
+    renderAppShell();
+    const mainEl = screen.getByTestId("test-content").closest("main");
+    expect(mainEl).toHaveClass("flex-1", "overflow-y-auto", "p-4");
+  });
+
+  it("renders children inside AnimatePresence without layout shift", () => {
+    renderAppShell();
+    // Children must still be accessible inside the animated wrapper
+    const content = screen.getByTestId("test-content");
+    expect(content).toBeInTheDocument();
+    expect(content).toHaveTextContent("Page content");
+    // The main content area should be inside the flex column container
+    const mainEl = content.closest("main");
+    const parentDiv = mainEl?.parentElement;
+    expect(parentDiv).toHaveClass("flex", "flex-1", "flex-col", "overflow-hidden");
+  });
+
+  it("renders plain main when prefers-reduced-motion is active", () => {
+    // Simulate prefers-reduced-motion: reduce via matchMedia
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    renderAppShell();
+    const content = screen.getByTestId("test-content");
+    expect(content).toBeInTheDocument();
+    // Children should still render in a <main> element
+    const mainEl = content.closest("main");
+    expect(mainEl).toBeInTheDocument();
+    expect(mainEl).toHaveClass("flex-1", "overflow-y-auto");
+
+    window.matchMedia = originalMatchMedia;
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integration tests -- AppShell with routing context
 //
 // NOTE: Auth-dependent integration tests (Login without sidebar, Onboarding
@@ -439,10 +499,10 @@ describe("AppShell integration", () => {
 
     const desktopSidebar = screen.getByTestId("desktop-sidebar");
     const billingLink = within(desktopSidebar).getByText("Billing").closest("a");
-    expect(billingLink).toHaveClass("bg-accent/15");
+    expect(billingLink).toHaveClass("bg-primary/10");
 
     const calendarLink = within(desktopSidebar).getByText("Calendar").closest("a");
-    expect(calendarLink).not.toHaveClass("bg-accent/15");
+    expect(calendarLink).not.toHaveClass("bg-primary/10");
   });
 
   it("clicking sidebar link navigates and updates active state", async () => {
@@ -463,7 +523,7 @@ describe("AppShell integration", () => {
 
     // After clicking, Accounts should now be the active link
     const updatedLink = within(desktopSidebar).getByText("Accounts").closest("a");
-    expect(updatedLink).toHaveClass("bg-accent/15");
+    expect(updatedLink).toHaveClass("bg-primary/10");
   });
 
   it("renders both desktop and mobile sidebars with same links", () => {

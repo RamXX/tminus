@@ -29,9 +29,7 @@ import type {
 import {
   buildOAuthStartUrl,
   navigateToOAuth,
-  statusColor,
   statusLabel,
-  statusSymbol,
   providerLabel,
 } from "../lib/accounts";
 import { Button } from "../components/ui/button";
@@ -384,8 +382,8 @@ export function Accounts() {
           data-status-type={statusMsg.type}
           className={`px-4 py-2 rounded-md text-sm font-medium mb-4 ${
             statusMsg.type === "success"
-              ? "bg-emerald-950 text-emerald-300 border border-emerald-600"
-              : "bg-red-950 text-red-300 border border-red-600"
+              ? "bg-success/10 text-success border border-success/40"
+              : "bg-destructive/10 text-destructive border border-destructive/40"
           }`}
         >
           {statusMsg.text}
@@ -394,22 +392,20 @@ export function Accounts() {
 
       {/* Link account buttons */}
       <div className="flex items-center gap-3 mb-6 flex-wrap" data-testid="link-account-section">
-        <span className="text-muted-foreground text-sm">Link new account:</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Link new account:</span>
         <Button
           data-testid="link-google"
           onClick={() => handleLinkAccount("google")}
-          variant="outline"
+          variant="default"
           size="sm"
-          className="border-blue-500 text-blue-500 hover:bg-blue-500/10"
         >
           Link Google Account
         </Button>
         <Button
           data-testid="link-microsoft"
           onClick={() => handleLinkAccount("microsoft")}
-          variant="outline"
+          variant="default"
           size="sm"
-          className="border-blue-500 text-blue-500 hover:bg-blue-500/10"
         >
           Link Microsoft Account
         </Button>
@@ -426,10 +422,10 @@ export function Accounts() {
           <table className="w-full text-sm border-collapse" data-testid="accounts-table">
             <thead>
               <tr>
-                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Status</th>
-                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Email</th>
-                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Provider</th>
-                <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Actions</th>
+                <th className="text-left px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">Status</th>
+                <th className="text-left px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">Email</th>
+                <th className="text-left px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">Provider</th>
+                <th className="text-left px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -437,39 +433,47 @@ export function Accounts() {
                 <tr
                   key={account.account_id}
                   data-testid={`account-row-${account.account_id}`}
-                  className="border-b border-border/50"
+                  className="border-b border-border/50 bg-card"
                 >
-                  <td className="px-3 py-2 text-foreground whitespace-nowrap">
-                    <span
-                      data-testid="account-status-indicator"
-                      data-status={account.status}
-                      style={{ color: statusColor(account.status) }}
-                      title={statusLabel(account.status)}
-                      className="text-sm"
-                    >
-                      {statusSymbol(account.status)}
-                    </span>
-                    <span
-                      data-testid="account-status-label"
-                      style={{ color: statusColor(account.status) }}
-                      className="ml-2 text-xs"
-                    >
-                      {statusLabel(account.status)}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        data-testid="account-status-indicator"
+                        data-status={account.status}
+                        title={statusLabel(account.status)}
+                        className={`inline-block h-2 w-2 rounded-full animate-glow ${
+                          account.status === "active"
+                            ? "bg-success text-success"
+                            : account.status === "pending"
+                              ? "bg-warning text-warning"
+                              : account.status === "error"
+                                ? "bg-destructive text-destructive"
+                                : "bg-muted-foreground text-muted-foreground"
+                        }`}
+                      />
+                      <span
+                        data-testid="account-status-label"
+                        className="text-xs text-muted-foreground"
+                      >
+                        {statusLabel(account.status)}
+                      </span>
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-foreground whitespace-nowrap" data-testid="account-email">
+                  <td className="px-3 py-2 whitespace-nowrap font-mono text-xs text-muted-foreground" data-testid="account-email">
                     {account.email}
                   </td>
-                  <td className="px-3 py-2 text-foreground whitespace-nowrap" data-testid="account-provider">
-                    {providerLabel(account.provider)}
+                  <td className="px-3 py-2 whitespace-nowrap" data-testid="account-provider">
+                    <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {providerLabel(account.provider)}
+                    </span>
                   </td>
-                  <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                  <td className="px-3 py-2 whitespace-nowrap">
                     <Button
                       data-testid={`scopes-btn-${account.account_id}`}
                       onClick={() => handleManageScopes(account)}
                       variant="outline"
                       size="sm"
-                      className="mr-2 border-blue-500 text-blue-500 hover:bg-blue-500/10 h-8 text-xs"
+                      className="mr-2 h-8 text-xs"
                     >
                       Scopes
                     </Button>
@@ -493,7 +497,7 @@ export function Accounts() {
       {/* Federation settings */}
       <Card className="mt-6" data-testid="federation-settings">
         <CardHeader>
-          <CardTitle className="text-lg">Federation Settings</CardTitle>
+          <CardTitle className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Federation Settings</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
           <label
@@ -505,7 +509,7 @@ export function Accounts() {
               checked={cascadeToOrigin}
               disabled={cascadeLoading || cascadeSaving}
               onChange={handleCascadeToggle}
-              className="h-4 w-4 rounded border-border accent-blue-500"
+              className="h-4 w-4 rounded border-border accent-primary"
             />
             <div className="flex flex-col">
               <span className="text-sm font-medium text-foreground">
@@ -541,7 +545,7 @@ export function Accounts() {
                 <strong>{unlinkTarget.email}</strong> (
                 {providerLabel(unlinkTarget.provider)})?
               </p>
-              <p className="text-xs text-yellow-400">
+              <p className="text-xs text-warning">
                 This will stop syncing events for this account. Existing mirrored
                 events will remain but no longer update.
               </p>
@@ -634,7 +638,7 @@ export function Accounts() {
                       className="flex items-center justify-between px-3 py-2 border-b border-border/50"
                     >
                       <div className="flex flex-col gap-0.5 flex-1">
-                        <span className="text-sm font-medium text-foreground">
+                        <span className="font-mono text-xs text-foreground">
                           {scope.display_name || scope.provider_calendar_id}
                         </span>
                         <span className="text-xs text-muted-foreground">

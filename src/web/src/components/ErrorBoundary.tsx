@@ -6,6 +6,7 @@
  */
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { cn } from "../lib/utils";
+import { Button } from "./ui/button";
 
 export interface ErrorBoundaryProps {
   children: ReactNode;
@@ -49,22 +50,18 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, State> {
         <div
           role="alert"
           className={cn(
-            "flex flex-col items-center justify-center gap-4 rounded-lg border border-destructive/50 bg-destructive/5 p-8 text-center",
+            "flex flex-col items-center justify-center gap-4 rounded-lg border border-destructive/50 bg-background p-8 text-center",
           )}
         >
           <h2 className="text-lg font-semibold text-foreground">
             Something went wrong
           </h2>
-          <p className="max-w-md text-sm text-muted-foreground">
+          <p className="max-w-md text-destructive text-sm">
             {error.message || "An unexpected error occurred."}
           </p>
-          <button
-            type="button"
-            onClick={this.handleReset}
-            className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
+          <Button type="button" onClick={this.handleReset}>
             Try again
-          </button>
+          </Button>
         </div>
       );
     }

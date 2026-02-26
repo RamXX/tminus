@@ -77,10 +77,8 @@ const config: Config = {
           to: { transform: "rotate(360deg)" },
         },
         glow: {
-          "0%, 100%": { boxShadow: "0 0 4px currentColor" },
-          "50%": {
-            boxShadow: "0 0 8px currentColor, 0 0 12px currentColor",
-          },
+          "0%, 100%": { boxShadow: "0 0 4px 1px currentColor" },
+          "50%": { boxShadow: "0 0 8px 3px currentColor" },
         },
       },
       animation: {

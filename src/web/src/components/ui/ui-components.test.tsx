@@ -177,7 +177,7 @@ describe("Skeleton", () => {
     const { container } = render(<Skeleton data-testid="skel" />);
     const skel = container.firstElementChild!;
     expect(skel.className).toContain("animate-pulse");
-    expect(skel.className).toContain("bg-muted");
+    expect(skel.className).toContain("bg-muted/50");
   });
 
   it("accepts custom className", () => {

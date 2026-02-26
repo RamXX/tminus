@@ -11,7 +11,9 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useLocation } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "../lib/auth";
+import { pageFade, useMotionConfig } from "../lib/motion";
 import { Sidebar } from "./Sidebar";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
@@ -32,6 +34,7 @@ export interface AppShellProps {
 export function AppShell({ children }: AppShellProps) {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const { prefersReduced } = useMotionConfig();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Close mobile menu on route change
@@ -60,7 +63,7 @@ export function AppShell({ children }: AppShellProps) {
       >
         {/* Sidebar header */}
         <div className="flex h-14 items-center px-6">
-          <span className="text-lg font-bold text-foreground">T-Minus</span>
+          <span className="text-sm font-semibold tracking-wider uppercase text-foreground">T-Minus</span>
         </div>
         <Separator />
         <Sidebar showAdmin={showAdmin} />
@@ -70,7 +73,7 @@ export function AppShell({ children }: AppShellProps) {
       {mobileMenuOpen && (
         <div
           data-testid="mobile-overlay"
-          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
           onClick={() => setMobileMenuOpen(false)}
           onKeyDown={(e) => {
             if (e.key === "Escape") setMobileMenuOpen(false);
@@ -88,7 +91,7 @@ export function AppShell({ children }: AppShellProps) {
         }`}
       >
         <div className="flex h-14 items-center justify-between px-6">
-          <span className="text-lg font-bold text-foreground">T-Minus</span>
+          <span className="text-sm font-semibold tracking-wider uppercase text-foreground">T-Minus</span>
           <Button
             variant="ghost"
             size="icon"
@@ -115,14 +118,14 @@ export function AppShell({ children }: AppShellProps) {
               data-testid="hamburger-button"
               variant="ghost"
               size="icon"
-              className="md:hidden"
+              className="text-muted-foreground hover:text-foreground md:hidden"
               onClick={toggleMobileMenu}
               aria-label="Open navigation menu"
             >
               <Menu className="h-5 w-5" />
             </Button>
             {/* App name on mobile (since sidebar is hidden) */}
-            <span className="text-lg font-bold text-foreground md:hidden">
+            <span className="text-sm font-semibold tracking-wider uppercase text-foreground md:hidden">
               T-Minus
             </span>
           </div>
@@ -131,28 +134,40 @@ export function AppShell({ children }: AppShellProps) {
             {user && (
               <span
                 data-testid="user-email"
-                className="text-sm text-muted-foreground"
+                className="font-mono text-xs text-muted-foreground"
               >
                 {user.email}
               </span>
             )}
-            <Button
+            <button
               data-testid="logout-button"
-              variant="ghost"
-              size="sm"
               onClick={logout}
-              className="gap-2"
+              className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Logout</span>
-            </Button>
+            </button>
           </div>
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6">
-          {children}
-        </main>
+        {prefersReduced ? (
+          <main className="flex-1 overflow-y-auto p-4 md:p-6">
+            {children}
+          </main>
+        ) : (
+          <AnimatePresence mode="wait">
+            <motion.main
+              key={location.pathname}
+              initial={pageFade.initial}
+              animate={pageFade.animate}
+              exit={pageFade.exit}
+              className="flex-1 overflow-y-auto p-4 md:p-6"
+            >
+              {children}
+            </motion.main>
+          </AnimatePresence>
+        )}
       </div>
     </div>
   );

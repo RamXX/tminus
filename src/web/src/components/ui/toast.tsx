@@ -112,7 +112,12 @@ export function Toaster() {
         <div
           key={t.id}
           className={cn(
-            "flex items-center gap-2 rounded-lg border px-4 py-3 text-sm shadow-lg animate-in slide-in-from-bottom-2 duration-200",
+            // TODO: Migrate toast entrance/exit to Framer Motion (motion + AnimatePresence)
+            // when framer-motion is installed (TM-lshm.1). Use slideInRight pattern:
+            //   initial: { opacity: 0, x: 24 }
+            //   animate: { opacity: 1, x: 0, transition: { duration: 0.3, ease: "easeOut" } }
+            //   exit: { opacity: 0, x: 24, transition: { duration: 0.2 } }
+            "flex items-center gap-2 rounded-lg border px-4 py-3 text-sm shadow-lg animate-in slide-in-from-right-6 duration-300",
             variantClasses[t.variant],
           )}
           role="status"

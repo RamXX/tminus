@@ -42,25 +42,13 @@ interface StatusMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Level-specific colors (dynamic hex -- cannot be expressed as Tailwind classes)
+// Level-specific Tailwind classes (semantic tokens from Settlement Monitor theme)
 // ---------------------------------------------------------------------------
 
-const LEVEL_STYLES: Record<DetailLevel, React.CSSProperties> = {
-  BUSY: {
-    backgroundColor: "#1e3a5f",
-    color: "#60a5fa",
-    borderColor: "#2563eb",
-  },
-  TITLE: {
-    backgroundColor: "#3b2f1e",
-    color: "#fbbf24",
-    borderColor: "#d97706",
-  },
-  FULL: {
-    backgroundColor: "#1e3b2f",
-    color: "#34d399",
-    borderColor: "#059669",
-  },
+const LEVEL_CLASSES: Record<DetailLevel, string> = {
+  BUSY: "bg-primary/20 text-primary border-primary/50",
+  TITLE: "bg-warning/20 text-warning border-warning/50",
+  FULL: "bg-success/20 text-success border-success/50",
 };
 
 // ---------------------------------------------------------------------------
@@ -263,11 +251,11 @@ export function Policies() {
 
       {/* Legend */}
       <div className="flex gap-4 mb-4 items-center" data-testid="policy-legend">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Levels:</span>
         {DETAIL_LEVELS.map((level) => (
           <span key={level} className="flex items-center gap-1">
             <span
-              className="inline-block px-2 py-0.5 rounded text-xs font-semibold border"
-              style={LEVEL_STYLES[level]}
+              className={`inline-block px-2 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider border ${LEVEL_CLASSES[level]}`}
             >
               {level}
             </span>
@@ -285,12 +273,11 @@ export function Policies() {
           data-status-type={status.type}
           role="status"
           aria-live="polite"
-          className="fixed top-4 right-4 left-4 max-w-[420px] ml-auto z-40 pointer-events-none px-4 py-2 rounded-md text-sm font-medium shadow-lg"
-          style={
+          className={`fixed top-4 right-4 left-4 max-w-[420px] ml-auto z-40 pointer-events-none px-4 py-2 rounded-md text-sm font-medium shadow-lg border ${
             status.type === "success"
-              ? { backgroundColor: "#064e3b", color: "#6ee7b7", border: "1px solid #059669" }
-              : { backgroundColor: "#450a0a", color: "#fca5a5", border: "1px solid #dc2626" }
-          }
+              ? "bg-success/20 text-success border-success/50"
+              : "bg-destructive/20 text-destructive border-destructive/50"
+          }`}
         >
           {status.text}
         </div>
@@ -301,12 +288,12 @@ export function Policies() {
         <table className="text-sm border-collapse" data-testid="policy-matrix">
           <thead>
             <tr>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap italic">
+              <th className="text-left px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap italic">
                 From \ To
               </th>
               {accounts.map((acc) => (
-                <th key={acc.account_id} className="text-center px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap text-xs">
-                  {acc.email}
+                <th key={acc.account_id} className="text-center px-3 py-2 border-b border-border text-muted-foreground whitespace-nowrap">
+                  <span className="font-mono text-xs">{acc.email}</span>
                 </th>
               ))}
             </tr>
@@ -314,15 +301,15 @@ export function Policies() {
           <tbody>
             {accounts.map((fromAcc) => (
               <tr key={fromAcc.account_id}>
-                <td className="px-3 py-2 text-muted-foreground font-semibold whitespace-nowrap text-xs border-r border-border">
-                  {fromAcc.email}
+                <td className="px-3 py-2 text-muted-foreground whitespace-nowrap border-r border-border">
+                  <span className="font-mono text-xs">{fromAcc.email}</span>
                 </td>
                 {accounts.map((toAcc) => {
                   if (fromAcc.account_id === toAcc.account_id) {
                     return (
                       <td
                         key={toAcc.account_id}
-                        className="text-center px-3 py-2 text-border bg-background"
+                        className="text-center px-3 py-2 text-muted-foreground/30 bg-card"
                         data-testid={`cell-${fromAcc.account_id}-${toAcc.account_id}`}
                       >
                         --
@@ -345,7 +332,7 @@ export function Policies() {
                     <td
                       key={toAcc.account_id}
                       data-testid={`cell-${fromAcc.account_id}-${toAcc.account_id}`}
-                      className={`text-center p-1 ${cell.isDefault ? "bg-blue-950/15" : ""} ${isSaving ? "opacity-60" : ""}`}
+                      className={`text-center p-1 bg-card border border-border hover:bg-surface-elevated transition-colors ${cell.isDefault ? "bg-muted/30" : ""} ${isSaving ? "opacity-60" : ""}`}
                     >
                       <button
                         data-testid={`cell-btn-${fromAcc.account_id}-${toAcc.account_id}`}
@@ -353,8 +340,7 @@ export function Policies() {
                         data-is-default={cell.isDefault}
                         onClick={() => handleCellClick(cell)}
                         disabled={isSaving}
-                        className={`inline-flex items-center gap-0.5 px-2.5 py-1 rounded-md border cursor-pointer font-semibold text-xs transition-opacity ${cell.isDefault ? "border-dashed" : "border-solid"}`}
-                        style={LEVEL_STYLES[cell.detailLevel]}
+                        className={`inline-flex items-center gap-0.5 px-2.5 py-1 rounded-md border cursor-pointer text-[9px] font-semibold uppercase tracking-wider transition-opacity ${cell.isDefault ? "border-dashed" : "border-solid"} ${LEVEL_CLASSES[cell.detailLevel]}`}
                         title={`${fromAcc.email} -> ${toAcc.email}: ${cell.detailLevel}${cell.isDefault ? " (default)" : ""}. Click to change.`}
                       >
                         {cell.detailLevel}

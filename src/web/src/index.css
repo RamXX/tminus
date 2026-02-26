@@ -1,3 +1,11 @@
+/* Self-hosted fonts via fontsource (DR-1: self-hosted over CDN) */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -8,43 +16,48 @@
  * Values are raw HSL numbers (no hsl() wrapper) so Tailwind's
  * opacity modifier (<alpha-value>) works correctly, e.g. bg-background/50.
  *
- * The palette is dark-slate by default. Light mode tokens are provided
- * for completeness but T-Minus ships dark-only for now.
+ * The palette is Settlement Monitor (near-black canvas with gold accents).
+ * T-Minus ships dark-only.
  */
 @layer base {
   :root {
-    /* -- Dark-slate palette (default) ------------------------------- */
-    --background: 222.2 47.4% 11.2%;      /* #0f172a  slate-900 */
-    --foreground: 210 40% 96.1%;           /* #f1f5f9  slate-100 */
+    /* SURFACES */
+    --background:            240 20% 3.7%;       /* #0a0a0f  near-black canvas */
+    --foreground:            0 0% 93%;           /* #ededed  primary text */
 
-    --card: 217.2 32.6% 17.5%;            /* #1e293b  slate-800 */
-    --card-foreground: 210 40% 96.1%;      /* #f1f5f9  slate-100 */
+    --card:                  240 16.7% 8.6%;     /* #111118  card/panel surface */
+    --card-foreground:       0 0% 93%;           /* #ededed  text on cards */
 
-    --primary: 217.2 91.2% 59.8%;         /* #3b82f6  blue-500 */
-    --primary-foreground: 0 0% 100%;       /* #ffffff */
+    --secondary:             240 10% 12%;        /* #1a1a24  elevated surface */
+    --secondary-foreground:  0 0% 80%;           /* #cccccc  text on secondary */
 
-    --secondary: 217.2 32.6% 17.5%;       /* #1e293b  slate-800 */
-    --secondary-foreground: 210 40% 96.1%; /* #f1f5f9  slate-100 */
+    --muted:                 240 10% 12%;        /* #1a1a24  subdued backgrounds */
+    --muted-foreground:      240 5% 50%;         /* #797980  subdued text */
 
-    --muted: 217.2 32.6% 17.5%;           /* #1e293b  slate-800 */
-    --muted-foreground: 215 20.2% 65.1%;   /* #94a3b8  slate-400 */
+    /* BORDERS */
+    --border:                240 13% 15%;        /* #1e1e2e  default border */
+    --input:                 240 13% 15%;        /* #1e1e2e  input border (= border) */
 
-    --accent: 217.2 91.2% 59.8%;          /* #3b82f6  blue-500 */
-    --accent-foreground: 0 0% 100%;        /* #ffffff */
+    /* ACCENT: GOLD */
+    --primary:               43 49% 53%;         /* #C5A04E  gold accent */
+    --primary-foreground:    0 0% 0%;            /* #000000  text on gold */
 
-    --destructive: 0 84.2% 60.2%;         /* #ef4444  red-500 */
-    --destructive-foreground: 0 0% 100%;   /* #ffffff */
+    --accent:                43 49% 53%;         /* #C5A04E  = primary for consistency */
+    --accent-foreground:     0 0% 0%;
 
-    --success: 160 84.1% 39.4%;           /* #059669  emerald-600 */
-    --success-foreground: 0 0% 100%;       /* #ffffff */
+    --ring:                  43 49% 53%;         /* gold focus ring */
 
-    --warning: 38 92.1% 50.2%;            /* #f59e0b  amber-500 */
-    --warning-foreground: 0 0% 0%;         /* #000000 */
+    /* SEMANTIC STATUS */
+    --destructive:           0 72% 51%;          /* #d93025  error / destructive */
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 217.2 32.6% 27.5%;          /* #334155  slate-700 */
-    --input: 217.2 32.6% 27.5%;           /* #334155  slate-700 */
-    --ring: 217.2 91.2% 59.8%;            /* #3b82f6  blue-500 */
+    --success:               152 69% 31%;        /* #188038  healthy / success */
+    --success-foreground:    0 0% 100%;
 
+    --warning:               43 96% 56%;         /* #f9ab00  degraded / caution */
+    --warning-foreground:    0 0% 0%;
+
+    /* RADIUS */
     --radius: 0.5rem;
   }
 }
@@ -52,5 +65,19 @@
 @layer base {
   * {
     border-color: hsl(var(--border));
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings: "cv11", "ss01"; /* Inter stylistic alternates */
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-glow,
+  .animate-glow-green,
+  .animate-glow-red,
+  .animate-glow-amber {
+    animation: none !important;
   }
 }
