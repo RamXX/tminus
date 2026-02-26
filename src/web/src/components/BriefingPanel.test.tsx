@@ -727,8 +727,8 @@ describe("BriefingPanel", () => {
       });
 
       const panel = screen.getByTestId("briefing-panel");
-      // Panel should have width: 100% for responsive behavior
-      expect(panel.style.width).toBe("100%");
+      // Panel should have w-full class for responsive behavior
+      expect(panel.className).toContain("w-full");
     });
   });
 });

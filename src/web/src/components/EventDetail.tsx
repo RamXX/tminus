@@ -78,14 +78,23 @@ export function MirrorStatusBadge({ mirror }: MirrorStatusBadgeProps) {
   const displayName = mirror.target_account_email ?? mirror.target_account_id;
 
   return (
-    <div style={styles.mirrorBadge} data-testid="mirror-status-badge">
-      <span style={styles.mirrorAccount}>{displayName}</span>
-      <span style={styles.mirrorStatusGroup}>
+    <div
+      className="flex items-center justify-between rounded-md bg-card px-3 py-2"
+      data-testid="mirror-status-badge"
+    >
+      <span className="font-mono text-xs text-foreground">{displayName}</span>
+      <span className="flex items-center gap-1.5">
         <span
-          style={{ ...styles.mirrorStatusDot, backgroundColor: color }}
+          className="inline-block h-2 w-2 rounded-full"
+          style={{ backgroundColor: color }}
           data-testid="mirror-status-indicator"
         />
-        <span style={{ ...styles.mirrorStatusText, color }}>{label}</span>
+        <span
+          className="text-xs font-semibold uppercase tracking-wide"
+          style={{ color }}
+        >
+          {label}
+        </span>
       </span>
     </div>
   );
@@ -104,15 +113,18 @@ interface DeleteConfirmDialogProps {
 /** Inline confirmation dialog for event deletion. */
 function DeleteConfirmDialog({ onConfirm, onCancel, deleting }: DeleteConfirmDialogProps) {
   return (
-    <div style={styles.deleteConfirm} data-testid="delete-confirm-dialog">
-      <p style={styles.deleteConfirmText}>
+    <div
+      className="rounded-md border border-destructive/50 bg-destructive/10 p-3"
+      data-testid="delete-confirm-dialog"
+    >
+      <p className="mb-3 mt-0 text-sm leading-relaxed text-destructive">
         Are you sure you want to delete this event? This action cannot be undone.
       </p>
-      <div style={styles.deleteConfirmActions}>
+      <div className="flex justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
-          style={styles.cancelBtn}
+          className="cursor-pointer rounded-md border border-border bg-transparent px-4 py-2 text-sm font-medium text-muted-foreground"
           disabled={deleting}
           data-testid="delete-cancel-btn"
         >
@@ -121,7 +133,7 @@ function DeleteConfirmDialog({ onConfirm, onCancel, deleting }: DeleteConfirmDia
         <button
           type="button"
           onClick={onConfirm}
-          style={styles.deleteConfirmBtn}
+          className="cursor-pointer rounded-md border-none bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground"
           disabled={deleting}
           data-testid="delete-confirm-btn"
         >
@@ -285,41 +297,41 @@ export function EventDetail({
     // Overlay (backdrop) -- clicking it dismisses the panel
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
-      style={styles.overlay}
+      className="fixed inset-0 z-[1000] flex justify-end bg-black/50"
       data-testid="event-detail-overlay"
       onClick={onClose}
     >
       {/* Panel -- stop propagation so clicking inside doesn't dismiss */}
       {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
       <div
-        style={styles.panel}
+        className="flex w-full max-w-[420px] flex-col gap-4 overflow-y-auto border-l border-border bg-card p-6"
         data-testid="event-detail-panel"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header: title + action buttons */}
-        <div style={styles.header}>
+        <div className="flex items-start justify-between gap-4">
           {editing ? (
             <input
               type="text"
               value={formValues.title}
               onChange={(e) => updateField("title", e.target.value)}
-              style={{
-                ...styles.editInput,
-                ...styles.editTitleInput,
-                ...(formErrors.title ? styles.inputError : {}),
-              }}
+              className={`flex-1 rounded-md border bg-background px-3 py-2 text-lg font-semibold text-foreground outline-none focus:ring-2 focus:ring-ring ${
+                formErrors.title ? "border-destructive" : "border-border"
+              }`}
               disabled={isBusy}
               data-testid="edit-title-input"
               autoFocus
             />
           ) : (
-            <h2 style={styles.title}>{event.summary ?? "(No title)"}</h2>
+            <h2 className="m-0 text-lg font-bold leading-tight text-foreground">
+              {event.summary ?? "(No title)"}
+            </h2>
           )}
-          <div style={styles.headerActions}>
+          <div className="flex shrink-0 gap-2">
             {!editing && canEdit && (
               <button
                 onClick={handleEdit}
-                style={styles.editBtn}
+                className="shrink-0 cursor-pointer rounded-md border border-primary bg-transparent px-2.5 py-1 text-sm font-semibold text-primary"
                 aria-label="Edit"
                 disabled={isBusy}
                 data-testid="edit-event-btn"
@@ -329,7 +341,7 @@ export function EventDetail({
             )}
             <button
               onClick={onClose}
-              style={styles.closeBtn}
+              className="shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-sm font-semibold text-muted-foreground"
               aria-label="Close"
             >
               X
@@ -339,32 +351,45 @@ export function EventDetail({
 
         {/* Title validation error */}
         {editing && formErrors.title && (
-          <span style={styles.fieldError} data-testid="edit-title-error">
+          <span className="text-xs text-destructive" data-testid="edit-title-error">
             {formErrors.title}
           </span>
         )}
 
         {/* Error banner */}
         {error && (
-          <div style={styles.errorBanner} data-testid="event-detail-error">
+          <div
+            className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+            data-testid="event-detail-error"
+          >
             {error}
           </div>
         )}
 
         {/* Time */}
-        <div style={styles.section} data-testid="event-detail-time">
-          <span style={styles.sectionIcon}>T</span>
+        <div
+          className="flex items-start gap-3 border-b border-border py-2"
+          data-testid="event-detail-time"
+        >
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+            T
+          </span>
           {editing ? (
-            <div style={styles.editTimeContainer}>
-              <div style={styles.editTimeRow}>
-                <label htmlFor="edit-start-date" style={styles.editLabel}>Start</label>
-                <div style={styles.dateTimeRow}>
+            <div className="flex flex-1 flex-col gap-2">
+              <div className="flex flex-col gap-1">
+                <label
+                  htmlFor="edit-start-date"
+                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+                >
+                  Start
+                </label>
+                <div className="flex gap-2">
                   <input
                     id="edit-start-date"
                     type="date"
                     value={formValues.startDate}
                     onChange={(e) => updateField("startDate", e.target.value)}
-                    style={{ ...styles.editInput, ...styles.dateInput }}
+                    className="flex-[2] rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
                     disabled={isBusy}
                     data-testid="edit-start-date-input"
                   />
@@ -373,21 +398,26 @@ export function EventDetail({
                     type="time"
                     value={formValues.startTime}
                     onChange={(e) => updateField("startTime", e.target.value)}
-                    style={{ ...styles.editInput, ...styles.timeInput }}
+                    className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
                     disabled={isBusy}
                     data-testid="edit-start-time-input"
                   />
                 </div>
               </div>
-              <div style={styles.editTimeRow}>
-                <label htmlFor="edit-end-date" style={styles.editLabel}>End</label>
-                <div style={styles.dateTimeRow}>
+              <div className="flex flex-col gap-1">
+                <label
+                  htmlFor="edit-end-date"
+                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+                >
+                  End
+                </label>
+                <div className="flex gap-2">
                   <input
                     id="edit-end-date"
                     type="date"
                     value={formValues.endDate}
                     onChange={(e) => updateField("endDate", e.target.value)}
-                    style={{ ...styles.editInput, ...styles.dateInput }}
+                    className="flex-[2] rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
                     disabled={isBusy}
                     data-testid="edit-end-date-input"
                   />
@@ -396,22 +426,22 @@ export function EventDetail({
                     type="time"
                     value={formValues.endTime}
                     onChange={(e) => updateField("endTime", e.target.value)}
-                    style={{ ...styles.editInput, ...styles.timeInput }}
+                    className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
                     disabled={isBusy}
                     data-testid="edit-end-time-input"
                   />
                 </div>
               </div>
               {formErrors.endTime && (
-                <span style={styles.fieldError} data-testid="edit-end-time-error">
+                <span className="text-xs text-destructive" data-testid="edit-end-time-error">
                   {formErrors.endTime}
                 </span>
               )}
             </div>
           ) : (
             <div>
-              <div style={styles.timeDate}>{dateDisplay}</div>
-              <div style={styles.timeRange}>
+              <div className="text-sm font-medium text-foreground">{dateDisplay}</div>
+              <div className="mt-0.5 font-mono text-xs text-muted-foreground">
                 {formatTimeShort(event.start)} - {formatTimeShort(event.end)}
               </div>
             </div>
@@ -420,12 +450,17 @@ export function EventDetail({
 
         {/* Description */}
         {editing ? (
-          <div style={styles.section} data-testid="event-detail-description">
-            <span style={styles.sectionIcon}>D</span>
+          <div
+            className="flex items-start gap-3 border-b border-border py-2"
+            data-testid="event-detail-description"
+          >
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+              D
+            </span>
             <textarea
               value={formValues.description}
               onChange={(e) => updateField("description", e.target.value)}
-              style={{ ...styles.editInput, ...styles.editTextarea }}
+              className="min-h-[3rem] flex-1 resize-y rounded-md border border-border bg-background px-3 py-2 font-[inherit] text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
               disabled={isBusy}
               placeholder="Add a description..."
               rows={3}
@@ -434,22 +469,34 @@ export function EventDetail({
           </div>
         ) : (
           event.description && (
-            <div style={styles.section} data-testid="event-detail-description">
-              <span style={styles.sectionIcon}>D</span>
-              <p style={styles.description}>{event.description}</p>
+            <div
+              className="flex items-start gap-3 border-b border-border py-2"
+              data-testid="event-detail-description"
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+                D
+              </span>
+              <p className="m-0 whitespace-pre-wrap text-sm leading-relaxed text-card-foreground">
+                {event.description}
+              </p>
             </div>
           )
         )}
 
         {/* Location */}
         {editing ? (
-          <div style={styles.section} data-testid="event-detail-location">
-            <span style={styles.sectionIcon}>L</span>
+          <div
+            className="flex items-start gap-3 border-b border-border py-2"
+            data-testid="event-detail-location"
+          >
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+              L
+            </span>
             <input
               type="text"
               value={formValues.location}
               onChange={(e) => updateField("location", e.target.value)}
-              style={styles.editInput}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
               disabled={isBusy}
               placeholder="Add a location..."
               data-testid="edit-location-input"
@@ -457,20 +504,27 @@ export function EventDetail({
           </div>
         ) : (
           event.location && (
-            <div style={styles.section} data-testid="event-detail-location">
-              <span style={styles.sectionIcon}>L</span>
-              <span style={styles.locationText}>{event.location}</span>
+            <div
+              className="flex items-start gap-3 border-b border-border py-2"
+              data-testid="event-detail-location"
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+                L
+              </span>
+              <span className="font-mono text-xs text-card-foreground">
+                {event.location}
+              </span>
             </div>
           )
         )}
 
         {/* Edit mode actions: Save / Cancel */}
         {editing && (
-          <div style={styles.editActions} data-testid="edit-actions">
+          <div className="flex justify-end gap-2 border-t border-border pt-2" data-testid="edit-actions">
             <button
               type="button"
               onClick={handleCancelEdit}
-              style={styles.cancelBtn}
+              className="cursor-pointer rounded-md border border-border bg-transparent px-4 py-2 text-sm font-medium text-muted-foreground"
               disabled={isBusy}
               data-testid="edit-cancel-btn"
             >
@@ -479,7 +533,7 @@ export function EventDetail({
             <button
               type="button"
               onClick={handleSave}
-              style={styles.saveBtn}
+              className="cursor-pointer rounded-md border-none bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
               disabled={isBusy}
               data-testid="edit-save-btn"
             >
@@ -489,21 +543,30 @@ export function EventDetail({
         )}
 
         {/* Origin account */}
-        <div style={styles.section} data-testid="event-detail-origin">
-          <span style={styles.sectionIcon}>O</span>
+        <div
+          className="flex items-start gap-3 border-b border-border py-2"
+          data-testid="event-detail-origin"
+        >
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-card text-xs font-bold text-muted-foreground">
+            O
+          </span>
           <div>
-            <span style={styles.sectionLabel}>Origin account</span>
-            <span style={styles.originValue}>
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Origin account
+            </span>
+            <span className="block font-mono text-xs text-foreground">
               {event.origin_account_email ?? event.origin_account_id ?? "Unknown"}
             </span>
           </div>
         </div>
 
         {/* Mirror statuses */}
-        <div style={styles.mirrorsSection}>
-          <span style={styles.sectionLabel}>Mirror Status</span>
+        <div className="border-b border-border py-3">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Mirror Status
+          </span>
           {hasMirrors ? (
-            <div style={styles.mirrorList}>
+            <div className="mt-2 flex flex-col gap-2">
               {event.mirrors!.map((mirror) => (
                 <MirrorStatusBadge
                   key={mirror.target_account_id}
@@ -512,20 +575,31 @@ export function EventDetail({
               ))}
             </div>
           ) : (
-            <p style={styles.noMirrors}>No mirrors configured</p>
+            <p className="mt-2 m-0 text-[13px] italic text-muted-foreground">
+              No mirrors configured
+            </p>
           )}
         </div>
 
         {/* Meta: version + last updated */}
-        <div style={styles.metaSection} data-testid="event-detail-meta">
+        <div
+          className="flex flex-wrap gap-4 py-2"
+          data-testid="event-detail-meta"
+        >
           {event.version != null && (
-            <span style={styles.metaItem}>v{event.version}</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              v{event.version}
+            </span>
           )}
           {updatedAtDisplay && (
-            <span style={styles.metaItem}>Updated {updatedAtDisplay}</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              Updated {updatedAtDisplay}
+            </span>
           )}
           {event.version == null && !updatedAtDisplay && (
-            <span style={styles.metaItem}>No version info</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              No version info
+            </span>
           )}
         </div>
 
@@ -540,7 +614,7 @@ export function EventDetail({
 
         {/* Delete button + confirmation dialog */}
         {canDelete && !editing && (
-          <div style={styles.deleteSection}>
+          <div className="border-t border-border pt-3">
             {showDeleteConfirm ? (
               <DeleteConfirmDialog
                 onConfirm={handleDeleteConfirm}
@@ -551,7 +625,7 @@ export function EventDetail({
               <button
                 type="button"
                 onClick={handleDeleteClick}
-                style={styles.deleteBtn}
+                className="w-full cursor-pointer rounded-md border border-destructive/50 bg-transparent px-4 py-2 text-sm font-semibold text-destructive"
                 disabled={isBusy}
                 data-testid="delete-event-btn"
               >
@@ -564,341 +638,3 @@ export function EventDetail({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
-    display: "flex",
-    justifyContent: "flex-end",
-    zIndex: 1000,
-  },
-  panel: {
-    width: "100%",
-    maxWidth: "420px",
-    backgroundColor: "#0f172a",
-    borderLeft: "1px solid #334155",
-    overflowY: "auto",
-    padding: "1.5rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "1rem",
-  },
-
-  // Header
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: "1rem",
-  },
-  headerActions: {
-    display: "flex",
-    gap: "0.5rem",
-    flexShrink: 0,
-  },
-  title: {
-    margin: 0,
-    fontSize: "1.25rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    lineHeight: 1.3,
-  },
-  closeBtn: {
-    background: "transparent",
-    border: "1px solid #334155",
-    borderRadius: "6px",
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    padding: "0.25rem 0.625rem",
-    cursor: "pointer",
-    flexShrink: 0,
-  },
-  editBtn: {
-    background: "transparent",
-    border: "1px solid #3b82f6",
-    borderRadius: "6px",
-    color: "#3b82f6",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    padding: "0.25rem 0.625rem",
-    cursor: "pointer",
-    flexShrink: 0,
-  },
-
-  // Sections
-  section: {
-    display: "flex",
-    gap: "0.75rem",
-    alignItems: "flex-start",
-    padding: "0.5rem 0",
-    borderBottom: "1px solid #1e293b",
-  },
-  sectionIcon: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: "24px",
-    height: "24px",
-    borderRadius: "4px",
-    backgroundColor: "#1e293b",
-    color: "#64748b",
-    fontSize: "0.75rem",
-    fontWeight: 700,
-    flexShrink: 0,
-  },
-  sectionLabel: {
-    display: "block",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    color: "#64748b",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    marginBottom: "0.25rem",
-  },
-
-  // Time
-  timeDate: {
-    fontSize: "0.875rem",
-    fontWeight: 500,
-    color: "#e2e8f0",
-  },
-  timeRange: {
-    fontSize: "0.8125rem",
-    color: "#94a3b8",
-    marginTop: "0.125rem",
-  },
-
-  // Description
-  description: {
-    margin: 0,
-    fontSize: "0.875rem",
-    color: "#cbd5e1",
-    lineHeight: 1.5,
-    whiteSpace: "pre-wrap" as const,
-  },
-
-  // Location
-  locationText: {
-    fontSize: "0.875rem",
-    color: "#cbd5e1",
-  },
-
-  // Origin account
-  originValue: {
-    display: "block",
-    fontSize: "0.875rem",
-    color: "#e2e8f0",
-    fontWeight: 500,
-  },
-
-  // Mirrors
-  mirrorsSection: {
-    padding: "0.75rem 0",
-    borderBottom: "1px solid #1e293b",
-  },
-  mirrorList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    marginTop: "0.5rem",
-  },
-  mirrorBadge: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "0.5rem 0.75rem",
-    backgroundColor: "#1e293b",
-    borderRadius: "6px",
-  },
-  mirrorAccount: {
-    fontSize: "0.8125rem",
-    color: "#e2e8f0",
-    fontWeight: 500,
-  },
-  mirrorStatusGroup: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.375rem",
-  },
-  mirrorStatusDot: {
-    width: "8px",
-    height: "8px",
-    borderRadius: "50%",
-    display: "inline-block",
-  },
-  mirrorStatusText: {
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.03em",
-  },
-  noMirrors: {
-    margin: "0.5rem 0 0 0",
-    fontSize: "0.8125rem",
-    color: "#64748b",
-    fontStyle: "italic",
-  },
-
-  // Meta
-  metaSection: {
-    display: "flex",
-    gap: "1rem",
-    flexWrap: "wrap",
-    padding: "0.5rem 0",
-  },
-  metaItem: {
-    fontSize: "0.75rem",
-    color: "#64748b",
-  },
-
-  // Edit mode inputs
-  editInput: {
-    padding: "0.5rem 0.75rem",
-    borderRadius: "6px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    borderColor: "#334155",
-    backgroundColor: "#1e293b",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    outline: "none",
-    width: "100%",
-    boxSizing: "border-box" as const,
-  },
-  editTitleInput: {
-    fontSize: "1.125rem",
-    fontWeight: 600,
-    flex: 1,
-  },
-  inputError: {
-    borderColor: "#ef4444",
-  },
-  editTextarea: {
-    resize: "vertical" as const,
-    minHeight: "3rem",
-    fontFamily: "inherit",
-    flex: 1,
-  },
-  editTimeContainer: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    flex: 1,
-  },
-  editTimeRow: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.25rem",
-  },
-  editLabel: {
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  dateTimeRow: {
-    display: "flex",
-    gap: "0.5rem",
-  },
-  dateInput: {
-    flex: 2,
-  },
-  timeInput: {
-    flex: 1,
-  },
-  fieldError: {
-    fontSize: "0.75rem",
-    color: "#ef4444",
-  },
-
-  // Edit actions
-  editActions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: "0.5rem",
-    paddingTop: "0.5rem",
-    borderTop: "1px solid #1e293b",
-  },
-  cancelBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-  },
-  saveBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#3b82f6",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-
-  // Error banner
-  errorBanner: {
-    padding: "0.75rem",
-    borderRadius: "6px",
-    backgroundColor: "#2d1b1b",
-    border: "1px solid #7f1d1d",
-    color: "#fca5a5",
-    fontSize: "0.875rem",
-  },
-
-  // Delete
-  deleteSection: {
-    padding: "0.75rem 0",
-    borderTop: "1px solid #1e293b",
-  },
-  deleteBtn: {
-    width: "100%",
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #7f1d1d",
-    background: "transparent",
-    color: "#ef4444",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-  deleteConfirm: {
-    padding: "0.75rem",
-    borderRadius: "6px",
-    backgroundColor: "#2d1b1b",
-    border: "1px solid #7f1d1d",
-  },
-  deleteConfirmText: {
-    margin: "0 0 0.75rem 0",
-    fontSize: "0.875rem",
-    color: "#fca5a5",
-    lineHeight: 1.5,
-  },
-  deleteConfirmActions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: "0.5rem",
-  },
-  deleteConfirmBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#ef4444",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-};

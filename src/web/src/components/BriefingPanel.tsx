@@ -16,6 +16,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { motion } from "framer-motion";
 import type {
   EventBriefing,
   BriefingParticipant,
@@ -32,6 +33,7 @@ import {
   EXCUSE_TONES,
   TRUTH_LEVELS,
 } from "../lib/briefing";
+import { slideInRight, easeOut300, useMotionConfig } from "../lib/motion";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,42 +64,54 @@ function ParticipantCard({ participant }: ParticipantCardProps) {
   const displayName = participant.display_name ?? "Unknown";
 
   return (
-    <div style={styles.participantCard} data-testid="participant-card">
+    <div
+      className="rounded-md border border-border bg-card p-2.5"
+      data-testid="participant-card"
+    >
       {/* Header: name + category badge */}
-      <div style={styles.participantHeader}>
-        <span style={styles.participantName}>{displayName}</span>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-sm font-semibold text-foreground">
+          {displayName}
+        </span>
         <span
-          style={{
-            ...styles.categoryBadge,
-            backgroundColor: categoryColor,
-          }}
+          className="inline-block rounded-full px-1.5 py-px text-[11px] font-semibold uppercase tracking-wide text-white"
+          style={{ backgroundColor: categoryColor }}
         >
           {categoryLabel}
         </span>
       </div>
 
       {/* Details row */}
-      <div style={styles.participantDetails}>
+      <div className="flex flex-wrap gap-3">
         {/* Last interaction */}
-        <div style={styles.detailItem}>
-          <span style={styles.detailLabel}>Last seen</span>
-          <span style={styles.detailValue}>
+        <div className="flex flex-col gap-px">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Last seen
+          </span>
+          <span className="font-mono text-xs text-card-foreground">
             {participant.last_interaction_summary ?? "Never"}
           </span>
         </div>
 
         {/* Reputation score */}
-        <div style={styles.detailItem}>
-          <span style={styles.detailLabel}>Reputation</span>
-          <span style={{ ...styles.detailValue, color: reputation.color }}>
+        <div className="flex flex-col gap-px">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Reputation
+          </span>
+          <span
+            className="font-mono text-xs"
+            style={{ color: reputation.color }}
+          >
             {reputation.display}
           </span>
         </div>
 
         {/* Drift indicator */}
-        <div style={styles.detailItem}>
-          <span style={styles.detailLabel}>Drift</span>
-          <span style={{ ...styles.detailValue, color: drift.color }}>
+        <div className="flex flex-col gap-px">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Drift
+          </span>
+          <span className="font-mono text-xs" style={{ color: drift.color }}>
             {drift.label}
           </span>
         </div>
@@ -120,16 +134,16 @@ function ActionButtons({
   onProposeReschedule,
 }: ActionButtonsProps) {
   return (
-    <div style={styles.actionButtons}>
+    <div className="flex flex-wrap gap-2 border-t border-border pt-2">
       <button
-        style={styles.excuseBtn}
+        className="min-w-[120px] flex-1 cursor-pointer rounded-md border border-primary bg-transparent px-3 py-2 text-[13px] font-semibold text-primary"
         onClick={onGenerateExcuse}
         aria-label="Generate Excuse"
       >
         Generate Excuse
       </button>
       <button
-        style={styles.rescheduleBtn}
+        className="min-w-[120px] flex-1 cursor-pointer rounded-md border border-border bg-transparent px-3 py-2 text-[13px] font-semibold text-muted-foreground"
         onClick={onProposeReschedule}
         aria-label="Propose Reschedule"
       >
@@ -192,16 +206,21 @@ function ExcuseModal({ eventId, generateExcuse, onClose }: ExcuseModalProps) {
   }, [draft]);
 
   return (
-    <div style={styles.modalOverlay} data-testid="excuse-modal">
+    <div
+      className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/60 p-4"
+      data-testid="excuse-modal"
+    >
       <div
-        style={styles.modalContent}
+        className="flex max-h-[90vh] w-full max-w-[480px] flex-col gap-4 overflow-y-auto rounded-xl border border-border bg-background p-6"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div style={styles.modalHeader}>
-          <h3 style={styles.modalTitle}>Generate Excuse</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="m-0 text-lg font-bold text-foreground">
+            Generate Excuse
+          </h3>
           <button
-            style={styles.modalCloseBtn}
+            className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-sm font-semibold text-muted-foreground"
             onClick={onClose}
             aria-label="Close"
           >
@@ -210,17 +229,19 @@ function ExcuseModal({ eventId, generateExcuse, onClose }: ExcuseModalProps) {
         </div>
 
         {/* Tone selector */}
-        <div style={styles.selectorGroup} data-testid="tone-selector">
-          <span style={styles.selectorLabel}>Tone</span>
-          <div style={styles.selectorOptions}>
+        <div className="flex flex-col gap-1.5" data-testid="tone-selector">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Tone
+          </span>
+          <div className="flex flex-wrap gap-1.5">
             {EXCUSE_TONES.map((t) => (
               <button
                 key={t}
-                style={
+                className={`cursor-pointer rounded-md border px-3 py-1.5 text-[13px] font-medium ${
                   tone === t
-                    ? { ...styles.selectorBtn, ...styles.selectorBtnActive }
-                    : styles.selectorBtn
-                }
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-transparent text-muted-foreground"
+                }`}
                 onClick={() => setTone(t)}
               >
                 {t.charAt(0).toUpperCase() + t.slice(1)}
@@ -230,17 +251,22 @@ function ExcuseModal({ eventId, generateExcuse, onClose }: ExcuseModalProps) {
         </div>
 
         {/* Truth level selector */}
-        <div style={styles.selectorGroup} data-testid="truth-level-selector">
-          <span style={styles.selectorLabel}>Truth Level</span>
-          <div style={styles.selectorOptions}>
+        <div
+          className="flex flex-col gap-1.5"
+          data-testid="truth-level-selector"
+        >
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Truth Level
+          </span>
+          <div className="flex flex-wrap gap-1.5">
             {TRUTH_LEVELS.map((tl) => (
               <button
                 key={tl}
-                style={
+                className={`cursor-pointer rounded-md border px-3 py-1.5 text-[13px] font-medium ${
                   truthLevel === tl
-                    ? { ...styles.selectorBtn, ...styles.selectorBtnActive }
-                    : styles.selectorBtn
-                }
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-transparent text-muted-foreground"
+                }`}
                 onClick={() => setTruthLevel(tl)}
               >
                 {formatTruthLevel(tl)}
@@ -251,7 +277,7 @@ function ExcuseModal({ eventId, generateExcuse, onClose }: ExcuseModalProps) {
 
         {/* Generate button */}
         <button
-          style={styles.generateBtn}
+          className="cursor-pointer rounded-md border-none bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
           onClick={handleGenerate}
           disabled={loading}
           aria-label="Generate"
@@ -261,25 +287,33 @@ function ExcuseModal({ eventId, generateExcuse, onClose }: ExcuseModalProps) {
 
         {/* Error */}
         {error && (
-          <div style={styles.excuseError} data-testid="excuse-error">
+          <div
+            className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+            data-testid="excuse-error"
+          >
             {error}
           </div>
         )}
 
         {/* Draft output */}
         {draft && (
-          <div style={styles.draftSection}>
-            <div style={styles.draftContent} data-testid="excuse-draft">
+          <div className="flex flex-col gap-2">
+            <div
+              className="whitespace-pre-wrap rounded-md border border-border bg-card p-3 text-sm leading-relaxed text-foreground"
+              data-testid="excuse-draft"
+            >
               {draft.draft_message}
             </div>
-            <div style={styles.draftMeta}>
-              <span style={styles.draftBadge}>DRAFT</span>
-              <span style={styles.draftTone}>
+            <div className="flex items-center gap-2">
+              <span className="inline-block rounded bg-primary px-1.5 py-px text-[10px] font-bold uppercase tracking-wider text-primary-foreground">
+                DRAFT
+              </span>
+              <span className="font-mono text-xs text-muted-foreground">
                 {draft.tone} / {formatTruthLevel(draft.truth_level)}
               </span>
             </div>
             <button
-              style={styles.copyBtn}
+              className="cursor-pointer self-end rounded-md border border-success bg-transparent px-4 py-1.5 text-[13px] font-semibold text-success"
               onClick={handleCopy}
               aria-label="Copy"
             >
@@ -305,6 +339,7 @@ export function BriefingPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showExcuseModal, setShowExcuseModal] = useState(false);
+  const { prefersReduced } = useMotionConfig();
 
   useEffect(() => {
     let cancelled = false;
@@ -348,16 +383,32 @@ export function BriefingPanel({
     window.location.hash = "#/scheduling";
   }, []);
 
+  // Wrapper: use motion.div when animations are allowed, plain div otherwise
+  const PanelWrapper = prefersReduced ? "div" : motion.div;
+  const panelMotionProps = prefersReduced
+    ? {}
+    : {
+        variants: slideInRight,
+        initial: "hidden",
+        animate: "visible",
+        transition: easeOut300,
+      };
+
   // Loading state
   if (loading) {
     return (
-      <div style={styles.panel} data-testid="briefing-loading">
-        <div style={styles.loadingSkeleton}>
-          <div style={styles.skeletonRow} />
-          <div style={styles.skeletonRow} />
-          <div style={styles.skeletonRow} />
+      <div
+        className="w-full border-t border-border py-3"
+        data-testid="briefing-loading"
+      >
+        <div className="mb-2 flex flex-col gap-2">
+          <div className="h-6 rounded bg-card" />
+          <div className="h-6 rounded bg-card" />
+          <div className="h-6 rounded bg-card" />
         </div>
-        <p style={styles.loadingText}>Loading briefing...</p>
+        <p className="m-0 text-center text-[13px] text-muted-foreground">
+          Loading briefing...
+        </p>
       </div>
     );
   }
@@ -365,8 +416,11 @@ export function BriefingPanel({
   // Error state
   if (error) {
     return (
-      <div style={styles.panel} data-testid="briefing-error">
-        <p style={styles.errorText}>{error}</p>
+      <div
+        className="w-full border-t border-border py-3"
+        data-testid="briefing-error"
+      >
+        <p className="m-0 text-sm text-destructive">{error}</p>
       </div>
     );
   }
@@ -374,24 +428,40 @@ export function BriefingPanel({
   // Empty state
   if (!briefing) {
     return (
-      <div style={styles.panel} data-testid="briefing-empty">
-        <p style={styles.emptyText}>No briefing data available.</p>
+      <div
+        className="w-full border-t border-border py-3"
+        data-testid="briefing-empty"
+      >
+        <p className="m-0 mb-3 text-[13px] italic text-muted-foreground">
+          No briefing data available.
+        </p>
       </div>
     );
   }
 
   return (
-    <div style={styles.panel} data-testid="briefing-panel">
+    <PanelWrapper
+      className="w-full border-t border-border py-3"
+      data-testid="briefing-panel"
+      {...panelMotionProps}
+    >
       {/* Header */}
-      <h3 style={styles.panelTitle}>Context Briefing</h3>
+      <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Context Briefing
+      </h3>
 
       {/* Topics */}
       {briefing.topics.length > 0 && (
-        <div style={styles.topicsSection}>
-          <span style={styles.topicsLabel}>Topics</span>
-          <div style={styles.topicsList}>
+        <div className="mb-3">
+          <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Topics
+          </span>
+          <div className="flex flex-wrap gap-1.5">
             {briefing.topics.map((topic) => (
-              <span key={topic} style={styles.topicBadge}>
+              <span
+                key={topic}
+                className="inline-block rounded-full bg-card px-2 py-0.5 text-xs font-medium text-muted-foreground"
+              >
                 {topic}
               </span>
             ))}
@@ -401,13 +471,15 @@ export function BriefingPanel({
 
       {/* Participants */}
       {briefing.participants.length > 0 ? (
-        <div style={styles.participantsList}>
+        <div className="mb-3 flex flex-col gap-2">
           {briefing.participants.map((p) => (
             <ParticipantCard key={p.participant_hash} participant={p} />
           ))}
         </div>
       ) : (
-        <p style={styles.emptyText}>No participant data available.</p>
+        <p className="m-0 mb-3 text-[13px] italic text-muted-foreground">
+          No participant data available.
+        </p>
       )}
 
       {/* Actions */}
@@ -424,331 +496,6 @@ export function BriefingPanel({
           onClose={handleCloseExcuse}
         />
       )}
-    </div>
+    </PanelWrapper>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  // Panel
-  panel: {
-    width: "100%",
-    padding: "0.75rem 0",
-    borderTop: "1px solid #1e293b",
-  },
-  panelTitle: {
-    margin: "0 0 0.75rem 0",
-    fontSize: "0.9375rem",
-    fontWeight: 700,
-    color: "#e2e8f0",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-
-  // Topics
-  topicsSection: {
-    marginBottom: "0.75rem",
-  },
-  topicsLabel: {
-    display: "block",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    color: "#64748b",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    marginBottom: "0.375rem",
-  },
-  topicsList: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: "0.375rem",
-  },
-  topicBadge: {
-    display: "inline-block",
-    padding: "0.125rem 0.5rem",
-    borderRadius: "9999px",
-    backgroundColor: "#1e293b",
-    color: "#94a3b8",
-    fontSize: "0.75rem",
-    fontWeight: 500,
-  },
-
-  // Participants list
-  participantsList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    marginBottom: "0.75rem",
-  },
-
-  // Participant card
-  participantCard: {
-    padding: "0.625rem",
-    backgroundColor: "#1e293b",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-  },
-  participantHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "0.375rem",
-  },
-  participantName: {
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    color: "#e2e8f0",
-  },
-  categoryBadge: {
-    display: "inline-block",
-    padding: "0.0625rem 0.375rem",
-    borderRadius: "9999px",
-    color: "#ffffff",
-    fontSize: "0.6875rem",
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.03em",
-  },
-  participantDetails: {
-    display: "flex",
-    gap: "0.75rem",
-    flexWrap: "wrap",
-  },
-  detailItem: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.0625rem",
-  },
-  detailLabel: {
-    fontSize: "0.625rem",
-    fontWeight: 600,
-    color: "#64748b",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  detailValue: {
-    fontSize: "0.8125rem",
-    fontWeight: 500,
-    color: "#cbd5e1",
-  },
-
-  // Action buttons
-  actionButtons: {
-    display: "flex",
-    gap: "0.5rem",
-    flexWrap: "wrap",
-    paddingTop: "0.5rem",
-    borderTop: "1px solid #1e293b",
-  },
-  excuseBtn: {
-    flex: 1,
-    padding: "0.5rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #f59e0b",
-    background: "transparent",
-    color: "#f59e0b",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 600,
-    minWidth: "120px",
-  },
-  rescheduleBtn: {
-    flex: 1,
-    padding: "0.5rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #3b82f6",
-    background: "transparent",
-    color: "#3b82f6",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 600,
-    minWidth: "120px",
-  },
-
-  // Loading
-  loadingSkeleton: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    marginBottom: "0.5rem",
-  },
-  skeletonRow: {
-    height: "1.5rem",
-    borderRadius: "4px",
-    background: "#1e293b",
-  },
-  loadingText: {
-    color: "#64748b",
-    fontSize: "0.8125rem",
-    textAlign: "center",
-    margin: 0,
-  },
-
-  // Error
-  errorText: {
-    color: "#fca5a5",
-    fontSize: "0.875rem",
-    margin: 0,
-  },
-
-  // Empty
-  emptyText: {
-    color: "#64748b",
-    fontSize: "0.8125rem",
-    fontStyle: "italic",
-    margin: "0 0 0.75rem 0",
-  },
-
-  // Modal overlay
-  modalOverlay: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.6)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 1100,
-    padding: "1rem",
-  },
-  modalContent: {
-    width: "100%",
-    maxWidth: "480px",
-    backgroundColor: "#0f172a",
-    borderRadius: "12px",
-    border: "1px solid #334155",
-    padding: "1.5rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "1rem",
-    maxHeight: "90vh",
-    overflowY: "auto",
-  },
-  modalHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  modalTitle: {
-    margin: 0,
-    fontSize: "1.125rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-  },
-  modalCloseBtn: {
-    background: "transparent",
-    border: "1px solid #334155",
-    borderRadius: "6px",
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    padding: "0.25rem 0.625rem",
-    cursor: "pointer",
-  },
-
-  // Selector groups
-  selectorGroup: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.375rem",
-  },
-  selectorLabel: {
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  selectorOptions: {
-    display: "flex",
-    gap: "0.375rem",
-    flexWrap: "wrap",
-  },
-  selectorBtn: {
-    padding: "0.375rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 500,
-  },
-  selectorBtnActive: {
-    background: "#1e40af",
-    color: "#ffffff",
-    border: "1px solid #1e40af",
-  },
-
-  // Generate button
-  generateBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#3b82f6",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-
-  // Error in excuse modal
-  excuseError: {
-    padding: "0.75rem",
-    borderRadius: "6px",
-    backgroundColor: "#2d1b1b",
-    border: "1px solid #7f1d1d",
-    color: "#fca5a5",
-    fontSize: "0.875rem",
-  },
-
-  // Draft section
-  draftSection: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-  },
-  draftContent: {
-    padding: "0.75rem",
-    backgroundColor: "#1e293b",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    lineHeight: 1.5,
-    whiteSpace: "pre-wrap" as const,
-  },
-  draftMeta: {
-    display: "flex",
-    gap: "0.5rem",
-    alignItems: "center",
-  },
-  draftBadge: {
-    display: "inline-block",
-    padding: "0.0625rem 0.375rem",
-    borderRadius: "4px",
-    backgroundColor: "#f59e0b",
-    color: "#000000",
-    fontSize: "0.625rem",
-    fontWeight: 700,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  draftTone: {
-    fontSize: "0.75rem",
-    color: "#64748b",
-  },
-  copyBtn: {
-    alignSelf: "flex-end",
-    padding: "0.375rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #22c55e",
-    background: "transparent",
-    color: "#22c55e",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 600,
-  },
-};

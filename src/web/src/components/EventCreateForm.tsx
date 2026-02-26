@@ -23,6 +23,7 @@ import {
   type EventFormValues,
   type EventFormErrors,
 } from "../lib/event-form";
+import { Button } from "./ui/button";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,23 +90,25 @@ export function EventCreateForm({
     // Overlay backdrop -- clicking dismisses
     // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div
-      style={styles.overlay}
+      className="fixed inset-0 z-[1000] flex justify-end bg-black/50"
       data-testid="event-create-overlay"
       onClick={onCancel}
     >
       {/* Panel -- stop propagation so clicking inside doesn't dismiss */}
       {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
       <div
-        style={styles.panel}
+        className="flex w-full max-w-[420px] flex-col gap-3 overflow-y-auto border-l border-border bg-card p-6"
         data-testid="event-create-panel"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div style={styles.header}>
-          <h2 style={styles.title}>New Event</h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="m-0 text-lg font-bold leading-tight text-foreground">
+            New Event
+          </h2>
           <button
             onClick={onCancel}
-            style={styles.closeBtn}
+            className="shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-sm font-semibold text-muted-foreground"
             aria-label="Cancel"
             type="button"
             disabled={submitting}
@@ -116,7 +119,10 @@ export function EventCreateForm({
 
         {/* API error banner */}
         {error && (
-          <div style={styles.errorBanner} data-testid="event-create-error">
+          <div
+            className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+            data-testid="event-create-error"
+          >
             {error}
           </div>
         )}
@@ -124,8 +130,11 @@ export function EventCreateForm({
         {/* Form */}
         <form onSubmit={handleSubmit} data-testid="event-create-form">
           {/* Title */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-title" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-title"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               Title *
             </label>
             <input
@@ -133,38 +142,38 @@ export function EventCreateForm({
               type="text"
               value={values.title}
               onChange={(e) => updateField("title", e.target.value)}
-              style={{
-                ...styles.input,
-                ...(errors.title ? styles.inputError : {}),
-              }}
+              className={`w-full rounded-md border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                errors.title ? "border-destructive" : "border-border"
+              }`}
               placeholder="Event title"
               disabled={submitting}
               autoFocus
               data-testid="event-title-input"
             />
             {errors.title && (
-              <span style={styles.fieldError} data-testid="title-error">
+              <span className="text-xs text-destructive" data-testid="title-error">
                 {errors.title}
               </span>
             )}
           </div>
 
           {/* Start date + time */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-start-date" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-start-date"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               Start
             </label>
-            <div style={styles.dateTimeRow}>
+            <div className="flex gap-2">
               <input
                 id="event-start-date"
                 type="date"
                 value={values.startDate}
                 onChange={(e) => updateField("startDate", e.target.value)}
-                style={{
-                  ...styles.input,
-                  ...styles.dateInput,
-                  ...(errors.startDate ? styles.inputError : {}),
-                }}
+                className={`flex-[2] rounded-md border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                  errors.startDate ? "border-destructive" : "border-border"
+                }`}
                 disabled={submitting}
                 data-testid="event-start-date-input"
               />
@@ -173,39 +182,38 @@ export function EventCreateForm({
                 type="time"
                 value={values.startTime}
                 onChange={(e) => updateField("startTime", e.target.value)}
-                style={{
-                  ...styles.input,
-                  ...styles.timeInput,
-                  ...(errors.startTime ? styles.inputError : {}),
-                }}
+                className={`flex-1 rounded-md border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                  errors.startTime ? "border-destructive" : "border-border"
+                }`}
                 disabled={submitting}
                 data-testid="event-start-time-input"
               />
             </div>
             {errors.startDate && (
-              <span style={styles.fieldError}>{errors.startDate}</span>
+              <span className="text-xs text-destructive">{errors.startDate}</span>
             )}
             {errors.startTime && (
-              <span style={styles.fieldError}>{errors.startTime}</span>
+              <span className="text-xs text-destructive">{errors.startTime}</span>
             )}
           </div>
 
           {/* End date + time */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-end-date" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-end-date"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               End
             </label>
-            <div style={styles.dateTimeRow}>
+            <div className="flex gap-2">
               <input
                 id="event-end-date"
                 type="date"
                 value={values.endDate}
                 onChange={(e) => updateField("endDate", e.target.value)}
-                style={{
-                  ...styles.input,
-                  ...styles.dateInput,
-                  ...(errors.endDate ? styles.inputError : {}),
-                }}
+                className={`flex-[2] rounded-md border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                  errors.endDate ? "border-destructive" : "border-border"
+                }`}
                 disabled={submitting}
                 data-testid="event-end-date-input"
               />
@@ -214,28 +222,29 @@ export function EventCreateForm({
                 type="time"
                 value={values.endTime}
                 onChange={(e) => updateField("endTime", e.target.value)}
-                style={{
-                  ...styles.input,
-                  ...styles.timeInput,
-                  ...(errors.endTime ? styles.inputError : {}),
-                }}
+                className={`flex-1 rounded-md border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                  errors.endTime ? "border-destructive" : "border-border"
+                }`}
                 disabled={submitting}
                 data-testid="event-end-time-input"
               />
             </div>
             {errors.endDate && (
-              <span style={styles.fieldError}>{errors.endDate}</span>
+              <span className="text-xs text-destructive">{errors.endDate}</span>
             )}
             {errors.endTime && (
-              <span style={styles.fieldError} data-testid="end-time-error">
+              <span className="text-xs text-destructive" data-testid="end-time-error">
                 {errors.endTime}
               </span>
             )}
           </div>
 
           {/* Timezone */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-timezone" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-timezone"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               Timezone
             </label>
             <input
@@ -243,7 +252,7 @@ export function EventCreateForm({
               type="text"
               value={values.timezone}
               onChange={(e) => updateField("timezone", e.target.value)}
-              style={styles.input}
+              className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="e.g. America/New_York"
               disabled={submitting}
               data-testid="event-timezone-input"
@@ -251,15 +260,18 @@ export function EventCreateForm({
           </div>
 
           {/* Description */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-description" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-description"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               Description
             </label>
             <textarea
               id="event-description"
               value={values.description}
               onChange={(e) => updateField("description", e.target.value)}
-              style={{ ...styles.input, ...styles.textarea }}
+              className="min-h-[3rem] w-full resize-y rounded-md border border-border bg-background px-3 py-2.5 font-[inherit] text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="Add a description..."
               disabled={submitting}
               rows={3}
@@ -268,8 +280,11 @@ export function EventCreateForm({
           </div>
 
           {/* Location */}
-          <div style={styles.fieldGroup}>
-            <label htmlFor="event-location" style={styles.label}>
+          <div className="mb-2 flex flex-col gap-1">
+            <label
+              htmlFor="event-location"
+              className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
               Location
             </label>
             <input
@@ -277,7 +292,7 @@ export function EventCreateForm({
               type="text"
               value={values.location}
               onChange={(e) => updateField("location", e.target.value)}
-              style={styles.input}
+              className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="Add a location..."
               disabled={submitting}
               data-testid="event-location-input"
@@ -285,168 +300,25 @@ export function EventCreateForm({
           </div>
 
           {/* Actions */}
-          <div style={styles.actions}>
-            <button
+          <div className="mt-3 flex justify-end gap-2 border-t border-border pt-3">
+            <Button
               type="button"
+              variant="ghost"
               onClick={onCancel}
-              style={styles.cancelBtn}
               disabled={submitting}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              style={styles.submitBtn}
               disabled={submitting}
               data-testid="event-create-submit"
             >
               {submitting ? "Creating..." : "Create Event"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Inline styles
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
-    display: "flex",
-    justifyContent: "flex-end",
-    zIndex: 1000,
-  },
-  panel: {
-    width: "100%",
-    maxWidth: "420px",
-    backgroundColor: "#0f172a",
-    borderLeft: "1px solid #334155",
-    overflowY: "auto",
-    padding: "1.5rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.75rem",
-  },
-
-  // Header
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: "1rem",
-  },
-  title: {
-    margin: 0,
-    fontSize: "1.25rem",
-    fontWeight: 700,
-    color: "#f1f5f9",
-    lineHeight: 1.3,
-  },
-  closeBtn: {
-    background: "transparent",
-    border: "1px solid #334155",
-    borderRadius: "6px",
-    color: "#94a3b8",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-    padding: "0.25rem 0.625rem",
-    cursor: "pointer",
-    flexShrink: 0,
-  },
-
-  // Error
-  errorBanner: {
-    padding: "0.75rem",
-    borderRadius: "6px",
-    backgroundColor: "#2d1b1b",
-    border: "1px solid #7f1d1d",
-    color: "#fca5a5",
-    fontSize: "0.875rem",
-  },
-
-  // Form fields
-  fieldGroup: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.25rem",
-    marginBottom: "0.5rem",
-  },
-  label: {
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    color: "#94a3b8",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  input: {
-    padding: "0.5rem 0.75rem",
-    borderRadius: "6px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    borderColor: "#334155",
-    backgroundColor: "#1e293b",
-    color: "#e2e8f0",
-    fontSize: "0.875rem",
-    outline: "none",
-    width: "100%",
-    boxSizing: "border-box" as const,
-  },
-  inputError: {
-    borderColor: "#ef4444",
-  },
-  dateTimeRow: {
-    display: "flex",
-    gap: "0.5rem",
-  },
-  dateInput: {
-    flex: 2,
-  },
-  timeInput: {
-    flex: 1,
-  },
-  textarea: {
-    resize: "vertical" as const,
-    minHeight: "3rem",
-    fontFamily: "inherit",
-  },
-  fieldError: {
-    fontSize: "0.75rem",
-    color: "#ef4444",
-  },
-
-  // Actions
-  actions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: "0.5rem",
-    marginTop: "0.75rem",
-    paddingTop: "0.75rem",
-    borderTop: "1px solid #1e293b",
-  },
-  cancelBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-  },
-  submitBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#3b82f6",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 600,
-  },
-};
