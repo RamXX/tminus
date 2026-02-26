@@ -26,10 +26,37 @@ import {
   type AccountHealth,
   type UserGraphSyncHealth,
   type HealthState,
+  type HealthColor,
 } from "../lib/sync-status";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
+
+// ---------------------------------------------------------------------------
+// Color & banner constants
+// ---------------------------------------------------------------------------
+
+const STATUS_COLORS = {
+  green:  "#22c55e",
+  amber:  "#f59e0b",
+  red:    "#ef4444",
+  blue:   "#3b82f6",
+} as const;
+
+/** Map HealthColor to a Tailwind text-* class for glow dot color inheritance. */
+const DOT_COLOR_CLASS: Record<HealthColor, string> = {
+  green: "text-success",
+  yellow: "text-warning",
+  red: "text-destructive",
+};
+
+/** Map HealthState to banner styling. */
+const BANNER_CONFIG: Record<HealthState, { bg: string; border: string; dot: string; label: string }> = {
+  healthy:  { bg: "bg-success/10",     border: "border-success/30",     dot: "text-success",     label: "All Systems Healthy" },
+  degraded: { bg: "bg-warning/10",     border: "border-warning/30",     dot: "text-warning",     label: "Degraded -- Check Accounts Below" },
+  stale:    { bg: "bg-warning/10",     border: "border-warning/30",     dot: "text-warning",     label: "Stale -- Some Accounts Need Attention" },
+  error:    { bg: "bg-destructive/10", border: "border-destructive/30", dot: "text-destructive", label: "Error -- Immediate Attention Required" },
+};
 
 // ---------------------------------------------------------------------------
 // Component
@@ -122,6 +149,8 @@ export function SyncStatus() {
     );
   }
 
+  const bannerCfg = BANNER_CONFIG[overallHealth];
+
   // Normal state
   return (
     <div className="mx-auto max-w-[1200px]">
@@ -134,13 +163,13 @@ export function SyncStatus() {
         data-testid="overall-health-banner"
         data-health={overallHealth}
         data-color={healthToColor(overallHealth)}
-        className="flex items-center gap-2 px-4 py-3 rounded-lg text-white font-semibold text-sm mb-6"
-        style={{ backgroundColor: COLOR_MAP[healthToColor(overallHealth)] }}
+        className={`flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-semibold mb-6 border ${bannerCfg.bg} ${bannerCfg.border}`}
       >
-        <span className="text-lg">
-          {HEALTH_SYMBOL[overallHealth]}
-        </span>
-        <span>Overall: {healthLabel(overallHealth)}</span>
+        <span
+          className={`h-2.5 w-2.5 rounded-full animate-glow motion-reduce:animate-none ${bannerCfg.dot}`}
+          style={{ backgroundColor: "currentColor" }}
+        />
+        <span>{bannerCfg.label}</span>
       </div>
 
       {userGraph && (
@@ -149,10 +178,14 @@ export function SyncStatus() {
           data-health={computeUserGraphHealth(userGraph)}
           className="mb-4"
         >
-          <CardContent className="py-3 px-4 text-sm text-muted-foreground">
-            <strong className="text-foreground">Mirror Engine:</strong>{" "}
-            {userGraph.pending_mirrors} pending, {userGraph.error_mirrors} errors,{" "}
-            {userGraph.active_mirrors} active
+          <CardContent className="py-3 px-4">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Mirror Engine
+            </span>
+            <div className="mt-1 font-mono text-xs text-muted-foreground">
+              {userGraph.pending_mirrors} pending, {userGraph.error_mirrors} errors,{" "}
+              {userGraph.active_mirrors} active
+            </div>
           </CardContent>
         </Card>
       )}
@@ -162,55 +195,55 @@ export function SyncStatus() {
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Status</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Email</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Provider</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Last Sync</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Channel</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Pending</th>
-              <th className="text-left px-3 py-2 border-b border-border text-muted-foreground font-semibold whitespace-nowrap">Errors</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Status</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Email</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Provider</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Last Sync</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Channel</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Pending</th>
+              <th className="text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border px-3 py-2 whitespace-nowrap">Errors</th>
             </tr>
           </thead>
           <tbody>
-            {accounts.map((account) => (
+            {accounts.map((account, index) => (
               <tr
                 key={account.account_id}
                 data-testid={`account-row-${account.account_id}`}
-                className="border-b border-border/50"
+                className={`border-b border-border/50 hover:bg-secondary/50 transition-colors ${index % 2 === 0 ? "bg-secondary/30" : "bg-transparent"}`}
               >
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                <td className="px-3 py-2 whitespace-nowrap">
                   <span
                     data-testid="health-indicator"
                     data-health={account.health}
                     data-color={account.color}
-                    className="inline-block w-3 h-3 rounded-full"
-                    style={{ backgroundColor: COLOR_MAP[account.color] }}
+                    className={`inline-block h-2.5 w-2.5 rounded-full animate-glow motion-reduce:animate-none ${DOT_COLOR_CLASS[account.color]}`}
+                    style={{ backgroundColor: "currentColor" }}
                     title={healthLabel(account.health)}
                   />
                 </td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">{account.email}</td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">{account.provider}</td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-xs text-foreground whitespace-nowrap">{account.email}</td>
+                <td className="px-3 py-2 font-mono text-xs text-foreground whitespace-nowrap">{account.provider}</td>
+                <td className="px-3 py-2 font-mono text-xs text-foreground whitespace-nowrap">
                   <span data-testid="last-sync-time">
                     {account.last_sync_ts
                       ? formatRelativeTime(account.last_sync_ts)
                       : "Never"}
                   </span>
                 </td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-xs text-foreground whitespace-nowrap">
                   <span data-testid="channel-status">
                     {account.channel_status}
                   </span>
                 </td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-xs text-foreground whitespace-nowrap">
                   <span data-testid="pending-writes">
                     {account.pending_writes}
                   </span>
                 </td>
-                <td className="px-3 py-2 text-foreground whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
                   <span
                     data-testid="error-count"
-                    className={account.error_count > 0 ? "text-red-300 font-bold" : ""}
+                    className={account.error_count > 0 ? "text-destructive font-bold" : "text-foreground"}
                   >
                     {account.error_count}
                   </span>
@@ -220,6 +253,9 @@ export function SyncStatus() {
           </tbody>
         </table>
       </div>
+
+      {/* Auto-refresh indicator */}
+      <p className="text-xs text-muted-foreground font-mono mt-3">Auto-refreshes every 30s</p>
     </div>
   );
 }
@@ -248,20 +284,3 @@ function formatRelativeTime(isoTimestamp: string): string {
     return isoTimestamp;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Color mapping & symbols
-// ---------------------------------------------------------------------------
-
-const COLOR_MAP: Record<string, string> = {
-  green: "#16a34a",
-  yellow: "#ca8a04",
-  red: "#dc2626",
-};
-
-const HEALTH_SYMBOL: Record<HealthState, string> = {
-  healthy: "\u25CF", // filled circle
-  degraded: "\u25B2", // triangle
-  stale: "\u25A0", // square
-  error: "\u2716", // heavy X
-};

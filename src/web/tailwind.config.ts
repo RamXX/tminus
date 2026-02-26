@@ -60,9 +60,14 @@ const config: Config = {
           from: { transform: "rotate(0deg)" },
           to: { transform: "rotate(360deg)" },
         },
+        glow: {
+          "0%, 100%": { opacity: "1" },
+          "50%": { opacity: "0.5" },
+        },
       },
       animation: {
         "spin-slow": "spin-slow 1.2s linear infinite",
+        glow: "glow 2s ease-in-out infinite",
       },
     },
   },
