@@ -1,16 +1,19 @@
 /**
- * tminus-sync-consumer -- Queue consumer for sync-queue.
+ * tminus-sync-consumer -- Queue consumer for sync-queue and reconcile-queue.
  *
  * Provider-aware: dispatches to Google or Microsoft Calendar APIs based on
  * the account's provider type (looked up from D1 registry at consumption time).
  *
- * Processes SYNC_INCREMENTAL and SYNC_FULL messages:
+ * Processes SYNC_INCREMENTAL, SYNC_FULL, and RECONCILE_ACCOUNT messages:
  * 1. Looks up provider type from D1 accounts table
  * 2. Fetches events via provider-specific client (Google listEvents or Microsoft delta query)
  * 3. Classifies events using provider-specific strategy (extended properties or open extensions)
  * 4. Normalizes origin events to ProviderDelta via provider-specific normalizer
  * 5. Calls UserGraphDO.applyProviderDelta() via RPC (fetch to DO stub)
  * 6. Updates AccountDO sync cursor (syncToken for Google, deltaLink for Microsoft)
+ *
+ * Reconcile-queue messages (RECONCILE_ACCOUNT) are converted to SYNC_FULL
+ * and processed through the same pipeline. Dispatch is by batch.queue name.
  *
  * Error handling (both Google and Microsoft):
  * - 429: retry with jittered exponential backoff (1s, 2s, max 2)
