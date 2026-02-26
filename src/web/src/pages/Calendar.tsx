@@ -180,7 +180,7 @@ export function Calendar() {
   );
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className="mx-auto max-w-[1200px] bg-background">
       {/* Upgrade prompt banner (TM-d17.4) */}
       <UpgradePromptBanner
         prompt={activePrompt}
@@ -191,6 +191,7 @@ export function Calendar() {
 
       {/* Calendar */}
       <main className="py-2">
+        <h1 className="text-lg font-semibold tracking-tight text-foreground sr-only">Calendar</h1>
         <UnifiedCalendar
           fetchEvents={fetchCalendarEvents}
           onCreateEvent={handleCreateEvent}

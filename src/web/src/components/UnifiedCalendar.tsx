@@ -352,45 +352,45 @@ export function UnifiedCalendar({
   }, [view, currentDate, range]);
 
   return (
-    <div style={styles.container}>
+    <div className="w-full">
       {/* Toolbar: navigation + view switch */}
-      <div style={styles.toolbar}>
-        <div style={styles.navGroup}>
+      <div className="flex justify-between items-center py-3 mb-3 flex-wrap gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             onClick={navigateToday}
-            style={styles.navBtn}
+            className="px-3 py-1.5 rounded-md border border-border bg-transparent text-muted-foreground cursor-pointer text-[0.8125rem] font-medium hover:bg-card/50"
             aria-label="Today"
           >
             Today
           </button>
           <button
             onClick={navigatePrev}
-            style={styles.navBtn}
+            className="px-3 py-1.5 rounded-md border border-border bg-transparent text-muted-foreground cursor-pointer text-[0.8125rem] font-medium hover:bg-card/50"
             aria-label="Previous"
           >
             Prev
           </button>
           <button
             onClick={navigateNext}
-            style={styles.navBtn}
+            className="px-3 py-1.5 rounded-md border border-border bg-transparent text-muted-foreground cursor-pointer text-[0.8125rem] font-medium hover:bg-card/50"
             aria-label="Next"
           >
             Next
           </button>
-          <span style={styles.dateHeader} data-testid="calendar-date-header">
+          <span className="font-mono text-xs text-muted-foreground ml-2" data-testid="calendar-date-header">
             {dateHeaderText}
           </span>
         </div>
-        <div style={styles.viewGroup}>
+        <div className="flex gap-1">
           {(["day", "week", "month"] as CalendarViewType[]).map((v) => (
             <button
               key={v}
               onClick={() => changeView(v)}
-              style={
+              className={`px-3 py-1.5 rounded-md border cursor-pointer text-[0.8125rem] font-medium transition-colors ${
                 view === v
-                  ? { ...styles.viewBtn, ...styles.viewBtnActive }
-                  : styles.viewBtn
-              }
+                  ? "bg-primary/15 text-primary border-primary/30"
+                  : "border-border bg-transparent text-muted-foreground hover:bg-card/50"
+              }`}
               aria-pressed={view === v}
               aria-label={v.charAt(0).toUpperCase() + v.slice(1)}
             >
@@ -402,23 +402,23 @@ export function UnifiedCalendar({
 
       {/* Loading state */}
       {loading && (
-        <div style={styles.loadingContainer} data-testid="calendar-loading">
-          <div style={styles.loadingSkeleton}>
+        <div className="p-8 text-center" data-testid="calendar-loading">
+          <div className="flex flex-col gap-3 mb-4">
             {[1, 2, 3].map((i) => (
-              <div key={i} style={styles.skeletonRow} />
+              <div key={i} className="h-8 rounded bg-card animate-pulse" />
             ))}
           </div>
-          <p style={styles.loadingText}>Loading events...</p>
+          <p className="text-muted-foreground text-sm">Loading events...</p>
         </div>
       )}
 
       {/* Error state */}
       {!loading && error && (
-        <div style={styles.errorContainer}>
-          <p style={styles.errorText}>Failed to load events</p>
+        <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-6 text-center">
+          <p className="text-destructive text-[0.9375rem] mb-3">Failed to load events</p>
           <button
             onClick={loadEvents}
-            style={styles.retryBtn}
+            className="px-4 py-2 rounded-md border-none bg-primary text-primary-foreground cursor-pointer text-sm font-medium"
             aria-label="Retry"
           >
             Retry
@@ -430,9 +430,9 @@ export function UnifiedCalendar({
       {!loading && !error && (
         <>
           {events.length === 0 && !onCreateEvent ? (
-            <div style={styles.emptyState}>
-              <p style={styles.emptyTitle}>No events in this period</p>
-              <p style={styles.emptySubtitle}>
+            <div className="text-center py-12 px-4">
+              <p className="text-lg font-semibold text-foreground mb-2">No events in this period</p>
+              <p className="text-sm text-muted-foreground">
                 Try a different date range or link more calendar accounts.
               </p>
             </div>
@@ -447,7 +447,7 @@ export function UnifiedCalendar({
             />
           )}
           {events.length === 0 && onCreateEvent && (
-            <p style={styles.emptyHint}>Click a time slot to create an event.</p>
+            <p className="text-center p-4 text-[0.8125rem] text-muted-foreground">Click a time slot to create an event.</p>
           )}
         </>
       )}
@@ -541,7 +541,7 @@ function WeekView({
   const grouped = useMemo(() => groupEventsByDate(events), [events]);
 
   return (
-    <div style={styles.weekGrid}>
+    <div className="grid grid-cols-7 gap-px bg-border rounded-lg overflow-hidden">
       {/* Day headers */}
       {days.map((day, i) => {
         const key = formatDateKey(day);
@@ -560,10 +560,7 @@ function WeekView({
         return (
           <div
             key={i}
-            style={{
-              ...styles.weekDay,
-              ...(onTimeSlotClick ? styles.clickableSlot : {}),
-            }}
+            className={`bg-background min-h-[120px] hover:bg-card/50 ${onTimeSlotClick ? "cursor-pointer" : ""}`}
             onClick={handleSlotClick}
             data-testid={`week-day-slot-${formatDateKey(day)}`}
             role={onTimeSlotClick ? "button" : undefined}
@@ -575,24 +572,22 @@ function WeekView({
             }
           >
             <div
-              style={{
-                ...styles.weekDayHeader,
-                ...(today ? styles.todayHeader : {}),
-              }}
+              className={`p-2 text-center border-b border-border ${today ? "bg-primary/15" : ""}`}
             >
-              <span style={styles.weekDayName}>
+              <span className={`block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground ${today ? "border-b-2 border-primary pb-0.5" : ""}`}>
                 {day.toLocaleDateString(undefined, { weekday: "short" })}
               </span>
               <span
-                style={{
-                  ...styles.weekDayNumber,
-                  ...(today ? styles.todayNumber : {}),
-                }}
+                className={`inline-block font-mono text-xs px-1.5 py-0.5 rounded-full leading-normal ${
+                  today
+                    ? "text-primary font-bold"
+                    : "text-foreground"
+                }`}
               >
                 {day.getDate()}
               </span>
             </div>
-            <div style={styles.weekDayEvents}>
+            <div className="p-1 flex flex-col gap-0.5">
               {dayEvents.map((evt) => (
                 <EventChip key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
               ))}
@@ -663,16 +658,16 @@ function MonthView({
   return (
     <div>
       {/* Day-of-week headers */}
-      <div style={styles.monthHeaderRow}>
+      <div className="grid grid-cols-7 gap-px mb-px">
         {dayNames.map((name) => (
-          <div key={name} style={styles.monthHeaderCell}>
+          <div key={name} className="p-2 text-center text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             {name}
           </div>
         ))}
       </div>
       {/* Weeks */}
       {weeks.map((week, wi) => (
-        <div key={wi} style={styles.monthWeekRow}>
+        <div key={wi} className="grid grid-cols-7 gap-px mb-px">
           {week.map((day, di) => {
             const key = formatDateKey(day);
             const dayEvents = grouped[key] ?? [];
@@ -690,11 +685,7 @@ function MonthView({
             return (
               <div
                 key={di}
-                style={{
-                  ...styles.monthCell,
-                  ...(inMonth ? {} : styles.monthCellOutside),
-                  ...(onTimeSlotClick ? styles.clickableSlot : {}),
-                }}
+                className={`bg-background min-h-[80px] p-1 rounded-sm hover:bg-card/50 ${!inMonth ? "opacity-40" : ""} ${onTimeSlotClick ? "cursor-pointer" : ""}`}
                 onClick={handleMonthSlotClick}
                 data-testid={`month-day-slot-${formatDateKey(day)}`}
                 role={onTimeSlotClick ? "button" : undefined}
@@ -706,19 +697,20 @@ function MonthView({
                 }
               >
                 <span
-                  style={{
-                    ...styles.monthCellDay,
-                    ...(today ? styles.todayNumber : {}),
-                  }}
+                  className={`inline-block font-mono text-xs px-1.5 py-0.5 rounded-full mb-0.5 ${
+                    today
+                      ? "text-primary font-bold"
+                      : "text-muted-foreground"
+                  }`}
                 >
                   {day.getDate()}
                 </span>
-                <div style={styles.monthCellEvents}>
+                <div className="flex flex-col gap-px">
                   {dayEvents.slice(0, 3).map((evt) => (
                     <EventDot key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
                   ))}
                   {dayEvents.length > 3 && (
-                    <span style={styles.moreEvents}>
+                    <span className="text-[0.6875rem] text-muted-foreground pl-1">
                       +{dayEvents.length - 3}
                     </span>
                   )}
@@ -761,10 +753,7 @@ function DayView({
 
   return (
     <div
-      style={{
-        ...styles.dayContainer,
-        ...(onTimeSlotClick ? styles.clickableSlot : {}),
-      }}
+      className={`bg-background rounded-lg border border-border overflow-hidden hover:bg-card/50 ${onTimeSlotClick ? "cursor-pointer" : ""}`}
       onClick={handleDaySlotClick}
       data-testid={`day-slot-${formatDateKey(currentDate)}`}
       role={onTimeSlotClick ? "button" : undefined}
@@ -775,15 +764,15 @@ function DayView({
           : undefined
       }
     >
-      <div style={styles.dayHeader}>
-        <span style={styles.dayHeaderDate}>
+      <div className="p-4 border-b border-border">
+        <span className="text-lg font-semibold text-foreground">
           {formatDateHeader(currentDate)}
         </span>
       </div>
       {dayEvents.length === 0 ? (
-        <p style={styles.dayEmpty}>No events today</p>
+        <p className="text-muted-foreground text-center p-8 text-sm">No events today</p>
       ) : (
-        <div style={styles.dayEventList}>
+        <div className="flex flex-col gap-2 p-3">
           {dayEvents.map((evt) => (
             <EventCard key={evt.canonical_event_id} event={evt} onClick={onEventClick} />
           ))}
@@ -802,7 +791,8 @@ function EventChip({ event, onClick }: { event: CalendarEvent; onClick: (event: 
   const color = getAccountColor(event.origin_account_id);
   return (
     <div
-      style={{ ...styles.eventChip, cursor: "pointer" }}
+      className="flex items-center gap-1 rounded-sm px-2 py-1 text-xs truncate cursor-pointer border-l-2"
+      style={{ borderLeftColor: color, backgroundColor: hexToRgba(color, 0.15) }}
       onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
@@ -810,13 +800,14 @@ function EventChip({ event, onClick }: { event: CalendarEvent; onClick: (event: 
       data-testid={`event-chip-${event.canonical_event_id}`}
     >
       <span
-        style={{ ...styles.colorIndicator, backgroundColor: color }}
+        className="w-1.5 h-1.5 rounded-full shrink-0 inline-block"
+        style={{ backgroundColor: color }}
         data-testid="event-color-indicator"
       />
-      <span style={styles.eventChipTime}>
+      <span className="font-mono text-xs text-muted-foreground shrink-0">
         {formatTimeShort(event.start)}
       </span>
-      <span style={styles.eventChipTitle}>
+      <span className="font-sans text-foreground overflow-hidden text-ellipsis">
         {event.summary ?? "(No title)"}
       </span>
     </div>
@@ -828,7 +819,7 @@ function EventDot({ event, onClick }: { event: CalendarEvent; onClick: (event: C
   const color = getAccountColor(event.origin_account_id);
   return (
     <div
-      style={{ ...styles.eventDot, cursor: "pointer" }}
+      className="flex items-center gap-[3px] text-[0.625rem] overflow-hidden whitespace-nowrap cursor-pointer"
       onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
@@ -836,10 +827,11 @@ function EventDot({ event, onClick }: { event: CalendarEvent; onClick: (event: C
       data-testid={`event-dot-${event.canonical_event_id}`}
     >
       <span
-        style={{ ...styles.dotIndicator, backgroundColor: color }}
+        className="w-[5px] h-[5px] rounded-full shrink-0 inline-block"
+        style={{ backgroundColor: color }}
         data-testid="event-color-indicator"
       />
-      <span style={styles.eventDotTitle}>
+      <span className="font-sans text-muted-foreground overflow-hidden text-ellipsis">
         {event.summary ?? "(No title)"}
       </span>
     </div>
@@ -851,7 +843,8 @@ function EventCard({ event, onClick }: { event: CalendarEvent; onClick: (event: 
   const color = getAccountColor(event.origin_account_id);
   return (
     <div
-      style={{ ...styles.eventCard, borderLeftColor: color, cursor: "pointer" } as React.CSSProperties}
+      className="flex items-stretch gap-3 rounded-sm px-2 py-1 text-xs truncate cursor-pointer border-l-2"
+      style={{ borderLeftColor: color, backgroundColor: hexToRgba(color, 0.15) }}
       onClick={(e) => { e.stopPropagation(); onClick(event); }}
       role="button"
       tabIndex={0}
@@ -859,14 +852,15 @@ function EventCard({ event, onClick }: { event: CalendarEvent; onClick: (event: 
       data-testid={`event-card-${event.canonical_event_id}`}
     >
       <span
-        style={{ ...styles.cardColorBar, backgroundColor: color }}
+        className="w-1 rounded-sm shrink-0 hidden"
+        style={{ backgroundColor: color }}
         data-testid="event-color-indicator"
       />
-      <div style={styles.eventCardContent}>
-        <div style={styles.eventCardTitle}>
+      <div className="flex-1 min-w-0">
+        <div className="font-sans text-[0.9375rem] font-medium text-foreground mb-1">
           {event.summary ?? "(No title)"}
         </div>
-        <div style={styles.eventCardTime}>
+        <div className="font-mono text-xs text-muted-foreground">
           {formatTimeShort(event.start)} - {formatTimeShort(event.end)}
         </div>
       </div>
@@ -886,350 +880,10 @@ function formatDateKey(d: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-// ---------------------------------------------------------------------------
-// Inline styles
-// ---------------------------------------------------------------------------
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    width: "100%",
-  },
-
-  // Toolbar
-  toolbar: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "0.75rem 0",
-    marginBottom: "0.75rem",
-    flexWrap: "wrap",
-    gap: "0.5rem",
-  },
-  navGroup: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    flexWrap: "wrap",
-  },
-  navBtn: {
-    padding: "0.375rem 0.75rem",
-    borderRadius: "6px",
-    border: "1px solid #334155",
-    background: "transparent",
-    color: "#cbd5e1",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 500,
-  },
-  dateHeader: {
-    fontSize: "1.125rem",
-    fontWeight: 600,
-    color: "#f1f5f9",
-    marginLeft: "0.5rem",
-  },
-  viewGroup: {
-    display: "flex",
-    gap: "0.25rem",
-  },
-  viewBtn: {
-    padding: "0.375rem 0.75rem",
-    borderRadius: "6px",
-    borderWidth: "1px",
-    borderStyle: "solid",
-    borderColor: "#334155",
-    background: "transparent",
-    color: "#94a3b8",
-    cursor: "pointer",
-    fontSize: "0.8125rem",
-    fontWeight: 500,
-    transition: "background 0.15s, color 0.15s",
-  },
-  viewBtnActive: {
-    background: "#1e40af",
-    color: "#ffffff",
-    borderColor: "#1e40af",
-  },
-
-  // Loading
-  loadingContainer: {
-    padding: "2rem",
-    textAlign: "center",
-  },
-  loadingSkeleton: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.75rem",
-    marginBottom: "1rem",
-  },
-  skeletonRow: {
-    height: "2rem",
-    borderRadius: "4px",
-    background: "#1e293b",
-    animation: "pulse 1.5s ease-in-out infinite",
-  },
-  loadingText: {
-    color: "#64748b",
-    fontSize: "0.875rem",
-  },
-
-  // Error
-  errorContainer: {
-    background: "#2d1b1b",
-    border: "1px solid #7f1d1d",
-    borderRadius: "8px",
-    padding: "1.5rem",
-    textAlign: "center",
-  },
-  errorText: {
-    color: "#fca5a5",
-    fontSize: "0.9375rem",
-    marginBottom: "0.75rem",
-  },
-  retryBtn: {
-    padding: "0.5rem 1rem",
-    borderRadius: "6px",
-    border: "none",
-    background: "#3b82f6",
-    color: "#ffffff",
-    cursor: "pointer",
-    fontSize: "0.875rem",
-    fontWeight: 500,
-  },
-
-  // Empty state
-  emptyState: {
-    textAlign: "center",
-    padding: "3rem 1rem",
-  },
-  emptyTitle: {
-    fontSize: "1.125rem",
-    fontWeight: 600,
-    color: "#cbd5e1",
-    marginBottom: "0.5rem",
-  },
-  emptySubtitle: {
-    fontSize: "0.875rem",
-    color: "#64748b",
-  },
-  emptyHint: {
-    textAlign: "center",
-    padding: "1rem",
-    fontSize: "0.8125rem",
-    color: "#64748b",
-  },
-
-  // Week view
-  weekGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(7, 1fr)",
-    gap: "1px",
-    background: "#1e293b",
-    borderRadius: "8px",
-    overflow: "hidden",
-  },
-  weekDay: {
-    background: "#0f172a",
-    minHeight: "120px",
-  },
-  clickableSlot: {
-    cursor: "pointer",
-  },
-  weekDayHeader: {
-    padding: "0.5rem",
-    textAlign: "center",
-    borderBottom: "1px solid #1e293b",
-  },
-  todayHeader: {
-    background: "rgba(30, 64, 175, 0.15)",
-  },
-  weekDayName: {
-    display: "block",
-    fontSize: "0.75rem",
-    color: "#64748b",
-    textTransform: "uppercase" as const,
-    fontWeight: 600,
-    letterSpacing: "0.05em",
-  },
-  weekDayNumber: {
-    display: "inline-block",
-    fontSize: "1rem",
-    fontWeight: 600,
-    color: "#cbd5e1",
-    padding: "0.125rem 0.375rem",
-    borderRadius: "9999px",
-    lineHeight: "1.5",
-  },
-  todayNumber: {
-    background: "#1e40af",
-    color: "#ffffff",
-  },
-  weekDayEvents: {
-    padding: "0.25rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.125rem",
-  },
-
-  // Month view
-  monthHeaderRow: {
-    display: "grid",
-    gridTemplateColumns: "repeat(7, 1fr)",
-    gap: "1px",
-    marginBottom: "1px",
-  },
-  monthHeaderCell: {
-    padding: "0.5rem",
-    textAlign: "center",
-    fontSize: "0.75rem",
-    color: "#64748b",
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-  },
-  monthWeekRow: {
-    display: "grid",
-    gridTemplateColumns: "repeat(7, 1fr)",
-    gap: "1px",
-    marginBottom: "1px",
-  },
-  monthCell: {
-    background: "#0f172a",
-    minHeight: "80px",
-    padding: "0.25rem",
-    borderRadius: "2px",
-  },
-  monthCellOutside: {
-    opacity: 0.4,
-  },
-  monthCellDay: {
-    display: "inline-block",
-    fontSize: "0.8125rem",
-    fontWeight: 500,
-    color: "#94a3b8",
-    padding: "0.125rem 0.375rem",
-    borderRadius: "9999px",
-    marginBottom: "0.125rem",
-  },
-  monthCellEvents: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.0625rem",
-  },
-  moreEvents: {
-    fontSize: "0.6875rem",
-    color: "#64748b",
-    paddingLeft: "0.25rem",
-  },
-
-  // Day view
-  dayContainer: {
-    background: "#0f172a",
-    borderRadius: "8px",
-    border: "1px solid #1e293b",
-    overflow: "hidden",
-  },
-  dayHeader: {
-    padding: "1rem",
-    borderBottom: "1px solid #1e293b",
-  },
-  dayHeaderDate: {
-    fontSize: "1.125rem",
-    fontWeight: 600,
-    color: "#e2e8f0",
-  },
-  dayEmpty: {
-    color: "#64748b",
-    textAlign: "center",
-    padding: "2rem",
-    fontSize: "0.875rem",
-  },
-  dayEventList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    padding: "0.75rem",
-  },
-
-  // Event chip (week view)
-  eventChip: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.25rem",
-    padding: "0.125rem 0.25rem",
-    borderRadius: "3px",
-    fontSize: "0.6875rem",
-    overflow: "hidden",
-    whiteSpace: "nowrap" as const,
-  },
-  colorIndicator: {
-    width: "6px",
-    height: "6px",
-    borderRadius: "50%",
-    flexShrink: 0,
-    display: "inline-block",
-  },
-  eventChipTime: {
-    color: "#64748b",
-    flexShrink: 0,
-  },
-  eventChipTitle: {
-    color: "#cbd5e1",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  },
-
-  // Event dot (month view)
-  eventDot: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.1875rem",
-    fontSize: "0.625rem",
-    overflow: "hidden",
-    whiteSpace: "nowrap" as const,
-  },
-  dotIndicator: {
-    width: "5px",
-    height: "5px",
-    borderRadius: "50%",
-    flexShrink: 0,
-    display: "inline-block",
-  },
-  eventDotTitle: {
-    color: "#94a3b8",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  },
-
-  // Event card (day view)
-  eventCard: {
-    display: "flex",
-    alignItems: "stretch",
-    gap: "0.75rem",
-    padding: "0.75rem",
-    background: "#1e293b",
-    borderRadius: "6px",
-    borderLeftWidth: "3px",
-    borderLeftStyle: "solid",
-    borderLeftColor: "transparent",
-  },
-  cardColorBar: {
-    width: "4px",
-    borderRadius: "2px",
-    flexShrink: 0,
-    display: "none", // We use borderLeft instead, but keep for testid
-  },
-  eventCardContent: {
-    flex: 1,
-    minWidth: 0,
-  },
-  eventCardTitle: {
-    fontSize: "0.9375rem",
-    fontWeight: 500,
-    color: "#e2e8f0",
-    marginBottom: "0.25rem",
-  },
-  eventCardTime: {
-    fontSize: "0.8125rem",
-    color: "#64748b",
-  },
-};
+/** Convert a hex color to rgba with the given alpha. */
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
