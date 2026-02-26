@@ -49,6 +49,22 @@ const config: Config = {
         border: "hsl(var(--border) / <alpha-value>)",
         input: "hsl(var(--input) / <alpha-value>)",
         ring: "hsl(var(--ring) / <alpha-value>)",
+        "surface-elevated": "hsl(240 10% 10%)",
+      },
+      fontFamily: {
+        sans: [
+          "Inter",
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "sans-serif",
+        ],
+        mono: [
+          "JetBrains Mono",
+          "ui-monospace",
+          "SFMono-Regular",
+          "monospace",
+        ],
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -60,9 +76,16 @@ const config: Config = {
           from: { transform: "rotate(0deg)" },
           to: { transform: "rotate(360deg)" },
         },
+        glow: {
+          "0%, 100%": { boxShadow: "0 0 4px currentColor" },
+          "50%": {
+            boxShadow: "0 0 8px currentColor, 0 0 12px currentColor",
+          },
+        },
       },
       animation: {
         "spin-slow": "spin-slow 1.2s linear infinite",
+        glow: "glow 2s ease-in-out infinite",
       },
     },
   },
